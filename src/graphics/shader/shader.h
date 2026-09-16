@@ -182,6 +182,8 @@ struct ShaderPixelInputInfo {
 	bool                                           ps_execute_on_noop           = false;
 	ShaderStageRuntime                             stage;
 
+	bool ps_single_sample = false;
+
 	bool HasPositionInput() const { return ps_pos_x || ps_pos_y || ps_pos_z || ps_pos_w; }
 };
 

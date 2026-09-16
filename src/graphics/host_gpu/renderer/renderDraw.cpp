@@ -873,13 +873,24 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 			        .export_mapping;
 		}
 	}
+	// Centroid equals center only when every active attachment has one sample.
+	bool single_sample = true;
+	for (uint32_t i = 0; i < state.color_count; ++i) {
+		single_sample &= state.color_info[i].desc.info.samples == 1u;
+	}
+	if (state.depth_info.image_id) {
+		single_sample &= state.depth_info.desc.info.samples == 1u;
+	} else if (state.color_count == 0) {
+		single_sample = render_sample_count(ctx.GetAaConfig().msaa_num_samples) == 1u;
+	}
 	auto& pipeline_cache = buffer.GetContext().GetPipelineCache();
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "GetGraphicsPrograms");
 	}
 	state.programs = pipeline_cache.GetGraphicsPrograms(
 	    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
-	    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info);
+	    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info,
+	    single_sample);
 }
 
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
