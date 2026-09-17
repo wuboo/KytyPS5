@@ -228,7 +228,8 @@ static void CreateDescriptorLayout(GraphicContext& graphics, PipelineCache::Pipe
 		EXIT("native sampler descriptors exceed device limit: %" PRIu64 "/%u\n",
 		     samplers, limits.maxDescriptorSetSamplers);
 	}
-	pipeline.uses_push_descriptors = descriptor_count <= graphics.max_push_descriptors;
+	pipeline.uses_push_descriptors =
+	    UsePushDescriptors(descriptor_count, graphics.max_push_descriptors);
 
 	vk::DescriptorSetLayoutCreateInfo create {};
 	create.flags        = pipeline.uses_push_descriptors
