@@ -109,15 +109,17 @@ public:
 	void Save();
 
 	struct Pipeline {
-		vk::PipelineLayout      pipeline_layout       = nullptr;
-		vk::Pipeline            pipeline              = nullptr;
-		vk::DescriptorSetLayout descriptor_set_layout = nullptr;
-		bool                    uses_push_descriptors = false;
+		vk::PipelineLayout      pipeline_layout          = nullptr;
+		vk::Pipeline            pipeline                 = nullptr;
+		vk::DescriptorSetLayout descriptor_set_layout    = nullptr;
+		bool                    uses_push_descriptors    = false;
+		bool                    prototype_vertex_capture = false;
 	};
 
 	struct GraphicsPrograms {
 		std::array<ShaderProgram, 3> vertex;
-		ShaderProgram pixel;
+		ShaderProgram                pixel;
+		vk::DescriptorSetLayout      prototype_extra_layout = nullptr;
 
 		[[nodiscard]] uint32_t VertexStageCount() const { return vertex[1] ? 3u : 1u; }
 	};
@@ -141,6 +143,8 @@ public:
 	                              const GraphicsPrograms& programs);
 	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info,
 	                             const ShaderProgram&          compute_program);
+
+	[[nodiscard]] vk::PipelineCache DriverCache() const { return m_driver_cache; }
 
 private:
 	struct ProgramCache;
@@ -184,6 +188,7 @@ private:
 	void CheckpointDriverCache();
 };
 
+std::string PipelineCacheTitleId();
 void LogPipelineTrace(const char* phase, uint64_t vertex_program_id, uint64_t pixel_program_id);
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const PipelineRenderingState&          rendering,
