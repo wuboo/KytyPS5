@@ -655,6 +655,8 @@ void PipelineCache::Save() {
 	if (!written || error) {
 		PipelineCacheLog("Vulkan pipeline cache: failed to write {}",
 		                 Common::PathToString(m_driver_cache_path));
+		std::error_code remove_error;
+		std::filesystem::remove(temp_path, remove_error);
 		return;
 	}
 	PipelineCacheLog("Vulkan pipeline cache: saved {:.2f} MB to {}",
