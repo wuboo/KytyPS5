@@ -437,17 +437,20 @@ struct ShaderInfo {
 	static constexpr uint32_t MaxSamplers     = 32;
 	static constexpr uint32_t MaxSampledPairs = 64;
 
-	std::vector<BufferResource>      buffers;
-	std::vector<ImageResource>       images;
-	std::vector<SamplerResource>     samplers;
-	std::vector<SampledResourcePair> sampled_pairs;
-	std::vector<StageInput>          inputs;
-	std::vector<StageOutput>         outputs;
-	std::array<uint8_t, 32>          vertex_fetch_components {};
-	int32_t                          vertex_offset_sgpr   = -1;
-	int32_t                          instance_offset_sgpr = -1;
-	bool                             has_bitwise_xor      = false;
-	bool                             uses_dma             = false;
+	std::vector<BufferResource>                buffers;
+	std::vector<ImageResource>                 images;
+	std::vector<SamplerResource>               samplers;
+	std::array<uint32_t, 32>                   parameter_locations {};
+	std::vector<std::pair<uint32_t, uint32_t>> parameter_aliases;
+	bool                                       parameter_plan_valid = false;
+	std::vector<SampledResourcePair>           sampled_pairs;
+	std::vector<StageInput>                    inputs;
+	std::vector<StageOutput>                   outputs;
+	std::array<uint8_t, 32>                    vertex_fetch_components {};
+	int32_t                                    vertex_offset_sgpr   = -1;
+	int32_t                                    instance_offset_sgpr = -1;
+	bool                                       has_bitwise_xor      = false;
+	bool                                       uses_dma             = false;
 
 	bool operator==(const ShaderInfo& other) const = default;
 };
