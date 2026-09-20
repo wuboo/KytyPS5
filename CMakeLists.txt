@@ -285,6 +285,21 @@ foreach(shader_name IN LISTS gpu_tiler_shader_names)
 	list(APPEND gpu_tiler_shader_headers "${shader_header}")
 endforeach()
 
+set(per_vertex_shader_source "${gpu_tiler_shader_dir}/per_vertex_unpack.comp")
+set(per_vertex_shader_generated_dir "${PROJECT_BINARY_DIR}/per_vertex_shaders")
+set(per_vertex_shader_spv "${per_vertex_shader_generated_dir}/per_vertex_unpack.spv")
+set(per_vertex_shader_header "${per_vertex_shader_generated_dir}/per_vertex_unpack_spv.h")
+add_custom_command(
+	OUTPUT "${per_vertex_shader_header}"
+	COMMAND ${CMAKE_COMMAND} -E make_directory "${per_vertex_shader_generated_dir}"
+	COMMAND "${KYTY_GLSLANG_VALIDATOR}" -V --target-env vulkan1.2 -Os
+		-o "${per_vertex_shader_spv}" "${per_vertex_shader_source}"
+	COMMAND ${CMAKE_COMMAND} -DINPUT=${per_vertex_shader_spv} -DOUTPUT=${per_vertex_shader_header}
+		-DSYMBOL=PERVERTEX_UNPACK_SPV -P "${KYTY_SOURCE_DIR}/embed_spirv.cmake"
+	DEPENDS "${per_vertex_shader_source}"
+	VERBATIM
+)
+
 set(fault_buffer_shader_source "${gpu_tiler_shader_dir}/fault_buffer_process.comp")
 set(fault_buffer_shader_spv "${gpu_tiler_generated_dir}/fault_buffer_process.spv")
 set(fault_buffer_shader_header "${gpu_tiler_generated_dir}/fault_buffer_process_spv.h")
@@ -325,6 +340,7 @@ add_gpu_blit_shader(gpu_blit_color_to_ms_depth gpu_blit_color_to_ms_depth.frag)
 add_gpu_blit_shader(gpu_video_out_overlay gpu_video_out_overlay.frag)
 add_gpu_blit_shader(gpu_imgui_hdr gpu_video_out_overlay.frag -DIMGUI_HDR=1)
 list(APPEND kyty_emulator_src ${gpu_blit_shader_headers})
+list(APPEND kyty_emulator_src "${per_vertex_shader_header}")
 
 list(APPEND kyty_emulator_src
 	"${KYTY_SOURCE_DIR}/emulator.h"
@@ -346,6 +362,7 @@ endif()
 
 set(inc_headers
 	${KYTY_SOURCE_DIR}
+	${per_vertex_shader_generated_dir}
 	${KYTY_THIRD_PARTY_DIR}/VulkanMemoryAllocator/include
 	${KYTY_THIRD_PARTY_DIR}/SPIRV-Tools/include
 	${KYTY_THIRD_PARTY_DIR}/SPIRV-Headers/include
@@ -405,6 +422,7 @@ target_link_libraries(per_vertex_transform_tests common fmt::fmt xxhash)
 add_executable(per_vertex_gpu_execution_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PerVertexGpuExecutionTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/perVertexTransform.cpp"
+	"${per_vertex_shader_header}"
 )
 target_include_directories(per_vertex_gpu_execution_tests PRIVATE ${inc_headers})
 target_link_libraries(per_vertex_gpu_execution_tests Vulkan::Headers spirv-tools common fmt::fmt xxhash)
