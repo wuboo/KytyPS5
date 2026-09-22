@@ -118,7 +118,7 @@ NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource
 	buffer_offset = 0;
 
 	const auto& [address, size, id] = source;
-	if (address == 0 || size == 0) {
+	if (address < BufferCache::CACHING_PAGESIZE || size == 0) {
 		return {context.GetBufferCache().GetBuffer(NULL_BUFFER_ID).Handle(), 0, 16};
 	}
 	const auto& graphics  = context.GetGraphics();
