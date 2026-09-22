@@ -39,6 +39,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <string_view>
 #include <cstring>
 #include <deque>
 #include <initializer_list>
@@ -6896,9 +6897,17 @@ void TestPerVertexPrototypeDetection() {
   Check(!DecodePerVertexPrototypeAttribute(Prospero::BufferFormat::k32_32_32_32Float,
                                            std::span<const uint8_t>(float_bytes.data(), 12u), decoded),
         "a short attribute span was decoded");
-  Check(!DecodePerVertexPrototypeAttribute(Prospero::BufferFormat::k32_32_32_32UInt,
+  Check(DecodePerVertexPrototypeAttribute(Prospero::BufferFormat::k32_32_32_32UInt,
+                                          float_bytes, decoded) &&
+            std::equal(decoded.begin(), decoded.end(), std::begin(float_words)),
+        "integer attribute bits were not preserved");
+  const std::array<uint8_t, 1> signed_byte {0x80u};
+  Check(DecodePerVertexPrototypeAttribute(Prospero::BufferFormat::k8SInt, signed_byte, decoded) &&
+            decoded == std::array<uint32_t, 4>{0xffffff80u, 0u, 0u, 1u},
+        "signed attribute extension or integer defaults are wrong");
+  Check(!DecodePerVertexPrototypeAttribute(Prospero::BufferFormat::k10_10_10_2UInt,
                                            float_bytes, decoded),
-        "an integer attribute format was decoded");
+        "unsupported packed integer attribute format was decoded");
 }
 
 void TestPerspectiveCentroidInputs() {
@@ -16716,10 +16725,14 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
 } // namespace
 } // namespace Libs::Graphics
 
-int main() {
+int main(int argc, char** argv) {
   using namespace Libs::Graphics;
 
   EnsureConfigInitialized();
+  if (argc == 2 && std::string_view(argv[1]) == "--per-vertex") {
+    TestPerVertexPrototypeDetection();
+    return 0;
+  }
   TestRayTracingInstructions();
   TestResourceDescriptorClassification();
   TestShaderBufferResourceSize();
