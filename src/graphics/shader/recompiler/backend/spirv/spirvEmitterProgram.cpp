@@ -1,6 +1,5 @@
-#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
-
 #include "common/assert.h"
+#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 
 #include <algorithm>
 #include <bit>
@@ -57,11 +56,11 @@ struct StructuredFunctionState {
 
 struct DispatcherFunctionState {
 	std::array<std::unordered_map<const IR::Inst*, uint32_t>, 2> spills;
-	uint32_t                                      header_label       = 0;
-	uint32_t                                      select_label       = 0;
-	uint32_t                                      after_switch_label = 0;
-	uint32_t                                      continue_label     = 0;
-	uint32_t                                      merge_label        = 0;
+	uint32_t                                                     header_label       = 0;
+	uint32_t                                                     select_label       = 0;
+	uint32_t                                                     after_switch_label = 0;
+	uint32_t                                                     continue_label     = 0;
+	uint32_t                                                     merge_label        = 0;
 };
 
 void StoreDispatcherPhiEdge(ValueEmitContext& ctx, const DispatcherFunctionState& dispatcher,
@@ -332,7 +331,7 @@ void PatchStructuredPhis(ValueEmitContext& ctx, StructuredFunctionState& structu
 }
 
 void EmitStructuredFunction(ValueEmitContext& ctx) {
-	const auto& program = ctx.state.program;
+	const auto&             program = ctx.state.program;
 	StructuredFunctionState structured;
 	ctx.state.builder.AddFunction(spv::OpBranch, program.blocks.front()->Definition());
 	for (size_t index = 0; index < program.blocks.size(); index++) {
@@ -464,6 +463,10 @@ uint32_t ValueEmitContext::Arg(const IR::Inst& inst, size_t index) {
 	return Def(inst.Arg(index));
 }
 
+uint32_t ValueEmitContext::ExecutionMask(const IR::Inst& inst, size_t index) {
+	return MaskCaptureExecution(state, Arg(inst, index), half);
+}
+
 uint32_t ValueEmitContext::HalfArg(const IR::Inst& inst, size_t index, uint32_t lane_half) {
 	return lane_half == half ? Arg(inst, index) : other_half->Arg(inst, index);
 }
@@ -472,9 +475,11 @@ uint32_t ValueEmitContext::Ballot(IR::Value predicate) {
 	const auto ballot_type = TypeU32Vector(state, 4);
 	const auto scope       = ConstantU32(state, spv::ScopeSubgroup);
 	const auto low         = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpGroupNonUniformBallot, ballot_type, low, scope,
-	                          other_half == nullptr || half == 0 ? Def(predicate)
-	                                                             : other_half->Def(predicate));
+	state.builder.AddFunction(
+	    spv::OpGroupNonUniformBallot, ballot_type, low, scope,
+	    MaskCaptureExecution(
+	        state, other_half == nullptr || half == 0 ? Def(predicate) : other_half->Def(predicate),
+	        0));
 	if (other_half == nullptr) {
 		return low;
 	}
@@ -482,8 +487,9 @@ uint32_t ValueEmitContext::Ballot(IR::Value predicate) {
 	const auto low_word  = state.builder.AllocateId();
 	const auto high_word = state.builder.AllocateId();
 	const auto ballot    = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpGroupNonUniformBallot, ballot_type, high, scope,
-	                          half == 1 ? Def(predicate) : other_half->Def(predicate));
+	state.builder.AddFunction(
+	    spv::OpGroupNonUniformBallot, ballot_type, high, scope,
+	    MaskCaptureExecution(state, half == 1 ? Def(predicate) : other_half->Def(predicate), 1));
 	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), low_word, low, 0);
 	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), high_word, high, 0);
 	state.builder.AddFunction(spv::OpCompositeConstruct, ballot_type, ballot, low_word, high_word,
@@ -528,9 +534,9 @@ uint32_t ValueEmitContext::Shuffle(const IR::Inst& inst, size_t index, uint32_t 
 	}
 	const auto physical_lane =
 	    EmitBinaryU32(state, spv::OpBitwiseAnd, lane, ConstantU32(state, 31));
-	const auto high          = state.builder.AllocateId();
-	const auto in_high       = state.builder.AllocateId();
-	const auto value         = state.builder.AllocateId();
+	const auto high    = state.builder.AllocateId();
+	const auto in_high = state.builder.AllocateId();
+	const auto value   = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpGroupNonUniformShuffle, type, low, scope,
 	                          HalfArg(inst, index, 0), physical_lane);
 	state.builder.AddFunction(spv::OpGroupNonUniformShuffle, type, high, scope,
@@ -749,6 +755,7 @@ void EmitProgram(EmitterState& state) {
 		state.lds_base_dwords = EmitBinaryU32(state, spv::OpIMul, index,
 		                                     ConstantU32(state, LdsDwordCount(state)));
 	}
+	InitializeVertexCapture(state);
 	EmitMemoryOffsets(state);
 	if (program.blocks.empty()) {
 		EmitReturn(ctx);

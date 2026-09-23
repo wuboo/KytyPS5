@@ -1,5 +1,3 @@
-#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
-
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 
@@ -385,10 +383,11 @@ uint32_t LoadWordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const IR:
 }
 
 uint32_t LoadWord(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo mem) {
-	return EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
-		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
-		return LoadWordPrepared(ctx, inst, mem, resource);
-	});
+	return EmitValueOrZeroIfCondition(
+	    ctx.state, ctx.ExecutionMask(inst, inst.NumArgs() - 1), [&]() {
+		    const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
+		    return LoadWordPrepared(ctx, inst, mem, resource);
+	    });
 }
 
 uint32_t LoadSubwordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
@@ -399,9 +398,8 @@ uint32_t LoadSubwordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const 
 	    ctx.state, spv::OpShiftRightLogical, TypeU32(ctx.state), address,
 	    ConstantU32(ctx.state, std::countr_zero(resource.element_bits / 8u)));
 	return EmitValueOrZeroIfCondition(
-	    ctx.state, EmitMemoryElementInBounds(ctx.state, resource, index), [&]() {
-		    return LoadSubwordInBounds(ctx, resource, address, index, bits, sign_extend);
-	    });
+	    ctx.state, EmitMemoryElementInBounds(ctx.state, resource, index),
+	    [&]() { return LoadSubwordInBounds(ctx, resource, address, index, bits, sign_extend); });
 }
 
 uint32_t LoadWordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& resource,
@@ -442,10 +440,11 @@ uint32_t LoadSubwordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& 
 
 uint32_t LoadSubword(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo mem, uint32_t bits,
                      bool sign_extend) {
-	return EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
-		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
-		return LoadSubwordPrepared(ctx, inst, mem, resource, bits, sign_extend);
-	});
+	return EmitValueOrZeroIfCondition(
+	    ctx.state, ctx.ExecutionMask(inst, inst.NumArgs() - 1), [&]() {
+		    const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
+		    return LoadSubwordPrepared(ctx, inst, mem, resource, bits, sign_extend);
+	    });
 }
 
 Prospero::BufferFormat BufferFormat(const ValueEmitContext& ctx, const IR::MemoryInfo& mem) {
@@ -473,7 +472,7 @@ FormattedSource ResolveFormattedSource(ValueEmitContext& ctx, const IR::MemoryIn
 	}
 	const auto selector = GetDstSel(ctx.state.program.info.buffers[mem.resource].descriptor_swizzle,
 	                                output_component);
-	const auto source = Format::ResolveFormattedSource(info, selector);
+	const auto source   = Format::ResolveFormattedSource(info, selector);
 	if (source.kind == FormattedSourceKind::Invalid) {
 		ExitDescriptorBindingFailure(ctx.state, IR::DescriptorBindingKind::Buffers, mem.resource,
 		                             "buffer descriptor has reserved dst_sel");
@@ -569,7 +568,7 @@ void StoreSubwordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const IR:
 }
 
 void StoreSubword(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo mem, uint32_t bits) {
-	EmitIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
+	EmitIfCondition(ctx.state, ctx.ExecutionMask(inst, inst.NumArgs() - 1), [&]() {
 		EmitBufferAccess(ctx, inst, mem, 0u, [&](const auto& selected, const auto& resource) {
 			StoreSubwordPrepared(ctx, inst, selected, resource, bits, ctx.Arg(inst, inst.NumArgs() - 2));
 		});
@@ -605,7 +604,7 @@ void ForEachLocalFlatAccess(ValueEmitContext& ctx, const IR::Inst& inst, Fn&& em
 }
 
 uint32_t LoadLocalFlat(ValueEmitContext& ctx, const IR::Inst& inst) {
-	return EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
+	return EmitValueOrZeroIfCondition(ctx.state, ctx.ExecutionMask(inst, inst.NumArgs() - 1), [&]() {
 		uint32_t result = 0;
 		ForEachLocalFlatAccess(ctx, inst, [&](const auto& resource, uint32_t index, uint32_t valid) {
 			const auto value = EmitValueOrZeroIfCondition(ctx.state, valid, [&]() {
@@ -618,7 +617,7 @@ uint32_t LoadLocalFlat(ValueEmitContext& ctx, const IR::Inst& inst) {
 }
 
 void StoreLocalFlat(ValueEmitContext& ctx, const IR::Inst& inst) {
-	EmitIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
+	EmitIfCondition(ctx.state, ctx.ExecutionMask(inst, inst.NumArgs() - 1), [&]() {
 		ForEachLocalFlatAccess(ctx, inst, [&](const auto& resource, uint32_t index, uint32_t valid) {
 			EmitIfCondition(ctx.state, valid, [&]() {
 				StoreWordInBounds(ctx, resource, index, ctx.Arg(inst, inst.NumArgs() - 2));
@@ -639,7 +638,7 @@ void StoreWordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const IR::Me
 }
 
 void StoreWord(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo mem) {
-	EmitIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
+	EmitIfCondition(ctx.state, ctx.ExecutionMask(inst, inst.NumArgs() - 1), [&]() {
 		EmitBufferAccess(ctx, inst, mem, 0u, [&](const auto& selected, const auto& resource) {
 			StoreWordPrepared(ctx, inst, selected, resource, ctx.Arg(inst, inst.NumArgs() - 2));
 		});
@@ -649,7 +648,7 @@ void StoreWord(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo mem) 
 template <typename Fn>
 uint32_t EmitAtomicAccess(ValueEmitContext& ctx, const IR::Inst& inst,
                           const IR::MemoryInfo& mem, Fn&& operation) {
-	return EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
+	return EmitValueOrZeroIfCondition(ctx.state, ctx.ExecutionMask(inst, inst.NumArgs() - 1), [&]() {
 		auto index = DwordIndex(ctx, inst, mem);
 		if (mem.kind == IR::ResourceKind::Lds || mem.kind == IR::ResourceKind::Gds) {
 			// Keep region-address truncation local to DS atomics.
@@ -665,13 +664,12 @@ uint32_t EmitAtomicAccess(ValueEmitContext& ctx, const IR::Inst& inst,
 }
 
 template <typename Fn>
-uint32_t EmitAtomicUpdate(ValueEmitContext& ctx, const IR::Inst& inst,
-                          const IR::MemoryInfo& mem, Fn&& replacement) {
+uint32_t EmitAtomicUpdate(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
+                          Fn&& replacement) {
 	const auto value = ctx.Arg(inst, inst.NumArgs() - 2);
 	return EmitAtomicAccess(ctx, inst, mem, [&](uint32_t pointer) {
-		return AtomicUpdate(ctx.state, pointer, mem.kind, [&](uint32_t old) {
-			return replacement(ctx.state, old, value);
-		});
+		return AtomicUpdate(ctx.state, pointer, mem.kind,
+		                    [&](uint32_t old) { return replacement(ctx.state, old, value); });
 	});
 }
 
@@ -1028,7 +1026,7 @@ uint32_t LoadIndirectBuffer(ValueEmitContext& ctx, const IndirectBufferAccess& b
 
 uint32_t LoadIndirectFormattedX(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto& state = ctx.state;
-	return EmitValueOrZeroIfCondition(state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
+	return EmitValueOrZeroIfCondition(state, ctx.ExecutionMask(inst, inst.NumArgs() - 1), [&]() {
 		const auto buffer = PrepareIndirectBuffer(state, IndirectBufferArgs(ctx, inst), true);
 		const auto geometry = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpFunctionCall, TypeU32Composite(state, 4), geometry,
@@ -1139,7 +1137,7 @@ uint32_t LoadBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t compon
 		return LoadIndirectFormattedX(ctx, inst);
 	}
 	return EmitValueOrDefaultIfCondition(
-	    state, ctx.Arg(inst, inst.NumArgs() - 1), TypeU32Composite(state, components),
+	    state, ctx.ExecutionMask(inst, inst.NumArgs() - 1), TypeU32Composite(state, components),
 	    ConstantU32CompositeZero(state, components), [&]() {
 		    if (mem.kind == IR::ResourceKind::IndirectBuffer) {
 			    const auto function = state.indirect_buffer_load_functions.at(
@@ -1164,7 +1162,7 @@ uint32_t LoadBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t compon
 
 void StoreBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t components) {
 	auto& state = ctx.state;
-	EmitIfCondition(state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
+	EmitIfCondition(state, ctx.ExecutionMask(inst, inst.NumArgs() - 1), [&]() {
 		const auto mem = ctx.Memory(inst);
 		const auto composite = ctx.Arg(inst, inst.NumArgs() - 2);
 		EmitBufferAccess(ctx, inst, mem, 0u, [&](const auto& selected, const auto& resource) {
@@ -1190,7 +1188,7 @@ void StoreBuffer(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t component
 uint32_t LoadWideShared(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t components) {
 	auto& state = ctx.state;
 	return EmitValueOrDefaultIfCondition(
-	    state, ctx.Arg(inst, inst.NumArgs() - 1), TypeU32Composite(state, components),
+	    state, ctx.ExecutionMask(inst, inst.NumArgs() - 1), TypeU32Composite(state, components),
 	    ConstantU32CompositeZero(state, components), [&]() {
 		    const auto              mem      = ctx.Memory(inst);
 		    const auto              resource = PrepareMemoryResourceAccess(state, mem);
@@ -1213,7 +1211,7 @@ uint32_t LoadWideShared(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t co
 
 void StoreWideShared(ValueEmitContext& ctx, const IR::Inst& inst, uint32_t components) {
 	auto& state = ctx.state;
-	EmitIfCondition(state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
+	EmitIfCondition(state, ctx.ExecutionMask(inst, inst.NumArgs() - 1), [&]() {
 		const auto mem      = ctx.Memory(inst);
 		const auto resource = PrepareMemoryResourceAccess(state, mem);
 		const auto base     = ByteAddress(ctx, inst, mem);
@@ -1429,7 +1427,7 @@ uint32_t EmitBufferAtomic64(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto& mem   = ctx.Memory(inst);
 	auto&       state = ctx.state;
 	return EmitValueOrDefaultIfCondition(
-	    state, ctx.Arg(inst, inst.NumArgs() - 1), TypeU64(state), ConstantU64(state, 0), [&]() {
+	    state, ctx.ExecutionMask(inst, inst.NumArgs() - 1), TypeU64(state), ConstantU64(state, 0), [&]() {
 		    const auto resource =
 		        PrepareStorageBufferResourceAccess(state, mem, state.storage_buffers[3]);
 		    const auto byte_address = ByteAddress(ctx, inst, mem);
@@ -1457,7 +1455,7 @@ void EmitSharedAtomic64(ValueEmitContext& ctx, const IR::Inst& inst) {
 	                          ConstantU32(state, 3u));
 	const auto in_bounds = Binary(state, spv::OpULessThan, TypeBool(state), index,
 	                              ConstantU32(state, LdsDwordCount(state) / 2u));
-	const auto active = EmitLogicalAndBool(state, ctx.Arg(inst, inst.NumArgs() - 1), in_bounds);
+	const auto active = EmitLogicalAndBool(state, ctx.ExecutionMask(inst, inst.NumArgs() - 1), in_bounds);
 	const auto emit = [&]() {
 		auto native_index = index;
 		auto semantics = spv::MemorySemanticsWorkgroupMemoryMask;
@@ -1649,7 +1647,7 @@ void EmitLoadMemory(ValueEmitContext& ctx, const IR::Inst& inst) {
 		value = LoadBdaDword(ctx, GuestAddress(ctx, inst, mem));
 	else if (address_info.access == IR::AddressAccess::Read &&
 	         mem.kind != IR::ResourceKind::Scratch)
-		value = LoadBda(ctx, GuestAddress(ctx, inst, mem), ctx.Arg(inst, inst.NumArgs() - 1),
+		value = LoadBda(ctx, GuestAddress(ctx, inst, mem), ctx.ExecutionMask(inst, inst.NumArgs() - 1),
 		                address_info.data_bits, mem.coherent);
 	else if (inst.GetType() == IR::Type::U8)
 		value = LoadSubword(ctx, inst, mem, 8, false);

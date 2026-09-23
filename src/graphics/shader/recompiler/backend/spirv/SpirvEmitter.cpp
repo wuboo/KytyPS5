@@ -205,7 +205,7 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 
 std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo input_info,
                                   uint32_t push_data_start_dword, bool maintenance8_enabled,
-                                  bool emit_debug_info) {
+                                  bool emit_debug_info, const VertexCaptureInfo* vertex_capture) {
 	using namespace Emitter;
 
 	if (program.stage != ShaderType::Compute && program.stage != ShaderType::Vertex &&
@@ -221,6 +221,7 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	IR::ValidateProgram(program, true);
 	program.bindings = {.push_data_start_dword = push_data_start_dword};
 	EmitterState state(program, input_info, maintenance8_enabled);
+	state.vertex_capture = vertex_capture;
 	if (emit_debug_info) {
 		char name[64];
 		std::snprintf(name, sizeof(name), "rdna2-%016" PRIx64 "-block-byte-pc-plus-one",
@@ -232,12 +233,23 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	    workgroup != nullptr && program.wave_size == 64u && workgroup->host_subgroup_size == 32u
 	        ? 2u
 	        : 1u;
+	if (vertex_capture != nullptr) {
+		if (program.stage != ShaderType::Vertex || input_info.vertex == nullptr ||
+		    (vertex_capture->host_subgroup_size != 32 &&
+		     vertex_capture->host_subgroup_size != 64)) {
+			Fail(program, "invalid vertex capture stage or host subgroup size");
+		}
+		state.lane_count =
+		    program.wave_size == 64 && vertex_capture->host_subgroup_size == 32 ? 2u : 1u;
+	}
 	DefineModule(state);
 	ValidateNativeProgram(program, program.stage == ShaderType::Compute &&
 	                                   input_info.compute != nullptr && input_info.compute->lds_storage);
 	EmitProgram(state);
-	state.builder.AddEntryPoint(ExecutionModelForStage(state.program.stage), state.main_func,
-	                            "main", state.interface_variables);
+	state.builder.AddEntryPoint(vertex_capture != nullptr
+	                                ? spv::ExecutionModelGLCompute
+	                                : ExecutionModelForStage(state.program.stage),
+	                            state.main_func, "main", state.interface_variables);
 
 	return state.builder.Build();
 }

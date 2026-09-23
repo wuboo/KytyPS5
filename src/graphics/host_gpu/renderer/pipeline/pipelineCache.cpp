@@ -323,7 +323,7 @@ struct PipelineCache::ProgramCache {
 			     static_cast<uint64_t>(result.spirv.size()), options.wave_size);
 		}
 		const ShaderProgram handle {.id = ++next_shader_id, .module = module};
-		RememberPerVertexPrototypeShader(options.stage, handle, result.spirv);
+		RememberPerVertexPrototypeShader(handle, result, options, graphics.subgroup_size);
 		return {
 		    .function_code  = {function_code.begin(), function_code.end()},
 		    .specialization = std::move(specialization),
