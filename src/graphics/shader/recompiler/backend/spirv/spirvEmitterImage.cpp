@@ -842,11 +842,11 @@ std::array<ImageSampler, 2> LoadImageSamplers(ValueEmitContext& ctx, const IR::I
 } // namespace
 
 void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
-	const auto op         = inst.GetOpcode();
-	const auto image_info = IR::ImageOpcodeInfoOf(op);
-	auto&       state     = ctx.state;
-	const auto& mem       = ctx.Memory(inst);
-	const auto  image_arg = inst.Arg(0);
+	const auto  op         = inst.GetOpcode();
+	const auto  image_info = IR::ImageOpcodeInfoOf(op);
+	auto&       state      = ctx.state;
+	const auto& mem        = ctx.Memory(inst);
+	const auto  image_arg  = inst.Arg(0);
 	ctx.ResourceIndex(image_arg, IR::ValueOpcode::GetImageResource);
 	const auto& image   = state.program.info.images.at(mem.resource);
 	const auto* address = ctx.ImageAddress(inst.Arg(image_info.needs_sampler ? 2 : 1));
@@ -896,7 +896,7 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		return;
 	}
 	if (op == IR::ValueOpcode::ImageRead) {
-		const auto condition = ctx.Arg(inst, 2);
+		const auto condition = ctx.ExecutionMask(inst, 2);
 		ctx.Define(
 		    inst,
 		    EmitValueOrDefaultIfCondition(
@@ -927,7 +927,7 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		return;
 	}
 	if (op == IR::ValueOpcode::ImageWrite) {
-		EmitIfCondition(state, ctx.Arg(inst, 3), [&]() {
+		EmitIfCondition(state, ctx.ExecutionMask(inst, 3), [&]() {
 			EmitImageAccess(ctx, inst, 0u, [&](uint32_t resource, uint32_t array_index) {
 				const auto& candidate = state.program.info.images[resource];
 				auto selected = mem;
@@ -1095,7 +1095,7 @@ void EmitImage(ValueEmitContext& ctx, const IR::Inst& inst) {
 		const auto result_type = TypeId(state, inst.GetType());
 		const auto zero = image.atomic64 ? ConstantU64(state, 0) : ConstantU32(state, 0);
 		ctx.Define(inst, EmitValueOrDefaultIfCondition(
-		                     state, ctx.Arg(inst, inst.NumArgs() - 1), result_type, zero, [&]() {
+		                     state, ctx.ExecutionMask(inst, inst.NumArgs() - 1), result_type, zero, [&]() {
 			           const auto pointer      = state.builder.AllocateId();
 			           const auto pointer_type =
 			               state.builder.Type(spv::OpTypePointer, spv::StorageClassImage,

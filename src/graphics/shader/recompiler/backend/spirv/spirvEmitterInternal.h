@@ -5,6 +5,7 @@
 #include "common/stringUtils.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvBuilder.h"
+#include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
@@ -25,11 +26,11 @@
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 
-struct InputBinding : IR::StageInput {
+struct InputBinding: IR::StageInput {
 	uint32_t variable_id = 0;
 };
 
-struct OutputBinding : IR::StageOutput {
+struct OutputBinding: IR::StageOutput {
 	uint32_t variable_id        = 0;
 	uint32_t mesh_data_variable = 0;
 };
@@ -110,6 +111,10 @@ struct EmitterState {
 
 	uint32_t                                         lane_count              = 1;
 	uint32_t                                         lane_half               = 0;
+	const VertexCaptureInfo*                         vertex_capture          = nullptr;
+	std::array<uint32_t, 3>                          capture_buffers {};
+	std::array<uint32_t, 2>                          capture_index {};
+	std::array<uint32_t, 2>                          capture_valid {};
 	std::array<BufferDefinition, 4>                  storage_buffers {};
 	std::vector<uint32_t>                           memory_byte_offsets;
 	uint32_t                                         bda_pagetable_variable  = 0;
@@ -241,9 +246,9 @@ inline uint32_t Select(EmitterState& state, uint32_t type, uint32_t condition, u
 
 struct ValueEmitContext {
 	explicit ValueEmitContext(EmitterState& state_): state(state_) {}
-
 	uint32_t              Def(IR::Value value);
 	uint32_t              Arg(const IR::Inst& inst, size_t index);
+	uint32_t              ExecutionMask(const IR::Inst& inst, size_t index);
 	uint32_t              HalfArg(const IR::Inst& inst, size_t index, uint32_t half);
 	uint32_t              Ballot(IR::Value predicate);
 	uint32_t              FirstLane(uint32_t ballot);
@@ -274,6 +279,12 @@ struct DppTargetLane {
 	uint32_t valid = 0;
 };
 
+void     DefineVertexCapture(EmitterState& state);
+void     InitializeVertexCapture(EmitterState& state);
+uint32_t CaptureInput(EmitterState& state, bool attribute, uint32_t location, uint32_t component);
+uint32_t CaptureOutputPointer(EmitterState& state, uint32_t slot, uint32_t component = UINT32_MAX);
+uint32_t MaskCaptureExecution(EmitterState& state, uint32_t predicate, uint32_t half);
+
 struct ImageSampleLayout {
 	uint32_t offset = NoImageComponent;
 	uint32_t dref   = NoImageComponent;
@@ -301,7 +312,6 @@ VertexInputScalarKind VertexParameterScalarKind(const EmitterState& state, uint3
 uint32_t VertexParameterComponentCount(const InputBinding& input);
 
 uint32_t VertexParameterScalarType(EmitterState& state, VertexInputScalarKind kind);
-
 
 uint32_t OutputVariableForExport(const EmitterState& state, const IR::ExportInfo& exp);
 
