@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/frameTiming.h"
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
@@ -811,6 +812,7 @@ void Presenter::Present(Frame& frame, bool reuse) {
 		m_impl->presented_overlay_revision.store(overlay_visual.revision,
 		                                         std::memory_order_release);
 		m_impl->window.UpdateTitle();
+		FrameTiming::OnFramePresented();
 		m_impl->frames.Release(&frame, true);
 		return;
 	}
