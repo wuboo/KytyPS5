@@ -11,6 +11,7 @@
 #include "libs/errno.h"
 #include "libs/libs.h"
 #include "libs/padData.h"
+#include "libs/padScript.h"
 
 #include <algorithm>
 #include <array>
@@ -269,9 +270,11 @@ void Initialize() {
 
 	g_controller = new GameController;
 	g_controller->Connect(HOST_INPUT_CONTROLLER_ID);
+	PadScript::Start();
 }
 
 void Shutdown() {
+	PadScript::Stop();
 	EmergencyShutdown();
 	delete g_controller;
 	g_controller = nullptr;
@@ -828,6 +831,7 @@ int KYTY_SYSV_ABI PadIsRemoteController(int handle, bool* is_remote) {
 
 int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 	PRINT_NAME();
+	PadScript::OnPadRead();
 
 	if (handle != 1) {
 		return PAD_ERROR_INVALID_HANDLE;
@@ -849,6 +853,7 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 
 int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 	PRINT_NAME();
+	PadScript::OnPadRead();
 
 	EXIT_NOT_IMPLEMENTED(num < 1 || num > 64);
 	if (handle != 1) {

@@ -411,6 +411,11 @@ add_executable(bit_array_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(bit_array_tests PRIVATE ${inc_headers})
 
+add_executable(pad_script_parser_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PadScriptParserTests.cpp"
+)
+target_include_directories(pad_script_parser_tests PRIVATE ${inc_headers})
+
 add_executable(ime_dialog_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ImeDialogTests.cpp"
 	"${KYTY_SOURCE_DIR}/libs/imeCommon.cpp"
@@ -555,6 +560,7 @@ if(BUILD_TESTING)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
+	add_test(NAME pad_script_parser COMMAND $<TARGET_FILE:pad_script_parser_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
@@ -619,6 +625,7 @@ if(BUILD_TESTING)
 		memory_tracker_tests
 		page_manager_tests
 		bit_array_tests
+		pad_script_parser_tests
 		shader_vertex_metadata_tests
 		resource_materialization_tests
 		resource_tracking_tests
