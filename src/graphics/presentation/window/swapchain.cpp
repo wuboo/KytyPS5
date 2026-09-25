@@ -679,7 +679,11 @@ uint64_t Swapchain::Submit(CommandScheduler& scheduler) {
 	SubmitInfo submit;
 	submit.AddWait(m_image_acquired[m_frame_index], 1, vk::PipelineStageFlagBits::eTransfer);
 	submit.AddSignal(m_render_complete[m_image_index]);
-	return scheduler.Submit(submit);
+	const auto tick = scheduler.Submit(submit);
+	// Bench diagnostic: which timeline ticks carry a swapchain-acquire wait.
+	LOGF("[bench-present] tick=%" PRIu64 " frame_index=%u image_index=%u\n", tick, m_frame_index,
+	     m_image_index);
+	return tick;
 }
 
 Swapchain::Status Swapchain::Present() {
