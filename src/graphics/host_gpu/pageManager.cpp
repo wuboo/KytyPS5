@@ -280,12 +280,11 @@ struct PageManager::Impl {
 		}
 
 		release_pending();
-		// A page that became watched again must not keep a stale guard bit, and the page in
-		// front of the updated range may have gained or lost its guard.
+		// release_pending() protects whole coalesced ranges with each page's own permissions,
+		// which drops a guard inside [first, last). Forget those guard bits so UpdateGuards
+		// re-applies the protection; the page in front of the range keeps its bit.
 		for (size_t index = first; index < last; index++) {
-			if (Watched(region, index)) {
-				region.guards.reset(index);
-			}
+			region.guards.reset(index);
 		}
 		UpdateGuards(region, base_addr, first == 0 ? 0 : first - 1, last == 0 ? 0 : last - 1);
 	}
