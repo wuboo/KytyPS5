@@ -12,6 +12,7 @@
 #include "libs/errno.h"
 #include "libs/libs.h"
 #include "libs/padData.h"
+#include "libs/padScript.h"
 
 #include <algorithm>
 #include <array>
@@ -447,9 +448,11 @@ void Initialize() {
 	}
 	g_keyboard_player = Config::GetKeyboardPlayer();
 	RefreshPlayers();
+	PadScript::Start();
 }
 
 void Shutdown() {
+	PadScript::Stop();
 	EmergencyShutdown();
 	for (auto& player: g_players) {
 		player.reset();
@@ -1333,6 +1336,7 @@ int KYTY_SYSV_ABI PadIsRemoteController(int handle, bool* is_remote) {
 
 int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 	PRINT_NAME();
+	PadScript::OnPadRead();
 
 	if (const auto error = PadCheckHandle(handle); error != OK) {
 		return error;
@@ -1354,6 +1358,7 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 
 int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 	PRINT_NAME();
+	PadScript::OnPadRead();
 
 	EXIT_NOT_IMPLEMENTED(num < 1 || num > 64);
 	if (const auto error = PadCheckHandle(handle); error != OK) {
