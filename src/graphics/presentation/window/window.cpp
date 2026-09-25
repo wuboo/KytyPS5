@@ -1,5 +1,10 @@
 #include "graphics/presentation/window.h"
 
+#if defined(__APPLE__)
+#include <objc/message.h>
+#include <objc/runtime.h>
+#endif
+
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
@@ -773,6 +778,29 @@ static void WindowCreate(WindowContext& context) {
 	}
 #endif
 	context.window = SDL_CreateWindow(KYTY_SDL_WINDOW_CAPTION, width, height, window_flags);
+#if defined(__APPLE__)
+	// Benchmarks: keep App Nap and timer coalescing off while the window is in the background,
+	// and try to take the foreground; an occluded emulator otherwise drops to a few FPS.
+	if (std::getenv("KYTY_BENCH_FOREGROUND") != nullptr) {
+		using Send       = id (*)(id, SEL);
+		using SendActive = id (*)(id, SEL, unsigned long long, id);
+		using SendBool   = void (*)(id, SEL, BOOL);
+		const id info    = reinterpret_cast<Send>(objc_msgSend)(
+            reinterpret_cast<id>(objc_getClass("NSProcessInfo")), sel_registerName("processInfo"));
+		const id reason = reinterpret_cast<id (*)(id, SEL, const char*)>(objc_msgSend)(
+		    reinterpret_cast<id>(objc_getClass("NSString")), sel_registerName("stringWithUTF8String:"),
+		    "benchmark");
+		// NSActivityUserInitiated | NSActivityLatencyCritical
+		constexpr unsigned long long options = 0x00FFFFFFULL | 0xFF00000000ULL;
+		const id activity = reinterpret_cast<SendActive>(objc_msgSend)(
+		    info, sel_registerName("beginActivityWithOptions:reason:"), options, reason);
+		(void)reinterpret_cast<Send>(objc_msgSend)(activity, sel_registerName("retain"));
+		const id app = reinterpret_cast<Send>(objc_msgSend)(
+		    reinterpret_cast<id>(objc_getClass("NSApplication")), sel_registerName("sharedApplication"));
+		reinterpret_cast<SendBool>(objc_msgSend)(app, sel_registerName("activateIgnoringOtherApps:"),
+		                                          YES);
+	}
+#endif
 
 	if (context.window == nullptr) {
 		EXIT("%s\n", SDL_GetError());
