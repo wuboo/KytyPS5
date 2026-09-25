@@ -7,6 +7,9 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cinttypes>
+#include <cstdlib>
 
 namespace Libs::Graphics {
 
@@ -62,8 +65,37 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		return false;
 	}
 	if (access == PageFaultAccess::Write) {
-		m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
-		m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
+		uint64_t invalidate_size = fault_size;
+#if defined(__APPLE__)
+		// Rosetta aborts the process ("unexpectedly need to EmulateForward on a synchronous
+		// exception") when a 256-bit AVX store that crosses from a writable page into a
+		// write-protected one faults mid-block. Release the whole run of watched pages that
+		// follows the fault, so a copy that has started writing does not cross into a
+		// protected page further on.
+		static const uint64_t release_ahead = [] {
+			const char* value = std::getenv("KYTY_ROSETTA_RELEASE_AHEAD_MB");
+			return (value != nullptr ? std::strtoull(value, nullptr, 10) : 64ull) << 20u;
+		}();
+		if (release_ahead != 0) {
+			const auto run_end = m_page_manager.WatchedRunEnd(fault_vaddr, release_ahead);
+			if (run_end > fault_vaddr && IsMapped(fault_vaddr, run_end - fault_vaddr)) {
+				invalidate_size = run_end - fault_vaddr;
+			}
+		}
+		static std::atomic<uint64_t> faults {0};
+		static std::atomic<uint64_t> released_pages {0};
+		const auto                   n = faults.fetch_add(1, std::memory_order_relaxed) + 1;
+		const auto released = released_pages.fetch_add(invalidate_size / m_page_manager.GetPageSize(),
+		                                         std::memory_order_relaxed) +
+		                   invalidate_size / m_page_manager.GetPageSize();
+		if ((n & (n - 1)) == 0) {
+			LOGF("[rosetta-release-ahead] write faults=%" PRIu64 " pages invalidated=%" PRIu64
+			     "\n",
+			     n, released);
+		}
+#endif
+		m_buffer_cache.InvalidateMemory(fault_vaddr, invalidate_size);
+		m_texture_cache.InvalidateMemory(fault_vaddr, invalidate_size);
 	} else {
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
 	}

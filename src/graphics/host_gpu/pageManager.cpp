@@ -317,6 +317,26 @@ void PageManager::UpdatePageWatchersForRegion(uint64_t base_addr, RegionBits& ma
 	m_impl->UpdateRegionWatchers<track, is_read, true>(*region, base_addr, first, last, &mask);
 }
 
+uint64_t PageManager::WatchedRunEnd(uint64_t vaddr, uint64_t max_bytes) const noexcept {
+	auto       page  = Common::AlignDown(vaddr, PAGE_SIZE);
+	const auto limit = (max_bytes > ADDRESS_SIZE - page) ? ADDRESS_SIZE : page + max_bytes;
+	while (page < limit) {
+		auto* region = m_impl->FindRegion(page);
+		if (region == nullptr) {
+			break;
+		}
+		const auto region_base = Common::AlignDown(page, REGION_SIZE);
+		SpinGuard  lock(region->lock);
+		for (auto index = static_cast<size_t>((page - region_base) / PAGE_SIZE);
+		     index < REGION_PAGES && page < limit; index++, page += PAGE_SIZE) {
+			if (region->pages[index].Perms() == Common::VirtualMemory::Mode::ReadWrite) {
+				return page;
+			}
+		}
+	}
+	return std::min(page, limit);
+}
+
 template void PageManager::UpdatePageWatchersForRegion<true, true>(uint64_t, RegionBits&);
 template void PageManager::UpdatePageWatchersForRegion<true, false>(uint64_t, RegionBits&);
 template void PageManager::UpdatePageWatchersForRegion<false, true>(uint64_t, RegionBits&);
