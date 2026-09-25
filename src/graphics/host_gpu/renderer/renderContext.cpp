@@ -61,6 +61,27 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	// The host reports the faulting byte, not the instruction's access width. Both caches
 	// resolve its page; guessing a width can cross the end of a valid guest mapping.
 	constexpr uint64_t fault_size = 1;
+#if defined(__APPLE__)
+	// A guard page is unwatched memory kept read-only in front of a watched page (see
+	// PageManager). Any access to it releases the watched run behind it, which drops the guard.
+	if (m_page_manager.IsGuardPage(fault_vaddr)) {
+		const auto page_size = m_page_manager.GetPageSize();
+		const auto next      = (fault_vaddr & ~(page_size - 1)) + page_size;
+		const auto run_end   = m_page_manager.WatchedRunEnd(next, 64ull << 20u);
+		if (run_end > next && IsMapped(next, run_end - next)) {
+			m_buffer_cache.InvalidateMemory(next, run_end - next);
+			m_texture_cache.InvalidateMemory(next, run_end - next);
+		}
+		static std::atomic<uint64_t> guard_faults {0};
+		const auto n = guard_faults.fetch_add(1, std::memory_order_relaxed) + 1;
+		if ((n & (n - 1)) == 0) {
+			LOGF("[rosetta-guard] guard faults=%" PRIu64 "\n", n);
+		}
+		// If the caches kept the next page watched, the guard stays and the access would fault
+		// forever; report it instead of spinning.
+		return !m_page_manager.IsGuardPage(fault_vaddr);
+	}
+#endif
 	if (!IsMapped(fault_vaddr, fault_size)) {
 		return false;
 	}

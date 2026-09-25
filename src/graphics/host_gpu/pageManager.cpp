@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bitset>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
@@ -134,7 +135,40 @@ struct PageManager::Impl {
 	struct Region {
 		std::atomic_flag                    lock = ATOMIC_FLAG_INIT;
 		std::array<PageState, REGION_PAGES> pages;
+		// Unwatched pages kept read-only because the next page is watched (see UpdateGuards).
+		std::bitset<REGION_PAGES> guards;
 	};
+
+	static bool Watched(const Region& region, size_t index) noexcept {
+		return index < REGION_PAGES &&
+		       region.pages[index].Perms() != Common::VirtualMemory::Mode::ReadWrite;
+	}
+
+	// Rosetta aborts the process when a 256-bit AVX store that crosses from a writable page
+	// into a write-protected page faults: the first half has already been written. Keeping
+	// the page in front of every watched page read-only makes such a store fault on its first
+	// half instead, which Rosetta handles. Pages in [first, last] of the region are updated;
+	// the region's first page has no guard, as the previous region is not locked here.
+	void UpdateGuards(Region& region, uint64_t base_addr, size_t first, size_t last) noexcept {
+#if defined(__APPLE__)
+		for (size_t index = first; index <= last && index < REGION_PAGES; index++) {
+			const bool guard = !Watched(region, index) && Watched(region, index + 1);
+			if (guard != region.guards.test(index)) {
+				region.guards.set(index, guard);
+				// Unmapped pages are skipped by the address space and cannot be written anyway.
+				(void)Libs::LibKernel::Memory::ProtectGuestHostMemory(
+				    base_addr + index * PAGE_SIZE, PAGE_SIZE,
+				    guard ? Common::VirtualMemory::Mode::Read
+				          : Common::VirtualMemory::Mode::ReadWrite);
+			}
+		}
+#else
+		(void)region;
+		(void)base_addr;
+		(void)first;
+		(void)last;
+#endif
+	}
 
 	Impl() {
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -246,6 +280,14 @@ struct PageManager::Impl {
 		}
 
 		release_pending();
+		// A page that became watched again must not keep a stale guard bit, and the page in
+		// front of the updated range may have gained or lost its guard.
+		for (size_t index = first; index < last; index++) {
+			if (Watched(region, index)) {
+				region.guards.reset(index);
+			}
+		}
+		UpdateGuards(region, base_addr, first == 0 ? 0 : first - 1, last == 0 ? 0 : last - 1);
 	}
 
 	template <bool track, bool is_read>
@@ -329,12 +371,23 @@ uint64_t PageManager::WatchedRunEnd(uint64_t vaddr, uint64_t max_bytes) const no
 		SpinGuard  lock(region->lock);
 		for (auto index = static_cast<size_t>((page - region_base) / PAGE_SIZE);
 		     index < REGION_PAGES && page < limit; index++, page += PAGE_SIZE) {
-			if (region->pages[index].Perms() == Common::VirtualMemory::Mode::ReadWrite) {
+			if (region->pages[index].Perms() == Common::VirtualMemory::Mode::ReadWrite &&
+			    !region->guards.test(index)) {
 				return page;
 			}
 		}
 	}
 	return std::min(page, limit);
+}
+
+bool PageManager::IsGuardPage(uint64_t vaddr) const noexcept {
+	auto* region = m_impl->FindRegion(vaddr);
+	if (region == nullptr) {
+		return false;
+	}
+	SpinGuard lock(region->lock);
+	return region->guards.test(
+	    static_cast<size_t>((vaddr - Common::AlignDown(vaddr, REGION_SIZE)) / PAGE_SIZE));
 }
 
 template void PageManager::UpdatePageWatchersForRegion<true, true>(uint64_t, RegionBits&);
