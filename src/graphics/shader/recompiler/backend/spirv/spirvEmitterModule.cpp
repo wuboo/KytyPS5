@@ -471,7 +471,14 @@ void DefineInputs(EmitterState& state) {
 			                            builtin);
 		}
 	}
-	if (state.requirements.subgroup_local_invocation_id) {
+#if defined(__APPLE__)
+	// Bench bring-up: MoltenVK rejects SubgroupLocalInvocationId in vertex functions.
+	if (state.requirements.subgroup_local_invocation_id &&
+	    state.program.stage == ShaderType::Vertex) {
+		state.vertex_lane_from_index = true;
+	} else
+#endif
+	    if (state.requirements.subgroup_local_invocation_id) {
 		const auto variable = DefineInterfaceVariable(state, TypeU32(state), spv::StorageClassInput,
 		                                              "gl_SubgroupInvocationID");
 		state.subgroup_local_invocation_id_variable = variable;

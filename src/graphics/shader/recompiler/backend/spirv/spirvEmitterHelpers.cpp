@@ -125,6 +125,19 @@ DppTargetLane EmitDppTargetLane(EmitterState& state, const IR::DppMoveFlags& fla
 }
 
 uint32_t EmitSubgroupLocalInvocationId(EmitterState& state) {
+	if (state.vertex_lane_from_index) {
+		// Consecutive vertices fill consecutive lanes, as they would in a guest wave.
+		uint32_t   lane         = ConstantU32(state, 0);
+		const auto vertex_index = InputVariableForKind(state, IR::StageInputKind::VertexIndex);
+		if (vertex_index != 0) {
+			const auto loaded = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpLoad, TypeI32(state), loaded, vertex_index);
+			const auto as_uint = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpBitcast, TypeU32(state), as_uint, loaded);
+			lane = Binary(state, spv::OpBitwiseAnd, TypeU32(state), as_uint, ConstantU32(state, 31));
+		}
+		return state.lane_half == 0 ? lane : EmitAddU32(state, lane, ConstantU32(state, 32));
+	}
 	if (state.subgroup_local_invocation_id_variable == 0) {
 		EXIT("SubgroupLocalInvocationId was not declared before SPIR-V function emission\n");
 	}
