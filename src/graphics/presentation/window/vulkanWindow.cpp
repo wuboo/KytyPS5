@@ -1026,13 +1026,15 @@ void WindowContext::CreateVulkan() {
 	push_descriptor_properties.pNext = &driver_properties;
 	graphic_ctx.physical_device.getProperties2(&physical_device_properties);
 	graphic_ctx.physical_device_properties = physical_device_properties.properties;
-	graphic_ctx.max_push_descriptors       = push_descriptor_properties.maxPushDescriptors;
+	graphic_ctx.max_push_descriptors       = SelectMaxPushDescriptors(
+	    driver_properties.driverID, push_descriptor_properties.maxPushDescriptors);
 	graphic_ctx.device_address_destruction_waits_for_queue =
 	    DeviceAddressBufferDestructionWaitsForQueue(driver_properties.driverID);
 	graphic_ctx.physical_device.getMemoryProperties(&graphic_ctx.physical_device_memory_properties);
 	const auto& device_properties = graphic_ctx.GetPhysicalDeviceProperties();
 
-	LOGF("Select device: %s\n", device_properties.deviceName.data());
+	LOGF("Select device: %s, max push descriptors=%u\n", device_properties.deviceName.data(),
+	     graphic_ctx.max_push_descriptors);
 
 	const vk::PhysicalDeviceImageFormatInfo2 block_texel_view_info {
 	    .format = vk::Format::eBc1RgbaUnormBlock,
