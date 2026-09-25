@@ -25,6 +25,10 @@ public:
 	template <bool track, bool is_read = false>
 	void UpdatePageWatchersForRegion(uint64_t base_addr, RegionBits& mask);
 
+	// End of the run of consecutive watched (protected) pages that starts at vaddr's page,
+	// scanning at most max_bytes. Returns the page start of vaddr when that page is unwatched.
+	[[nodiscard]] uint64_t WatchedRunEnd(uint64_t vaddr, uint64_t max_bytes) const noexcept;
+
 private:
 	struct Impl;
 	std::unique_ptr<Impl> m_impl;
