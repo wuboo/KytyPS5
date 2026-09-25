@@ -361,11 +361,13 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 	usage.usage = is_storage ? vk::ImageUsageFlagBits::eStorage
 	                         : image.usage & ~vk::ImageUsageFlagBits::eStorage;
 	vk::ImageViewMinLodCreateInfoEXT min_lod {};
+#if !defined(__APPLE__)
 	if (normalized.min_lod != 0) {
 		min_lod.minLod = static_cast<float>(normalized.base_level) +
 		                 static_cast<float>(normalized.min_lod) / 256.0f;
 		usage.pNext    = &min_lod;
 	}
+#endif
 	vk::ImageViewCreateInfo create {};
 	create.pNext                           = &usage;
 	create.image                           = image.image;
