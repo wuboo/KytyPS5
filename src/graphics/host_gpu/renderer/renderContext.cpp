@@ -117,6 +117,22 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 #endif
 		m_buffer_cache.InvalidateMemory(fault_vaddr, invalidate_size);
 		m_texture_cache.InvalidateMemory(fault_vaddr, invalidate_size);
+#if defined(__APPLE__)
+		{
+			// Diagnostic: a store that faulted near the end of its page will cross into the next
+			// page on retry; if that page is still protected, Rosetta aborts.
+			const auto page_size = m_page_manager.GetPageSize();
+			const auto next      = (fault_vaddr & ~(page_size - 1)) + page_size;
+			if (next - fault_vaddr <= 32 && m_page_manager.WatchedRunEnd(next, page_size) > next) {
+				static std::atomic<uint32_t> still_watched {0};
+				if (still_watched.fetch_add(1, std::memory_order_relaxed) < 32) {
+					LOGF("[rosetta-guard] next page still watched after write fault: fault=0x%016" PRIx64
+					     " invalidated=0x%" PRIx64 " guard=%u\n",
+					     fault_vaddr, invalidate_size, m_page_manager.IsGuardPage(next) ? 1u : 0u);
+				}
+			}
+		}
+#endif
 	} else {
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
 	}
