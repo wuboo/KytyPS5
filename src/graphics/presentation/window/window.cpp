@@ -776,6 +776,10 @@ static void WindowCreate(WindowContext& context) {
 	if (std::getenv("KYTY_BORDERLESS") != nullptr) {
 		window_flags |= static_cast<uint32_t>(SDL_WINDOW_BORDERLESS);
 	}
+	// Benchmarks: an occluded window gets few drawables; stay above other windows.
+	if (std::getenv("KYTY_BENCH_FOREGROUND") != nullptr) {
+		window_flags |= static_cast<uint32_t>(SDL_WINDOW_ALWAYS_ON_TOP);
+	}
 #endif
 	context.window = SDL_CreateWindow(KYTY_SDL_WINDOW_CAPTION, width, height, window_flags);
 #if defined(__APPLE__)
