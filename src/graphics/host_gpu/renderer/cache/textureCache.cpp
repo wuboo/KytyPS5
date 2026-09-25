@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <atomic>
 #include <cinttypes>
 #include <cstring>
 #include <limits>
@@ -1151,6 +1152,17 @@ void TextureCache::MaterializeDccClear(ImageId id, const ImageDesc& desc,
 	// Finish native metadata writes before reading backing bytes. This can submit the scheduler,
 	// so discovery runs before final draw uploads and never holds the texture lock across it.
 	if (m_buffer_cache.IsRegionGpuModified(range.address, range.size)) {
+		static std::atomic<uint64_t> readbacks {0};
+		static std::atomic<uint64_t> fill_covered {0};
+		uint32_t   fill_value = 0;
+		const bool covered    = m_buffer_cache.RecentGpuFillCovers(range.address, range.size, &fill_value);
+		const auto n          = readbacks.fetch_add(1, std::memory_order_relaxed) + 1;
+		const auto c = fill_covered.fetch_add(covered ? 1 : 0, std::memory_order_relaxed) + (covered ? 1 : 0);
+		if ((n & (n - 1)) == 0) {
+			LOGF("[bench-dcc] readbacks=%" PRIu64 " covered_by_gpu_fill=%" PRIu64
+			     " last: addr=0x%" PRIx64 " size=0x%" PRIx64 " covered=%u value=0x%08x\n",
+			     n, c, range.address, range.size, covered ? 1u : 0u, fill_value);
+		}
 		m_buffer_cache.ReadMemory(range.address, range.size, false);
 	}
 	const auto slice_size = range.size / layers;

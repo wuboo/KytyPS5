@@ -527,6 +527,17 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 	m_texture_cache.InvalidateMemoryFromGPU(vaddr, size);
 	auto [dst, dst_offset] = ObtainBuffer(vaddr, size, true, true);
 	dst->Fill(dst_offset, size, value);
+	m_recent_gpu_fills[m_recent_gpu_fill_next++ % m_recent_gpu_fills.size()] = {vaddr, size, value};
+}
+
+bool BufferCache::RecentGpuFillCovers(uint64_t vaddr, uint64_t size, uint32_t* value) const {
+	for (const auto& fill: m_recent_gpu_fills) {
+		if (fill.size != 0 && vaddr >= fill.vaddr && vaddr + size <= fill.vaddr + fill.size) {
+			*value = fill.value;
+			return true;
+		}
+	}
+	return false;
 }
 
 void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,

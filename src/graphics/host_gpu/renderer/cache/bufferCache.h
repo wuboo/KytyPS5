@@ -11,6 +11,7 @@
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 
+#include <array>
 #include <map>
 #include <span>
 #include <utility>
@@ -60,6 +61,8 @@ public:
 	[[nodiscard]] Buffer* GetFaultBuffer() noexcept { return m_fault_manager.GetFaultBuffer(); }
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBufferForImage(uint64_t vaddr, uint64_t size);
 	void FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool is_gds);
+	// Bench diagnostic: true when [vaddr, vaddr+size) lies inside a recent GPU-side fill.
+	[[nodiscard]] bool RecentGpuFillCovers(uint64_t vaddr, uint64_t size, uint32_t* value) const;
 	void CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,
 	                bool src_gds);
 	// Cache-index and exact dirty-range queries require GPU-thread serialization.
@@ -72,6 +75,13 @@ public:
 	void               RunGarbageCollector();
 
 private:
+	struct GpuFill {
+		uint64_t vaddr = 0;
+		uint64_t size  = 0;
+		uint32_t value = 0;
+	};
+	std::array<GpuFill, 16> m_recent_gpu_fills {};
+	uint32_t                m_recent_gpu_fill_next = 0;
 	friend struct BufferCacheTestAccess;
 
 	bool IsBufferInvalid(BufferId id) const {
