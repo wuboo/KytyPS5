@@ -11,7 +11,11 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+<<<<<<< HEAD
 #include "graphics/presentation/performanceOverlay.h"
+=======
+#include "graphics/presentation/frameTiming.h"
+>>>>>>> a73962f9 (presentation: add Tracy frame marks and optional per-frame timing log)
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
@@ -1060,6 +1064,7 @@ void Presenter::Impl::Present() {
 
 		presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
 		window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed);
+		FrameTiming::OnFramePresented();
 		return;
 	}
 	LOGF("Vulkan presentation retry exhausted; dropping frame\n");
