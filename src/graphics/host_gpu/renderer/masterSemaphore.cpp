@@ -1,7 +1,10 @@
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
+
+#include <cinttypes>
 
 namespace Libs::Graphics {
 
@@ -49,7 +52,17 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	wait_info.pSemaphores    = &m_semaphore;
 	wait_info.pValues        = &tick;
 
-	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
+	// Bench diagnostic: report waits that take unusually long, then keep waiting.
+	constexpr uint64_t report_ns = 5'000'000'000ull;
+	auto               result    = m_graphics.device.waitSemaphores(&wait_info, report_ns);
+	if (result == vk::Result::eTimeout) {
+		uint64_t gpu_value = 0;
+		(void)m_graphics.device.getSemaphoreCounterValue(m_semaphore, &gpu_value);
+		LOGF("[bench-wait] timeline wait >5 s: waiting for tick %" PRIu64 ", GPU reached %" PRIu64
+		     "\n",
+		     tick, gpu_value);
+		result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
+	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	Refresh();
 }
