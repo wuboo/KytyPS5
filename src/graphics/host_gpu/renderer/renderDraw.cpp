@@ -38,6 +38,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -1068,6 +1069,17 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 		const auto primitives = mesh.InputPrimitiveCount(draw.index_count);
 		if (primitives == 0 || draw.instance_count == 0) {
+			return;
+		}
+		// Bench diagnostic: skip mesh draws whose LDS exceeds the reported host limit.
+		static const bool skip_oversized = std::getenv("KYTY_SKIP_OVERSIZED_MESH") != nullptr;
+		if (skip_oversized &&
+		    mesh.lds_size_dwords * sizeof(uint32_t) >
+		        m_context.GetGraphics().mesh_shader_properties.maxMeshSharedMemorySize) {
+			static std::atomic<uint32_t> skipped = 0;
+			if (skipped.fetch_add(1, std::memory_order_relaxed) == 0) {
+				LOGF("[bench] skipping mesh draws with LDS=%u bytes\n", mesh.lds_size_dwords * 4u);
+			}
 			return;
 		}
 		mesh_groups        = (primitives - 1u) / mesh.primitives_per_group + 1u;
