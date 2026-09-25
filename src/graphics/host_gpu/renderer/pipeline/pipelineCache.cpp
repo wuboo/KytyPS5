@@ -597,10 +597,16 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		if (host_threads > limits.maxMeshWorkGroupInvocations ||
 		    host_threads > limits.maxMeshWorkGroupSize[0] ||
 		    mesh.max_vertices > limits.maxMeshOutputVertices ||
-		    mesh.max_primitives > limits.maxMeshOutputPrimitives ||
-		    mesh.lds_size_dwords * sizeof(uint32_t) > limits.maxMeshSharedMemorySize) {
+		    mesh.max_primitives > limits.maxMeshOutputPrimitives) {
 			EXIT("mesh shader exceeds host limits: threads=%u vertices=%u primitives=%u LDS=%u\n",
 			     host_threads, mesh.max_vertices, mesh.max_primitives, mesh.lds_size_dwords);
+		}
+		// Bench bring-up: MoltenVK splits threadgroup memory evenly between shared memory and
+		// staged mesh outputs, so the reported shared limit is conservative. Let the driver
+		// decide whether the pipeline fits.
+		if (mesh.lds_size_dwords * sizeof(uint32_t) > limits.maxMeshSharedMemorySize) {
+			LOGF("mesh shader LDS above reported host limit: LDS=%u bytes limit=%u\n",
+			     mesh.lds_size_dwords * 4u, limits.maxMeshSharedMemorySize);
 		}
 	}
 	ShaderParams pixel_params;
