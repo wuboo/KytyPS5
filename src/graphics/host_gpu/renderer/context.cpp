@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/frameTiming.h"
 
 #include <algorithm>
 #include <bit>
@@ -25,6 +26,7 @@ bool CommandBuffer::IsInvalid() const {
 
 vk::CommandBuffer CommandBuffer::Handle() const {
 	EXIT_IF(IsInvalid());
+	m_recorded = true;
 	return m_buffer;
 }
 
@@ -38,6 +40,7 @@ void CommandBuffer::Begin() {
 	auto result = buffer.begin(&begin_info);
 
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	m_recorded = false;
 }
 
 void CommandBuffer::End() const {
@@ -67,6 +70,7 @@ void CommandBuffer::BeginRendering(const RenderState& state) const {
 	EXIT_IF(state.width == 0 || state.height == 0 || state.num_layers == 0 ||
 	        state.num_color_attachments > RENDER_COLOR_ATTACHMENTS_MAX);
 	EndRendering();
+	FrameTiming::Add(FrameTiming::Counter::RenderPasses);
 
 	std::array<vk::RenderingAttachmentInfo, RENDER_COLOR_ATTACHMENTS_MAX> colors {};
 	for (uint32_t i = 0; i < state.num_color_attachments; i++) {

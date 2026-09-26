@@ -7,14 +7,17 @@
 #include "common/profiler.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/benchTrace.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/frameTiming.h"
 #include "kernel/memory.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cinttypes>
 #include <cstring>
 #include <memory>
@@ -300,8 +303,10 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	if (!GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: invalid memory-invalidation range\n");
 	}
-	m_memory_tracker.InvalidateRegion(vaddr, size,
-	                                  [this, vaddr, size] { ReadMemory(vaddr, size, true); });
+	m_memory_tracker.InvalidateRegion(vaddr, size, [this, vaddr, size] {
+		FrameTiming::Add(FrameTiming::Counter::ReadbackWriteFault);
+		ReadMemory(vaddr, size, true);
+	});
 }
 
 void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
@@ -310,6 +315,8 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
 		     vaddr, size);
 	}
+	FrameTiming::Add(FrameTiming::Counter::Readbacks);
+	const auto wait_begin = std::chrono::steady_clock::now();
 	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write] {
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
@@ -317,12 +324,17 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 
 		if (DownloadBufferMemory<false>(buffer, vaddr, size)) {
+			FrameTiming::Add(FrameTiming::Counter::ReadbackDownloads);
 			m_memory_tracker.UnmarkRegionAsGpuModified(vaddr, size);
 		}
 		if (is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 		}
 	});
+	FrameTiming::Add(FrameTiming::Counter::ReadbackWaitNs,
+	                 static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                                           std::chrono::steady_clock::now() - wait_begin)
+	                                           .count()));
 }
 
 BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size) {
@@ -597,6 +609,7 @@ void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t si
 	if (src_memory && dst_memory && !IsRegionGpuModified(dst_vaddr, size) &&
 	    !IsRegionGpuModified(src_vaddr, size) &&
 	    !m_texture_cache.FindImageFromRange(src_vaddr, size)) {
+		FrameTiming::Add(FrameTiming::Counter::DmaMemcpyBytes, size);
 		std::memcpy(reinterpret_cast<void*>(dst_vaddr), reinterpret_cast<const void*>(src_vaddr),
 		            size);
 		return;
