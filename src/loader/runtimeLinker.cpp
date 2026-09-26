@@ -1979,6 +1979,13 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			    X64InstructionEmulator::PatchReciprocalSquareRoots(segment_addr, segment_size);
 			Common::VirtualMemory::FlushInstructionCache(segment_addr, segment_size);
 		}
+#if defined(__APPLE__)
+		if (std::getenv("KYTY_BENCH_WIDE_STORES") != nullptr) {
+			X64InstructionEmulator::LogWideStores(
+			    segment_addr, segment_size,
+			    Common::PathToString(program->file_name.filename()).c_str());
+		}
+#endif
 #endif
 		if (reciprocal_sqrt_count != 0) {
 			LOGF("Guest VRSQRTPS emulation: %s, instructions=%" PRIu64 "\n",

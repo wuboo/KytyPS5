@@ -1,8 +1,11 @@
 #include "loader/x64InstructionEmulator.h"
 
 #include "common/common.h"
+#include "common/logging/log.h"
 
 #include <Zydis/Zydis.h>
+#include <algorithm>
+#include <array>
 #include <bit>
 #include <cstring>
 #if !defined(__APPLE__)
@@ -751,6 +754,54 @@ uint64_t PatchReciprocalSquareRoots(uint64_t address, uint64_t size) {
 	(void)size;
 #endif
 	return patched;
+}
+
+void LogWideStores(uint64_t address, uint64_t size, const char* module_name) {
+	ZydisDecoder decoder {};
+	if (!ZYAN_SUCCESS(
+	        ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64))) {
+		return;
+	}
+	uint64_t by_length[16] {};
+	uint64_t total = 0, rip_relative = 0;
+	std::array<uint64_t, ZYDIS_MNEMONIC_MAX_VALUE + 1> by_mnemonic {};
+	for (uint64_t offset = 0; offset < size;) {
+		const auto*             code = reinterpret_cast<const uint8_t*>(address + offset);
+		ZydisDecodedInstruction instruction {};
+		ZydisDecodedOperand     operands[ZYDIS_MAX_OPERAND_COUNT] {};
+		if (!ZYAN_SUCCESS(
+		        ZydisDecoderDecodeFull(&decoder, code, size - offset, &instruction, operands))) {
+			++offset;
+			continue;
+		}
+		for (uint32_t i = 0; i < instruction.operand_count_visible; i++) {
+			const auto& op = operands[i];
+			if (op.type == ZYDIS_OPERAND_TYPE_MEMORY && op.size == 256 &&
+			    (op.actions & ZYDIS_OPERAND_ACTION_MASK_WRITE) != 0) {
+				total++;
+				by_length[std::min<uint32_t>(instruction.length, 15)]++;
+				rip_relative += op.mem.base == ZYDIS_REGISTER_RIP ? 1 : 0;
+				by_mnemonic[instruction.mnemonic]++;
+				break;
+			}
+		}
+		offset += instruction.length;
+	}
+	LOGF("[bench-wide-stores] %s: total=%llu rip=%llu len4=%llu len5=%llu len6=%llu len7=%llu "
+	     "len8=%llu len9+=%llu\n",
+	     module_name, (unsigned long long)total, (unsigned long long)rip_relative,
+	     (unsigned long long)by_length[4], (unsigned long long)by_length[5],
+	     (unsigned long long)by_length[6], (unsigned long long)by_length[7],
+	     (unsigned long long)by_length[8],
+	     (unsigned long long)(by_length[9] + by_length[10] + by_length[11] + by_length[12] +
+	                          by_length[13] + by_length[14] + by_length[15]));
+	for (uint32_t m = 0; m < by_mnemonic.size(); m++) {
+		if (by_mnemonic[m] != 0) {
+			LOGF("[bench-wide-stores]   %s=%llu\n",
+			     ZydisMnemonicGetString(static_cast<ZydisMnemonic>(m)),
+			     (unsigned long long)by_mnemonic[m]);
+		}
+	}
 }
 
 bool TryEmulate(void* native_context) {

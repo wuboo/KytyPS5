@@ -10,6 +10,8 @@ namespace Loader::X64InstructionEmulator {
                                          const ZydisDecodedOperand* operands);
 uint64_t           PatchReciprocalSquareRoots(uint64_t address, uint64_t size);
 [[nodiscard]] bool TryEmulate(void* native_context);
+// Bench diagnostic: log 256-bit memory stores in a code range by length and addressing.
+void LogWideStores(uint64_t address, uint64_t size, const char* module_name);
 
 } // namespace Loader::X64InstructionEmulator
 
