@@ -1,4 +1,5 @@
 #include "graphics/presentation/videoOut.h"
+#include "graphics/presentation/frameTiming.h"
 
 #include "common/abi.h"
 #include "common/assert.h"
@@ -1155,6 +1156,7 @@ bool FlipQueue::Flip(uint32_t micros) {
 	m_requests.pop_front();
 
 	r.cfg->flip_status.count++;
+	Graphics::FrameTiming::OnGuestFlip();
 	r.cfg->flip_status.processTime              = LibKernel::KernelGetProcessTime();
 	r.cfg->flip_status.processTimeCounter       = LibKernel::KernelGetProcessTimeCounter();
 	r.cfg->flip_status.submitProcessTimeCounter = r.submit_ptc;

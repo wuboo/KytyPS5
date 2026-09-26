@@ -1,4 +1,5 @@
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/presentation/frameTiming.h"
 
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
@@ -23,6 +24,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <deque>
 #include <memory>
@@ -529,7 +531,12 @@ void GuestGpu::ThreadRun(void* data) {
 
 		if (command) {
 			EXIT_IF(g_current_processor != nullptr);
+			const auto busy_begin = std::chrono::steady_clock::now();
 			command();
+			FrameTiming::AddGpuBusy(static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(
+			        std::chrono::steady_clock::now() - busy_begin)
+			        .count()));
 
 			Common::LockGuard lock(gpu->m_queue_mutex);
 			gpu->m_processing = false;
@@ -540,7 +547,12 @@ void GuestGpu::ThreadRun(void* data) {
 		}
 
 		EXIT_IF(!has_submission);
-		const bool complete = gpu->Process(submission);
+		const auto busy_begin = std::chrono::steady_clock::now();
+		const bool complete   = gpu->Process(submission);
+		FrameTiming::AddGpuBusy(static_cast<uint64_t>(
+		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+		                                                         busy_begin)
+		        .count()));
 
 		Common::LockGuard lock(gpu->m_queue_mutex);
 		if (!complete) {
