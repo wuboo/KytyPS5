@@ -81,6 +81,7 @@ private:
 	};
 
 	void BeginNext();
+	bool HasOperationsAtCurrentTick();
 	void PriorityOperationsThread(std::stop_token stop);
 	void RunOperation(Common::UniqueFunction<void>&& operation);
 

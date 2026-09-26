@@ -168,8 +168,24 @@ void CommandScheduler::EndRendering() {
 }
 
 void CommandScheduler::Flush() {
+	// Submitting a command buffer nothing was recorded into still costs a Metal command buffer
+	// under MoltenVK. It only matters when something waits for the tick it would signal: a
+	// deferred operation (EOP write, interrupt) queued for the current tick.
+	static const bool skip_empty = FrameTiming::OptEnabled("empty_submit");
+	if (skip_empty && !m_command.IsInvalid() && !m_command.m_recorded &&
+	    !HasOperationsAtCurrentTick()) {
+		FrameTiming::Add(FrameTiming::Counter::SkippedSubmits);
+		return;
+	}
 	SubmitInfo submit;
 	Flush(submit);
+}
+
+bool CommandScheduler::HasOperationsAtCurrentTick() {
+	const auto      tick = CurrentTick();
+	std::lock_guard lock(m_operation_mutex);
+	return (!m_pending_operations.empty() && m_pending_operations.back().tick >= tick) ||
+	       (!m_priority_operations.empty() && m_priority_operations.back().tick >= tick);
 }
 
 void CommandScheduler::Flush(SubmitInfo& submit) {
