@@ -1280,10 +1280,11 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 				}
 				std::memset(code + ShortJumpSize, 0xCC, length - ShortJumpSize);
 				if (split_log != nullptr) {
-					std::fprintf(split_log, "cave site=0x%llx len=%llu cave=0x%llx\n",
+					std::fprintf(split_log, "cave site=0x%llx len=%llu cave=0x%llx tramp=0x%llx\n",
 					             static_cast<unsigned long long>(site),
 					             static_cast<unsigned long long>(length),
-					             static_cast<unsigned long long>(cave));
+					             static_cast<unsigned long long>(cave),
+					             static_cast<unsigned long long>(trampoline));
 					std::fflush(split_log);
 				}
 				result.via_cave++;
@@ -1311,9 +1312,10 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 				code[1] = 0x0B;
 				std::memset(code + ShortJumpSize, 0xCC, length - ShortJumpSize);
 				if (split_log != nullptr) {
-					std::fprintf(split_log, "trap site=0x%llx len=%llu\n",
+					std::fprintf(split_log, "trap site=0x%llx len=%llu tramp=0x%llx\n",
 					             static_cast<unsigned long long>(site),
-					             static_cast<unsigned long long>(length));
+					             static_cast<unsigned long long>(length),
+					             static_cast<unsigned long long>(trampoline));
 					std::fflush(split_log);
 				}
 				result.trapped++;
@@ -1327,10 +1329,12 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			std::memset(code + JumpSize, 0xCC, length + moved_original - JumpSize);
 			if (moved_count != 0) {
 				if (split_log != nullptr) {
-					std::fprintf(split_log, "moved site=0x%llx len=%llu moved=%llu count=%u\n",
+					std::fprintf(split_log,
+					             "moved site=0x%llx len=%llu moved=%llu count=%u tramp=0x%llx\n",
 					             static_cast<unsigned long long>(site),
 					             static_cast<unsigned long long>(length),
-					             static_cast<unsigned long long>(moved_original), moved_count);
+					             static_cast<unsigned long long>(moved_original), moved_count,
+					             static_cast<unsigned long long>(trampoline));
 					std::fflush(split_log);
 				}
 				result.relocated++;
