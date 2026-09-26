@@ -278,7 +278,22 @@ void CommandProcessor::BenchFlushEach() {
 
 void CommandProcessor::BufferFlush() {
 	FrameTiming::Add(FrameTiming::Counter::CpFlushes);
+	GetScheduler().RequestFlush();
+}
+
+void CommandProcessor::BufferFlushNow() {
+	FrameTiming::Add(FrameTiming::Counter::CpFlushes);
 	GetScheduler().Flush();
+}
+
+bool CommandProcessor::FlushRequested() const {
+	return GetScheduler().FlushRequested();
+}
+
+void CommandProcessor::FlushPending() {
+	if (GetScheduler().FlushRequested()) {
+		GetScheduler().FlushPending();
+	}
 }
 
 void CommandProcessor::BufferFlushAndWait() {
@@ -485,6 +500,21 @@ void GuestGpu::ThreadRun(void* data) {
 	g_gpu_state  = gpu;
 
 	for (;;) {
+		// Lazy flush: before the thread waits (no command, no runnable submission), submit what
+		// the batched flushes held back, so nothing the guest waits for stays unsubmitted.
+		if (gpu->m_gfx_cp->FlushRequested()) {
+			bool idle = false;
+			{
+				Common::LockGuard lock(gpu->m_queue_mutex);
+				idle = gpu->m_commands.empty();
+				for (uint32_t id = 0; idle && id < QueueCount; id++) {
+					idle = gpu->m_queues[id].empty() || gpu->m_queues[id].front().blocked;
+				}
+			}
+			if (idle) {
+				gpu->m_gfx_cp->FlushPending();
+			}
+		}
 		Submission                   submission;
 		Common::UniqueFunction<void> command;
 		bool                         has_submission = false;
@@ -631,7 +661,12 @@ bool GuestGpu::Process(Submission& submission) {
 				if (complete) {
 					m_renderer.RunGarbageCollector();
 				}
-				cp.BufferFlush();
+				// A suspended submission waits for something; submit what it recorded now.
+				if (complete) {
+					cp.BufferFlush();
+				} else {
+					cp.BufferFlushNow();
+				}
 			} else if (complete) {
 				m_renderer.RunGarbageCollector();
 			}
@@ -657,7 +692,11 @@ bool GuestGpu::Process(Submission& submission) {
 				if (complete) {
 					m_renderer.RunGarbageCollector();
 				}
-				cp.BufferFlush();
+				if (complete) {
+					cp.BufferFlush();
+				} else {
+					cp.BufferFlushNow();
+				}
 			} else if (complete) {
 				m_renderer.RunGarbageCollector();
 			}
@@ -1138,7 +1177,7 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 }
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
-	BufferFlush();
+	BufferFlushNow();
 
 	m_renderer.GetVideoOut().WaitFlipDone(static_cast<int>(video_out_handle),
 	                                      static_cast<int>(display_buffer_index));

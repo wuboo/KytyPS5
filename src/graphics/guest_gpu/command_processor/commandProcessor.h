@@ -63,6 +63,9 @@ public:
 	void            BufferInit();
 	void            BufferFlush();
 	void            BenchFlushEach();
+	void               BufferFlushNow();
+	void               FlushPending();
+	[[nodiscard]] bool FlushRequested() const;
 	void            BufferFlushAndWait();
 	void            BufferWait();
 	HW::Context&    GetCtx() { return m_ctx; }

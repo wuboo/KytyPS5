@@ -1,13 +1,14 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
-#include "graphics/host_gpu/renderer/benchTrace.h"
-#include "graphics/presentation/frameTiming.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/benchTrace.h"
+#include "graphics/presentation/frameTiming.h"
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <optional>
 
 namespace Libs::Graphics {
@@ -179,6 +180,34 @@ void CommandScheduler::Flush() {
 	}
 	SubmitInfo submit;
 	Flush(submit);
+}
+
+void CommandScheduler::RequestFlush() {
+	static const bool     lazy = FrameTiming::OptEnabled("lazy_flush");
+	static const uint32_t max  = [] {
+		const char* value = std::getenv("KYTY_LAZY_FLUSH_MAX");
+		return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 8u;
+	}();
+	if (!lazy) {
+		Flush();
+		return;
+	}
+	const auto now = std::chrono::steady_clock::now();
+	if (m_flush_requests++ == 0) {
+		m_first_flush_request = now;
+	}
+	if (m_flush_requests >= max || now - m_first_flush_request >= std::chrono::milliseconds(1)) {
+		FlushPending();
+	} else {
+		FrameTiming::Add(FrameTiming::Counter::FlushesDeferred);
+	}
+}
+
+void CommandScheduler::FlushPending() {
+	if (m_flush_requests != 0) {
+		m_flush_requests = 0;
+		Flush();
+	}
 }
 
 bool CommandScheduler::HasOperationsAtCurrentTick() {
@@ -376,6 +405,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	if (!m_command.m_recorded) {
 		FrameTiming::Add(FrameTiming::Counter::EmptySubmits);
 	}
+	m_flush_requests = 0; // this submit carries everything a pending flush would
 	m_command.End();
 	const auto buffer   = m_command.m_buffer;
 	auto&      graphics = m_graphics;

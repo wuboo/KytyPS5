@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 #include "graphics/host_gpu/renderer/render.h"
 
+#include <chrono>
 #include <condition_variable>
 #include <mutex>
 
@@ -27,6 +28,12 @@ public:
 	void           EndRendering();
 	void           Flush();
 	void           Flush(SubmitInfo& submit);
+	// Lazy flush (KYTY_OPT_OFF=lazy_flush disables): the command processor asks for a flush at
+	// the end of every PM4 submission and ReleaseMem; batch those into one submit, made once
+	// enough are pending, after 1 ms, or when the GPU thread is about to wait.
+	void               RequestFlush();
+	void               FlushPending();
+	[[nodiscard]] bool FlushRequested() const noexcept { return m_flush_requests != 0; }
 	void           FlushAndWait();
 	void           Finish();
 	CommandBuffer& BeginCommand();
@@ -82,6 +89,8 @@ private:
 
 	void BeginNext();
 	bool HasOperationsAtCurrentTick();
+	uint32_t                              m_flush_requests = 0;
+	std::chrono::steady_clock::time_point m_first_flush_request {};
 	void PriorityOperationsThread(std::stop_token stop);
 	void RunOperation(Common::UniqueFunction<void>&& operation);
 
