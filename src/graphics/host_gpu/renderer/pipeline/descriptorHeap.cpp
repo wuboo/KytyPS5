@@ -55,6 +55,7 @@ vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 	}
 
 	m_sets.clear();
+	m_pool_generation++;
 	auto& fresh_batch = m_sets[layout];
 	EXIT_IF(!Allocate(layout, fresh_batch));
 	return fresh_batch.sets[--fresh_batch.size];
