@@ -155,6 +155,28 @@ void TestShortStoreViaInt3Padding() {
         "short store wrote all bytes");
 }
 
+void TestShortStoreViaNopPadding() {
+  auto area = MakeCode();
+  // vmovups [rdi], ymm0 (4 bytes); ret; 5-byte nop (alignment padding after
+  // ret)
+  const std::array<uint8_t, 10> code = {0xc5, 0xfc, 0x11, 0x07, 0xc3,
+                                        0x0f, 0x1f, 0x44, 0x00, 0x00};
+  std::memcpy(area.code, code.data(), code.size());
+  auto cursor = area.trampolines;
+  const auto result = Loader::X64InstructionEmulator::SplitWideStores(
+      reinterpret_cast<uint64_t>(area.code), code.size(), &cursor, area.end);
+  Check(result.via_cave == 1 && area.code[5] == 0xe9,
+        "nop padding after ret used as a cave");
+  // A nop that execution falls into is not padding.
+  const std::array<uint8_t, 10> live = {0xc5, 0xfc, 0x11, 0x07, 0x0f,
+                                        0x1f, 0x44, 0x00, 0x00, 0xc3};
+  std::memcpy(area.code, live.data(), live.size());
+  cursor = area.trampolines;
+  const auto live_result = Loader::X64InstructionEmulator::SplitWideStores(
+      reinterpret_cast<uint64_t>(area.code), live.size(), &cursor, area.end);
+  Check(live_result.too_short == 1, "reachable nop left alone");
+}
+
 void TestRipRelativeStore() {
 	auto area = MakeCode();
 	// vmovups ymm0, [rsi]; vmovups [rip + 0x7f4], ymm0; vzeroupper; ret

@@ -819,16 +819,30 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 		uint64_t size  = 0;
 		uint64_t used  = 0;
 	};
+	// Also usable: nop padding that directly follows an unconditional ret/jmp/ud2, which
+	// execution cannot fall into (branches target the aligned code after it).
 	std::vector<Cave> caves;
+	bool              after_unconditional = false;
+	uint64_t          nop_start           = 0;
+	uint64_t          nop_size            = 0;
+	const auto        end_nops            = [&]() {
+		if (nop_size >= JumpSize) {
+			caves.push_back({nop_start, nop_size, 0});
+		}
+		nop_size = 0;
+	};
 	for (uint64_t offset = 0; offset < size;) {
 		const auto*             code = reinterpret_cast<const uint8_t*>(address + offset);
 		ZydisDecodedInstruction instruction {};
 		if (!ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&decoder, nullptr, code, size - offset,
 		                                                &instruction))) {
+			end_nops();
+			after_unconditional = false;
 			++offset;
 			continue;
 		}
 		if (instruction.mnemonic == ZYDIS_MNEMONIC_INT3 && instruction.length == 1) {
+			end_nops();
 			const uint64_t start = address + offset;
 			uint64_t       run   = 0;
 			while (offset + run < size && code[run] == 0xCC) {
@@ -838,10 +852,27 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 				caves.push_back({start, run, 0});
 			}
 			offset += run;
+			after_unconditional = true;
 			continue;
 		}
+		if (instruction.mnemonic == ZYDIS_MNEMONIC_NOP && (after_unconditional || nop_size != 0)) {
+			if (nop_size == 0) {
+				nop_start = address + offset;
+			}
+			nop_size += instruction.length;
+			after_unconditional = false;
+			offset += instruction.length;
+			continue;
+		}
+		end_nops();
+		after_unconditional = instruction.mnemonic == ZYDIS_MNEMONIC_RET ||
+		                      instruction.mnemonic == ZYDIS_MNEMONIC_UD2 ||
+		                      (instruction.mnemonic == ZYDIS_MNEMONIC_JMP);
 		offset += instruction.length;
 	}
+	end_nops();
+	std::sort(caves.begin(), caves.end(),
+	          [](const Cave& a, const Cave& b) { return a.start < b.start; });
 	const auto take_cave = [&](uint64_t next_ip) -> uint64_t {
 		const uint64_t low  = next_ip >= 128 ? next_ip - 128 : 0;
 		const uint64_t high = next_ip + 127;
