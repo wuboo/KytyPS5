@@ -9,12 +9,16 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/shader.h"
 
+#include <atomic>
 #include <cstddef>
 #include <filesystem>
 #include <memory>
 #include <span>
+#include <stop_token>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
+#include <vector>
 
 namespace Libs::Graphics {
 
@@ -219,9 +223,16 @@ private:
 	                                                        m_graphics_pipelines;
 	std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> m_compute_pipelines;
 	Common::Mutex                                           m_mutex;
+	// Set after a pipeline is created; the saver thread writes the driver cache to disk when it
+	// sees it, so the GPU thread never waits for file I/O.
+	std::atomic<bool> m_driver_cache_dirty {false};
+	std::jthread      m_driver_cache_saver;
 
-	void InitializeDriverCache();
-	void SaveInternalLocked();
+	void                 InitializeDriverCache();
+	void                 SaveInternalLocked();
+	std::vector<uint8_t> CollectDriverCacheLocked();
+	void                 WriteDriverCache(const std::vector<uint8_t>& payload);
+	void                 DriverCacheSaverThread(std::stop_token stop);
 };
 
 std::string PipelineCacheTitleId();

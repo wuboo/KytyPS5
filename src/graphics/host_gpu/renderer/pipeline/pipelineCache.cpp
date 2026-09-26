@@ -34,6 +34,7 @@
 #include <span>
 #include <spirv-tools/libspirv.hpp>
 #include <string_view>
+#include <thread>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -441,9 +442,17 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
     : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics)) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	InitializeDriverCache();
+	if (m_driver_cache != nullptr) {
+		m_driver_cache_saver =
+		    std::jthread([this](std::stop_token stop) { DriverCacheSaverThread(stop); });
+	}
 }
 
 PipelineCache::~PipelineCache() {
+	if (m_driver_cache_saver.joinable()) {
+		m_driver_cache_saver.request_stop();
+		m_driver_cache_saver.join();
+	}
 	Save();
 	auto destroy = [this](const auto& pipelines) {
 		for (const auto& [key, pipeline]: pipelines) {
@@ -544,8 +553,17 @@ void PipelineCache::Save() {
 }
 
 void PipelineCache::SaveInternalLocked() {
+	const auto payload = CollectDriverCacheLocked();
+	if (!payload.empty()) {
+		WriteDriverCache(payload);
+	}
+}
+
+// Reads the driver cache blob. The cache is used by pipeline creation under m_mutex, and host
+// access to a VkPipelineCache must be externally synchronized, so the caller holds m_mutex.
+std::vector<uint8_t> PipelineCache::CollectDriverCacheLocked() {
 	if (m_driver_cache == nullptr) {
-		return;
+		return {};
 	}
 
 	size_t               size = 0;
@@ -566,9 +584,14 @@ void PipelineCache::SaveInternalLocked() {
 	if (result != vk::Result::eSuccess || size == 0 || size > 256 * 1024 * 1024) {
 		PipelineCacheLog("Vulkan pipeline cache: save failed ({}, {} bytes)", vk::to_string(result),
 		                 size);
-		return;
+		return {};
 	}
 	payload.resize(size);
+	return payload;
+}
+
+// File work only: no Vulkan calls, so it needs no lock and can run off the GPU thread.
+void PipelineCache::WriteDriverCache(const std::vector<uint8_t>& payload) {
 	auto       prefix       = DriverCacheSignature(m_graphics.GetPhysicalDeviceProperties());
 	const auto payload_hash = XXH3_64bits(payload.data(), payload.size());
 	prefix.append(reinterpret_cast<const char*>(&payload_hash), sizeof(payload_hash));
@@ -599,6 +622,29 @@ void PipelineCache::SaveInternalLocked() {
 	}
 	PipelineCacheLog("Vulkan pipeline cache: saved {} bytes to {}", payload.size(),
 	                 Common::PathToString(m_driver_cache_path));
+}
+
+void PipelineCache::DriverCacheSaverThread(std::stop_token stop) {
+	KYTY_PROFILER_THREAD("Thread_PipelineCacheSave");
+	// Previously the GPU thread wrote the whole cache (read, write, flush, rename) at most every
+	// 500 ms right after creating a pipeline, inside the draw that needed it. Collect the blob
+	// under the lock here and do the file work without it; the destructor still saves at exit.
+	while (!stop.stop_requested()) {
+		for (int i = 0; i < 20 && !stop.stop_requested(); i++) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(250));
+		}
+		if (!m_driver_cache_dirty.exchange(false, std::memory_order_acq_rel)) {
+			continue;
+		}
+		std::vector<uint8_t> payload;
+		{
+			Common::LockGuard lock(m_mutex);
+			payload = CollectDriverCacheLocked();
+		}
+		if (!payload.empty()) {
+			WriteDriverCache(payload);
+		}
+	}
 }
 
 PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
@@ -885,12 +931,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 	auto [iter, inserted] = m_graphics_pipelines.emplace(std::move(key), std::move(cached));
 	EXIT_IF(!inserted);
 
-	static auto last_save = std::chrono::steady_clock::now();
-	const auto  now       = std::chrono::steady_clock::now();
-	if (now - last_save >= std::chrono::milliseconds(500)) {
-		last_save = now;
-		SaveInternalLocked();
-	}
+	m_driver_cache_dirty.store(true, std::memory_order_release);
 
 	return *iter->second;
 }
@@ -927,12 +968,7 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 	auto [iter, inserted] = m_compute_pipelines.emplace(compute_program.id, std::move(cached));
 	EXIT_IF(!inserted);
 
-	static auto last_save = std::chrono::steady_clock::now();
-	const auto  now       = std::chrono::steady_clock::now();
-	if (now - last_save >= std::chrono::milliseconds(500)) {
-		last_save = now;
-		SaveInternalLocked();
-	}
+	m_driver_cache_dirty.store(true, std::memory_order_release);
 
 	return *iter->second;
 }
