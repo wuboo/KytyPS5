@@ -925,6 +925,7 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 	// execution cannot fall into (branches target the aligned code after it).
 	std::vector<Cave>     caves;
 	std::vector<uint64_t> branch_targets;
+	std::vector<uint64_t> candidates; // offsets of VEX vector moves, checked in the phases
 	bool                  after_unconditional = false;
 	uint64_t          nop_start           = 0;
 	uint64_t          nop_size            = 0;
@@ -969,6 +970,17 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			continue;
 		}
 		end_nops();
+		if (instruction.encoding == ZYDIS_INSTRUCTION_ENCODING_VEX) {
+			switch (instruction.mnemonic) {
+				case ZYDIS_MNEMONIC_VMOVUPS:
+				case ZYDIS_MNEMONIC_VMOVAPS:
+				case ZYDIS_MNEMONIC_VMOVUPD:
+				case ZYDIS_MNEMONIC_VMOVAPD:
+				case ZYDIS_MNEMONIC_VMOVDQU:
+				case ZYDIS_MNEMONIC_VMOVDQA: candidates.push_back(offset); break;
+				default: break;
+			}
+		}
 		if (instruction.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE &&
 		    (instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE) != 0) {
 			ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT] {};
@@ -1056,13 +1068,18 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			std::sort(caves.begin(), caves.end(),
 			          [](const Cave& a, const Cave& b) { return a.start < b.start; });
 		}
-		for (uint64_t offset = 0; offset < size;) {
-			auto*                   code = reinterpret_cast<uint8_t*>(address + offset);
+		// Bytes before skip_until were rewritten by a moved-instruction patch in this phase.
+		uint64_t skip_until = 0;
+		for (const uint64_t start: candidates) {
+			if (start < skip_until) {
+				continue;
+			}
+			uint64_t                offset = start;
+			auto*                   code   = reinterpret_cast<uint8_t*>(address + offset);
 			ZydisDecodedInstruction instruction {};
 			ZydisDecodedOperand     operands[ZYDIS_MAX_OPERAND_COUNT] {};
 			if (!ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, code, size - offset, &instruction,
 			                                         operands))) {
-				++offset;
 				continue;
 			}
 			const uint64_t length = instruction.length;
@@ -1317,7 +1334,7 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 					std::fflush(split_log);
 				}
 				result.relocated++;
-				offset += moved_original;
+				skip_until = offset + moved_original;
 			}
 			if (phase == 0 && length >= JumpSize + ShortJumpSize) {
 				caves.push_back({site + JumpSize, length - JumpSize, 0});
