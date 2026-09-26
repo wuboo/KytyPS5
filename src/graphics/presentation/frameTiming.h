@@ -44,6 +44,12 @@ enum class Counter : uint32_t {
 	DmaMemcpyBytes,
 	BufferDeleteDrains, // buffer deletions that waited for all submitted GPU work (MoltenVK)
 	BufferDeleteWaitNs,
+	SubmitsFlush, // submits by path: CommandScheduler::Flush(SubmitInfo&)
+	SubmitsFlushAndWait,
+	SubmitsFinish,
+	SubmitsWaitCurrent, // Wait() on the tick being recorded (submits, then waits for it)
+	CpFlushes,          // CommandProcessor::BufferFlush (PM4 slices, ReleaseMem, ...)
+	SliceSuspends,      // PM4 submissions suspended on a wait and resumed later
 	Count,
 };
 

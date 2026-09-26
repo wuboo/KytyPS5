@@ -173,11 +173,13 @@ void CommandScheduler::Flush() {
 }
 
 void CommandScheduler::Flush(SubmitInfo& submit) {
+	FrameTiming::Add(FrameTiming::Counter::SubmitsFlush);
 	Submit(submit);
 	BeginNext();
 }
 
 void CommandScheduler::FlushAndWait() {
+	FrameTiming::Add(FrameTiming::Counter::SubmitsFlushAndWait);
 	const auto tick = Submit();
 	m_master.Wait(tick);
 	BeginNext();
@@ -186,6 +188,9 @@ void CommandScheduler::FlushAndWait() {
 void CommandScheduler::Finish() {
 	CheckActive();
 	FrameTiming::Add(FrameTiming::Counter::Finishes);
+	if (!m_command.IsInvalid()) {
+		FrameTiming::Add(FrameTiming::Counter::SubmitsFinish);
+	}
 	if (!m_command.IsInvalid()) {
 		Submit();
 	}
@@ -201,6 +206,7 @@ void CommandScheduler::Wait(uint64_t tick) {
 		// A stream-buffer wrap can wait while a draw is being prepared through a reference to
 		// Current(). The wrapper stays stable while its pooled Vulkan buffer is retired. Deferred
 		// resources are released only at the next GPU operation boundary.
+		FrameTiming::Add(FrameTiming::Counter::SubmitsWaitCurrent);
 		const auto submitted_tick = Submit();
 		EXIT_IF(submitted_tick != tick);
 		m_master.Wait(tick);

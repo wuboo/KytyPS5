@@ -267,6 +267,7 @@ void CommandProcessor::BufferInit() {
 }
 
 void CommandProcessor::BufferFlush() {
+	FrameTiming::Add(FrameTiming::Counter::CpFlushes);
 	GetScheduler().Flush();
 }
 
@@ -658,6 +659,9 @@ bool GuestGpu::Process(Submission& submission) {
 			break;
 	}
 
+	if (!complete) {
+		FrameTiming::Add(FrameTiming::Counter::SliceSuspends);
+	}
 	return complete;
 }
 

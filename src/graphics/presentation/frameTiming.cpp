@@ -40,6 +40,12 @@ constexpr const char* kCounterNames[] = {
     "dma_memcpy_bytes",
     "buffer_delete_drains",
     "buffer_delete_wait_ns",
+    "submits_flush",
+    "submits_flush_and_wait",
+    "submits_finish",
+    "submits_wait_current",
+    "cp_flushes",
+    "slice_suspends",
 };
 static_assert(std::size(kCounterNames) == static_cast<size_t>(Counter::Count));
 
