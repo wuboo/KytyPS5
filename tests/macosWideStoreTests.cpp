@@ -182,6 +182,32 @@ void TestShortStoreViaNopPadding() {
         "reachable nop not used as a cave");
 }
 
+void TestShortStoreViaLongStoreDeadBytes() {
+  auto area = MakeCode();
+  // f: vmovups ymm0, [rsi]; vmovups [rdi], ymm0 (4 bytes); vzeroupper; ret
+  // g: vmovups [rdi + rax + 0x100], ymm0 (VEX3, 10 bytes: 5 dead bytes once
+  // patched); ret
+  const std::array<uint8_t, 23> code = {
+      0xc5, 0xfc, 0x10, 0x06, 0xc5, 0xfc, 0x11, 0x07, 0xc5, 0xf8, 0x77, 0xc3,
+      0xc4, 0xe1, 0x7c, 0x11, 0x84, 0x07, 0x00, 0x01, 0x00, 0x00, 0xc3};
+  std::memcpy(area.code, code.data(), code.size());
+  auto cursor = area.trampolines;
+  const auto result = Loader::X64InstructionEmulator::SplitWideStores(
+      reinterpret_cast<uint64_t>(area.code), code.size(), &cursor, area.end);
+  Check(result.patched == 2 && result.via_cave == 1 && result.trapped == 0,
+        "short store reaches its trampoline through a long store's dead bytes");
+  Check(area.code[4] == 0xeb && area.code[12] == 0xe9 && area.code[17] == 0xe9,
+        "rel8 into the dead bytes of the patched long store");
+  uint8_t source[32];
+  uint8_t destination[40]{};
+  for (int i = 0; i < 32; i++) {
+    source[i] = static_cast<uint8_t>(0x10 + i);
+  }
+  reinterpret_cast<CopyFunc>(area.code)(destination, source);
+  Check(std::memcmp(destination, source, 32) == 0 && destination[32] == 0,
+        "chained short store wrote its 32 bytes");
+}
+
 void TestRipRelativeStore() {
 	auto area = MakeCode();
 	// vmovups ymm0, [rsi]; vmovups [rip + 0x7f4], ymm0; vzeroupper; ret
