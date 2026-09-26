@@ -124,6 +124,71 @@ bool BenchDumpShader(uint64_t shader_hash) {
 	return std::ranges::find(hashes, shader_hash) != hashes.end();
 }
 
+// Inputs of the last resource materialization of a shader: user data, shader base and every
+// guest word it read. When all are unchanged the materialized resources are unchanged too, so
+// the IR walk can be skipped.
+struct ResourceMemo {
+	struct Read {
+		uint64_t address = 0;
+		uint32_t count   = 0; // words
+		uint32_t offset  = 0; // into words
+		bool     strict  = false;
+		bool     ok      = false;
+	};
+	bool                  valid = false;
+	uint64_t              base  = 0;
+	std::vector<uint32_t> user_data;
+	std::vector<Read>     reads;
+	std::vector<uint32_t> words;
+
+	void Clear() {
+		valid = false;
+		reads.clear();
+		words.clear();
+	}
+	void Add(uint64_t address, std::span<const uint32_t> values, bool strict, bool ok) {
+		reads.push_back({address, static_cast<uint32_t>(values.size()),
+		                 static_cast<uint32_t>(words.size()), strict, ok});
+		if (ok) {
+			words.insert(words.end(), values.begin(), values.end());
+		}
+	}
+	[[nodiscard]] bool Matches(uint64_t shader_base, std::span<const uint32_t> data) const {
+		if (!valid || base != shader_base || !std::ranges::equal(user_data, data)) {
+			return false;
+		}
+		std::array<uint32_t, 16> buffer {};
+		for (const auto& read: reads) {
+			if (read.count > buffer.size()) {
+				return false;
+			}
+			const std::span<uint32_t> values(buffer.data(), read.count);
+			bool                      ok = true;
+			if (read.strict) {
+				ok = ReadShaderGuestMemory(nullptr, read.address, values);
+			} else {
+				std::memcpy(values.data(), reinterpret_cast<const void*>(read.address),
+				            values.size_bytes());
+			}
+			if (ok != read.ok ||
+			    (ok && !std::equal(values.begin(), values.end(), words.begin() + read.offset))) {
+				return false;
+			}
+		}
+		return true;
+	}
+};
+
+bool RecordStrictRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
+	const bool ok = ReadShaderGuestMemory(nullptr, address, values);
+	static_cast<ResourceMemo*>(userdata)->Add(address, values, true, ok);
+	return ok;
+}
+
+void RecordOrdinaryRead(void* userdata, uint64_t address, uint32_t value) {
+	static_cast<ResourceMemo*>(userdata)->Add(address, {&value, 1}, false, true);
+}
+
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
                      const std::vector<uint32_t>& spirv) {
 	if (!Config::GraphicsDebugDumpEnabled() && !BenchDumpShader(shader_hash)) {
@@ -232,6 +297,7 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		std::vector<Permutation>                     permutations;
 		bool                                         skip_dispatch = false;
+		ResourceMemo                                 memo;
 	};
 
 	struct ProgramKeyHash {
@@ -322,9 +388,29 @@ struct PipelineCache::ProgramCache {
 		    .read_specialization_memory = ReadShaderGuestMemory,
 		};
 		if (entry != programs.end()) {
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(entry->second.resource_plan,
-			                                                    runtime, entry->second.resources,
-			                                                    entry->second.specialization));
+			static const bool memoize = FrameTiming::OptEnabled("srt_memo");
+			auto&             memo    = entry->second.memo;
+			if (memoize && memo.Matches(params.Base(), user_data)) {
+				FrameTiming::Add(FrameTiming::Counter::ResourceMemoHits);
+			} else if (memoize) {
+				memo.Clear();
+				auto recording                       = runtime;
+				recording.read_specialization_memory = RecordStrictRead;
+				recording.userdata                   = &memo;
+				recording.observe_read               = RecordOrdinaryRead;
+				recording.observe_userdata           = &memo;
+				EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
+				    entry->second.resource_plan, recording, entry->second.resources,
+				    entry->second.specialization));
+				memo.valid = true;
+				memo.base  = params.Base();
+				memo.user_data.assign(user_data.begin(), user_data.end());
+				FrameTiming::Add(FrameTiming::Counter::ResourceMemoMisses);
+			} else {
+				EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
+				    entry->second.resource_plan, runtime, entry->second.resources,
+				    entry->second.specialization));
+			}
 			if (const auto permutation = std::ranges::find_if(
 			        entry->second.permutations,
 			        [&](const Permutation& candidate) {

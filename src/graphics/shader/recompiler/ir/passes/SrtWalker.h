@@ -10,6 +10,9 @@ namespace Libs::Graphics::ShaderRecompiler::IR {
 class Value;
 
 using SrtMemoryReader = bool (*)(void* userdata, uint64_t address, std::span<uint32_t> values);
+// Sees every guest word the walker reads directly (read_memory == nullptr); lets a caller record
+// the inputs of a materialization.
+using SrtReadObserver = void (*)(void* userdata, uint64_t address, uint32_t value);
 
 struct SrtRuntime {
 	std::span<const uint32_t> user_data;
@@ -17,6 +20,8 @@ struct SrtRuntime {
 	SrtMemoryReader           read_memory                = nullptr;
 	void*                     userdata                   = nullptr;
 	SrtMemoryReader           read_specialization_memory = nullptr;
+	SrtReadObserver           observe_read               = nullptr;
+	void*                     observe_userdata           = nullptr;
 };
 
 enum class RuntimeValueType { Any, Integer };
