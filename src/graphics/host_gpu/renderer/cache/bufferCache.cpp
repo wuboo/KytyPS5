@@ -586,6 +586,15 @@ void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t si
 	    !IsRegionGpuModified(src_vaddr, size) &&
 	    !m_texture_cache.FindImageFromRange(src_vaddr, size)) {
 		FrameTiming::Add(FrameTiming::Counter::DmaMemcpyBytes, size);
+		// The destination is usually write-protected for tracking, and the copy would take one
+		// fault per 4 KiB page (a signal round trip, slow under Rosetta), each doing what these
+		// two calls do for the whole range at once. The range is not GPU-modified (checked
+		// above), so no readback is involved.
+		static const bool preinvalidate = FrameTiming::OptEnabled("dma_preinvalidate");
+		if (preinvalidate) {
+			InvalidateMemory(dst_vaddr, size);
+			m_texture_cache.InvalidateMemory(dst_vaddr, size);
+		}
 		std::memcpy(reinterpret_cast<void*>(dst_vaddr), reinterpret_cast<const void*>(src_vaddr),
 		            size);
 		return;
