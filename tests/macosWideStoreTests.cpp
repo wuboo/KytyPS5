@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -208,6 +209,29 @@ void TestShortStoreViaLongStoreDeadBytes() {
         "chained short store wrote its 32 bytes");
 }
 
+void TestHotRelocationSkipsBranchTargets() {
+  // Direct branch targets must be found: a loop whose head is the instruction
+  // after the store. store; L: add rbx, 0x20; dec ecx; jne L; ret
+  auto area = MakeCode();
+  const std::array<uint8_t, 13> code = {0xc5, 0xfc, 0x11, 0x03, 0x48,
+                                        0x83, 0xc3, 0x20, 0xff, 0xc9,
+                                        0x75, 0xf8, 0xc3};
+  std::memcpy(area.code, code.data(), code.size());
+  char path[] = "/tmp/kyty_hot_XXXXXX";
+  const int fd = mkstemp(path);
+  dprintf(
+      fd, "0x%llx\n",
+      static_cast<unsigned long long>(reinterpret_cast<uint64_t>(area.code)));
+  close(fd);
+  setenv("KYTY_WIDE_STORE_HOT", path, 1);
+  auto cursor = area.trampolines;
+  const auto result = Loader::X64InstructionEmulator::SplitWideStores(
+      reinterpret_cast<uint64_t>(area.code), code.size(), &cursor, area.end);
+  Check(result.relocated == 0 && result.trapped == 1,
+        "loop head after a hot store not moved");
+  unlink(path);
+}
+
 void TestRipRelativeStore() {
 	auto area = MakeCode();
 	// vmovups ymm0, [rsi]; vmovups [rip + 0x7f4], ymm0; vzeroupper; ret
@@ -239,7 +263,10 @@ int main() {
 	sigaction(SIGSEGV, &action, nullptr);
 	sigaction(SIGBUS, &action, nullptr);
 
-	TestUnpatchedAbortsUnderRosetta();
+        // Reads KYTY_WIDE_STORE_HOT, which the splitter loads once per process:
+        // run it first.
+        TestHotRelocationSkipsBranchTargets();
+        TestUnpatchedAbortsUnderRosetta();
 	TestPatchedCrossingStore();
         TestShortStoreWithoutPaddingTraps();
         TestShortStoreViaInt3Padding();

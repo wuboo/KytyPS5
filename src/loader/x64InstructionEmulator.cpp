@@ -949,9 +949,10 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 	};
 	for (uint64_t offset = 0; offset < size;) {
 		const auto*             code = reinterpret_cast<const uint8_t*>(address + offset);
+		ZydisDecoderContext     decode_context {};
 		ZydisDecodedInstruction instruction {};
-		if (!ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&decoder, nullptr, code, size - offset,
-		                                                &instruction))) {
+		if (!ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&decoder, &decode_context, code,
+		                                                size - offset, &instruction))) {
 			end_nops();
 			after_unconditional = false;
 			++offset;
@@ -985,8 +986,8 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 		    (instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE) != 0) {
 			ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT] {};
 			ZyanU64             target = 0;
-			if (ZYAN_SUCCESS(ZydisDecoderDecodeOperands(&decoder, nullptr, &instruction, ops,
-			                                            instruction.operand_count)) &&
+			if (ZYAN_SUCCESS(ZydisDecoderDecodeOperands(&decoder, &decode_context, &instruction,
+			                                            ops, instruction.operand_count)) &&
 			    ops[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE &&
 			    ZYAN_SUCCESS(
 			        ZydisCalcAbsoluteAddress(&instruction, &ops[0], address + offset, &target))) {
