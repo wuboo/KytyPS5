@@ -82,13 +82,13 @@ void StoreDispatcherPhiEdge(ValueEmitContext& ctx, const DispatcherFunctionState
 	}
 }
 
-// Iteration cap for emitted loops (KYTY_SHADER_LOOP_LIMIT, default 1 << 24; 0 disables). A loop
+// Iteration cap for emitted loops (KYTY_SHADER_LOOP_LIMIT, default 1 << 16; 0 disables). A loop
 // that runs past it exits, so a shader fed bad data cannot hang the GPU.
 uint32_t ShaderLoopLimit() {
 	static const uint32_t limit = [] {
 		const char* value = std::getenv("KYTY_SHADER_LOOP_LIMIT");
 		return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10))
-		                        : (1u << 24u);
+		                        : (1u << 16u);
 	}();
 	return limit;
 }
