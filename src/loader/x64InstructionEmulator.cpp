@@ -792,8 +792,7 @@ static void SetMemoryOperand(ZydisEncoderOperand& op, const ZydisDecodedOperand&
 	op.mem.base       = mem.mem.base;
 	op.mem.index      = mem.mem.index;
 	op.mem.scale      = mem.mem.scale;
-	op.mem.displacement = (mem.mem.disp.has_displacement ? mem.mem.disp.value : 0) +
-	                      extra_displacement;
+	op.mem.displacement = mem.mem.disp.value + extra_displacement;
 	op.mem.size       = 16;
 }
 

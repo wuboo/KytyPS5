@@ -123,10 +123,9 @@ struct Program {
 	uint64_t                     base_size         = 0;
 	uint64_t                     base_size_aligned = 0;
 	uint64_t                     mapped_size       = 0;
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	// Trampolines after the module: red-zone patches on Windows, 256-bit store splits on macOS.
 	uint64_t red_zone_trampoline_vaddr = 0;
 	uint64_t red_zone_trampoline_size  = 0;
-#endif
 	std::unique_ptr<SymbolDatabase> export_symbols;
 	std::unique_ptr<SymbolDatabase> import_symbols;
 	ThreadLocalStorage              tls;
