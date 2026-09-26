@@ -22,6 +22,35 @@ void AddGpuBusy(uint64_t ns);
 // Called once per vkQueueSubmit of the renderer's command scheduler.
 void OnQueueSubmit();
 
+// Cumulative bench counters, logged as extra KYTY_FRAME_LOG columns (see kCounterNames).
+enum class Counter : uint32_t {
+	EmptySubmits,         // submits of a command buffer nothing was recorded into
+	Readbacks,            // BufferCache::ReadMemory calls (each drains the GPU queue)
+	ReadbackDownloads,    // ... of which downloaded GPU-modified bytes
+	ReadbackWaitNs,       // time the requesting thread spent inside ReadMemory
+	ReadbackReadFault,    // CPU read of a GPU-modified page (guest threads)
+	ReadbackReadFaultGpu, // ... raised on the GPU thread itself (indirect args and the like)
+	ReadbackWriteFault,   // CPU write to a GPU-modified page
+	ReadbackDcc,          // DCC metadata read to materialize a fast clear
+	WriteFaults,          // write faults on tracked pages (guest threads)
+	WriteFaultsGpu,       // ... on the GPU thread (CPU-side DMA copies)
+	Finishes,             // full scheduler Finish() calls
+	Draws,
+	Dispatches,
+	DescriptorSets,
+	RenderPasses,
+	PipelinesCreated,
+	PipelineCompileNs,
+	DmaMemcpyBytes,
+	Count,
+};
+
+void Add(Counter counter, uint64_t value = 1);
+
+// Bench switches: KYTY_OPT_OFF is a comma-separated list of optimization names to disable, so a
+// single binary can be A/B tested. Returns true unless the name is listed.
+bool OptEnabled(const char* name);
+
 // Number of frames presented since startup.
 uint64_t PresentedFrames();
 

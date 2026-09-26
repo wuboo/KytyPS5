@@ -185,6 +185,7 @@ void CommandScheduler::FlushAndWait() {
 
 void CommandScheduler::Finish() {
 	CheckActive();
+	FrameTiming::Add(FrameTiming::Counter::Finishes);
 	if (!m_command.IsInvalid()) {
 		Submit();
 	}
@@ -350,6 +351,9 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
 
+	if (!m_command.m_recorded) {
+		FrameTiming::Add(FrameTiming::Counter::EmptySubmits);
+	}
 	m_command.End();
 	const auto buffer   = m_command.m_buffer;
 	auto&      graphics = m_graphics;

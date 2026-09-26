@@ -1,5 +1,4 @@
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
-#include "graphics/host_gpu/renderer/benchTrace.h"
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -9,18 +8,20 @@
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/benchTrace.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 #include "graphics/host_gpu/renderer/render.h"
+#include "graphics/presentation/frameTiming.h"
 #include "kernel/memory.h"
 
 #include <algorithm>
 #include <array>
-#include <bit>
 #include <atomic>
+#include <bit>
 #include <cinttypes>
 #include <cstring>
 #include <limits>
@@ -1164,6 +1165,7 @@ void TextureCache::MaterializeDccClear(ImageId id, const ImageDesc& desc,
 			     " last: addr=0x%" PRIx64 " size=0x%" PRIx64 " covered=%u value=0x%08x\n",
 			     n, c, range.address, range.size, covered ? 1u : 0u, fill_value);
 		}
+		FrameTiming::Add(FrameTiming::Counter::ReadbackDcc);
 		m_buffer_cache.ReadMemory(range.address, range.size, false);
 	}
 	const auto slice_size = range.size / layers;

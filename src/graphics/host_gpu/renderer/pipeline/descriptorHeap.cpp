@@ -4,6 +4,7 @@
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
+#include "graphics/presentation/frameTiming.h"
 
 namespace Libs::Graphics {
 namespace {
@@ -34,6 +35,7 @@ DescriptorHeap::~DescriptorHeap() {
 vk::DescriptorSet DescriptorHeap::Commit(vk::DescriptorSetLayout layout) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(layout == nullptr);
+	FrameTiming::Add(FrameTiming::Counter::DescriptorSets);
 
 	auto& batch = m_sets[layout];
 	if (batch.size != 0) {

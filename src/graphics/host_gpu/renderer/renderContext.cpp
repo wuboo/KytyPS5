@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/presentation/frameTiming.h"
 #include "graphics/presentation/videoOut.h"
 #include "libs/errno.h"
 
@@ -85,7 +86,10 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	if (!IsMapped(fault_vaddr, fault_size)) {
 		return false;
 	}
+	const bool on_gpu_thread = GuestGpu::IsGpuThread();
 	if (access == PageFaultAccess::Write) {
+		FrameTiming::Add(on_gpu_thread ? FrameTiming::Counter::WriteFaultsGpu
+		                               : FrameTiming::Counter::WriteFaults);
 		uint64_t invalidate_size = fault_size;
 #if defined(__APPLE__)
 		// Rosetta aborts the process ("unexpectedly need to EmulateForward on a synchronous
@@ -134,6 +138,8 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		}
 #endif
 	} else {
+		FrameTiming::Add(on_gpu_thread ? FrameTiming::Counter::ReadbackReadFaultGpu
+		                               : FrameTiming::Counter::ReadbackReadFault);
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
 	}
 	return true;

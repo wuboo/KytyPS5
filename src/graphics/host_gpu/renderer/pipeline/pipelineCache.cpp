@@ -14,6 +14,7 @@
 #include "graphics/host_gpu/renderer/perVertexPrototype.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
@@ -845,8 +846,14 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 
 	auto cached = std::make_unique<Pipeline>();
 	LogPipelineTrace("CreatePipelineInternal begin", vs_id, ps_id);
+	const auto compile_begin = std::chrono::steady_clock::now();
 	CreatePipelineInternal(m_graphics, *cached, rendering, key.vertex_input, vertex_info,
 	                       ps_input_info, programs, static_params, m_driver_cache);
+	FrameTiming::Add(FrameTiming::Counter::PipelinesCreated);
+	FrameTiming::Add(FrameTiming::Counter::PipelineCompileNs,
+	                 static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                                           std::chrono::steady_clock::now() - compile_begin)
+	                                           .count()));
 	LogPipelineTrace("CreatePipelineInternal done", vs_id, ps_id);
 
 	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
@@ -883,7 +890,13 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 	}
 
 	auto cached = std::make_unique<Pipeline>();
+	const auto compile_begin = std::chrono::steady_clock::now();
 	CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module, m_driver_cache);
+	FrameTiming::Add(FrameTiming::Counter::PipelinesCreated);
+	FrameTiming::Add(FrameTiming::Counter::PipelineCompileNs,
+	                 static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                                           std::chrono::steady_clock::now() - compile_begin)
+	                                           .count()));
 
 	EXIT_NOT_IMPLEMENTED(cached->pipeline == nullptr);
 	EXIT_NOT_IMPLEMENTED(cached->pipeline_layout == nullptr);
