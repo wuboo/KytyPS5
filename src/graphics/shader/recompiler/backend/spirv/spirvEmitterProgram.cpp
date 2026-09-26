@@ -109,14 +109,16 @@ uint32_t GuardLoopCondition(ValueEmitContext& ctx, const IR::Block& block, uint3
 	if (found == state.loop_counter_variables.end()) {
 		return condition;
 	}
-	const auto counter = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpLoad, TypeU32(state), counter, found->second);
+	const auto [variable, exit_block] = found->second;
+	const auto counter                = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), counter, variable);
 	const auto next = EmitBinaryU32(state, spv::OpIAdd, counter, ConstantU32(state, 1));
-	state.builder.AddFunction(spv::OpStore, found->second, next);
+	state.builder.AddFunction(spv::OpStore, variable, next);
 	const auto over = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpUGreaterThanEqual, TypeBool(state), over, counter,
 	                          ConstantU32(state, ShaderLoopLimit()));
-	const bool exit_when_true = block.terminator.true_block == block.terminator.merge_block;
+	const bool exit_when_true = block.terminator.true_block != nullptr &&
+	                            block.terminator.true_block->id == exit_block;
 	const auto guarded        = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpSelect, TypeBool(state), guarded, over,
 	                          ConstantBool(state, exit_when_true), condition);
@@ -778,13 +780,35 @@ void EmitProgram(EmitterState& state) {
 	}
 	state.loop_counter_variables.clear();
 	if (ShaderLoopLimit() != 0 && !state.program.dispatcher_fallback) {
+		const auto new_counter = [&]() {
+			const auto variable = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpVariable,
+			                          TypePointer(state, spv::StorageClassFunction, TypeU32(state)),
+			                          variable, spv::StorageClassFunction, ConstantU32(state, 0));
+			return variable;
+		};
 		for (const auto* block: program.blocks) {
+			const auto& term = block->terminator;
 			if (LoopHeaderHasDirectExit(*block)) {
-				const auto variable = state.builder.AllocateId();
-				state.builder.AddFunction(
-				    spv::OpVariable, TypePointer(state, spv::StorageClassFunction, TypeU32(state)),
-				    variable, spv::StorageClassFunction, ConstantU32(state, 0));
-				state.loop_counter_variables.emplace(block->id, variable);
+				state.loop_counter_variables.emplace(
+				    block->id, std::pair {new_counter(), term.merge_block->id});
+				continue;
+			}
+			if (!term.loop_header || term.merge_block == nullptr) {
+				continue;
+			}
+			// do-while shape: the header does not exit; guard the latch, a conditional branch
+			// back to the header whose other target is the loop's merge block.
+			for (const auto* latch: program.blocks) {
+				const auto& lt = latch->terminator;
+				if (lt.kind == CFG::TerminatorKind::ConditionalBranch &&
+				    ((lt.true_block == block && lt.false_block == term.merge_block) ||
+				     (lt.false_block == block && lt.true_block == term.merge_block)) &&
+				    !state.loop_counter_variables.contains(latch->id)) {
+					state.loop_counter_variables.emplace(
+					    latch->id, std::pair {new_counter(), term.merge_block->id});
+					break;
+				}
 			}
 		}
 	}
