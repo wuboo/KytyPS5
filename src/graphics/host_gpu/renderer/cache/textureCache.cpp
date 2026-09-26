@@ -1136,6 +1136,12 @@ void TextureCache::MaterializeDccClear(ImageId id, const ImageDesc& desc,
 			return;
 		}
 	}
+	// Bench sizing switch (breaks rendering of DCC fast clears): KYTY_OPT_OFF=dcc_decode skips
+	// reading DCC metadata, like emulators that ignore DCC fast clears altogether.
+	static const bool decode = FrameTiming::OptEnabled("dcc_decode");
+	if (!decode) {
+		return;
+	}
 	const auto layers = desc.info.TransferLayers();
 	// These one-mip surfaces use complete 4 KiB DCC metadata blocks.
 	constexpr uint64_t MetadataBlockSize = 0x1000;
