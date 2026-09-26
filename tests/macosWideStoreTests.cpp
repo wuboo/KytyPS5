@@ -177,6 +177,32 @@ void TestShortStoreViaNopPadding() {
   Check(live_result.too_short == 1, "reachable nop left alone");
 }
 
+void TestShortStoreRelocatesNext() {
+  auto area = MakeCode();
+  // vmovups ymm0, [rsi]; vmovups [rdi], ymm0 (4 bytes); add rdi, 0x20; vmovups
+  // [rdi], ymm0 would be next, so use: mov eax, 7; vzeroupper; ret — no padding
+  // anywhere.
+  const std::array<uint8_t, 17> code = {0xc5, 0xfc, 0x10, 0x06, 0xc5, 0xfc,
+                                        0x11, 0x07, 0xb8, 0x07, 0x00, 0x00,
+                                        0x00, 0xc5, 0xf8, 0x77, 0xc3};
+  std::memcpy(area.code, code.data(), code.size());
+  auto cursor = area.trampolines;
+  const auto result = Loader::X64InstructionEmulator::SplitWideStores(
+      reinterpret_cast<uint64_t>(area.code), code.size(), &cursor, area.end);
+  Check(result.patched == 1 && result.relocated == 1,
+        "short store patched with mov moved along");
+  uint8_t source[32];
+  uint8_t destination[48]{};
+  for (int i = 0; i < 32; i++) {
+    source[i] = static_cast<uint8_t>(0x60 + i);
+  }
+  using Func = uint32_t (*)(uint8_t *, const uint8_t *);
+  const auto value = reinterpret_cast<Func>(area.code)(destination, source);
+  Check(value == 7, "moved mov still executes");
+  Check(std::memcmp(destination, source, 32) == 0 && destination[32] == 0,
+        "relocated short store wrote its 32 bytes");
+}
+
 void TestRipRelativeStore() {
 	auto area = MakeCode();
 	// vmovups ymm0, [rsi]; vmovups [rip + 0x7f4], ymm0; vzeroupper; ret

@@ -15,6 +15,7 @@ struct WideStoreSplitResult {
 	uint64_t patched    = 0;  // rewritten into two 128-bit stores
 	uint64_t too_short   = 0;  // shorter than a rel32 jump and no int3 padding within rel8 reach
 	uint64_t via_cave    = 0;  // short stores patched with a rel8 jump through int3 padding
+	uint64_t relocated        = 0;  // short stores patched by moving following instructions along
 	uint64_t unsupported = 0; // segment override, encoder failure or trampoline area full
 	uint64_t trampoline_bytes = 0;
 };
