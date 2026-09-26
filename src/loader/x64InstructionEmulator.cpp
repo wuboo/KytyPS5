@@ -1294,6 +1294,13 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			std::memcpy(code + 1, &tramp32, sizeof(tramp32));
 			std::memset(code + JumpSize, 0xCC, length + moved_original - JumpSize);
 			if (moved_count != 0) {
+				if (split_log != nullptr) {
+					std::fprintf(split_log, "moved site=0x%llx len=%llu moved=%llu count=%u\n",
+					             static_cast<unsigned long long>(site),
+					             static_cast<unsigned long long>(length),
+					             static_cast<unsigned long long>(moved_original), moved_count);
+					std::fflush(split_log);
+				}
 				result.relocated++;
 				offset += moved_original;
 			}
