@@ -125,6 +125,36 @@ void TestShortStoreIsLeftAlone() {
 	Check(std::memcmp(area.code, code.data(), code.size()) == 0, "code unchanged");
 }
 
+void TestShortStoreViaInt3Padding() {
+  auto area = MakeCode();
+  // vmovups ymm0, [rsi]; vmovups [rdi], ymm0 (4 bytes); vzeroupper; ret; int3
+  // padding
+  const std::array<uint8_t, 20> code = {
+      0xc5, 0xfc, 0x10, 0x06, 0xc5, 0xfc, 0x11, 0x07, 0xc5, 0xf8,
+      0x77, 0xc3, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc, 0xcc};
+  std::memcpy(area.code, code.data(), code.size());
+  auto cursor = area.trampolines;
+  const auto result = Loader::X64InstructionEmulator::SplitWideStores(
+      reinterpret_cast<uint64_t>(area.code), code.size(), &cursor, area.end);
+  Check(result.candidates == 1 && result.patched == 1 && result.via_cave == 1,
+        "4-byte store patched through int3 padding");
+  Check(area.code[4] == 0xeb && area.code[12] == 0xe9,
+        "rel8 jump to a rel32 jump in padding");
+  // The store straddles a write-protected page, like the crossing copy above.
+  auto *data = static_cast<uint8_t *>(mmap(nullptr, 4 * g_page_size,
+                                           PROT_READ | PROT_WRITE,
+                                           MAP_PRIVATE | MAP_ANON, -1, 0));
+  uint8_t source[32];
+  for (int i = 0; i < 32; i++) {
+    source[i] = static_cast<uint8_t>(0x40 + i);
+  }
+  uint8_t *boundary = data + 2 * g_page_size;
+  mprotect(boundary, g_page_size, PROT_READ);
+  reinterpret_cast<CopyFunc>(area.code)(boundary - 16, source);
+  Check(std::memcmp(boundary - 16, source, 32) == 0,
+        "short store wrote all bytes");
+}
+
 void TestRipRelativeStore() {
 	auto area = MakeCode();
 	// vmovups ymm0, [rsi]; vmovups [rip + 0x7f4], ymm0; vzeroupper; ret
@@ -159,7 +189,8 @@ int main() {
 	TestUnpatchedAbortsUnderRosetta();
 	TestPatchedCrossingStore();
 	TestShortStoreIsLeftAlone();
-	TestRipRelativeStore();
+        TestShortStoreViaInt3Padding();
+        TestRipRelativeStore();
 
 	if (g_failures != 0) {
 		std::fprintf(stderr, "%d check(s) failed\n", g_failures);

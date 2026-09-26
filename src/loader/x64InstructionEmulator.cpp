@@ -9,6 +9,7 @@
 #include <bit>
 #include <cstdint>
 #include <cstring>
+#include <vector>
 #if !defined(__APPLE__)
 #include <emmintrin.h>
 #include <xmmintrin.h>
@@ -808,7 +809,56 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 	        ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64))) {
 		return result;
 	}
-	constexpr uint64_t JumpSize = 5;
+	constexpr uint64_t JumpSize      = 5;
+	constexpr uint64_t ShortJumpSize = 2;
+
+	// Stores shorter than a rel32 jump get a rel8 jump to a "cave": a run of int3 padding
+	// between functions (never executed), which holds the rel32 jump to the trampoline.
+	struct Cave {
+		uint64_t start = 0;
+		uint64_t size  = 0;
+		uint64_t used  = 0;
+	};
+	std::vector<Cave> caves;
+	for (uint64_t offset = 0; offset < size;) {
+		const auto*             code = reinterpret_cast<const uint8_t*>(address + offset);
+		ZydisDecodedInstruction instruction {};
+		if (!ZYAN_SUCCESS(ZydisDecoderDecodeInstruction(&decoder, nullptr, code, size - offset,
+		                                                &instruction))) {
+			++offset;
+			continue;
+		}
+		if (instruction.mnemonic == ZYDIS_MNEMONIC_INT3 && instruction.length == 1) {
+			const uint64_t start = address + offset;
+			uint64_t       run   = 0;
+			while (offset + run < size && code[run] == 0xCC) {
+				++run;
+			}
+			if (run >= JumpSize) {
+				caves.push_back({start, run, 0});
+			}
+			offset += run;
+			continue;
+		}
+		offset += instruction.length;
+	}
+	const auto take_cave = [&](uint64_t next_ip) -> uint64_t {
+		const uint64_t low  = next_ip >= 128 ? next_ip - 128 : 0;
+		const uint64_t high = next_ip + 127;
+		auto           it =
+		    std::lower_bound(caves.begin(), caves.end(), low, [](const Cave& cave, uint64_t v) {
+			    return cave.start + cave.size <= v;
+		    });
+		for (; it != caves.end() && it->start <= high; ++it) {
+			const uint64_t slot = it->start + it->used;
+			if (it->used + JumpSize <= it->size && slot >= low && slot <= high) {
+				it->used += JumpSize;
+				return slot;
+			}
+		}
+		return 0;
+	};
+
 	for (uint64_t offset = 0; offset < size;) {
 		auto*                   code = reinterpret_cast<uint8_t*>(address + offset);
 		ZydisDecodedInstruction instruction {};
@@ -824,9 +874,15 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			continue;
 		}
 		result.candidates++;
+		uint64_t cave = 0;
 		if (length < JumpSize) {
-			result.too_short++;
-			continue;
+			cave = length >= ShortJumpSize
+			           ? take_cave(reinterpret_cast<uint64_t>(code) + ShortJumpSize)
+			           : 0;
+			if (cave == 0) {
+				result.too_short++;
+				continue;
+			}
 		}
 		const auto& mem = operands[0];
 		if (mem.mem.segment != ZYDIS_REGISTER_DS && mem.mem.segment != ZYDIS_REGISTER_SS &&
@@ -874,8 +930,9 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			result.unsupported++;
 			continue;
 		}
-		const int64_t to_tramp =
-		    static_cast<int64_t>(trampoline) - static_cast<int64_t>(site + JumpSize);
+		const uint64_t jump_from = cave != 0 ? cave : site;
+		const int64_t  to_tramp =
+		    static_cast<int64_t>(trampoline) - static_cast<int64_t>(jump_from + JumpSize);
 		const int64_t to_back =
 		    static_cast<int64_t>(back) -
 		    static_cast<int64_t>(trampoline + low_length + high_length + JumpSize);
@@ -892,9 +949,22 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 		*cursor += body;
 		result.trampoline_bytes += body;
 
-		// The original instruction becomes the jump; its remaining bytes are never executed.
-		code[0]            = 0xE9;
 		const auto tramp32 = static_cast<int32_t>(to_tramp);
+		if (cave != 0) {
+			// site: jmp rel8 -> cave: jmp rel32 -> trampoline
+			auto* slot = reinterpret_cast<uint8_t*>(cave);
+			slot[0]    = 0xE9;
+			std::memcpy(slot + 1, &tramp32, sizeof(tramp32));
+			code[0] = 0xEB;
+			code[1] = static_cast<uint8_t>(static_cast<int8_t>(
+			    static_cast<int64_t>(cave) - static_cast<int64_t>(site + ShortJumpSize)));
+			std::memset(code + ShortJumpSize, 0xCC, length - ShortJumpSize);
+			result.via_cave++;
+			result.patched++;
+			continue;
+		}
+		// The original instruction becomes the jump; its remaining bytes are never executed.
+		code[0] = 0xE9;
 		std::memcpy(code + 1, &tramp32, sizeof(tramp32));
 		std::memset(code + JumpSize, 0xCC, length - JumpSize);
 		result.patched++;
