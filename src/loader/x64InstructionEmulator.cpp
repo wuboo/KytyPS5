@@ -1163,6 +1163,14 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 						break;
 					}
 				}
+				if (length + moved_original >= JumpSize && split_log != nullptr) {
+					std::fprintf(split_log, "moved-bytes site=0x%llx:",
+					             static_cast<unsigned long long>(reinterpret_cast<uint64_t>(code)));
+					for (uint64_t k = 0; k < length + moved_original; k++) {
+						std::fprintf(split_log, " %02x", code[k]);
+					}
+					std::fprintf(split_log, "\n");
+				}
 				if (length + moved_original >= JumpSize) {
 					trap = false;
 				} else {
