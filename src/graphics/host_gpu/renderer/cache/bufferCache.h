@@ -60,9 +60,15 @@ public:
 	[[nodiscard]] Buffer* GetBdaPageTableBuffer() noexcept { return &m_bda_pagetable_buffer; }
 	[[nodiscard]] Buffer* GetFaultBuffer() noexcept { return m_fault_manager.GetFaultBuffer(); }
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBufferForImage(uint64_t vaddr, uint64_t size);
-	void FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool is_gds);
+	void FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool is_gds,
+	                bool force_gpu = false);
 	// Bench diagnostic: true when [vaddr, vaddr+size) lies inside a recent GPU-side fill.
 	[[nodiscard]] bool RecentGpuFillCovers(uint64_t vaddr, uint64_t size, uint32_t* value) const;
+	// True when the newest GPU write to every byte of the range was one FillBuffer (the ring is
+	// pruned by every other GPU write), so the bytes equal *value without a readback.
+	[[nodiscard]] bool LatestGpuWriteIsFill(uint64_t vaddr, uint64_t size, uint32_t* value) const {
+		return RecentGpuFillCovers(vaddr, size, value);
+	}
 	void CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,
 	                bool src_gds);
 	// Cache-index and exact dirty-range queries require GPU-thread serialization.

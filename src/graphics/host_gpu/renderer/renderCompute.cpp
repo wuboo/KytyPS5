@@ -190,7 +190,19 @@ bool RenderExecutor::TryConsumeComputeImageClear(const ShaderComputeInputInfo& i
 		return false;
 	}
 	if (!cache.ClearImageFromBuffer(command, descriptor.Base48(), size, packed_clear)) {
-		return false;
+		// No image lives there (DCC metadata, for one). The dispatch only stores one value over
+		// the whole buffer, which a transfer fill does without a compute pass, and the buffer
+		// cache then knows the bytes: reading DCC clear codes needs no GPU drain.
+		static const bool fill = FrameTiming::OptEnabled("dcc_fill");
+		if (!fill) {
+			return false;
+		}
+		// Like the shader it replaces, write on the GPU: a CPU fill of a tracked range takes a
+		// write fault per page.
+		command.GetContext().GetBufferCache().FillBuffer(descriptor.Base48(), size, packed_clear,
+		                                                 false, true);
+		FrameTiming::Add(FrameTiming::Counter::ComputeFillsReplaced);
+		return true;
 	}
 	static std::atomic<uint32_t> logged_clears {0};
 	if (logged_clears.fetch_add(1, std::memory_order_relaxed) < 32) {
