@@ -111,7 +111,18 @@ void BufferCache::DeleteBuffer(BufferId id) {
 				// Every command buffer submitted so far may reference this device-address buffer.
 				// ponytail: drains the queue per deletion batch; a per-buffer retire tick would
 				// need the driver to stop referencing buffers the work does not use.
-				m_scheduler.GetMasterSemaphore().Wait(m_scheduler.CurrentTick() - 1);
+				auto&      master = m_scheduler.GetMasterSemaphore();
+				const auto last   = m_scheduler.CurrentTick() - 1;
+				if (!master.IsFree(last)) {
+					const auto wait_begin = std::chrono::steady_clock::now();
+					master.Wait(last);
+					FrameTiming::Add(FrameTiming::Counter::BufferDeleteDrains);
+					FrameTiming::Add(
+					    FrameTiming::Counter::BufferDeleteWaitNs,
+					    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+					                              std::chrono::steady_clock::now() - wait_begin)
+					                              .count()));
+				}
 			}
 			m_slot_buffers.erase(id);
 		});

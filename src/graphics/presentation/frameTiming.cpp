@@ -20,11 +20,26 @@ std::atomic<uint64_t> g_gpu_busy_ns {0};
 std::atomic<uint64_t> g_submits {0};
 
 constexpr const char* kCounterNames[] = {
-    "empty_submits",       "readbacks",         "readback_downloads", "readback_wait_ns",
-    "rb_read_fault",       "rb_read_fault_gpu", "rb_write_fault",     "rb_dcc",
-    "write_faults",        "write_faults_gpu",  "finishes",           "draws",
-    "dispatches",          "descriptor_sets",   "render_passes",      "pipelines_created",
-    "pipeline_compile_ns", "dma_memcpy_bytes",
+    "empty_submits",
+    "readbacks",
+    "readback_downloads",
+    "readback_wait_ns",
+    "rb_read_fault",
+    "rb_read_fault_gpu",
+    "rb_write_fault",
+    "rb_dcc",
+    "write_faults",
+    "write_faults_gpu",
+    "finishes",
+    "draws",
+    "dispatches",
+    "descriptor_sets",
+    "render_passes",
+    "pipelines_created",
+    "pipeline_compile_ns",
+    "dma_memcpy_bytes",
+    "buffer_delete_drains",
+    "buffer_delete_wait_ns",
 };
 static_assert(std::size(kCounterNames) == static_cast<size_t>(Counter::Count));
 

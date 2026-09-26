@@ -42,6 +42,8 @@ enum class Counter : uint32_t {
 	PipelinesCreated,
 	PipelineCompileNs,
 	DmaMemcpyBytes,
+	BufferDeleteDrains, // buffer deletions that waited for all submitted GPU work (MoltenVK)
+	BufferDeleteWaitNs,
 	Count,
 };
 
