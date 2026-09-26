@@ -1106,15 +1106,26 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 					    !ZYAN_SUCCESS(
 					        ZydisDecoderDecodeFull(&decoder, reinterpret_cast<uint8_t*>(ip),
 					                               address + size - ip, &next, next_ops)) ||
-					    next.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE ||
 					    next.meta.category == ZYDIS_CATEGORY_RET ||
 					    next.meta.category == ZYDIS_CATEGORY_SYSTEM ||
 					    next.meta.category == ZYDIS_CATEGORY_INTERRUPT ||
+					    next.meta.category == ZYDIS_CATEGORY_CALL ||
 					    IsPlainWideStore(next, next_ops)) {
+						break;
+					}
+					// A relative jmp/jcc (a loop's back edge) is re-encoded with its absolute
+					// target and ends the moved sequence; other control flow is not moved.
+					const bool branch = next.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE;
+					if (branch && ((next.attributes & ZYDIS_ATTRIB_IS_RELATIVE) == 0 ||
+					               (next.meta.category != ZYDIS_CATEGORY_UNCOND_BR &&
+					                next.meta.category != ZYDIS_CATEGORY_COND_BR))) {
 						break;
 					}
 					moved_ips[moved_count++] = ip;
 					moved_original += next.length;
+					if (branch) {
+						break;
+					}
 				}
 				if (length + moved_original >= JumpSize) {
 					trap = false;
@@ -1183,6 +1194,17 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 					auto& op = request.operands[k];
 					if (op.type == ZYDIS_OPERAND_TYPE_MEMORY && op.mem.base == ZYDIS_REGISTER_RIP) {
 						op.mem.displacement += static_cast<int64_t>(ip + insn.length);
+					}
+				}
+				if ((insn.attributes & ZYDIS_ATTRIB_IS_RELATIVE) != 0 &&
+				    insn.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE) {
+					ZyanU64 target = 0;
+					moved_ok = ZYAN_SUCCESS(ZydisCalcAbsoluteAddress(&insn, &ops[0], ip, &target));
+					request.operands[0].imm.u = target;
+					request.branch_type       = ZYDIS_BRANCH_TYPE_NONE;
+					request.branch_width      = ZYDIS_BRANCH_WIDTH_NONE;
+					if (!moved_ok) {
+						break;
 					}
 				}
 				const uint64_t used    = low_length + high_length + moved_length;
