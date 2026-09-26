@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cstdint>
 #include <cstring>
 #if !defined(__APPLE__)
 #include <emmintrin.h>
@@ -754,6 +755,146 @@ uint64_t PatchReciprocalSquareRoots(uint64_t address, uint64_t size) {
 	(void)size;
 #endif
 	return patched;
+}
+
+static bool IsPlainWideStore(const ZydisDecodedInstruction& instruction,
+                             const ZydisDecodedOperand* operands) {
+	switch (instruction.mnemonic) {
+		case ZYDIS_MNEMONIC_VMOVUPS:
+		case ZYDIS_MNEMONIC_VMOVAPS:
+		case ZYDIS_MNEMONIC_VMOVUPD:
+		case ZYDIS_MNEMONIC_VMOVAPD:
+		case ZYDIS_MNEMONIC_VMOVDQU:
+		case ZYDIS_MNEMONIC_VMOVDQA: break;
+		default: return false;
+	}
+	return instruction.encoding == ZYDIS_INSTRUCTION_ENCODING_VEX &&
+	       instruction.operand_count_visible == 2 &&
+	       operands[0].type == ZYDIS_OPERAND_TYPE_MEMORY && operands[0].size == 256 &&
+	       operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER &&
+	       operands[1].reg.value >= ZYDIS_REGISTER_YMM0 &&
+	       operands[1].reg.value <= ZYDIS_REGISTER_YMM15;
+}
+
+static bool EncodeInto(const ZydisEncoderRequest& request, uint8_t* out, uint64_t capacity,
+                       uint64_t* length) {
+	ZyanUSize size = capacity;
+	if (!ZYAN_SUCCESS(ZydisEncoderEncodeInstruction(&request, out, &size))) {
+		return false;
+	}
+	*length = size;
+	return true;
+}
+
+static void SetMemoryOperand(ZydisEncoderOperand& op, const ZydisDecodedOperand& mem,
+                             int64_t extra_displacement) {
+	op.type           = ZYDIS_OPERAND_TYPE_MEMORY;
+	op.mem.base       = mem.mem.base;
+	op.mem.index      = mem.mem.index;
+	op.mem.scale      = mem.mem.scale;
+	op.mem.displacement = (mem.mem.disp.has_displacement ? mem.mem.disp.value : 0) +
+	                      extra_displacement;
+	op.mem.size       = 16;
+}
+
+WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* cursor,
+                                     uint64_t trampoline_end) {
+	WideStoreSplitResult result;
+	ZydisDecoder         decoder {};
+	if (!ZYAN_SUCCESS(
+	        ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64))) {
+		return result;
+	}
+	constexpr uint64_t JumpSize = 5;
+	for (uint64_t offset = 0; offset < size;) {
+		auto*                   code = reinterpret_cast<uint8_t*>(address + offset);
+		ZydisDecodedInstruction instruction {};
+		ZydisDecodedOperand     operands[ZYDIS_MAX_OPERAND_COUNT] {};
+		if (!ZYAN_SUCCESS(
+		        ZydisDecoderDecodeFull(&decoder, code, size - offset, &instruction, operands))) {
+			++offset;
+			continue;
+		}
+		const uint64_t length = instruction.length;
+		offset += length;
+		if (!IsPlainWideStore(instruction, operands)) {
+			continue;
+		}
+		result.candidates++;
+		if (length < JumpSize) {
+			result.too_short++;
+			continue;
+		}
+		const auto& mem = operands[0];
+		if (mem.mem.base == ZYDIS_REGISTER_RIP ||
+		    (mem.mem.segment != ZYDIS_REGISTER_DS && mem.mem.segment != ZYDIS_REGISTER_SS &&
+		     mem.mem.segment != ZYDIS_REGISTER_NONE)) {
+			result.unsupported++;
+			continue;
+		}
+		const auto ymm = operands[1].reg.value;
+		const auto xmm =
+		    static_cast<ZydisRegister>(ZYDIS_REGISTER_XMM0 + (ymm - ZYDIS_REGISTER_YMM0));
+
+		// Low half: vmovups xmmword [mem], xmmN
+		ZydisEncoderRequest low {};
+		low.machine_mode    = ZYDIS_MACHINE_MODE_LONG_64;
+		low.mnemonic        = ZYDIS_MNEMONIC_VMOVUPS;
+		low.operand_count   = 2;
+		SetMemoryOperand(low.operands[0], mem, 0);
+		low.operands[1].type      = ZYDIS_OPERAND_TYPE_REGISTER;
+		low.operands[1].reg.value = xmm;
+		// High half: vextractf128 xmmword [mem + 16], ymmN, 1
+		ZydisEncoderRequest high {};
+		high.machine_mode   = ZYDIS_MACHINE_MODE_LONG_64;
+		high.mnemonic       = ZYDIS_MNEMONIC_VEXTRACTF128;
+		high.operand_count  = 3;
+		SetMemoryOperand(high.operands[0], mem, 16);
+		high.operands[1].type      = ZYDIS_OPERAND_TYPE_REGISTER;
+		high.operands[1].reg.value = ymm;
+		high.operands[2].type      = ZYDIS_OPERAND_TYPE_IMMEDIATE;
+		high.operands[2].imm.u     = 1;
+
+		uint8_t  buffer[64];
+		uint64_t low_length  = 0;
+		uint64_t high_length = 0;
+		if (!EncodeInto(low, buffer, sizeof(buffer), &low_length) ||
+		    !EncodeInto(high, buffer + low_length, sizeof(buffer) - low_length, &high_length)) {
+			result.unsupported++;
+			continue;
+		}
+		const uint64_t trampoline = *cursor;
+		const uint64_t body       = low_length + high_length + JumpSize;
+		if (trampoline + body > trampoline_end) {
+			result.unsupported++;
+			continue;
+		}
+		const uint64_t site      = reinterpret_cast<uint64_t>(code);
+		const uint64_t back      = site + length;
+		const int64_t  to_tramp  = static_cast<int64_t>(trampoline) - static_cast<int64_t>(site + JumpSize);
+		const int64_t  to_back   = static_cast<int64_t>(back) -
+		                        static_cast<int64_t>(trampoline + low_length + high_length + JumpSize);
+		if (to_tramp < INT32_MIN || to_tramp > INT32_MAX || to_back < INT32_MIN ||
+		    to_back > INT32_MAX) {
+			result.unsupported++;
+			continue;
+		}
+		auto* out = reinterpret_cast<uint8_t*>(trampoline);
+		std::memcpy(out, buffer, low_length + high_length);
+		out[low_length + high_length] = 0xE9;
+		const auto back32             = static_cast<int32_t>(to_back);
+		std::memcpy(out + low_length + high_length + 1, &back32, sizeof(back32));
+		*cursor += body;
+		result.trampoline_bytes += body;
+
+		// The original instruction becomes the jump; its remaining bytes are never executed.
+		code[0]               = 0xE9;
+		const auto tramp32    = static_cast<int32_t>(to_tramp);
+		std::memcpy(code + 1, &tramp32, sizeof(tramp32));
+		std::memset(code + JumpSize, 0xCC, length - JumpSize);
+		result.patched++;
+	}
+	return result;
 }
 
 void LogWideStores(uint64_t address, uint64_t size, const char* module_name) {

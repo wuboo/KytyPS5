@@ -1834,6 +1834,14 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		EXIT_IF(RED_ZONE_TRAMPOLINE_SIZE > UINT64_MAX - program->mapped_size);
 		program->mapped_size += RED_ZONE_TRAMPOLINE_SIZE;
 	}
+#elif defined(__APPLE__)
+	// Trampolines for splitting 256-bit guest stores (see X64InstructionEmulator::SplitWideStores).
+	const bool         split_wide_stores       = std::getenv("KYTY_SPLIT_WIDE_STORES") != nullptr;
+	constexpr uint64_t WIDE_STORE_TRAMPOLINE_SIZE = 8u * 1024u * 1024u;
+	if (split_wide_stores) {
+		EXIT_IF(WIDE_STORE_TRAMPOLINE_SIZE > UINT64_MAX - program->mapped_size);
+		program->mapped_size += WIDE_STORE_TRAMPOLINE_SIZE;
+	}
 #endif
 
 	program->base_vaddr = Libs::LibKernel::Memory::AllocateProgramMemory(
@@ -1850,12 +1858,15 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		                           reinterpret_cast<void*>(program->red_zone_trampoline_vaddr),
 		                           program->red_zone_trampoline_size);
 	}
+#elif defined(__APPLE__)
+	if (split_wide_stores) {
+		program->red_zone_trampoline_vaddr = program->base_vaddr + program->base_size_aligned;
+		program->red_zone_trampoline_size  = WIDE_STORE_TRAMPOLINE_SIZE;
+	}
 #endif
 	if (!is_shared) {
 		program->tls.handler_vaddr = program->base_vaddr + program->base_size_aligned;
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		program->tls.handler_vaddr += program->red_zone_trampoline_size;
-#endif
 	}
 
 	g_desired_base_addr += CODE_BASE_INCR * (1 + program->mapped_size / CODE_BASE_INCR);
@@ -1955,6 +1966,9 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		}
 	}
 #endif
+#if defined(__APPLE__)
+	uint64_t wide_store_cursor = program->red_zone_trampoline_vaddr;
+#endif
 	for (const auto& [segment_addr, segment_size]: executable_segments) {
 		uint64_t reciprocal_sqrt_count = 0;
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -1980,6 +1994,18 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			Common::VirtualMemory::FlushInstructionCache(segment_addr, segment_size);
 		}
 #if defined(__APPLE__)
+		if (program->red_zone_trampoline_size != 0) {
+			const auto result = X64InstructionEmulator::SplitWideStores(
+			    segment_addr, segment_size, &wide_store_cursor,
+			    program->red_zone_trampoline_vaddr + program->red_zone_trampoline_size);
+			Common::VirtualMemory::FlushInstructionCache(segment_addr, segment_size);
+			Common::VirtualMemory::FlushInstructionCache(program->red_zone_trampoline_vaddr,
+			                                             program->red_zone_trampoline_size);
+			LOGF("Guest 256-bit store splitting: %s, candidates=%" PRIu64 ", patched=%" PRIu64
+			     ", short=%" PRIu64 ", unsupported=%" PRIu64 ", trampoline bytes=%" PRIu64 "\n",
+			     Common::PathToString(program->file_name.filename()).c_str(), result.candidates,
+			     result.patched, result.too_short, result.unsupported, result.trampoline_bytes);
+		}
 		if (std::getenv("KYTY_BENCH_WIDE_STORES") != nullptr) {
 			X64InstructionEmulator::LogWideStores(
 			    segment_addr, segment_size,
