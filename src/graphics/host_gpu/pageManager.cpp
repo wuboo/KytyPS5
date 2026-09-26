@@ -151,6 +151,11 @@ struct PageManager::Impl {
 	// the region's first page has no guard, as the previous region is not locked here.
 	void UpdateGuards(Region& region, uint64_t base_addr, size_t first, size_t last) noexcept {
 #if defined(__APPLE__)
+		static const bool enabled = std::getenv("KYTY_ROSETTA_GUARDS") == nullptr ||
+		                            std::getenv("KYTY_ROSETTA_GUARDS")[0] != '0';
+		if (!enabled) {
+			return;
+		}
 		for (size_t index = first; index <= last && index < REGION_PAGES; index++) {
 			const bool guard = !Watched(region, index) && Watched(region, index + 1);
 			if (guard != region.guards.test(index)) {
