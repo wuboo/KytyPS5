@@ -785,6 +785,20 @@ static bool IsPlainWideStore(const ZydisDecodedInstruction& instruction,
 	       operands[1].reg.value <= ZYDIS_REGISTER_YMM15;
 }
 
+// fs:/gs: accesses (TLS) are not moved: re-encoding lost the segment in the test title and the
+// moved load read address 0.
+static bool UsesSegmentBase(const ZydisDecodedInstruction& instruction,
+                            const ZydisDecodedOperand*     operands) {
+	for (uint32_t i = 0; i < instruction.operand_count; i++) {
+		if (operands[i].type == ZYDIS_OPERAND_TYPE_MEMORY &&
+		    (operands[i].mem.segment == ZYDIS_REGISTER_FS ||
+		     operands[i].mem.segment == ZYDIS_REGISTER_GS)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 // Encodes at runtime_address; RIP-relative memory operands carry absolute addresses.
 static bool EncodeAt(ZydisEncoderRequest& request, uint64_t runtime_address, uint8_t* out,
                      uint64_t capacity, uint64_t* length) {
@@ -1132,7 +1146,7 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 					    next.meta.category == ZYDIS_CATEGORY_SYSTEM ||
 					    next.meta.category == ZYDIS_CATEGORY_INTERRUPT ||
 					    next.meta.category == ZYDIS_CATEGORY_CALL ||
-					    IsPlainWideStore(next, next_ops)) {
+					    IsPlainWideStore(next, next_ops) || UsesSegmentBase(next, next_ops)) {
 						break;
 					}
 					// A relative jmp/jcc (a loop's back edge) is re-encoded with its absolute
