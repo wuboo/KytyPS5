@@ -82,6 +82,47 @@ void StoreDispatcherPhiEdge(ValueEmitContext& ctx, const DispatcherFunctionState
 	}
 }
 
+// Iteration cap for emitted loops (KYTY_SHADER_LOOP_LIMIT, default 1 << 24; 0 disables). A loop
+// that runs past it exits, so a shader fed bad data cannot hang the GPU.
+uint32_t ShaderLoopLimit() {
+	static const uint32_t limit = [] {
+		const char* value = std::getenv("KYTY_SHADER_LOOP_LIMIT");
+		return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10))
+		                        : (1u << 24u);
+	}();
+	return limit;
+}
+
+// True for loop headers whose branch exits the loop on one side: those can be cut off by
+// forcing the exit once the iteration counter passes the limit.
+bool LoopHeaderHasDirectExit(const IR::BlockInfo& info) {
+	const auto& term = info.terminator;
+	return term.loop_header && term.kind == CFG::TerminatorKind::ConditionalBranch &&
+	       term.merge_block != UINT32_MAX &&
+	       (term.true_block == term.merge_block || term.false_block == term.merge_block);
+}
+
+// Wraps a loop header's branch condition so the loop exits after ShaderLoopLimit() iterations.
+uint32_t GuardLoopCondition(ValueEmitContext& ctx, const IR::BlockInfo& info, uint32_t condition) {
+	auto&      state = ctx.state;
+	const auto found = state.loop_counter_variables.find(info.id);
+	if (found == state.loop_counter_variables.end()) {
+		return condition;
+	}
+	const auto counter = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), counter, found->second);
+	const auto next = EmitBinaryU32(state, spv::OpIAdd, counter, ConstantU32(state, 1));
+	state.builder.AddFunction(spv::OpStore, found->second, next);
+	const auto over = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpUGreaterThanEqual, TypeBool(state), over, counter,
+	                          ConstantU32(state, ShaderLoopLimit()));
+	const bool exit_when_true = info.terminator.true_block == info.terminator.merge_block;
+	const auto guarded        = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpSelect, TypeBool(state), guarded, over,
+	                          ConstantBool(state, exit_when_true), condition);
+	return guarded;
+}
+
 const IR::Block* TargetBlock(const IR::Program& program, uint32_t id) {
 	const auto found = std::ranges::find_if(
 	    program.block_info, [&](const IR::BlockInfo& info) { return info.id == id; });
@@ -159,7 +200,7 @@ void EmitStructuredTerminator(ValueEmitContext& ctx, const IR::Block* block,
 				EmitReturn(ctx);
 				return;
 			}
-			const auto condition = BranchCondition(ctx, info);
+			const auto condition = GuardLoopCondition(ctx, info, BranchCondition(ctx, info));
 			emit_merge();
 			ctx.state.builder.AddFunction(spv::OpBranchConditional, condition,
 			                              ctx.Label(true_block), ctx.Label(false_block));
@@ -387,9 +428,29 @@ void EmitDispatcherFunction(ValueEmitContext& ctx, const DispatcherFunctionState
 	const auto next_pc = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpPhi, TypeU32(state), pc, initial_pc, initial_parent, next_pc,
 	                          dispatcher.continue_label);
-	const auto done = state.builder.AllocateId();
+	// Loop watchdog for the dispatcher: count dispatched blocks and leave when over the cap.
+	// Phis must lead the block, so the counter's phi goes before the exit test.
+	uint32_t iteration      = 0;
+	uint32_t next_iteration = 0;
+	if (ShaderLoopLimit() != 0) {
+		iteration      = state.builder.AllocateId();
+		next_iteration = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpPhi, TypeU32(state), iteration, ConstantU32(state, 0),
+		                          initial_parent, next_iteration, dispatcher.continue_label);
+	}
+	auto done = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpIEqual, TypeBool(state), done, pc,
 	                          ConstantU32(ctx.state, UINT32_MAX));
+	if (ShaderLoopLimit() != 0) {
+		state.builder.AddFunction(spv::OpIAdd, TypeU32(state), next_iteration, iteration,
+		                          ConstantU32(state, 1));
+		const auto over = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpUGreaterThanEqual, TypeBool(state), over, iteration,
+		                          ConstantU32(state, ShaderLoopLimit()));
+		const auto stop = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLogicalOr, TypeBool(state), stop, done, over);
+		done = stop;
+	}
 	state.builder.AddFunction(spv::OpLoopMerge, dispatcher.merge_label, dispatcher.continue_label,
 	                          spv::LoopControlMaskNone);
 	state.builder.AddFunction(spv::OpBranchConditional, done, dispatcher.merge_label,
@@ -743,6 +804,18 @@ void EmitProgram(EmitterState& state) {
 		state.builder.AddFunction(spv::OpVariable,
 		                          TypePointer(state, spv::StorageClassFunction, TypeU32(state)),
 		                          state.pixel_valid_mask_variable, spv::StorageClassFunction);
+	}
+	state.loop_counter_variables.clear();
+	if (ShaderLoopLimit() != 0 && !state.program.dispatcher_fallback) {
+		for (const auto& info: program.block_info) {
+			if (LoopHeaderHasDirectExit(info)) {
+				const auto variable = state.builder.AllocateId();
+				state.builder.AddFunction(
+				    spv::OpVariable, TypePointer(state, spv::StorageClassFunction, TypeU32(state)),
+				    variable, spv::StorageClassFunction, ConstantU32(state, 0));
+				state.loop_counter_variables.emplace(info.id, variable);
+			}
+		}
 	}
 	for (uint32_t half = 0; half < state.lane_count; half++) {
 		auto& lane = half == 0 ? ctx : high;
