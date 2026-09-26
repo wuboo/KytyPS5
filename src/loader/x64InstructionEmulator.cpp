@@ -1234,6 +1234,11 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 				if (!moved_ok) {
 					break;
 				}
+				// Nops (alignment padding that execution falls through) are dropped: re-encoding
+				// a 15-byte "nop cs:[rax + rax]" produced a load of address 0 in the test title.
+				if (insn.mnemonic == ZYDIS_MNEMONIC_NOP) {
+					continue;
+				}
 				for (uint32_t k = 0; k < request.operand_count; k++) {
 					auto& op = request.operands[k];
 					if (op.type == ZYDIS_OPERAND_TYPE_MEMORY && op.mem.base == ZYDIS_REGISTER_RIP) {
