@@ -12,6 +12,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fcntl.h>
+#include <unistd.h>
 #include <vector>
 #if !defined(__APPLE__)
 #include <emmintrin.h>
@@ -813,7 +815,50 @@ namespace {
 struct WideStoreTrap {
 	std::atomic<uint64_t> site {0};
 	std::atomic<uint64_t> trampoline {0};
+	std::atomic<uint32_t> hits {0};
 };
+// KYTY_WIDE_STORE_HOT names a profile: sites redirected often are appended to it, and on the
+// next start those sites are patched by moving the following instructions into the trampoline
+// instead of through a signal per execution.
+constexpr uint32_t WideStoreHotHits    = 1024;
+int                g_wide_store_hot_fd = -1;
+
+const std::vector<uint64_t>& WideStoreHotSites() {
+	static const std::vector<uint64_t> sites = [] {
+		std::vector<uint64_t> result;
+		const char*           path = std::getenv("KYTY_WIDE_STORE_HOT");
+		if (path == nullptr) {
+			return result;
+		}
+		if (FILE* file = std::fopen(path, "r"); file != nullptr) {
+			unsigned long long site = 0;
+			while (std::fscanf(file, "%llx", &site) == 1) {
+				result.push_back(site);
+			}
+			std::fclose(file);
+		}
+		std::sort(result.begin(), result.end());
+		g_wide_store_hot_fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0644);
+		return result;
+	}();
+	return sites;
+}
+
+// Async-signal-safe: formats with no allocation and writes with one write().
+void RecordHotWideStore(uint64_t site) {
+	if (g_wide_store_hot_fd < 0) {
+		return;
+	}
+	char buffer[20];
+	int  length      = 0;
+	buffer[length++] = '0';
+	buffer[length++] = 'x';
+	for (int shift = 60; shift >= 0; shift -= 4) {
+		buffer[length++] = "0123456789abcdef"[(site >> shift) & 0xfu];
+	}
+	buffer[length++] = '\n';
+	(void)!write(g_wide_store_hot_fd, buffer, static_cast<size_t>(length));
+}
 constexpr uint64_t                               WideStoreTrapCapacity = 1u << 15u;
 std::array<WideStoreTrap, WideStoreTrapCapacity> g_wide_store_traps {};
 std::atomic<uint64_t>                            g_wide_store_trap_hits {0};
@@ -839,18 +884,18 @@ static bool RegisterWideStoreTrap(uint64_t site, uint64_t trampoline) {
 	return false;
 }
 
-static uint64_t FindWideStoreTrap(uint64_t site) {
+static WideStoreTrap* FindWideStoreTrapEntry(uint64_t site) {
 	for (uint64_t i = 0; i < WideStoreTrapCapacity; i++) {
-		const auto& entry = g_wide_store_traps[(TrapSlot(site) + i) % WideStoreTrapCapacity];
-		const auto  key   = entry.site.load(std::memory_order_acquire);
+		auto&      entry = g_wide_store_traps[(TrapSlot(site) + i) % WideStoreTrapCapacity];
+		const auto key   = entry.site.load(std::memory_order_acquire);
 		if (key == site) {
-			return entry.trampoline.load(std::memory_order_acquire);
+			return &entry;
 		}
 		if (key == 0) {
-			return 0;
+			return nullptr;
 		}
 	}
-	return 0;
+	return nullptr;
 }
 
 WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* cursor,
@@ -878,8 +923,9 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 	};
 	// Also usable: nop padding that directly follows an unconditional ret/jmp/ud2, which
 	// execution cannot fall into (branches target the aligned code after it).
-	std::vector<Cave> caves;
-	bool              after_unconditional = false;
+	std::vector<Cave>     caves;
+	std::vector<uint64_t> branch_targets;
+	bool                  after_unconditional = false;
 	uint64_t          nop_start           = 0;
 	uint64_t          nop_size            = 0;
 	const auto        end_nops            = [&]() {
@@ -922,6 +968,18 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			continue;
 		}
 		end_nops();
+		if (instruction.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE &&
+		    (instruction.attributes & ZYDIS_ATTRIB_IS_RELATIVE) != 0) {
+			ZydisDecodedOperand ops[ZYDIS_MAX_OPERAND_COUNT] {};
+			ZyanU64             target = 0;
+			if (ZYAN_SUCCESS(ZydisDecoderDecodeOperands(&decoder, nullptr, &instruction, ops,
+			                                            instruction.operand_count)) &&
+			    ops[0].type == ZYDIS_OPERAND_TYPE_IMMEDIATE &&
+			    ZYAN_SUCCESS(
+			        ZydisCalcAbsoluteAddress(&instruction, &ops[0], address + offset, &target))) {
+				branch_targets.push_back(target);
+			}
+		}
 		after_unconditional = instruction.mnemonic == ZYDIS_MNEMONIC_RET ||
 		                      instruction.mnemonic == ZYDIS_MNEMONIC_UD2 ||
 		                      (instruction.mnemonic == ZYDIS_MNEMONIC_JMP);
@@ -930,6 +988,8 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 	end_nops();
 	std::sort(caves.begin(), caves.end(),
 	          [](const Cave& a, const Cave& b) { return a.start < b.start; });
+	std::sort(branch_targets.begin(), branch_targets.end());
+	const auto& hot_sites = WideStoreHotSites();
 
 	const auto take_cave = [&](uint64_t next_ip) -> uint64_t {
 		const uint64_t low  = next_ip >= 128 ? next_ip - 128 : 0;
@@ -979,6 +1039,38 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 				}
 			}
 		}
+		// A hot trapped site (from the profile) moves its following instructions into the
+		// trampoline: up to four, no control flow, not a direct branch target, re-encodable.
+		uint64_t                moved_original = 0;
+		std::array<uint64_t, 4> moved_ips {};
+		uint32_t                moved_count = 0;
+		if (trap && std::binary_search(hot_sites.begin(), hot_sites.end(),
+		                               reinterpret_cast<uint64_t>(code))) {
+			while (length + moved_original < JumpSize && moved_count < moved_ips.size()) {
+				const uint64_t ip = reinterpret_cast<uint64_t>(code) + length + moved_original;
+				ZydisDecodedInstruction next {};
+				ZydisDecodedOperand     next_ops[ZYDIS_MAX_OPERAND_COUNT] {};
+				if (ip >= address + size ||
+				    std::binary_search(branch_targets.begin(), branch_targets.end(), ip) ||
+				    !ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, reinterpret_cast<uint8_t*>(ip),
+				                                         address + size - ip, &next, next_ops)) ||
+				    next.meta.branch_type != ZYDIS_BRANCH_TYPE_NONE ||
+				    next.meta.category == ZYDIS_CATEGORY_RET ||
+				    next.meta.category == ZYDIS_CATEGORY_SYSTEM ||
+				    next.meta.category == ZYDIS_CATEGORY_INTERRUPT ||
+				    IsPlainWideStore(next, next_ops)) {
+					break;
+				}
+				moved_ips[moved_count++] = ip;
+				moved_original += next.length;
+			}
+			if (length + moved_original >= JumpSize) {
+				trap = false;
+			} else {
+				moved_count    = 0;
+				moved_original = 0;
+			}
+		}
 		const auto& mem = operands[0];
 		if (mem.mem.segment != ZYDIS_REGISTER_DS && mem.mem.segment != ZYDIS_REGISTER_SS &&
 		    mem.mem.segment != ZYDIS_REGISTER_NONE) {
@@ -1020,7 +1112,37 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			result.unsupported++;
 			continue;
 		}
-		const uint64_t prologue = low_length + high_length;
+		uint64_t moved_length = 0;
+		bool     moved_ok     = true;
+		for (uint32_t i = 0; i < moved_count && moved_ok; i++) {
+			const auto              ip = moved_ips[i];
+			ZydisDecodedInstruction insn {};
+			ZydisDecodedOperand     ops[ZYDIS_MAX_OPERAND_COUNT] {};
+			ZydisEncoderRequest     request {};
+			moved_ok = ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, reinterpret_cast<uint8_t*>(ip),
+			                                               address + size - ip, &insn, ops)) &&
+			           ZYAN_SUCCESS(ZydisEncoderDecodedInstructionToEncoderRequest(
+			               &insn, ops, insn.operand_count_visible, &request));
+			if (!moved_ok) {
+				break;
+			}
+			for (uint32_t k = 0; k < request.operand_count; k++) {
+				auto& op = request.operands[k];
+				if (op.type == ZYDIS_OPERAND_TYPE_MEMORY && op.mem.base == ZYDIS_REGISTER_RIP) {
+					op.mem.displacement += static_cast<int64_t>(ip + insn.length);
+				}
+			}
+			const uint64_t used    = low_length + high_length + moved_length;
+			uint64_t       encoded = 0;
+			moved_ok = EncodeAt(request, trampoline + used, buffer + used, sizeof(buffer) - used,
+			                    &encoded);
+			moved_length += encoded;
+		}
+		if (!moved_ok) {
+			result.unsupported++;
+			continue;
+		}
+		const uint64_t prologue = low_length + high_length + moved_length;
 		const uint64_t body     = prologue + JumpSize;
 		if (trampoline + body > trampoline_end) {
 			result.unsupported++;
@@ -1029,8 +1151,8 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 		const uint64_t jump_from = cave != 0 ? cave : site;
 		const int64_t  to_tramp =
 		    static_cast<int64_t>(trampoline) - static_cast<int64_t>(jump_from + JumpSize);
-		const int64_t to_back =
-		    static_cast<int64_t>(back) - static_cast<int64_t>(trampoline + prologue + JumpSize);
+		const int64_t to_back = static_cast<int64_t>(back + moved_original) -
+		                        static_cast<int64_t>(trampoline + prologue + JumpSize);
 		if (to_tramp < INT32_MIN || to_tramp > INT32_MAX || to_back < INT32_MIN ||
 		    to_back > INT32_MAX) {
 			result.unsupported++;
@@ -1095,10 +1217,15 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			result.patched++;
 			continue;
 		}
-		// The original instruction becomes the jump; its remaining bytes are never executed.
+		// The original instruction (with any moved ones) becomes the jump; the remaining bytes are
+		// never executed.
 		code[0] = 0xE9;
 		std::memcpy(code + 1, &tramp32, sizeof(tramp32));
-		std::memset(code + JumpSize, 0xCC, length - JumpSize);
+		std::memset(code + JumpSize, 0xCC, length + moved_original - JumpSize);
+		if (moved_count != 0) {
+			result.relocated++;
+			offset += moved_original;
+		}
 		result.patched++;
 	}
 	return result;
@@ -1167,7 +1294,11 @@ bool TryEmulate(void* native_context) {
 #else
 	Context context {static_cast<ucontext_t*>(native_context)};
 #endif
-	if (const auto trampoline = FindWideStoreTrap(context.Rip()); trampoline != 0) {
+	if (auto* trap = FindWideStoreTrapEntry(context.Rip()); trap != nullptr) {
+		const auto trampoline = trap->trampoline.load(std::memory_order_acquire);
+		if (trap->hits.fetch_add(1, std::memory_order_relaxed) + 1 == WideStoreHotHits) {
+			RecordHotWideStore(context.Rip());
+		}
 		const auto hits = g_wide_store_trap_hits.fetch_add(1, std::memory_order_relaxed) + 1;
 		if ((hits & (hits - 1)) == 0) {
 			LOGF("[wide-store-trap] hits=%llu last site=0x%llx\n",
