@@ -1066,6 +1066,18 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			continue;
 		}
 		if (trap) {
+			if (split_log != nullptr) {
+				std::fprintf(split_log,
+				             "trap-bytes site=0x%llx:", static_cast<unsigned long long>(site));
+				for (int64_t k = -64; k < 64; k++) {
+					const auto a = site + k;
+					if (a >= address && a < address + size) {
+						std::fprintf(split_log, "%s%02x", k == 0 ? " |" : " ",
+						             reinterpret_cast<const uint8_t*>(a)[0]);
+					}
+				}
+				std::fprintf(split_log, "\n");
+			}
 			if (!RegisterWideStoreTrap(site, trampoline)) {
 				result.unsupported++;
 				continue;
