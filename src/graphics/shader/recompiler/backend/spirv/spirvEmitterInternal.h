@@ -123,7 +123,8 @@ struct EmitterState {
 	// Metal has no subgroup builtins in vertex functions; derive the lane from the vertex index.
 	bool                                             vertex_lane_from_index                = false;
 	// Loop watchdog: Function-storage u32 counter per structured loop header (by block id).
-	std::unordered_map<uint32_t, uint32_t>           loop_counter_variables;
+	// Guarded block id -> {counter variable, the loop exit block its branch can take}.
+	std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> loop_counter_variables;
 	uint32_t                                         per_vertex_variable                   = 0;
 	uint32_t                                         point_size_variable                   = 0;
 	uint32_t                                         clip_distance_variable                = 0;
