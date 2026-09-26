@@ -1095,8 +1095,13 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			uint64_t                moved_original = 0;
 			std::array<uint64_t, 4> moved_ips {};
 			uint32_t                moved_count = 0;
-			if (trap && std::binary_search(hot_sites.begin(), hot_sites.end(),
-			                               reinterpret_cast<uint64_t>(code))) {
+			// KYTY_WIDE_STORE_MOVE=hot limits moving to sites in the hot profile.
+			static const bool move_all = [] {
+				const char* value = std::getenv("KYTY_WIDE_STORE_MOVE");
+				return value == nullptr || std::strcmp(value, "hot") != 0;
+			}();
+			if (trap && (move_all || std::binary_search(hot_sites.begin(), hot_sites.end(),
+			                                            reinterpret_cast<uint64_t>(code)))) {
 				while (length + moved_original < JumpSize && moved_count < moved_ips.size()) {
 					const uint64_t ip = reinterpret_cast<uint64_t>(code) + length + moved_original;
 					ZydisDecodedInstruction next {};
