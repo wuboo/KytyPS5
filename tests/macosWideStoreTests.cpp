@@ -113,16 +113,20 @@ void TestPatchedCrossingStore() {
 	Check(RunCrossingCopy(reinterpret_cast<CopyFunc>(area.code)), "patched copy wrote all bytes");
 }
 
-void TestShortStoreIsLeftAlone() {
-	auto area = MakeCode();
-	// vmovups [rdi], ymm0 (4 bytes, too short for a rel32 jump); ret
-	const std::array<uint8_t, 5> code = {0xc5, 0xfc, 0x11, 0x07, 0xc3};
-	std::memcpy(area.code, code.data(), code.size());
-	auto       cursor = area.trampolines;
-	const auto result = Loader::X64InstructionEmulator::SplitWideStores(
-	    reinterpret_cast<uint64_t>(area.code), code.size(), &cursor, area.end);
-	Check(result.candidates == 1 && result.too_short == 1, "4-byte store left in place");
-	Check(std::memcmp(area.code, code.data(), code.size()) == 0, "code unchanged");
+void TestShortStoreWithoutPaddingTraps() {
+  auto area = MakeCode();
+  // vmovups [rdi], ymm0 (4 bytes, too short for a rel32 jump); ret
+  const std::array<uint8_t, 5> code = {0xc5, 0xfc, 0x11, 0x07, 0xc3};
+  std::memcpy(area.code, code.data(), code.size());
+  auto cursor = area.trampolines;
+  const auto result = Loader::X64InstructionEmulator::SplitWideStores(
+      reinterpret_cast<uint64_t>(area.code), code.size(), &cursor, area.end);
+  // No padding in reach: the store becomes ud2, which the SIGILL handler
+  // redirects.
+  Check(result.candidates == 1 && result.trapped == 1,
+        "4-byte store without padding trapped");
+  Check(area.code[0] == 0x0f && area.code[1] == 0x0b && area.code[4] == 0xc3,
+        "store replaced by ud2, ret kept");
 }
 
 void TestShortStoreViaInt3Padding() {
@@ -174,33 +178,8 @@ void TestShortStoreViaNopPadding() {
   cursor = area.trampolines;
   const auto live_result = Loader::X64InstructionEmulator::SplitWideStores(
       reinterpret_cast<uint64_t>(area.code), live.size(), &cursor, area.end);
-  Check(live_result.too_short == 1, "reachable nop left alone");
-}
-
-void TestShortStoreRelocatesNext() {
-  auto area = MakeCode();
-  // vmovups ymm0, [rsi]; vmovups [rdi], ymm0 (4 bytes); add rdi, 0x20; vmovups
-  // [rdi], ymm0 would be next, so use: mov eax, 7; vzeroupper; ret — no padding
-  // anywhere.
-  const std::array<uint8_t, 17> code = {0xc5, 0xfc, 0x10, 0x06, 0xc5, 0xfc,
-                                        0x11, 0x07, 0xb8, 0x07, 0x00, 0x00,
-                                        0x00, 0xc5, 0xf8, 0x77, 0xc3};
-  std::memcpy(area.code, code.data(), code.size());
-  auto cursor = area.trampolines;
-  const auto result = Loader::X64InstructionEmulator::SplitWideStores(
-      reinterpret_cast<uint64_t>(area.code), code.size(), &cursor, area.end);
-  Check(result.patched == 1 && result.relocated == 1,
-        "short store patched with mov moved along");
-  uint8_t source[32];
-  uint8_t destination[48]{};
-  for (int i = 0; i < 32; i++) {
-    source[i] = static_cast<uint8_t>(0x60 + i);
-  }
-  using Func = uint32_t (*)(uint8_t *, const uint8_t *);
-  const auto value = reinterpret_cast<Func>(area.code)(destination, source);
-  Check(value == 7, "moved mov still executes");
-  Check(std::memcmp(destination, source, 32) == 0 && destination[32] == 0,
-        "relocated short store wrote its 32 bytes");
+  Check(live_result.via_cave == 0 && live_result.trapped == 1,
+        "reachable nop not used as a cave");
 }
 
 void TestRipRelativeStore() {
@@ -236,7 +215,7 @@ int main() {
 
 	TestUnpatchedAbortsUnderRosetta();
 	TestPatchedCrossingStore();
-	TestShortStoreIsLeftAlone();
+        TestShortStoreWithoutPaddingTraps();
         TestShortStoreViaInt3Padding();
         TestRipRelativeStore();
 
