@@ -8,6 +8,8 @@
 #include <array>
 #include <bit>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 #if !defined(__APPLE__)
@@ -811,6 +813,11 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 	}
 	constexpr uint64_t JumpSize      = 5;
 	constexpr uint64_t ShortJumpSize = 2;
+	// Bench diagnostic: KYTY_BENCH_SPLIT_LOG=<file> records every patch of a short store.
+	static FILE* split_log = [] {
+		const char* path = std::getenv("KYTY_BENCH_SPLIT_LOG");
+		return path != nullptr ? std::fopen(path, "a") : nullptr;
+	}();
 
 	// Stores shorter than a rel32 jump get a rel8 jump to a "cave": a run of int3 padding
 	// between functions (never executed), which holds the rel32 jump to the trampoline.
@@ -1067,6 +1074,13 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			code[1] = static_cast<uint8_t>(static_cast<int8_t>(
 			    static_cast<int64_t>(cave) - static_cast<int64_t>(site + ShortJumpSize)));
 			std::memset(code + ShortJumpSize, 0xCC, length - ShortJumpSize);
+			if (split_log != nullptr) {
+				std::fprintf(split_log, "cave site=0x%llx len=%llu cave=0x%llx\n",
+				             static_cast<unsigned long long>(site),
+				             static_cast<unsigned long long>(length),
+				             static_cast<unsigned long long>(cave));
+				std::fflush(split_log);
+			}
 			result.via_cave++;
 			result.patched++;
 			continue;
@@ -1077,6 +1091,13 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 		std::memcpy(code + 1, &tramp32, sizeof(tramp32));
 		std::memset(code + JumpSize, 0xCC, length + moved_original - JumpSize);
 		if (moved_count != 0) {
+			if (split_log != nullptr) {
+				std::fprintf(split_log, "moved site=0x%llx len=%llu moved=%llu count=%u\n",
+				             static_cast<unsigned long long>(site),
+				             static_cast<unsigned long long>(length),
+				             static_cast<unsigned long long>(moved_original), moved_count);
+				std::fflush(split_log);
+			}
 			result.relocated++;
 			offset += moved_original;
 		}
