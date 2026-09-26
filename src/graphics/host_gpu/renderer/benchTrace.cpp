@@ -5,6 +5,9 @@
 #include <array>
 #include <atomic>
 #include <cinttypes>
+#include <cstdlib>
+#include <string>
+#include <vector>
 
 namespace Libs::Graphics::BenchTrace {
 
@@ -38,6 +41,32 @@ void Dump(uint64_t tick) {
 		}
 	}
 	LOGF("[bench-trace] tick %" PRIu64 ": %u recorded operations\n", tick, count);
+}
+
+bool SkipCompute(uint64_t shader_hash) {
+	static const std::vector<uint64_t> skip = [] {
+		std::vector<uint64_t> hashes;
+		if (const char* value = std::getenv("KYTY_BENCH_SKIP_CS"); value != nullptr) {
+			std::string list = value;
+			size_t      pos  = 0;
+			while (pos < list.size()) {
+				const auto end = list.find(',', pos);
+				hashes.push_back(std::strtoull(list.substr(pos, end - pos).c_str(), nullptr, 16));
+				pos = end == std::string::npos ? list.size() : end + 1;
+			}
+		}
+		return hashes;
+	}();
+	for (const auto hash: skip) {
+		if (hash == shader_hash) {
+			static std::atomic<uint32_t> logged {0};
+			if (logged.fetch_add(1, std::memory_order_relaxed) < 4) {
+				LOGF("[bench-skip] skipping compute dispatch of 0x%016" PRIx64 "\n", shader_hash);
+			}
+			return true;
+		}
+	}
+	return false;
 }
 
 } // namespace Libs::Graphics::BenchTrace

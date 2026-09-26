@@ -9,6 +9,8 @@ namespace Libs::Graphics::BenchTrace {
 // them, so a stuck tick can be matched to the shaders it runs.
 void Record(uint64_t tick, const char* kind, uint64_t hash0, uint64_t hash1);
 void Dump(uint64_t tick);
+// True when KYTY_BENCH_SKIP_CS lists this compute shader hash (hex, comma separated).
+bool SkipCompute(uint64_t shader_hash);
 
 } // namespace Libs::Graphics::BenchTrace
 
