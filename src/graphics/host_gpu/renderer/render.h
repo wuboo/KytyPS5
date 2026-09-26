@@ -114,6 +114,29 @@ public:
 	void EndRendering() const;
 
 	[[nodiscard]] vk::CommandBuffer Handle() const;
+
+	// Graphics dynamic state last recorded by the draw path, so identical values are not
+	// recorded again. Anything else that records dynamic state or binds a graphics pipeline with
+	// static state must call InvalidateDynamicState().
+	struct DynamicState {
+		bool                              valid          = false;
+		uint32_t                          viewport_count = 0;
+		std::array<vk::Viewport, 16>      viewports {};
+		std::array<vk::Rect2D, 16>        scissors {};
+		float                             line_width = 0.0f;
+		std::array<float, 4>              blend_constants {};
+		vk::Bool32                        depth_test_enable  = VK_FALSE;
+		vk::Bool32                        depth_write_enable = VK_FALSE;
+		vk::CompareOp                     depth_compare_op   = vk::CompareOp::eNever;
+		vk::Bool32                        depth_bias_enable  = VK_FALSE;
+		std::array<float, 3>              depth_bias {};
+		bool                              depth_bias_known    = false;
+		vk::Bool32                        stencil_test_enable = VK_FALSE;
+		std::array<vk::StencilOpState, 2> stencil {};
+		std::array<bool, 2>               stencil_known {};
+	};
+	[[nodiscard]] DynamicState& Dynamic() const noexcept { return m_dynamic; }
+	void                        InvalidateDynamicState() const noexcept { m_dynamic.valid = false; }
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }
 	[[nodiscard]] RenderContext&    GetContext() const noexcept { return m_context; }
 	[[nodiscard]] HW::Context&      GetRegisters() const noexcept { return *m_registers; }
@@ -145,6 +168,7 @@ private:
 	mutable bool        m_rendering   = false;
 	// Set by Handle(): something (possibly) recorded since Begin(). Over-reporting is harmless.
 	mutable bool        m_recorded    = false;
+	mutable DynamicState m_dynamic;
 	HW::Context*        m_registers   = nullptr;
 	HW::UserConfig*     m_user_config = nullptr;
 	HW::Shader*         m_shaders     = nullptr;

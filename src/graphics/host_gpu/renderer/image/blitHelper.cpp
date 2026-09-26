@@ -192,6 +192,7 @@ void BlitHelper::ReinterpretColorAsMsDepth(Image& source, Image& destination) {
 	                            {destination_info.extent.width, destination_info.extent.height}};
 	command.setViewport(0, 1, &viewport);
 	command.setScissor(0, 1, &scissor);
+	m_scheduler.Current().InvalidateDynamicState();
 	KYTY_BENCH_TRACE_SITE();
 	command.draw(3, 1, 0, 0);
 	command.endRendering();

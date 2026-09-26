@@ -358,8 +358,29 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuf
 			scissor.extent = {0, 0};
 		}
 	}
-	vk_buffer.setViewportWithCount(viewport_count, viewports.data());
-	vk_buffer.setScissorWithCount(viewport_count, scissors.data());
+	// Dynamic state persists in the command buffer across draws; record only what changed.
+	static const bool use_cache = FrameTiming::OptEnabled("dyn_state_cache");
+	auto&             last      = buffer.Dynamic();
+	const bool        full      = !use_cache || !last.valid;
+	if (full) {
+		// Values that are only recorded while enabled are unknown until recorded again.
+		last.depth_bias_known = false;
+		last.stencil_known    = {};
+	}
+	const auto same = [](const auto& a, const auto& b) {
+		return std::memcmp(&a, &b, sizeof(a)) == 0;
+	};
+	if (full || last.viewport_count != viewport_count ||
+	    std::memcmp(last.viewports.data(), viewports.data(),
+	                sizeof(vk::Viewport) * viewport_count) != 0 ||
+	    std::memcmp(last.scissors.data(), scissors.data(), sizeof(vk::Rect2D) * viewport_count) !=
+	        0) {
+		vk_buffer.setViewportWithCount(viewport_count, viewports.data());
+		vk_buffer.setScissorWithCount(viewport_count, scissors.data());
+		last.viewport_count = viewport_count;
+		std::copy_n(viewports.begin(), viewport_count, last.viewports.begin());
+		std::copy_n(scissors.begin(), viewport_count, last.scissors.begin());
+	}
 
 	float line_width = ctx.GetLineWidth();
 	if (line_width != 1.0f) {
@@ -372,20 +393,41 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuf
 		}
 		line_width = 1.0f;
 	}
-	vk_buffer.setLineWidth(line_width);
+	if (full || !same(last.line_width, line_width)) {
+		vk_buffer.setLineWidth(line_width);
+		last.line_width = line_width;
+	}
 	const auto&      blend = ctx.GetBlendColor();
 	const std::array blend_constants {blend.red, blend.green, blend.blue, blend.alpha};
-	vk_buffer.setBlendConstants(blend_constants.data());
-	vk_buffer.setDepthTestEnable(depth.depth_test_enable ? VK_TRUE : VK_FALSE);
-	vk_buffer.setDepthWriteEnable(depth.depth_write_enable ? VK_TRUE : VK_FALSE);
-	vk_buffer.setDepthCompareOp(depth.depth_compare_op);
+	if (full || !same(last.blend_constants, blend_constants)) {
+		vk_buffer.setBlendConstants(blend_constants.data());
+		last.blend_constants = blend_constants;
+	}
+	const vk::Bool32 depth_test  = depth.depth_test_enable ? VK_TRUE : VK_FALSE;
+	const vk::Bool32 depth_write = depth.depth_write_enable ? VK_TRUE : VK_FALSE;
+	if (full || last.depth_test_enable != depth_test) {
+		vk_buffer.setDepthTestEnable(depth_test);
+		last.depth_test_enable = depth_test;
+	}
+	if (full || last.depth_write_enable != depth_write) {
+		vk_buffer.setDepthWriteEnable(depth_write);
+		last.depth_write_enable = depth_write;
+	}
+	if (full || last.depth_compare_op != depth.depth_compare_op) {
+		vk_buffer.setDepthCompareOp(depth.depth_compare_op);
+		last.depth_compare_op = depth.depth_compare_op;
+	}
 
-	const auto& mode              = ctx.GetModeControl();
-	const auto& poly_offset       = ctx.GetPolyOffset();
-	const bool  use_front         = mode.poly_offset_front_enable && !mode.cull_front;
-	const bool  use_back          = mode.poly_offset_back_enable && !mode.cull_back;
-	const bool  depth_bias_enable = use_front || use_back;
-	vk_buffer.setDepthBiasEnable(depth_bias_enable ? VK_TRUE : VK_FALSE);
+	const auto&      mode              = ctx.GetModeControl();
+	const auto&      poly_offset       = ctx.GetPolyOffset();
+	const bool       use_front         = mode.poly_offset_front_enable && !mode.cull_front;
+	const bool       use_back          = mode.poly_offset_back_enable && !mode.cull_back;
+	const bool       depth_bias_enable = use_front || use_back;
+	const vk::Bool32 bias_enable       = depth_bias_enable ? VK_TRUE : VK_FALSE;
+	if (full || last.depth_bias_enable != bias_enable) {
+		vk_buffer.setDepthBiasEnable(bias_enable);
+		last.depth_bias_enable = bias_enable;
+	}
 	if (depth_bias_enable) {
 		// Vulkan has one bias for both faces. Prefer a visible front face when both are enabled.
 		const float guest_constant_factor =
@@ -394,22 +436,37 @@ static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuf
 		    guest_constant_factor, poly_offset, depth.desc.view_info.format);
 		const float slope_factor =
 		    (use_front ? poly_offset.front_scale : poly_offset.back_scale) / 16.0f;
-		vk_buffer.setDepthBias(constant_factor, poly_offset.clamp, slope_factor);
+		const std::array<float, 3> bias {constant_factor, poly_offset.clamp, slope_factor};
+		if (!last.depth_bias_known || !same(last.depth_bias, bias)) {
+			vk_buffer.setDepthBias(constant_factor, poly_offset.clamp, slope_factor);
+			last.depth_bias       = bias;
+			last.depth_bias_known = true;
+		}
 	}
 
-	vk_buffer.setStencilTestEnable(depth.stencil_test_enable ? VK_TRUE : VK_FALSE);
+	const vk::Bool32 stencil_enable = depth.stencil_test_enable ? VK_TRUE : VK_FALSE;
+	if (full || last.stencil_test_enable != stencil_enable) {
+		vk_buffer.setStencilTestEnable(stencil_enable);
+		last.stencil_test_enable = stencil_enable;
+	}
 	if (depth.stencil_test_enable) {
-		const auto set_stencil = [&](vk::StencilFaceFlagBits   face,
-		                             const vk::StencilOpState& state) {
+		const auto set_stencil = [&](vk::StencilFaceFlagBits face, const vk::StencilOpState& state,
+		                             uint32_t index) {
+			if (last.stencil_known[index] && same(last.stencil[index], state)) {
+				return;
+			}
 			vk_buffer.setStencilOp(face, state.failOp, state.passOp, state.depthFailOp,
 			                       state.compareOp);
 			vk_buffer.setStencilCompareMask(face, state.compareMask);
 			vk_buffer.setStencilWriteMask(face, state.writeMask);
 			vk_buffer.setStencilReference(face, state.reference);
+			last.stencil[index]       = state;
+			last.stencil_known[index] = true;
 		};
-		set_stencil(vk::StencilFaceFlagBits::eFront, depth.stencil_front);
-		set_stencil(vk::StencilFaceFlagBits::eBack, depth.stencil_back);
+		set_stencil(vk::StencilFaceFlagBits::eFront, depth.stencil_front, 0);
+		set_stencil(vk::StencilFaceFlagBits::eBack, depth.stencil_back, 1);
 	}
+	last.valid = true;
 
 #if defined(__APPLE__)
 	// MoltenVK has no VK_EXT_color_write_enable; the pipeline is created without the

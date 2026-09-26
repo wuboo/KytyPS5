@@ -41,6 +41,7 @@ void CommandBuffer::Begin() {
 
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	m_recorded = false;
+	m_dynamic.valid = false;
 }
 
 void CommandBuffer::End() const {
