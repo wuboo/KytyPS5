@@ -151,7 +151,9 @@ struct PageManager::Impl {
 	// the region's first page has no guard, as the previous region is not locked here.
 	void UpdateGuards(Region& region, uint64_t base_addr, size_t first, size_t last) noexcept {
 #if defined(__APPLE__)
-		static const bool enabled = std::getenv("KYTY_ROSETTA_GUARDS") == nullptr ||
+		// Off by default: splitting 256-bit stores at load time (x64InstructionEmulator) fixed
+		// the Rosetta abort these guards worked around. KYTY_ROSETTA_GUARDS=1 turns them on.
+		static const bool enabled = std::getenv("KYTY_ROSETTA_GUARDS") != nullptr &&
 		                            std::getenv("KYTY_ROSETTA_GUARDS")[0] != '0';
 		if (!enabled) {
 			return;

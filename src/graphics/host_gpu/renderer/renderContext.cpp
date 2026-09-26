@@ -99,7 +99,9 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		// protected page further on.
 		static const uint64_t release_ahead = [] {
 			const char* value = std::getenv("KYTY_ROSETTA_RELEASE_AHEAD_MB");
-			return (value != nullptr ? std::strtoull(value, nullptr, 10) : 64ull) << 20u;
+			// Off by default (see KYTY_ROSETTA_GUARDS): widening a write fault to the whole
+			// watched run turns one fault into a readback per GPU-dirty 4 MiB region.
+			return (value != nullptr ? std::strtoull(value, nullptr, 10) : 0ull) << 20u;
 		}();
 		if (release_ahead != 0) {
 			const auto run_end = m_page_manager.WatchedRunEnd(fault_vaddr, release_ahead);
