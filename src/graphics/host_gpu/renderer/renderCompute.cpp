@@ -31,6 +31,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -276,6 +277,37 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	BenchTrace::SetCurrent("dispatch", program.shader_hash,
 	                       (uint64_t {thread_group_x} << 32u) | thread_group_y);
 	const auto& resources = *input_info.stage.resources;
+	if (static const uint64_t diag_hash =
+	        [] {
+		        const char* value = std::getenv("KYTY_BENCH_DIAG_CS");
+		        return value != nullptr ? std::strtoull(value, nullptr, 16) : 0ull;
+	        }();
+	    diag_hash != 0 && program.shader_hash == diag_hash) {
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 6) {
+			const auto& fill = resources.uniform_fill;
+			LOGF("[bench-diag-cs] 0x%016" PRIx64 " groups=%ux%ux%u threads=%ux%ux%u mode=0x%x "
+			     "dtd=%d fill kind=%d res=%u words=%u value=0x%08x stride=%u,%u,%u buffers=%zu "
+			     "images=%zu xor=%d\n",
+			     program.shader_hash, thread_group_x, thread_group_y, thread_group_z,
+			     input_info.threads_num[0], input_info.threads_num[1], input_info.threads_num[2],
+			     mode, input_info.dispatch_thread_dimensions ? 1 : 0, static_cast<int>(fill.kind),
+			     fill.resource, fill.words, fill.value, fill.group_stride[0], fill.group_stride[1],
+			     fill.group_stride[2], program.info.buffers.size(), program.info.images.size(),
+			     program.info.has_bitwise_xor ? 1 : 0);
+			for (uint32_t i = 0; i < program.info.buffers.size(); i++) {
+				const auto d = DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
+				LOGF("[bench-diag-cs]   buffer %u base=0x%" PRIx64 " size=0x%" PRIx64
+				     " stride=%u records=%u fmt=%u swz=%d addtid=%d idxstride=%u read=%d "
+				     "written=%d meta=%d\n",
+				     i, d.Base48(), d.GetSize(), d.Stride(), d.NumRecords(),
+				     static_cast<uint32_t>(d.Format()), d.SwizzleEnabled() ? 1 : 0,
+				     d.AddTid() ? 1 : 0, d.IndexStride(), program.info.buffers[i].read ? 1 : 0,
+				     program.info.buffers[i].written ? 1 : 0,
+				     buffer.GetContext().GetTextureCache().IsMeta(d.Base48()) ? 1 : 0);
+			}
+		}
+	}
 	if (TryConsumeComputeMetaClear(input_info, buffer)) {
 		ResetBindings();
 		return;
