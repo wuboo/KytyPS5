@@ -758,7 +758,7 @@ uint64_t PatchReciprocalSquareRoots(uint64_t address, uint64_t size) {
 }
 
 static bool IsPlainWideStore(const ZydisDecodedInstruction& instruction,
-                             const ZydisDecodedOperand* operands) {
+                             const ZydisDecodedOperand*     operands) {
 	switch (instruction.mnemonic) {
 		case ZYDIS_MNEMONIC_VMOVUPS:
 		case ZYDIS_MNEMONIC_VMOVAPS:
@@ -776,24 +776,28 @@ static bool IsPlainWideStore(const ZydisDecodedInstruction& instruction,
 	       operands[1].reg.value <= ZYDIS_REGISTER_YMM15;
 }
 
-static bool EncodeInto(const ZydisEncoderRequest& request, uint8_t* out, uint64_t capacity,
-                       uint64_t* length) {
+// Encodes at runtime_address; RIP-relative memory operands carry absolute addresses.
+static bool EncodeAt(ZydisEncoderRequest& request, uint64_t runtime_address, uint8_t* out,
+                     uint64_t capacity, uint64_t* length) {
 	ZyanUSize size = capacity;
-	if (!ZYAN_SUCCESS(ZydisEncoderEncodeInstruction(&request, out, &size))) {
+	if (!ZYAN_SUCCESS(
+	        ZydisEncoderEncodeInstructionAbsolute(&request, out, &size, runtime_address))) {
 		return false;
 	}
 	*length = size;
 	return true;
 }
 
+// next_ip is the address after the original instruction, the base of a RIP-relative operand.
 static void SetMemoryOperand(ZydisEncoderOperand& op, const ZydisDecodedOperand& mem,
-                             int64_t extra_displacement) {
-	op.type           = ZYDIS_OPERAND_TYPE_MEMORY;
-	op.mem.base       = mem.mem.base;
-	op.mem.index      = mem.mem.index;
-	op.mem.scale      = mem.mem.scale;
-	op.mem.displacement = mem.mem.disp.value + extra_displacement;
-	op.mem.size       = 16;
+                             uint64_t next_ip, int64_t extra_displacement) {
+	op.type             = ZYDIS_OPERAND_TYPE_MEMORY;
+	op.mem.base         = mem.mem.base;
+	op.mem.index        = mem.mem.index;
+	op.mem.scale        = mem.mem.scale;
+	op.mem.displacement = (mem.mem.base == ZYDIS_REGISTER_RIP ? static_cast<int64_t>(next_ip) : 0) +
+	                      mem.mem.disp.value + extra_displacement;
+	op.mem.size         = 16;
 }
 
 WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* cursor,
@@ -825,9 +829,8 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			continue;
 		}
 		const auto& mem = operands[0];
-		if (mem.mem.base == ZYDIS_REGISTER_RIP ||
-		    (mem.mem.segment != ZYDIS_REGISTER_DS && mem.mem.segment != ZYDIS_REGISTER_SS &&
-		     mem.mem.segment != ZYDIS_REGISTER_NONE)) {
+		if (mem.mem.segment != ZYDIS_REGISTER_DS && mem.mem.segment != ZYDIS_REGISTER_SS &&
+		    mem.mem.segment != ZYDIS_REGISTER_NONE) {
 			result.unsupported++;
 			continue;
 		}
@@ -837,42 +840,45 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 
 		// Low half: vmovups xmmword [mem], xmmN
 		ZydisEncoderRequest low {};
-		low.machine_mode    = ZYDIS_MACHINE_MODE_LONG_64;
-		low.mnemonic        = ZYDIS_MNEMONIC_VMOVUPS;
-		low.operand_count   = 2;
-		SetMemoryOperand(low.operands[0], mem, 0);
+		low.machine_mode  = ZYDIS_MACHINE_MODE_LONG_64;
+		low.mnemonic      = ZYDIS_MNEMONIC_VMOVUPS;
+		low.operand_count = 2;
+		const uint64_t site = reinterpret_cast<uint64_t>(code);
+		const uint64_t back = site + length;
+		SetMemoryOperand(low.operands[0], mem, back, 0);
 		low.operands[1].type      = ZYDIS_OPERAND_TYPE_REGISTER;
 		low.operands[1].reg.value = xmm;
 		// High half: vextractf128 xmmword [mem + 16], ymmN, 1
 		ZydisEncoderRequest high {};
-		high.machine_mode   = ZYDIS_MACHINE_MODE_LONG_64;
-		high.mnemonic       = ZYDIS_MNEMONIC_VEXTRACTF128;
-		high.operand_count  = 3;
-		SetMemoryOperand(high.operands[0], mem, 16);
+		high.machine_mode  = ZYDIS_MACHINE_MODE_LONG_64;
+		high.mnemonic      = ZYDIS_MNEMONIC_VEXTRACTF128;
+		high.operand_count = 3;
+		SetMemoryOperand(high.operands[0], mem, back, 16);
 		high.operands[1].type      = ZYDIS_OPERAND_TYPE_REGISTER;
 		high.operands[1].reg.value = ymm;
 		high.operands[2].type      = ZYDIS_OPERAND_TYPE_IMMEDIATE;
 		high.operands[2].imm.u     = 1;
 
-		uint8_t  buffer[64];
-		uint64_t low_length  = 0;
-		uint64_t high_length = 0;
-		if (!EncodeInto(low, buffer, sizeof(buffer), &low_length) ||
-		    !EncodeInto(high, buffer + low_length, sizeof(buffer) - low_length, &high_length)) {
+		const uint64_t trampoline = *cursor;
+		uint8_t        buffer[64];
+		uint64_t       low_length  = 0;
+		uint64_t       high_length = 0;
+		if (!EncodeAt(low, trampoline, buffer, sizeof(buffer), &low_length) ||
+		    !EncodeAt(high, trampoline + low_length, buffer + low_length,
+		              sizeof(buffer) - low_length, &high_length)) {
 			result.unsupported++;
 			continue;
 		}
-		const uint64_t trampoline = *cursor;
-		const uint64_t body       = low_length + high_length + JumpSize;
+		const uint64_t body = low_length + high_length + JumpSize;
 		if (trampoline + body > trampoline_end) {
 			result.unsupported++;
 			continue;
 		}
-		const uint64_t site      = reinterpret_cast<uint64_t>(code);
-		const uint64_t back      = site + length;
-		const int64_t  to_tramp  = static_cast<int64_t>(trampoline) - static_cast<int64_t>(site + JumpSize);
-		const int64_t  to_back   = static_cast<int64_t>(back) -
-		                        static_cast<int64_t>(trampoline + low_length + high_length + JumpSize);
+		const int64_t to_tramp =
+		    static_cast<int64_t>(trampoline) - static_cast<int64_t>(site + JumpSize);
+		const int64_t to_back =
+		    static_cast<int64_t>(back) -
+		    static_cast<int64_t>(trampoline + low_length + high_length + JumpSize);
 		if (to_tramp < INT32_MIN || to_tramp > INT32_MAX || to_back < INT32_MIN ||
 		    to_back > INT32_MAX) {
 			result.unsupported++;
@@ -887,8 +893,8 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 		result.trampoline_bytes += body;
 
 		// The original instruction becomes the jump; its remaining bytes are never executed.
-		code[0]               = 0xE9;
-		const auto tramp32    = static_cast<int32_t>(to_tramp);
+		code[0]            = 0xE9;
+		const auto tramp32 = static_cast<int32_t>(to_tramp);
 		std::memcpy(code + 1, &tramp32, sizeof(tramp32));
 		std::memset(code + JumpSize, 0xCC, length - JumpSize);
 		result.patched++;

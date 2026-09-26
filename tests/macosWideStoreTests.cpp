@@ -113,19 +113,37 @@ void TestPatchedCrossingStore() {
 	Check(RunCrossingCopy(reinterpret_cast<CopyFunc>(area.code)), "patched copy wrote all bytes");
 }
 
-void TestShortAndRipRelativeAreLeftAlone() {
+void TestShortStoreIsLeftAlone() {
 	auto area = MakeCode();
-	// vmovups [rdi], ymm0 (4 bytes); vmovups [rip + 0], ymm0 (8 bytes); ret
-	const std::array<uint8_t, 13> code = {0xc5, 0xfc, 0x11, 0x07, 0xc5, 0xfc, 0x11,
-	                                      0x05, 0x00, 0x00, 0x00, 0x00, 0xc3};
+	// vmovups [rdi], ymm0 (4 bytes, too short for a rel32 jump); ret
+	const std::array<uint8_t, 5> code = {0xc5, 0xfc, 0x11, 0x07, 0xc3};
 	std::memcpy(area.code, code.data(), code.size());
 	auto       cursor = area.trampolines;
 	const auto result = Loader::X64InstructionEmulator::SplitWideStores(
 	    reinterpret_cast<uint64_t>(area.code), code.size(), &cursor, area.end);
-	Check(result.candidates == 2, "short and RIP-relative stores found");
-	Check(result.too_short == 1, "4-byte store left in place");
-	Check(result.unsupported == 1, "RIP-relative store left in place");
+	Check(result.candidates == 1 && result.too_short == 1, "4-byte store left in place");
 	Check(std::memcmp(area.code, code.data(), code.size()) == 0, "code unchanged");
+}
+
+void TestRipRelativeStore() {
+	auto area = MakeCode();
+	// vmovups ymm0, [rsi]; vmovups [rip + 0x7f4], ymm0; vzeroupper; ret
+	// The store ends at offset 12, so it targets offset 12 + 0x7f4 = 0x800.
+	const std::array<uint8_t, 17> code = {0xc5, 0xfc, 0x10, 0x06, 0xc5, 0xfc, 0x11, 0x05, 0xf4,
+	                                      0x07, 0x00, 0x00, 0xc5, 0xf8, 0x77, 0xc3, 0xcc};
+	std::memcpy(area.code, code.data(), code.size());
+	auto       cursor = area.trampolines;
+	const auto result = Loader::X64InstructionEmulator::SplitWideStores(
+	    reinterpret_cast<uint64_t>(area.code), code.size(), &cursor, area.end);
+	Check(result.candidates == 1 && result.patched == 1, "RIP-relative store patched");
+	uint8_t source[32];
+	for (int i = 0; i < 32; i++) {
+		source[i] = static_cast<uint8_t>(0xa0 + i);
+	}
+	std::memset(area.code + 0x800, 0, 64);
+	reinterpret_cast<CopyFunc>(area.code)(nullptr, source);
+	Check(std::memcmp(area.code + 0x800, source, 32) == 0, "RIP-relative store hit its target");
+	Check(area.code[0x800 + 32] == 0, "RIP-relative store wrote nothing past its target");
 }
 
 } // namespace
@@ -140,7 +158,8 @@ int main() {
 
 	TestUnpatchedAbortsUnderRosetta();
 	TestPatchedCrossingStore();
-	TestShortAndRipRelativeAreLeftAlone();
+	TestShortStoreIsLeftAlone();
+	TestRipRelativeStore();
 
 	if (g_failures != 0) {
 		std::fprintf(stderr, "%d check(s) failed\n", g_failures);

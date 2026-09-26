@@ -14,7 +14,7 @@ struct WideStoreSplitResult {
 	uint64_t candidates = 0;  // plain 256-bit vector stores found
 	uint64_t patched    = 0;  // rewritten into two 128-bit stores
 	uint64_t too_short  = 0;  // shorter than a rel32 jump; left in place
-	uint64_t unsupported = 0; // RIP-relative, segment override or encoder failure
+	uint64_t unsupported = 0; // segment override, encoder failure or trampoline area full
 	uint64_t trampoline_bytes = 0;
 };
 
