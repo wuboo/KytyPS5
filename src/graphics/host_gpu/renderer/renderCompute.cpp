@@ -273,6 +273,8 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 
 	const auto& program   = *input_info.stage.program;
+	BenchTrace::SetCurrent("dispatch", program.shader_hash,
+	                       (uint64_t {thread_group_x} << 32u) | thread_group_y);
 	const auto& resources = *input_info.stage.resources;
 	if (TryConsumeComputeMetaClear(input_info, buffer)) {
 		ResetBindings();
@@ -437,6 +439,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	PrepareBindings(input_info.stage, bindings);
 	FindBuffers(bindings);
 	const auto& program = *input_info.stage.program;
+	BenchTrace::SetCurrent("dispatch-indirect", program.shader_hash, args_addr);
 	if (program.info.uses_dma) {
 		m_context.PrepareBda();
 	}

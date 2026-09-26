@@ -1166,6 +1166,7 @@ void TextureCache::MaterializeDccClear(ImageId id, const ImageDesc& desc,
 			     n, c, range.address, range.size, covered ? 1u : 0u, fill_value);
 		}
 		FrameTiming::Add(FrameTiming::Counter::ReadbackDcc);
+		BenchTrace::LogGpuWriter("dcc", range.address, range.size);
 		m_buffer_cache.ReadMemory(range.address, range.size, false);
 	}
 	const auto slice_size = range.size / layers;

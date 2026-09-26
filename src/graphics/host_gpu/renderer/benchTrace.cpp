@@ -56,6 +56,65 @@ uint64_t Tick() {
 	return g_tick.load(std::memory_order_relaxed);
 }
 
+namespace {
+struct Current {
+	const char* kind  = "none";
+	uint64_t    hash0 = 0;
+	uint64_t    hash1 = 0;
+};
+thread_local Current g_current;
+
+struct GpuWrite {
+	uint64_t vaddr = 0;
+	uint64_t size  = 0;
+	uint64_t tick  = 0;
+	Current  op;
+};
+constexpr uint32_t                  WriteCapacity = 1024;
+std::array<GpuWrite, WriteCapacity> g_writes {};
+std::atomic<uint32_t>               g_next_write {0};
+} // namespace
+
+void SetCurrent(const char* kind, uint64_t hash0, uint64_t hash1) {
+	g_current = {kind, hash0, hash1};
+}
+
+void RecordGpuWrite(uint64_t vaddr, uint64_t size) {
+	g_writes[g_next_write.fetch_add(1, std::memory_order_relaxed) % WriteCapacity] = {
+	    vaddr, size, Tick(), g_current};
+}
+
+void LogGpuWriter(const char* reason, uint64_t vaddr, uint64_t size) {
+	const auto next = g_next_write.load(std::memory_order_relaxed);
+	for (uint32_t i = 1; i <= WriteCapacity && i <= next; i++) {
+		const auto& write = g_writes[(next - i) % WriteCapacity];
+		if (write.vaddr < vaddr + size && vaddr < write.vaddr + write.size) {
+			// Log each distinct writer a few times.
+			static std::array<std::pair<uint64_t, uint32_t>, 64> seen {};
+			const auto key = write.op.hash0 ^ (reinterpret_cast<uintptr_t>(write.op.kind) << 1u);
+			for (auto& [hash, count]: seen) {
+				if (hash == key || count == 0) {
+					hash = key;
+					if (++count <= 4) {
+						LOGF("[bench-writer] %s range=0x%" PRIx64 "+0x%" PRIx64
+						     " written by %s 0x%016" PRIx64 " 0x%016" PRIx64 " write=0x%" PRIx64
+						     "+0x%" PRIx64 " tick=%" PRIu64 " now=%" PRIu64 "\n",
+						     reason, vaddr, size, write.op.kind, write.op.hash0, write.op.hash1,
+						     write.vaddr, write.size, write.tick, Tick());
+					}
+					return;
+				}
+			}
+			return;
+		}
+	}
+	static std::atomic<uint32_t> unknown {0};
+	if (unknown.fetch_add(1, std::memory_order_relaxed) < 8) {
+		LOGF("[bench-writer] %s range=0x%" PRIx64 "+0x%" PRIx64 " writer not in ring\n", reason,
+		     vaddr, size);
+	}
+}
+
 bool SkipCompute(uint64_t shader_hash) {
 	static const std::vector<uint64_t> skip = [] {
 		std::vector<uint64_t> hashes;

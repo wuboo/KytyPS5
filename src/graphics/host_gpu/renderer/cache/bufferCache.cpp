@@ -487,6 +487,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
 		m_gpu_modified_ranges.Add(vaddr, size);
+		BenchTrace::RecordGpuWrite(vaddr, size);
 	}
 	return {&buffer, buffer.Offset(vaddr)};
 }
@@ -518,6 +519,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferForImage(uint64_t vaddr, u
 }
 
 void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool is_gds) {
+	BenchTrace::SetCurrent("fill", value, size);
 	if ((vaddr & 3u) != 0 || size == 0 || (size & 3u) != 0 || size > UINT64_MAX - vaddr) {
 		EXIT("BufferCache: fill range must be dword aligned\n");
 	}
@@ -557,6 +559,7 @@ bool BufferCache::RecentGpuFillCovers(uint64_t vaddr, uint64_t size, uint32_t* v
 
 void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,
                              bool src_gds) {
+	BenchTrace::SetCurrent("copy", src_vaddr, size);
 	const bool dst_memory = !dst_gds;
 	const bool src_memory = !src_gds;
 	if ((dst_memory && dst_vaddr == 0) || (src_memory && src_vaddr == 0) || size == 0 ||

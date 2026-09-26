@@ -894,6 +894,8 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 	    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
 	    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info,
 	    single_sample);
+	BenchTrace::SetCurrent("draw", state.vertex_info[0].stage.program->shader_hash,
+	                       state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0);
 }
 
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,

@@ -15,6 +15,13 @@ bool SkipCompute(uint64_t shader_hash);
 void     SetTick(uint64_t tick);
 uint64_t Tick();
 
+// GPU-thread "current operation" (the draw/dispatch/copy being prepared), and a ring of GPU
+// writes to guest memory tagged with it, so a readback can name what wrote the range.
+void SetCurrent(const char* kind, uint64_t hash0, uint64_t hash1);
+void RecordGpuWrite(uint64_t vaddr, uint64_t size);
+// Logs the newest recorded writer overlapping [vaddr, vaddr + size) (rate-limited per writer).
+void LogGpuWriter(const char* reason, uint64_t vaddr, uint64_t size);
+
 } // namespace Libs::Graphics::BenchTrace
 
 // Records the source line of a GPU command about to be recorded into the current tick.
