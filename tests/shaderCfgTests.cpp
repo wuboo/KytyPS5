@@ -16547,6 +16547,8 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
       EncodeSopp(0x02, 0xfffeu), // B -> C
       EncodeSopp(0x01),
   };
+  // The dispatcher loop carries an iteration counter (loop watchdog): one more phi and a few
+  // words compared to the bare goto loop.
   auto dispatcher_result = compile("dispatcher", dispatcher,
                                          {.words = 255,
                                           .instructions = 70,
@@ -16554,7 +16556,7 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
                                           .function_variables = 3,
                                           .loads = 3,
                                           .stores = 6,
-                                          .phis = 2,
+                                          .phis = 3,
                                           .labels = 13,
                                           .loop_merges = 1,
                                           .selection_merges = 1,
@@ -16564,7 +16566,7 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
                                           .ballots = 1});
   Check(dispatcher_result.program.dispatcher_fallback &&
             (dispatcher_result.ir_dump.find("Phi") != std::string::npos) &&
-            SpirvInstructionOpcodeCount(dispatcher_result.spirv, 245u) == 2u &&
+            SpirvInstructionOpcodeCount(dispatcher_result.spirv, 245u) == 3u &&
             SpirvInstructionOpcodeCount(dispatcher_result.spirv, 251u) == 1u,
         "dispatcher size fixture lost its two control Phis or switch");
   CheckSpirvPhiParents(dispatcher_result.spirv);
