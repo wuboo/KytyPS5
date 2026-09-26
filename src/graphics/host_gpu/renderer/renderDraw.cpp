@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/renderDraw.h"
+#include "graphics/host_gpu/renderer/benchTrace.h"
 
 #include "common/assert.h"
 #include "common/common.h"
@@ -1173,6 +1174,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	m_context.GetCommandScheduler().BeginRendering(rendering);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+	BenchTrace::Record(m_context.GetCommandScheduler().CurrentTick(), mesh_active ? "mesh" : "draw",
+	                   state.vertex_info[0].stage.program->shader_hash,
+	                   state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0);
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u);
 	}

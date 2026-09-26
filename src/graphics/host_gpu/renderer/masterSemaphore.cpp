@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "graphics/host_gpu/renderer/benchTrace.h"
 #include "graphics/host_gpu/graphicContext.h"
 
 #include <cinttypes>
@@ -61,6 +62,7 @@ void MasterSemaphore::Wait(uint64_t tick) {
 		LOGF("[bench-wait] timeline wait >5 s: waiting for tick %" PRIu64 ", GPU reached %" PRIu64
 		     "\n",
 		     tick, gpu_value);
+		BenchTrace::Dump(gpu_value + 1);
 		result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);

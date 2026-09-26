@@ -16,6 +16,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
+#include "graphics/host_gpu/renderer/benchTrace.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -396,6 +397,8 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	}
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+	BenchTrace::Record(m_context.GetCommandScheduler().CurrentTick(), "dispatch", program.shader_hash,
+	                   (uint64_t {thread_group_x} << 32u) | thread_group_y);
 	vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
 
 	// The removed host fence also ordered read-only dispatches before later writers.
@@ -459,6 +462,8 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	        vk::PipelineStageFlagBits::eTransfer,
 	    vk::PipelineStageFlagBits::eDrawIndirect, {}, 1, &barrier, 0, nullptr, 0, nullptr);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
+	BenchTrace::Record(m_context.GetCommandScheduler().CurrentTick(), "dispatch-indirect",
+	                   program.shader_hash, 0);
 	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	ResetBindings();
