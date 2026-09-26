@@ -5,10 +5,15 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
+#include <atomic>
 #include <deque>
 #include <unordered_map>
 
 namespace Libs::Graphics {
+
+// Bumped whenever a VkBuffer or VkImageView the renderer bound may be destroyed, so a descriptor
+// set cached by content is not reused after a handle it references could have been recycled.
+inline std::atomic<uint64_t> g_descriptor_resource_generation {0};
 
 struct GraphicContext;
 class MasterSemaphore;
@@ -20,6 +25,8 @@ public:
 	KYTY_CLASS_NO_COPY(DescriptorHeap);
 
 	[[nodiscard]] vk::DescriptorSet Commit(vk::DescriptorSetLayout layout);
+	// Changes when the current pool is replaced; sets from older pools must not be reused.
+	[[nodiscard]] uint64_t PoolGeneration() const noexcept { return m_pool_generation; }
 
 private:
 	static constexpr uint32_t DescriptorSetBatch = 32;
@@ -38,6 +45,7 @@ private:
 	vk::DescriptorPool                                  m_current_pool = nullptr;
 	std::deque<std::pair<vk::DescriptorPool, uint64_t>> m_pending_pools;
 	std::unordered_map<vk::DescriptorSetLayout, Batch>  m_sets;
+	uint64_t                                            m_pool_generation = 0;
 };
 
 } // namespace Libs::Graphics

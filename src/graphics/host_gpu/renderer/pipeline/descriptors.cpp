@@ -20,10 +20,12 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/BindingLayout.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
@@ -37,6 +39,7 @@
 #include <limits>
 #include <span>
 #include <vector>
+#include <xxhash.h>
 
 #ifdef min
 #undef min
@@ -1126,13 +1129,57 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			                               static_cast<uint32_t>(m_descriptor_writes.size()),
 			                               m_descriptor_writes.data());
 		} else {
-			const auto set = m_context.GetDescriptorHeap().Commit(pipeline.descriptor_set_layout);
-			for (auto& write: m_descriptor_writes) {
-				write.dstSet = set;
+			// Consecutive draws often bind exactly the same resources. Descriptor sets are never
+			// rewritten after their update, so the previous set of this layout can be bound again
+			// while its pool is current and nothing it references can have been destroyed.
+			static const bool reuse = FrameTiming::OptEnabled("desc_reuse");
+			auto&             heap  = m_context.GetDescriptorHeap();
+			auto&             key   = m_descriptor_key;
+			key.clear();
+			const auto update = [&key](const void* data, size_t size) {
+				const auto* bytes = static_cast<const uint8_t*>(data);
+				key.insert(key.end(), bytes, bytes + size);
+			};
+			for (const auto& write: m_descriptor_writes) {
+				const std::array<uint32_t, 4> header {write.dstBinding, write.dstArrayElement,
+				                                      write.descriptorCount,
+				                                      static_cast<uint32_t>(write.descriptorType)};
+				update(header.data(), sizeof(header));
+				if (write.pBufferInfo != nullptr) {
+					update(write.pBufferInfo,
+					       sizeof(vk::DescriptorBufferInfo) * write.descriptorCount);
+				}
+				if (write.pImageInfo != nullptr) {
+					update(write.pImageInfo,
+					       sizeof(vk::DescriptorImageInfo) * write.descriptorCount);
+				}
+				if (write.pTexelBufferView != nullptr) {
+					update(write.pTexelBufferView, sizeof(vk::BufferView) * write.descriptorCount);
+				}
 			}
-			m_context.GetGraphics().device.updateDescriptorSets(
-			    static_cast<uint32_t>(m_descriptor_writes.size()), m_descriptor_writes.data(), 0,
-			    nullptr);
+			const auto hash      = XXH3_64bits(key.data(), key.size());
+			const auto resources = g_descriptor_resource_generation.load(std::memory_order_relaxed);
+			auto&      cached    = m_last_descriptor_sets[pipeline.descriptor_set_layout];
+			const bool identical = cached.set != nullptr && cached.hash == hash;
+			const bool reusable  = identical && cached.pool_generation == heap.PoolGeneration() &&
+			                       cached.resource_generation == resources;
+			if (identical) {
+				FrameTiming::Add(FrameTiming::Counter::DescriptorSetsIdentical);
+			}
+			vk::DescriptorSet set = nullptr;
+			if (reuse && reusable) {
+				FrameTiming::Add(FrameTiming::Counter::DescriptorSetsReused);
+				set = cached.set;
+			} else {
+				set = heap.Commit(pipeline.descriptor_set_layout);
+				for (auto& write: m_descriptor_writes) {
+					write.dstSet = set;
+				}
+				m_context.GetGraphics().device.updateDescriptorSets(
+				    static_cast<uint32_t>(m_descriptor_writes.size()), m_descriptor_writes.data(),
+				    0, nullptr);
+				cached = {hash, heap.PoolGeneration(), resources, set};
+			}
 			vk_buffer.bindDescriptorSets(pipeline_bind_point, pipeline.pipeline_layout, 0, 1, &set,
 			                             0, nullptr);
 		}

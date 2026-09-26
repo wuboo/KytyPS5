@@ -12,6 +12,7 @@
 #include <array>
 #include <optional>
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -248,6 +249,14 @@ private:
 	std::vector<vk::DescriptorImageInfo>  m_descriptor_images;
 	std::vector<vk::WriteDescriptorSet>   m_descriptor_writes;
 	std::vector<uint32_t>                 m_image_occurrences;
+	struct CachedDescriptorSet {
+		uint64_t          hash                = 0;
+		uint64_t          pool_generation     = 0;
+		uint64_t          resource_generation = 0;
+		vk::DescriptorSet set                 = nullptr;
+	};
+	std::unordered_map<vk::DescriptorSetLayout, CachedDescriptorSet> m_last_descriptor_sets;
+	std::vector<uint8_t>                                             m_descriptor_key;
 
 	friend class CommandProcessor;
 	friend struct RenderExecutorTestAccess;
