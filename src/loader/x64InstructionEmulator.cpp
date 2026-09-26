@@ -785,19 +785,6 @@ static bool IsPlainWideStore(const ZydisDecodedInstruction& instruction,
 	       operands[1].reg.value <= ZYDIS_REGISTER_YMM15;
 }
 
-// A moved instruction must not fault inside the trampoline: faults there resumed at the wrong
-// address in the test title. Register-only instructions (add rbx, 0x20) cannot fault.
-static bool AccessesMemory(const ZydisDecodedInstruction& instruction,
-                           const ZydisDecodedOperand*     operands) {
-	for (uint32_t i = 0; i < instruction.operand_count; i++) {
-		if (operands[i].type == ZYDIS_OPERAND_TYPE_MEMORY &&
-		    operands[i].mem.type != ZYDIS_MEMOP_TYPE_AGEN) {
-			return true;
-		}
-	}
-	return false;
-}
-
 // Encodes at runtime_address; RIP-relative memory operands carry absolute addresses.
 static bool EncodeAt(ZydisEncoderRequest& request, uint64_t runtime_address, uint8_t* out,
                      uint64_t capacity, uint64_t* length) {
@@ -1123,7 +1110,7 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 					    next.meta.category == ZYDIS_CATEGORY_RET ||
 					    next.meta.category == ZYDIS_CATEGORY_SYSTEM ||
 					    next.meta.category == ZYDIS_CATEGORY_INTERRUPT ||
-					    IsPlainWideStore(next, next_ops) || AccessesMemory(next, next_ops)) {
+					    IsPlainWideStore(next, next_ops)) {
 						break;
 					}
 					moved_ips[moved_count++] = ip;
