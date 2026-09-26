@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
+#include "graphics/host_gpu/renderer/benchTrace.h"
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -1634,9 +1635,11 @@ void TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format for
 		native_range.layerCount     = 1;
 	}
 	if (range.aspectMask == vk::ImageAspectFlagBits::eColor) {
+		KYTY_BENCH_TRACE_SITE();
 		command.Handle().clearColorImage(image.backing.image, vk::ImageLayout::eTransferDstOptimal,
 		                                 &clear.color, 1, &native_range);
 	} else {
+		KYTY_BENCH_TRACE_SITE();
 		command.Handle().clearDepthStencilImage(image.backing.image,
 		                                        vk::ImageLayout::eTransferDstOptimal,
 		                                        &clear.depthStencil, 1, &native_range);

@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/renderer/benchTrace.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -394,6 +395,10 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 void CommandScheduler::BeginNext() {
 	CheckActive();
 	BeginCommand();
+	// The swapchain scheduler has its own small tick numbers; trace only the renderer's.
+	if (CurrentTick() > 100000) {
+		BenchTrace::SetTick(CurrentTick());
+	}
 }
 
 } // namespace Libs::Graphics

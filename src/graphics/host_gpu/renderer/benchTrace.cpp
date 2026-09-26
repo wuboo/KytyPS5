@@ -35,12 +35,25 @@ void Dump(uint64_t tick) {
 	uint32_t count = 0;
 	for (const auto& entry: g_entries) {
 		if (entry.kind != nullptr && entry.tick == tick) {
-			LOGF("[bench-trace] tick %" PRIu64 ": %s 0x%016" PRIx64 " 0x%016" PRIx64 "\n", tick,
-			     entry.kind, entry.hash0, entry.hash1);
+			LOGF("[bench-trace] tick %" PRIu64 ": %s %" PRIu64 " 0x%016" PRIx64 " 0x%016" PRIx64
+			     "\n",
+			     tick, entry.kind, entry.hash0, entry.hash0, entry.hash1);
 			count++;
 		}
 	}
 	LOGF("[bench-trace] tick %" PRIu64 ": %u recorded operations\n", tick, count);
+}
+
+namespace {
+std::atomic<uint64_t> g_tick {0};
+} // namespace
+
+void SetTick(uint64_t tick) {
+	g_tick.store(tick, std::memory_order_relaxed);
+}
+
+uint64_t Tick() {
+	return g_tick.load(std::memory_order_relaxed);
 }
 
 bool SkipCompute(uint64_t shader_hash) {

@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/image/blitHelper.h"
+#include "graphics/host_gpu/renderer/benchTrace.h"
 
 #include "common/assert.h"
 #include "gpu_blit_shaders/gpu_blit_color_to_ms_depth_spv.h"
@@ -191,6 +192,7 @@ void BlitHelper::ReinterpretColorAsMsDepth(Image& source, Image& destination) {
 	                            {destination_info.extent.width, destination_info.extent.height}};
 	command.setViewport(0, 1, &viewport);
 	command.setScissor(0, 1, &scissor);
+	KYTY_BENCH_TRACE_SITE();
 	command.draw(3, 1, 0, 0);
 	command.endRendering();
 }

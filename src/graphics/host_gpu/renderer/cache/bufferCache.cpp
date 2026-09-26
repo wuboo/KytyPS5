@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/benchTrace.h"
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -158,6 +159,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                       vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1, &before, 0,
 	                       nullptr);
+	KYTY_BENCH_TRACE_SITE();
 	native.copyBuffer(buffer.Handle(), m_download_buffer.Handle(),
 	                  static_cast<uint32_t>(copies.size()), copies.data());
 
@@ -399,6 +401,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		native.pipelineBarrier(
 		    vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer,
 		    vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &before, 0, nullptr);
+		KYTY_BENCH_TRACE_SITE();
 		native.copyBuffer(source, buffer.Handle(), static_cast<uint32_t>(copies.size()),
 		                  copies.data());
 		auto after          = before;

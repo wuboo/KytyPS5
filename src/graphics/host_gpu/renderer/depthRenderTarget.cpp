@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+#include "graphics/host_gpu/renderer/benchTrace.h"
 
 #include "common/assert.h"
 #include "common/common.h"
@@ -407,6 +408,7 @@ bool RenderExecutor::DepthStencilCopy(CommandBuffer& buffer) {
 		region.dstSubresource = region.srcSubresource;
 		region.extent = write_desc.info.extent;
 	}
+	KYTY_BENCH_TRACE_SITE();
 	command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal,
 	                  destination.backing.image, vk::ImageLayout::eTransferDstOptimal,
 	                  count, regions.data());

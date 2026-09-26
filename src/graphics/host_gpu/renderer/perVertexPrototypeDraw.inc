@@ -225,6 +225,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	                       &unpack_set, 0, nullptr);
 	cmd.pushConstants(unpack_pipeline->pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
 	                  sizeof(unpack_push), &unpack_push);
+	KYTY_BENCH_TRACE_SITE();
 	cmd.dispatch((count + 63) / 64, 1, 1);
 
 	// Barrier: Unpack -> Capture compute
@@ -244,6 +245,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	                       programs->capture_pipeline.pipeline_layout, 1, 1, &extra_set, 0,
 	                       nullptr);
 	cmd.bindPipeline(vk::PipelineBindPoint::eCompute, programs->capture_pipeline.pipeline);
+	KYTY_BENCH_TRACE_SITE();
 	cmd.dispatch(programs->native_capture ? (count + 63u) / 64u : count, 1, 1);
 	if (capture_has_writes) ShaderWriteBarrier(cmd, vk::PipelineStageFlagBits::eComputeShader);
 
@@ -272,6 +274,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		cmd.setAttachmentFeedbackLoopEnableEXT(feedback_aspects);
 	scheduler.BeginRendering(rendering);
 	cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+	KYTY_BENCH_TRACE_SITE();
 	cmd.draw(count, 1, 0, 0);
 	scheduler.EndRendering();
 	if (HasShaderBufferWrites(state.ps_input_info.stage))
