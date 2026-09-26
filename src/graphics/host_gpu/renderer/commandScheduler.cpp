@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/benchTrace.h"
+#include "graphics/presentation/frameTiming.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -379,6 +380,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 
 		result = graphics.queue.submit(1, &submit_info, nullptr);
 	}
+	FrameTiming::OnQueueSubmit();
 
 	if (result != vk::Result::eSuccess) {
 		ReportVulkanFatal("vkQueueSubmit", result, tick, m_command.m_debug_op,
