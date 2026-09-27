@@ -511,19 +511,23 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		item.extra_set       = extra_set;
 		item.count           = count;
 		item.vs               = vs;
+		// `vs.pixel_input`, if set, also points into the caller's stack-local DrawRenderState (see
+		// the `runtime` note below). Nothing reads it once a program is already compiled -- it
+		// only feeds shader specialization, which already happened for programs->graphics when
+		// GetPerVertexPrototypePrograms() first compiled it -- but null it out anyway so a latent
+		// read elsewhere fails loudly (null deref) instead of touching freed stack memory.
+		item.vs.pixel_input   = nullptr;
 		item.vertex_bindings  = std::move(vertex_bindings);
 		item.pixel_bindings   = std::move(pixel_bindings);
 		// `PreparedBindings::runtime` is a raw pointer that PrepareBindings() above set into
 		// `vs.stage`/`state.ps_input_info.stage` -- both part of the caller's stack-local
 		// DrawRenderState, gone as soon as that caller (DrawIndex/DrawAuto) returns, which happens
-		// right after this draw does. CommitBindings() at flush time only ever reads
-		// `runtime->program` (never `->resources`; confirmed by reading its body), so repointing
-		// these at copies this item/batch actually owns is enough to make them safe to use later:
-		// `item.vs.stage` for vertex (freshly copied above), and the batch's own ps_input_info for
-		// pixel (every item here was checked to share the same ps_hash, i.e. the same compiled
-		// program pointer, when it was allowed to join this batch).
-		item.vertex_bindings.runtime = &item.vs.stage;
-		item.pixel_bindings.runtime  = &m_prototype_batch.ps_input_info.stage;
+		// right after this draw does. It gets repointed at storage this item/batch actually owns,
+		// but NOT here: `m_prototype_batch.items` is a std::vector, and every push_back beyond its
+		// current capacity moves every already-appended item (this one included) to a new address,
+		// which would leave a pointer into *this* item's own address (a self-reference) dangling.
+		// FlushPendingPrototypeBatch() fixes `runtime` up right before each item's address is
+		// final (no more items will be appended once flushing starts).
 		if (!store_in_cache && hit == nullptr) {
 			item.owned_captured = std::move(captured);
 			item.owned_pool     = capture_pool;
@@ -603,6 +607,14 @@ void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 	FrameTiming::Add(FrameTiming::Counter::PrototypeRenderPasses);
 	scheduler.BeginRendering(rendering);
 	for (auto& item: batch.items) {
+		// See the design note where items are appended: `runtime` is fixed up here, once this
+		// item's address in `batch.items` is final, rather than at append time. CommitBindings()
+		// below only ever reads `runtime->program` (confirmed by reading its body), never
+		// `->resources`, so pointing it at copies this item/batch actually owns is sufficient:
+		// `item.vs.stage` for vertex, and the batch's own ps_input_info for pixel (every item here
+		// shares the same ps_hash, i.e. the same compiled program pointer, by construction).
+		item.vertex_bindings.runtime = &item.vs.stage;
+		item.pixel_bindings.runtime  = &batch.ps_input_info.stage;
 		auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
 		    {batch.color_info.data(), batch.color_count}, batch.depth_info, {&item.vs, 1}, buffer,
 		    batch.ps_active ? &batch.ps_input_info : nullptr, batch.topology, false,
