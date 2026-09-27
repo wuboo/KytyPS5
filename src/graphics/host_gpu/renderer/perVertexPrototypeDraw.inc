@@ -72,7 +72,33 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	// side-effecting buffer writes are excluded: skipping those would silently drop the write,
 	// not just the geometry output.
 	static const bool capture_cache_enabled = FrameTiming::OptEnabled("capture_cache");
-	const bool         cache_eligible       = capture_cache_enabled && !capture_has_writes;
+	// CORRECTNESS FIX (2026-09-28, found via the diagnostic below): the capture is only a pure
+	// function of {vertex bytes, index bytes, a few draw/emit params} -- what the cache key hashes
+	// -- if the captured VS reads NOTHING ELSE. It runs as compute with its full original resource
+	// bindings (PrepareBindings(vs.stage, ...) below covers general buffers/images/samplers, not
+	// just the vertex-fetch buffer decoded via vs.resources[]/vs.buffers[0]); if it declares any
+	// such resource (e.g. a per-object transform matrix in a uniform buffer), two objects with
+	// identical vertex bytes but a different bound resource could silently share a captured result
+	// that is only correct for one of them -- confirmed to actually happen in this game (a real VS
+	// hash logged with buffers=4). Exclude any shader with such resources from caching entirely
+	// rather than try to guess or hash which ones are actually safe to ignore.
+	const bool capture_has_external_resources =
+	    vs.stage.program != nullptr &&
+	    (!vs.stage.program->info.buffers.empty() || !vs.stage.program->info.images.empty() ||
+	     !vs.stage.program->info.samplers.empty());
+	if (capture_has_external_resources) {
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+			const auto& sinfo = vs.stage.program->info;
+			LOGF("[bench] capture_cache: VS hash=0x%016llx declares external resources "
+			     "(buffers=%zu images=%zu samplers=%zu) not covered by the cache key -- excluded "
+			     "from caching\n",
+			     static_cast<unsigned long long>(vs.stage.program->shader_hash),
+			     sinfo.buffers.size(), sinfo.images.size(), sinfo.samplers.size());
+		}
+	}
+	const bool cache_eligible =
+	    capture_cache_enabled && !capture_has_writes && !capture_has_external_resources;
 	uint64_t            cache_key           = 0;
 	uint64_t            content_hash        = 0;
 	// Also used below by the batching key (Kierunek A), regardless of cache_eligible.
@@ -81,25 +107,6 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	    state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0;
 	CachedPrototypeCapture* hit = nullptr;
 	if (cache_eligible) {
-		// URGENT CORRECTNESS CHECK (2026-09-28): does the captured VS declare general resources
-		// (uniform/constant buffers, images, samplers) beyond the raw vertex-fetch buffer? If so,
-		// and if any of them carries per-object data (e.g. a transform matrix) that the cache key
-		// below does not hash, two objects sharing the same {addr, vs_hash, ps_hash} and identical
-		// vertex bytes but a DIFFERENT bound resource (different transform) would silently share a
-		// captured result that is only correct for one of them.
-		if (vs.stage.program != nullptr) {
-			const auto& sinfo = vs.stage.program->info;
-			if (!sinfo.buffers.empty() || !sinfo.images.empty() || !sinfo.samplers.empty()) {
-				static std::atomic<uint32_t> logged {0};
-				if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
-					LOGF("[bench] capture_cache: CAPTURED VS hash=0x%016llx DECLARES EXTERNAL "
-					     "RESOURCES not covered by the cache key: buffers=%zu images=%zu "
-					     "samplers=%zu\n",
-					     static_cast<unsigned long long>(vs_hash_for_cache), sinfo.buffers.size(),
-					     sinfo.images.size(), sinfo.samplers.size());
-				}
-			}
-		}
 		struct CaptureKeyMeta {
 			uint64_t vs_hash;
 			uint64_t ps_hash;
