@@ -61,6 +61,8 @@ enum class Counter : uint32_t {
 	PrototypeDraws,       // draws through the per-vertex-prototype (unpack+capture+replay) path
 	PrototypeVertices,    // sum of vertex*instance counts of those draws
 	PrototypeRenderPasses, // BeginRendering calls forced by the prototype path specifically
+	PrototypeCaptureCacheHits, // of PrototypeDraws, how many reused a cached capture (skipped
+	                           // the compute unpack+capture stages entirely)
 	Count,
 };
 

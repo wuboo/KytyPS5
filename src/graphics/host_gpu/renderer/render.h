@@ -4,12 +4,14 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
+#include <memory>
 #include <optional>
 #include <span>
 #include <unordered_map>
@@ -257,6 +259,25 @@ private:
 	};
 	std::unordered_map<vk::DescriptorSetLayout, CachedDescriptorSet> m_last_descriptor_sets;
 	std::vector<uint8_t>                                             m_descriptor_key;
+
+	// Content-addressed cache of per-vertex-prototype capture output (see perVertexPrototypeDraw.inc,
+	// bench-notes.md 2026-09-27 "Kierunek B"). Keyed by a hash of {guest vertex-buffer address,
+	// VS hash, PS hash}; validated on lookup against a hash of the actual bytes/params that feed
+	// the capture compute stage, so a key collision or a reused address can only cause an
+	// unnecessary miss, never a false hit.
+	struct CachedPrototypeCapture {
+		uint64_t                 addr               = 0;
+		uint64_t                 vs_hash            = 0;
+		uint64_t                 ps_hash            = 0;
+		uint64_t                 content_hash       = 0;
+		uint64_t                 count64            = 0;
+		uint32_t                 record_stride_vec4 = 0;
+		uint64_t                 last_used_tick     = 0;
+		std::unique_ptr<Buffer>  captured;
+		vk::DescriptorPool       pool               = nullptr;
+		vk::DescriptorSet        extra_set          = nullptr;
+	};
+	std::unordered_map<uint64_t, CachedPrototypeCapture> m_prototype_capture_cache;
 
 	friend class CommandProcessor;
 	friend struct RenderExecutorTestAccess;

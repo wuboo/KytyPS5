@@ -57,6 +57,7 @@ constexpr const char* kCounterNames[] = {
     "prototype_draws",
     "prototype_vertices",
     "prototype_render_passes",
+    "prototype_capture_cache_hits",
 };
 static_assert(std::size(kCounterNames) == static_cast<size_t>(Counter::Count));
 
