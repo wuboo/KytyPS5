@@ -591,6 +591,30 @@ void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 	auto& scheduler = m_context.GetCommandScheduler();
 	scheduler.EndRendering();
 
+	// Pipeline lookup/creation happens for every item *before* BeginRendering below, exactly like
+	// the non-batched path (GetGraphicsPipeline is always called before AcquireRenderTargets/
+	// BeginRendering there too -- see the fallback path above). CreatePipelineInternal can record
+	// host-side setup for a pipeline shape not seen before (e.g. the RectList topology helper
+	// shaders); doing that while a dynamic-rendering region is active is not something either this
+	// path or the original one is meant to do, and on MoltenVK it is not guaranteed to just be
+	// rejected cleanly -- this is suspected to be exactly what produced bug #3 (a crash with no
+	// direct connection to this code, in a completely unrelated part of the emulator, consistent
+	// with state corruption from an encoder-level command sequencing violation rather than a plain
+	// out-of-bounds C++ write). Also fixes up `runtime` here, once each item's address in
+	// `batch.items` is final (see the note where items are appended) -- GetGraphicsPipeline reads
+	// `item.vs`, not the bindings, so this could as well happen in the second loop below, but
+	// keeping both fixups together in one place is less error-prone than splitting them.
+	std::vector<PipelineCache::Pipeline*> pipelines;
+	pipelines.reserve(batch.items.size());
+	for (auto& item: batch.items) {
+		item.vertex_bindings.runtime = &item.vs.stage;
+		item.pixel_bindings.runtime  = &batch.ps_input_info.stage;
+		pipelines.push_back(&m_context.GetPipelineCache().GetGraphicsPipeline(
+		    {batch.color_info.data(), batch.color_count}, batch.depth_info, {&item.vs, 1}, buffer,
+		    batch.ps_active ? &batch.ps_input_info : nullptr, batch.topology, false,
+		    batch.programs->graphics));
+	}
+
 	// See the design note where items are appended: bindings/feedback-loop detection depend on
 	// which resources are actually bound, which could in principle differ between items sharing
 	// the same {VS, PS, targets}; every item here shares the exact same compiled VS+PS program
@@ -606,19 +630,9 @@ void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 	                         feedback_aspects, first_stages);
 	FrameTiming::Add(FrameTiming::Counter::PrototypeRenderPasses);
 	scheduler.BeginRendering(rendering);
-	for (auto& item: batch.items) {
-		// See the design note where items are appended: `runtime` is fixed up here, once this
-		// item's address in `batch.items` is final, rather than at append time. CommitBindings()
-		// below only ever reads `runtime->program` (confirmed by reading its body), never
-		// `->resources`, so pointing it at copies this item/batch actually owns is sufficient:
-		// `item.vs.stage` for vertex, and the batch's own ps_input_info for pixel (every item here
-		// shares the same ps_hash, i.e. the same compiled program pointer, by construction).
-		item.vertex_bindings.runtime = &item.vs.stage;
-		item.pixel_bindings.runtime  = &batch.ps_input_info.stage;
-		auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
-		    {batch.color_info.data(), batch.color_count}, batch.depth_info, {&item.vs, 1}, buffer,
-		    batch.ps_active ? &batch.ps_input_info : nullptr, batch.topology, false,
-		    batch.programs->graphics);
+	for (size_t i = 0; i < batch.items.size(); ++i) {
+		auto&      item     = batch.items[i];
+		auto&      pipeline = *pipelines[i];
 		PreparedBindings* stages[] {&item.vertex_bindings, &item.pixel_bindings};
 		CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
 		auto cmd = buffer.Handle();
