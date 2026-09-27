@@ -47,6 +47,13 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		return;
 	}
 	const auto count     = static_cast<uint32_t>(count64);
+	// Diagnostic: this path costs orders of magnitude more per draw than a native vertex stage
+	// (a compute unpack + a compute capture + a graphics replay, each with its own barrier and,
+	// because Vulkan forbids vkCmdDispatch inside an active dynamic-rendering region, its own
+	// render-pass break). A scene with many objects going through it can spend most of a frame
+	// here; see bench-notes.md 2026-09-27 for a measured example.
+	FrameTiming::Add(FrameTiming::Counter::PrototypeDraws);
+	FrameTiming::Add(FrameTiming::Counter::PrototypeVertices, count64);
 	auto&      graphics  = m_context.GetGraphics();
 	auto&      scheduler = m_context.GetCommandScheduler();
 	auto&      cache     = m_context.GetBufferCache();
@@ -284,6 +291,10 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	SetGraphicsDynamicParams(buffer, cmd, vs, state.depth_info, rendering);
 	if (graphics.attachment_feedback_loop_enabled)
 		cmd.setAttachmentFeedbackLoopEnableEXT(feedback_aspects);
+	// Counts every attempt, not only ones that change CommandBuffer::m_render_state (the global
+	// RenderPasses counter only counts the latter); compare the two to see how often this forced
+	// break was actually redundant (same target as the previous draw).
+	FrameTiming::Add(FrameTiming::Counter::PrototypeRenderPasses);
 	scheduler.BeginRendering(rendering);
 	cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
 	KYTY_BENCH_TRACE_SITE();

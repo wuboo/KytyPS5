@@ -46,6 +46,17 @@ constexpr const char* kCounterNames[] = {
     "submits_wait_current",
     "cp_flushes",
     "slice_suspends",
+    "skipped_submits",
+    "descriptor_sets_identical",
+    "descriptor_sets_reused",
+    "resource_memo_hits",
+    "resource_memo_misses",
+    "compute_fills_replaced",
+    "dcc_known_from_fill",
+    "flushes_deferred",
+    "prototype_draws",
+    "prototype_vertices",
+    "prototype_render_passes",
 };
 static_assert(std::size(kCounterNames) == static_cast<size_t>(Counter::Count));
 

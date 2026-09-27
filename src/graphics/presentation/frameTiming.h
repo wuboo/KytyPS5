@@ -47,9 +47,20 @@ enum class Counter : uint32_t {
 	SubmitsFlush, // submits by path: CommandScheduler::Flush(SubmitInfo&)
 	SubmitsFlushAndWait,
 	SubmitsFinish,
-	SubmitsWaitCurrent, // Wait() on the tick being recorded (submits, then waits for it)
-	CpFlushes,          // CommandProcessor::BufferFlush (PM4 slices, ReleaseMem, ...)
-	SliceSuspends,      // PM4 submissions suspended on a wait and resumed later
+	SubmitsWaitCurrent,      // Wait() on the tick being recorded (submits, then waits for it)
+	CpFlushes,               // CommandProcessor::BufferFlush (PM4 slices, ReleaseMem, ...)
+	SliceSuspends,           // PM4 submissions suspended on a wait and resumed later
+	SkippedSubmits,          // empty submits skipped by the empty_submit optimization
+	DescriptorSetsIdentical, // descriptor sets identical to the previous one of the same layout
+	DescriptorSetsReused,    // ... reused instead of allocated and written
+	ResourceMemoHits,        // shader resource materializations skipped (inputs unchanged)
+	ResourceMemoMisses,
+	ComputeFillsReplaced, // uniform-fill dispatches with no image target replaced by a fill
+	DccKnownFromFill,     // DCC materializations that used a known fill instead of a readback
+	FlushesDeferred,      // command-processor flushes batched by lazy_flush
+	PrototypeDraws,       // draws through the per-vertex-prototype (unpack+capture+replay) path
+	PrototypeVertices,    // sum of vertex*instance counts of those draws
+	PrototypeRenderPasses, // BeginRendering calls forced by the prototype path specifically
 	Count,
 };
 
