@@ -1048,6 +1048,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
                                          bool                         primitive_restart_enable) {
+	if (BenchTrace::SkipDraw(state.vertex_info[0].stage.program->shader_hash,
+	                         state.ps_active ? state.ps_input_info.stage.program->shader_hash
+	                                         : 0)) {
+		return;
+	}
 	if (state.vertex_info[0].logical_stage == ShaderType::Vertex) {
 		if (const auto* prototype = GetPerVertexPrototypePrograms(
 		        m_context.GetGraphics(), state.programs, state.vertex_info[0],

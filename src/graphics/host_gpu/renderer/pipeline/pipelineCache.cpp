@@ -27,6 +27,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fmt/format.h>
 #include <limits>
@@ -101,9 +102,30 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 	                              address, values.data(), values.size_bytes());
 }
 
+// Bench diagnostic: KYTY_BENCH_DUMP_SHADER lists shader hashes (hex, comma separated) whose
+// original code, RDNA2 disassembly and SPIR-V are dumped even without the graphics debug dump.
+bool BenchDumpShader(uint64_t shader_hash) {
+	static const std::vector<uint64_t> hashes = [] {
+		std::vector<uint64_t> list;
+		if (const char* value = std::getenv("KYTY_BENCH_DUMP_SHADER"); value != nullptr) {
+			for (const char* p = value; *p != '\0';) {
+				char*      end  = nullptr;
+				const auto hash = std::strtoull(p, &end, 16);
+				if (end == p) {
+					break;
+				}
+				list.push_back(hash);
+				p = *end == ',' ? end + 1 : end;
+			}
+		}
+		return list;
+	}();
+	return std::ranges::find(hashes, shader_hash) != hashes.end();
+}
+
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
                      const std::vector<uint32_t>& spirv) {
-	if (!Config::GraphicsDebugDumpEnabled()) {
+	if (!Config::GraphicsDebugDumpEnabled() && !BenchDumpShader(shader_hash)) {
 		return;
 	}
 	static std::atomic_int id = 0;
@@ -121,7 +143,7 @@ void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
 
 void DumpShaderOriginal(const char* stage_name, uint64_t shader_hash,
                         std::span<const uint32_t> code, const std::string& decoded_dump) {
-	if (!Config::GraphicsDebugDumpEnabled()) {
+	if (!Config::GraphicsDebugDumpEnabled() && !BenchDumpShader(shader_hash)) {
 		return;
 	}
 	EXIT_IF(code.empty());
@@ -343,7 +365,8 @@ struct PipelineCache::ProgramCache {
 		options.shader_hash = params.hash;
 		options.user_data   = user_data;
 		options.back_code   = params.back_code;
-		options.dump_ir     = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
+		options.dump_ir     = Config::GetShaderLogDirection() != Config::LogDirection::Silent ||
+		                      BenchDumpShader(params.hash);
 		options.early_dump  = options.dump_ir;
 		options.dump_label  = label;
 		options.input_info  = stage_input;
