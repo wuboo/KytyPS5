@@ -33,7 +33,19 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	}
 
 	const uint64_t count64 = static_cast<uint64_t>(draw.index_count) * draw.instance_count;
-	EXIT_IF(count64 == 0 || count64 > 65535);
+	// The non-native capture dispatches one workgroup per vertex, bounded by the 65535-group
+	// dispatch limit; the native capture packs 64 vertices per group. Skip a draw past the limit
+	// instead of exiting (it renders nothing, the rest of the frame continues).
+	const uint64_t max_count = programs->native_capture ? (uint64_t {1} << 24u) : 65535u;
+	if (count64 == 0 || count64 > max_count) {
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+			LOGF("PerVertexPrototype: skipping draw with %llu vertices (limit %llu, native=%d)\n",
+			     static_cast<unsigned long long>(count64),
+			     static_cast<unsigned long long>(max_count), programs->native_capture ? 1 : 0);
+		}
+		return;
+	}
 	const auto count     = static_cast<uint32_t>(count64);
 	auto&      graphics  = m_context.GetGraphics();
 	auto&      scheduler = m_context.GetCommandScheduler();
