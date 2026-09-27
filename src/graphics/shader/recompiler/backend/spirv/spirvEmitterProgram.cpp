@@ -82,15 +82,6 @@ void StoreDispatcherPhiEdge(ValueEmitContext& ctx, const DispatcherFunctionState
 	}
 }
 
-// True for loop headers whose branch exits the loop on one side: those can be cut off by
-// forcing the exit once the iteration counter passes the limit.
-bool LoopHeaderHasDirectExit(const IR::BlockInfo& info) {
-	const auto& term = info.terminator;
-	return term.loop_header && term.kind == CFG::TerminatorKind::ConditionalBranch &&
-	       term.merge_block != UINT32_MAX &&
-	       (term.true_block == term.merge_block || term.false_block == term.merge_block);
-}
-
 // Wraps a loop header's branch condition so the loop exits after ShaderLoopLimit() iterations.
 uint32_t GuardLoopCondition(ValueEmitContext& ctx, const IR::BlockInfo& info, uint32_t condition) {
 	auto&      state = ctx.state;
@@ -98,11 +89,11 @@ uint32_t GuardLoopCondition(ValueEmitContext& ctx, const IR::BlockInfo& info, ui
 	if (found == state.loop_counter_variables.end()) {
 		return condition;
 	}
+	// Loop watchdog, part 2: an exit of the loop is forced once its iteration count (counted on
+	// the back edges) passes the limit.
 	const auto [variable, exit_block] = found->second;
 	const auto counter                = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpLoad, TypeU32(state), counter, variable);
-	const auto next = EmitBinaryU32(state, spv::OpIAdd, counter, ConstantU32(state, 1));
-	state.builder.AddFunction(spv::OpStore, variable, next);
 	const auto over = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpUGreaterThanEqual, TypeBool(state), over, counter,
 	                          ConstantU32(state, ShaderLoopLimit()));
@@ -386,9 +377,8 @@ void PatchStructuredPhis(ValueEmitContext& ctx, StructuredFunctionState& structu
 	}
 }
 
-// Loop watchdog on a back edge of any loop shape: count, and return from the function once the
-// count passes the limit. The latch block is split by a selection whose one side returns, so no
-// edge to the loop's merge block is added (its phis and dominance stay as they are).
+// Loop watchdog, part 1: every back edge (latch) of a loop counts one iteration. The exits of
+// the loop test the count (GuardLoopCondition), so only existing edges are ever taken.
 void EmitBackEdgeGuard(ValueEmitContext& ctx, const IR::BlockInfo& info) {
 	auto&      state = ctx.state;
 	const auto found = state.back_edge_counters.find(info.id);
@@ -399,16 +389,6 @@ void EmitBackEdgeGuard(ValueEmitContext& ctx, const IR::BlockInfo& info) {
 	state.builder.AddFunction(spv::OpLoad, TypeU32(state), counter, found->second);
 	const auto next = EmitBinaryU32(state, spv::OpIAdd, counter, ConstantU32(state, 1));
 	state.builder.AddFunction(spv::OpStore, found->second, next);
-	const auto over = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpUGreaterThanEqual, TypeBool(state), over, counter,
-	                          ConstantU32(state, ShaderLoopLimit()));
-	const auto stop_label = state.builder.AllocateId();
-	const auto cont_label = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpSelectionMerge, cont_label, spv::SelectionControlMaskNone);
-	state.builder.AddFunction(spv::OpBranchConditional, over, stop_label, cont_label);
-	EmitLabel(state, stop_label);
-	state.builder.AddFunction(spv::OpReturn);
-	EmitLabel(state, cont_label);
 }
 
 void EmitStructuredFunction(ValueEmitContext& ctx) {
@@ -831,21 +811,13 @@ void EmitProgram(EmitterState& state) {
 			                          variable, spv::StorageClassFunction, ConstantU32(state, 0));
 			return variable;
 		};
-		// Self loops (header == latch) keep the header guard: a header must hold its
-		// OpLoopMerge, so it cannot be split. Every other back edge gets EmitBackEdgeGuard.
+		// Latches (blocks with a back edge to an earlier loop header) count iterations; every
+		// conditional branch that leaves a loop to its merge block tests that loop's count.
 		std::unordered_map<uint32_t, size_t> order;
 		for (size_t index = 0; index < program.block_info.size(); index++) {
 			order.emplace(program.block_info[index].id, index);
 		}
-		std::unordered_map<uint32_t, uint32_t> loop_counters;
-		const auto                             counter_for = [&](uint32_t header) {
-			if (const auto it = loop_counters.find(header); it != loop_counters.end()) {
-				return it->second;
-			}
-			const auto variable = new_counter();
-			loop_counters.emplace(header, variable);
-			return variable;
-		};
+		std::unordered_map<uint32_t, uint32_t> loop_counters; // header id -> counter
 		for (size_t index = 0; index < program.block_info.size(); index++) {
 			const auto& info = program.block_info[index];
 			const auto& term = info.terminator;
@@ -855,15 +827,26 @@ void EmitProgram(EmitterState& state) {
 				    !program.block_info[found->second].terminator.loop_header) {
 					continue;
 				}
-				if (target == info.id) {
-					if (LoopHeaderHasDirectExit(info)) {
-						state.loop_counter_variables.emplace(
-						    info.id, std::pair {counter_for(info.id), term.merge_block});
-					}
-				} else if (!term.loop_header) {
-					state.back_edge_counters.emplace(info.id, counter_for(target));
+				auto counter = loop_counters.find(target);
+				if (counter == loop_counters.end()) {
+					counter = loop_counters.emplace(target, new_counter()).first;
 				}
+				state.back_edge_counters.emplace(info.id, counter->second);
 				break;
+			}
+		}
+		for (const auto& [header, counter]: loop_counters) {
+			const auto merge = program.block_info[order.at(header)].terminator.merge_block;
+			if (merge == UINT32_MAX) {
+				continue;
+			}
+			for (const auto& info: program.block_info) {
+				const auto& term = info.terminator;
+				if (term.kind == CFG::TerminatorKind::ConditionalBranch &&
+				    (term.true_block == merge) != (term.false_block == merge) &&
+				    !state.loop_counter_variables.contains(info.id)) {
+					state.loop_counter_variables.emplace(info.id, std::pair {counter, merge});
+				}
 			}
 		}
 	}
