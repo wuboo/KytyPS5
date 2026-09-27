@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 namespace {
@@ -611,6 +612,33 @@ void EmitBarrier(EmitterState& state) {
 	if (!tessellation && ShaderWorkgroupInput(state.program.stage, state.input_info) == nullptr) {
 		// Independent graphics invocations have no native workgroup left to synchronize.
 		return;
+	}
+	// A guest s_barrier runs for the whole wave whatever EXEC is, but EXEC/VCC branches become
+	// per-invocation branches here (one lane per invocation): a barrier under such a branch is
+	// not reached by every invocation and can hang the GPU. Log such shaders; the bench switch
+	// KYTY_BENCH_DROP_DIVERGENT_BARRIERS=1 leaves their barriers out (diagnosis only).
+	if (!tessellation && state.lane_count == 1) {
+		const bool divergent = std::ranges::any_of(state.program.block_info, [](const auto& info) {
+			switch (info.terminator.condition) {
+				case CFG::BranchCondition::VccZero:
+				case CFG::BranchCondition::VccNonZero:
+				case CFG::BranchCondition::ExecZero:
+				case CFG::BranchCondition::ExecNonZero: return true;
+				default: return false;
+			}
+		});
+		if (divergent) {
+			static std::atomic<uint32_t> logged {0};
+			if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+				LOGF("[bench-divergent-barrier] stage=%d blocks=%zu: barrier with per-invocation "
+				     "EXEC/VCC branches\n",
+				     static_cast<int>(state.program.stage), state.program.block_info.size());
+			}
+			static const bool drop = std::getenv("KYTY_BENCH_DROP_DIVERGENT_BARRIERS") != nullptr;
+			if (drop) {
+				return;
+			}
+		}
 	}
 	const auto memory_scope = tessellation ? spv::ScopeInvocation : spv::ScopeWorkgroup;
 	const auto semantics    = tessellation ? spv::MemorySemanticsMaskNone

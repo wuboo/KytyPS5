@@ -125,6 +125,8 @@ struct EmitterState {
 	// Loop watchdog: Function-storage u32 counter per structured loop header (by block id).
 	// Guarded block id -> {counter variable, the loop exit block its branch can take}.
 	std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> loop_counter_variables;
+	// Block id of a loop back edge (latch) -> counter variable of its loop.
+	std::unordered_map<uint32_t, uint32_t>           back_edge_counters;
 	uint32_t                                         per_vertex_variable                   = 0;
 	uint32_t                                         point_size_variable                   = 0;
 	uint32_t                                         clip_distance_variable                = 0;
@@ -328,6 +330,17 @@ uint32_t ConstantF32(EmitterState& state, uint32_t bits);
 uint32_t ConstantF32Value(EmitterState& state, float value);
 
 uint32_t ConstantBool(EmitterState& state, bool value);
+
+// Iteration cap for emitted loops (KYTY_SHADER_LOOP_LIMIT, default 1 << 16; 0 disables). A loop
+// that runs past it stops, so a shader fed bad data cannot hang the GPU.
+inline uint32_t ShaderLoopLimit() {
+	static const uint32_t limit = [] {
+		const char* value = std::getenv("KYTY_SHADER_LOOP_LIMIT");
+		return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10))
+		                        : (1u << 16u);
+	}();
+	return limit;
+}
 
 uint32_t ConstantU64(EmitterState& state, uint64_t value);
 
@@ -559,13 +572,28 @@ uint32_t AtomicUpdate(EmitterState& state, uint32_t pointer, IR::ResourceKind ki
 	EmitLabel(state, header);
 	state.builder.AddFunction(spv::OpPhi, TypeU32(state), observed, initial, preheader, exchanged,
 	                          cont);
+	// Loop watchdog: give up after ShaderLoopLimit() failed exchanges.
+	const auto iteration      = state.builder.AllocateId();
+	const auto next_iteration = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpPhi, TypeU32(state), iteration, ConstantU32(state, 0),
+	                          preheader, next_iteration, cont);
 	const auto next = desired(observed);
 	state.builder.AddFunction(spv::OpAtomicCompareExchange, TypeU32(state), exchanged, pointer,
 	                          ConstantU32(state, scope),
 	                          ConstantU32(state, spv::MemorySemanticsMaskNone),
 	                          ConstantU32(state, spv::MemorySemanticsMaskNone), next, observed);
-	const auto success = state.builder.AllocateId();
+	auto success = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpIEqual, TypeBool(state), success, exchanged, observed);
+	state.builder.AddFunction(spv::OpIAdd, TypeU32(state), next_iteration, iteration,
+	                          ConstantU32(state, 1));
+	if (ShaderLoopLimit() != 0) {
+		const auto over = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpUGreaterThanEqual, TypeBool(state), over, iteration,
+		                          ConstantU32(state, ShaderLoopLimit()));
+		const auto stop = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLogicalOr, TypeBool(state), stop, success, over);
+		success = stop;
+	}
 	state.builder.AddFunction(spv::OpLoopMerge, merge, cont, spv::LoopControlMaskNone);
 	state.builder.AddFunction(spv::OpBranchConditional, success, merge, cont);
 	EmitLabel(state, cont);
