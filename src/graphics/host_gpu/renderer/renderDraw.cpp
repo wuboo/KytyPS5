@@ -1132,6 +1132,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			return;
 		}
 	}
+	// This draw is not itself a (possibly batchable) per-vertex-prototype draw: flush any pending
+	// batch first, same reasoning as the PM4-interpreter-level flush in graphicsRun.cpp -- two
+	// consecutive IT_DRAW_INDEX_2 packets reach the same opcode check there, so only the check
+	// here (now that we know this one isn't prototype-eligible) can catch that case.
+	FlushPendingPrototypeBatch(buffer);
 	auto&      ucfg = buffer.GetUserConfig();
 	const auto vertex_stages =
 	    std::span {state.vertex_info.data(), state.programs.VertexStageCount()};

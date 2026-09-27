@@ -5,6 +5,8 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
+#include "graphics/host_gpu/renderer/colorRenderTarget.h"
+#include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
@@ -34,6 +36,7 @@ struct DrawCallInfo;
 struct DrawEmitInfo;
 struct DrawIndexBufferSource;
 struct DrawRenderState;
+struct PerVertexPrototypePrograms;
 class RenderContext;
 class CommandScheduler;
 struct RenderExecutorTestAccess;
@@ -189,6 +192,13 @@ public:
 	void DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer, uint64_t args_addr,
 	                      uint32_t mode);
 
+	// Replays and clears any per-vertex-prototype draws batched by
+	// ExecutePerVertexPrototype() (bench-notes.md 2026-09-27 "Kierunek A"). The PM4 interpreter
+	// calls this before every op it does not itself know to be a compatible batchable draw, so a
+	// pending batch is always flushed before anything else in the command stream can observe it;
+	// a no-op when nothing is pending.
+	void FlushPendingPrototypeBatch(CommandBuffer& buffer);
+
 	void PrepareBindings(const ShaderStageRuntime& runtime, PreparedBindings& prepared);
 	void FindBuffers(PreparedBindings& bindings);
 	void RebindBuffers(PreparedBindings& bindings);
@@ -278,6 +288,39 @@ private:
 		vk::DescriptorSet        extra_set          = nullptr;
 	};
 	std::unordered_map<uint64_t, CachedPrototypeCapture> m_prototype_capture_cache;
+
+	// Batching of consecutive per-vertex-prototype replay draws into one render pass (see
+	// perVertexPrototypeDraw.inc, bench-notes.md 2026-09-27 "Kierunek A"). A draw is appended here
+	// instead of replayed immediately when it matches `key` (below) exactly; FlushPendingBatch()
+	// -- called by the PM4 interpreter before anything that is not itself a matching draw --
+	// replays every pending item inside a single BeginRendering/EndRendering pair.
+	struct PendingPrototypeReplayItem {
+		vk::DescriptorSet      extra_set = nullptr;
+		uint32_t                count    = 0;
+		ShaderVertexInputInfo    vs;
+		PreparedBindings         vertex_bindings;
+		PreparedBindings         pixel_bindings;
+		// Only set when this item's capture output is not owned by m_prototype_capture_cache
+		// (cache disabled, or this VS has side-effecting writes): owns the buffer/pool until the
+		// batch flush records the replay draw, then is freed the same deferred way a non-batched
+		// draw would free them.
+		std::unique_ptr<Buffer> owned_captured;
+		vk::DescriptorPool      owned_pool = nullptr;
+	};
+	struct PendingPrototypeBatch {
+		bool                                       active      = false;
+		uint64_t                                   vs_hash     = 0;
+		uint64_t                                   ps_hash     = 0;
+		std::array<RenderColorInfo, RENDER_COLOR_ATTACHMENTS_MAX> color_info {};
+		uint32_t                                   color_count = 0;
+		RenderDepthInfo                            depth_info;
+		bool                                        ps_active   = false;
+		ShaderPixelInputInfo                        ps_input_info;
+		vk::PrimitiveTopology                       topology    = vk::PrimitiveTopology::eTriangleList;
+		const PerVertexPrototypePrograms*           programs    = nullptr;
+		std::vector<PendingPrototypeReplayItem>     items;
+	};
+	PendingPrototypeBatch m_prototype_batch;
 
 	friend class CommandProcessor;
 	friend struct RenderExecutorTestAccess;

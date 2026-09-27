@@ -75,9 +75,11 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	const bool         cache_eligible       = capture_cache_enabled && !capture_has_writes;
 	uint64_t            cache_key           = 0;
 	uint64_t            content_hash        = 0;
-	uint64_t            vs_hash_for_cache   = 0;
-	uint64_t            ps_hash_for_cache   = 0;
-	CachedPrototypeCapture* hit             = nullptr;
+	// Also used below by the batching key (Kierunek A), regardless of cache_eligible.
+	const uint64_t vs_hash_for_cache = vs.stage.program->shader_hash;
+	const uint64_t ps_hash_for_cache =
+	    state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0;
+	CachedPrototypeCapture* hit = nullptr;
 	if (cache_eligible) {
 		struct CaptureKeyMeta {
 			uint64_t vs_hash;
@@ -92,9 +94,6 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 			uint32_t first_instance;
 			uint32_t index_element_size;
 		};
-		vs_hash_for_cache = vs.stage.program->shader_hash;
-		ps_hash_for_cache =
-		    state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0;
 		const CaptureKeyMeta meta {vs_hash_for_cache,
 		                          ps_hash_for_cache,
 		                          input.stride,
@@ -408,7 +407,122 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	});
 	} // if (hit != nullptr) ... else
 
-	// Step 3: Graphics replay pass
+	static uint64_t draw_counter = 0;
+	draw_counter++;
+	LOGF("PerVertexPrototype: recorded draw submission=%llu vertices=%u instances=%u "
+	     "capture_bytes=%llu layout_stride=%u cache_hit=%d\n",
+	     static_cast<unsigned long long>(draw_counter), count, draw.instance_count,
+	     static_cast<unsigned long long>(captured_size_for_log),
+	     programs->layout.record_stride_vec4, hit != nullptr ? 1 : 0);
+
+	// `extra_set` is fully decided from here on (either from the cache, or freshly captured
+	// above); settle its ownership before choosing whether to replay now or batch it, so both
+	// paths below only ever read it.
+	const bool store_in_cache = hit == nullptr && cache_eligible;
+	if (store_in_cache) {
+		// Cache takes ownership of `captured`/`capture_pool`/`extra_set`. Whatever previously
+		// occupied this slot, and the globally least-recently-used entry when the cache is at
+		// capacity, are freed through the deferred-reclamation path (not immediately): an
+		// already-recorded, not-yet-completed command buffer from an earlier frame may still
+		// be reading them.
+		static constexpr size_t kPrototypeCaptureCacheCap = 4096;
+		auto&                   slot = m_prototype_capture_cache[cache_key];
+		if (slot.captured != nullptr) {
+			scheduler.DeferOperation([old_captured = std::move(slot.captured),
+			                          old_pool = slot.pool, dev = graphics.device]() mutable {
+				old_captured.reset();
+				dev.destroyDescriptorPool(old_pool);
+			});
+		} else if (m_prototype_capture_cache.size() > kPrototypeCaptureCacheCap) {
+			auto oldest = m_prototype_capture_cache.end();
+			for (auto it = m_prototype_capture_cache.begin();
+			     it != m_prototype_capture_cache.end(); ++it) {
+				if (it->first == cache_key) continue;
+				if (oldest == m_prototype_capture_cache.end() ||
+				    it->second.last_used_tick < oldest->second.last_used_tick) {
+					oldest = it;
+				}
+			}
+			if (oldest != m_prototype_capture_cache.end()) {
+				scheduler.DeferOperation([old_captured = std::move(oldest->second.captured),
+				                          old_pool = oldest->second.pool,
+				                          dev = graphics.device]() mutable {
+					old_captured.reset();
+					dev.destroyDescriptorPool(old_pool);
+				});
+				m_prototype_capture_cache.erase(oldest);
+			}
+		}
+		slot.addr               = input.addr;
+		slot.vs_hash            = vs_hash_for_cache;
+		slot.ps_hash            = ps_hash_for_cache;
+		slot.content_hash       = content_hash;
+		slot.count64            = count64;
+		slot.record_stride_vec4 = programs->layout.record_stride_vec4;
+		slot.last_used_tick     = scheduler.CurrentTick();
+		slot.captured           = std::move(captured);
+		slot.pool               = capture_pool;
+		slot.extra_set          = extra_set;
+	}
+
+	// ---- Batching of the replay draw (bench-notes.md 2026-09-27, "Kierunek A") ----
+	// Consecutive replay draws that share {VS, PS, render targets, topology} can share one
+	// BeginRendering/EndRendering pair instead of one each. Whether the *next* PM4 packet is a
+	// compatible draw is decided by the interpreter (graphicsRun.cpp) before it runs anything
+	// else, and by ExecutePreparedDraw() before it runs a non-matching draw -- both flush this
+	// batch first -- so a pending item here is never observed by anything else in the meantime.
+	static const bool batch_enabled = FrameTiming::OptEnabled("prototype_batch");
+	// Exact byte equality (not just image identity) of color/depth info: these also carry
+	// blend-bypass/depth-test/stencil state that feeds GetGraphicsPipeline per item below, and
+	// which the shared BeginRendering doesn't otherwise account for. Comparing every byte can
+	// only ever cause an unnecessary miss (from incidentally differing padding), never a false
+	// match, the same tradeoff PipelineStaticParameters::operator==() already makes elsewhere.
+	bool colors_match = batch_enabled && m_prototype_batch.active &&
+	                    m_prototype_batch.color_count == state.color_count;
+	for (uint32_t i = 0; colors_match && i < state.color_count; ++i) {
+		colors_match = std::memcmp(&m_prototype_batch.color_info[i], &state.color_info[i],
+		                           sizeof(RenderColorInfo)) == 0;
+	}
+	const bool batch_matches =
+	    colors_match && m_prototype_batch.vs_hash == vs_hash_for_cache &&
+	    m_prototype_batch.ps_hash == ps_hash_for_cache &&
+	    m_prototype_batch.ps_active == state.ps_active && m_prototype_batch.topology == topology &&
+	    m_prototype_batch.programs == programs &&
+	    std::memcmp(&m_prototype_batch.depth_info, &state.depth_info, sizeof(RenderDepthInfo)) == 0;
+	if (batch_enabled) {
+		if (m_prototype_batch.active && !batch_matches) {
+			FlushPendingPrototypeBatch(buffer);
+		}
+		if (!m_prototype_batch.active) {
+			m_prototype_batch.active      = true;
+			m_prototype_batch.vs_hash     = vs_hash_for_cache;
+			m_prototype_batch.ps_hash     = ps_hash_for_cache;
+			m_prototype_batch.color_count = state.color_count;
+			for (uint32_t i = 0; i < state.color_count; ++i) {
+				m_prototype_batch.color_info[i] = state.color_info[i];
+			}
+			m_prototype_batch.depth_info     = state.depth_info;
+			m_prototype_batch.ps_active      = state.ps_active;
+			m_prototype_batch.ps_input_info  = state.ps_input_info;
+			m_prototype_batch.topology       = topology;
+			m_prototype_batch.programs       = programs;
+		}
+		PendingPrototypeReplayItem item;
+		item.extra_set       = extra_set;
+		item.count           = count;
+		item.vs               = vs;
+		item.vertex_bindings  = std::move(vertex_bindings);
+		item.pixel_bindings   = std::move(pixel_bindings);
+		if (!store_in_cache && hit == nullptr) {
+			item.owned_captured = std::move(captured);
+			item.owned_pool     = capture_pool;
+		}
+		m_prototype_batch.items.push_back(std::move(item));
+		return;
+	}
+
+	// Batching disabled (or KYTY_OPT_OFF=prototype_batch): replay immediately, exactly as before
+	// this batching existed.
 	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
 	    {state.color_info, state.color_count}, state.depth_info, {state.vertex_info.data(), 1},
 	    buffer, &state.ps_input_info, topology, false, programs->graphics);
@@ -436,67 +550,77 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	if (HasShaderBufferWrites(state.ps_input_info.stage))
 		ShaderWriteBarrier(cmd, vk::PipelineStageFlagBits::eFragmentShader);
 
-	static uint64_t draw_counter = 0;
-	draw_counter++;
-	LOGF("PerVertexPrototype: recorded draw submission=%llu vertices=%u instances=%u "
-	     "capture_bytes=%llu layout_stride=%u cache_hit=%d\n",
-	     static_cast<unsigned long long>(draw_counter), count, draw.instance_count,
-	     static_cast<unsigned long long>(captured_size_for_log),
-	     programs->layout.record_stride_vec4, hit != nullptr ? 1 : 0);
+	if (!store_in_cache) {
+		// Diagnostic (capture has side-effecting writes) or `KYTY_OPT_OFF=capture_cache`:
+		// keep the original per-draw lifetime, same as before this cache existed.
+		scheduler.DeferOperation([cap = std::move(captured), cp = capture_pool,
+		                          dev = graphics.device]() mutable {
+			cap.reset();
+			dev.destroyDescriptorPool(cp);
+		});
+	}
+}
 
-	if (hit == nullptr) {
-		if (cache_eligible) {
-			// Cache takes ownership of `captured`/`capture_pool`/`extra_set`. Whatever previously
-			// occupied this slot, and the globally least-recently-used entry when the cache is at
-			// capacity, are freed through the deferred-reclamation path (not immediately): an
-			// already-recorded, not-yet-completed command buffer from an earlier frame may still
-			// be reading them.
-			static constexpr size_t kPrototypeCaptureCacheCap = 4096;
-			auto&                   slot = m_prototype_capture_cache[cache_key];
-			if (slot.captured != nullptr) {
-				scheduler.DeferOperation([old_captured = std::move(slot.captured),
-				                          old_pool = slot.pool, dev = graphics.device]() mutable {
-					old_captured.reset();
-					dev.destroyDescriptorPool(old_pool);
-				});
-			} else if (m_prototype_capture_cache.size() > kPrototypeCaptureCacheCap) {
-				auto oldest = m_prototype_capture_cache.end();
-				for (auto it = m_prototype_capture_cache.begin();
-				     it != m_prototype_capture_cache.end(); ++it) {
-					if (it->first == cache_key) continue;
-					if (oldest == m_prototype_capture_cache.end() ||
-					    it->second.last_used_tick < oldest->second.last_used_tick) {
-						oldest = it;
-					}
-				}
-				if (oldest != m_prototype_capture_cache.end()) {
-					scheduler.DeferOperation([old_captured = std::move(oldest->second.captured),
-					                          old_pool = oldest->second.pool,
-					                          dev = graphics.device]() mutable {
-						old_captured.reset();
-						dev.destroyDescriptorPool(old_pool);
-					});
-					m_prototype_capture_cache.erase(oldest);
-				}
-			}
-			slot.addr               = input.addr;
-			slot.vs_hash            = vs_hash_for_cache;
-			slot.ps_hash            = ps_hash_for_cache;
-			slot.content_hash       = content_hash;
-			slot.count64            = count64;
-			slot.record_stride_vec4 = programs->layout.record_stride_vec4;
-			slot.last_used_tick     = scheduler.CurrentTick();
-			slot.captured           = std::move(captured);
-			slot.pool               = capture_pool;
-			slot.extra_set          = extra_set;
-		} else {
-			// Diagnostic (capture has side-effecting writes) or `KYTY_OPT_OFF=capture_cache`:
-			// keep the original per-draw lifetime, same as before this cache existed.
-			scheduler.DeferOperation([cap = std::move(captured), cp = capture_pool,
+void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
+	if (!m_prototype_batch.active) {
+		return;
+	}
+	auto& batch = m_prototype_batch;
+	m_prototype_batch.active = false; // reentrancy guard: none of the calls below re-enter here
+	                                  // with `active` still true, but keep this false regardless
+	if (batch.items.empty()) {
+		batch.items.clear();
+		return;
+	}
+	auto& graphics  = m_context.GetGraphics();
+	auto& scheduler = m_context.GetCommandScheduler();
+	scheduler.EndRendering();
+
+	// See the design note where items are appended: bindings/feedback-loop detection depend on
+	// which resources are actually bound, which could in principle differ between items sharing
+	// the same {VS, PS, targets}; every item here shares the exact same compiled VS+PS program
+	// (same vs_hash+ps_hash), so its static resource-usage pattern -- and therefore whether it
+	// reads its own render target -- is the same for all of them. Acquiring once, from the first
+	// item, is exactly as correct as acquiring per item would be, and is what makes batching the
+	// render pass possible at all.
+	PreparedBindings*     first_stages[] {&batch.items[0].vertex_bindings,
+	                                     &batch.items[0].pixel_bindings};
+	vk::ImageAspectFlags feedback_aspects;
+	const auto           rendering =
+	    AcquireRenderTargets(buffer, batch.color_info.data(), batch.color_count, batch.depth_info,
+	                         feedback_aspects, first_stages);
+	FrameTiming::Add(FrameTiming::Counter::PrototypeRenderPasses);
+	scheduler.BeginRendering(rendering);
+	for (auto& item: batch.items) {
+		auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
+		    {batch.color_info.data(), batch.color_count}, batch.depth_info, {&item.vs, 1}, buffer,
+		    batch.ps_active ? &batch.ps_input_info : nullptr, batch.topology, false,
+		    batch.programs->graphics);
+		PreparedBindings* stages[] {&item.vertex_bindings, &item.pixel_bindings};
+		CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
+		auto cmd = buffer.Handle();
+		cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline.pipeline_layout, 1, 1,
+		                       &item.extra_set, 0, nullptr);
+		SetGraphicsDynamicParams(buffer, cmd, item.vs, batch.depth_info, rendering);
+		if (graphics.attachment_feedback_loop_enabled)
+			cmd.setAttachmentFeedbackLoopEnableEXT(feedback_aspects);
+		cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+		KYTY_BENCH_TRACE_SITE();
+		BenchTrace::Record(BenchTrace::Tick(), "proto-draw", batch.vs_hash, batch.ps_hash);
+		cmd.draw(item.count, 1, 0, 0);
+		if (batch.ps_active && HasShaderBufferWrites(batch.ps_input_info.stage))
+			ShaderWriteBarrier(cmd, vk::PipelineStageFlagBits::eFragmentShader);
+	}
+	scheduler.EndRendering();
+
+	for (auto& item: batch.items) {
+		if (item.owned_captured != nullptr) {
+			scheduler.DeferOperation([cap = std::move(item.owned_captured), cp = item.owned_pool,
 			                          dev = graphics.device]() mutable {
 				cap.reset();
 				dev.destroyDescriptorPool(cp);
 			});
 		}
 	}
+	batch.items.clear();
 }

@@ -835,10 +835,26 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			     total_dw - remaining_dw, packet_header);
 		}
 
+		if (opcode != Pm4::IT_DRAW_INDEX_2 && opcode != Pm4::IT_DISPATCH_DRAW_PREAMBLE &&
+		    opcode != Pm4::IT_DRAW_INDEX_AUTO) {
+			// Every op other than a (possibly per-vertex-prototype) draw must see this op's
+			// effects fully applied first: flush any prototype draws whose replay was deferred for
+			// batching (bench-notes.md 2026-09-27 "Kierunek A") before this op runs, so nothing
+			// else in the whole PM4 stream can ever observe a partially-applied batch. The other
+			// half of this decision -- whether a draw itself is batchable, and with what -- lives
+			// in RenderExecutor::ExecutePerVertexPrototype/FlushPendingPrototypeBatch.
+			m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
+		}
+
 		const auto packet_dw =
 		    handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
 		EXIT_IF(packet_dw > remaining_dw);
 		if (execution.m_suspended) {
+			// Defense in depth: the op above should already have been preceded by a flush (it is
+			// not a batchable draw opcode, or it *is* one and decided for itself whether to defer);
+			// flush again before giving up the command buffer across a suspend/resume boundary
+			// that may span an arbitrary amount of real time.
+			m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
 			return;
 		}
 		cursor.offset_dw += packet_dw;
@@ -853,6 +869,10 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			execution.m_next_buffer = {};
 		}
 	}
+	// End of this PM4 stream (buffer stack drained without a suspend): nothing can observe a
+	// pending batch until the next Process() call, but that may run on a different command buffer
+	// entirely, so it must not still be pending here.
+	m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
 }
 
 void CommandProcessor::SetIndexType(uint32_t index_type_and_size) {
