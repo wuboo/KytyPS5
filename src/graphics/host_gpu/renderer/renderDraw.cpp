@@ -49,6 +49,7 @@
 #include <span>
 #include <unordered_map>
 #include <vector>
+#include <xxhash.h>
 
 namespace Libs::Graphics {
 
