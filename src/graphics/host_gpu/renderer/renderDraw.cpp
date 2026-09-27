@@ -952,6 +952,12 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 	    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
 	    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info,
 	    single_sample);
+	if (!state.programs.vertex[0]) {
+		// PrepareDrawRenderState() checks this right after calling us and skips the draw; bail out
+		// here too since state.ps_input_info was left unpopulated (never got to the pixel-program
+		// step below) and is not safe to dereference.
+		return;
+	}
 	BenchTrace::SetCurrent("draw", state.vertex_info[0].stage.program->shader_hash,
 	                       state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0);
 }
@@ -961,6 +967,12 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
                                             DrawRenderState& state) {
 	state.ps_active = DrawHasActivePixelShader(buffer);
 	RefreshShaders(buffer, draw, state);
+	if (!state.programs.vertex[0]) {
+		// GetGraphicsPrograms() returns an empty GraphicsPrograms when it could not prepare the
+		// vertex stage (currently: a mesh-shader draw on a host without mesh shader support).
+		// Skip this draw the same way an empty render target does, below.
+		return false;
+	}
 	uint32_t mrt_mask = 0;
 	if (state.ps_active) {
 		for (const auto& output: state.ps_input_info.stage.program->info.outputs) {
