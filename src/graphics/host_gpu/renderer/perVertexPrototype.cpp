@@ -67,7 +67,8 @@ bool                                                                s_unpack_ini
 #include "graphics/host_gpu/renderer/perVertexTransform.h"
 
 bool PerVertexPrototypeEnabled() {
-	return std::getenv("KYTY_PER_VERTEX_PROTOTYPE") != nullptr;
+	const char* value = std::getenv("KYTY_PER_VERTEX_PROTOTYPE");
+	return value != nullptr && value[0] != '0';
 }
 
 bool HasPerVertexPrototypeInput(std::span<const uint32_t> words) {
