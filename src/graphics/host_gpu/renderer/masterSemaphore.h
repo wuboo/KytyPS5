@@ -5,6 +5,8 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <atomic>
+#include <stop_token>
+#include <thread>
 
 namespace Libs::Graphics {
 
@@ -36,6 +38,10 @@ private:
 	vk::Semaphore         m_semaphore = nullptr;
 	std::atomic<uint64_t> m_gpu_tick {0};
 	std::atomic<uint64_t> m_current_tick {1};
+	// Bench diagnostic: logs the operations of a tick the GPU has not finished for 5 s, even when
+	// the GPU thread itself is blocked (for example in vkQueueSubmit behind a hung queue).
+	std::jthread m_stall_watch;
+	void         StallWatch(std::stop_token stop);
 };
 
 } // namespace Libs::Graphics
