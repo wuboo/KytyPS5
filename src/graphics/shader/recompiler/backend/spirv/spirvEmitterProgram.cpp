@@ -82,17 +82,6 @@ void StoreDispatcherPhiEdge(ValueEmitContext& ctx, const DispatcherFunctionState
 	}
 }
 
-// Iteration cap for emitted loops (KYTY_SHADER_LOOP_LIMIT, default 1 << 16; 0 disables). A loop
-// that runs past it exits, so a shader fed bad data cannot hang the GPU.
-uint32_t ShaderLoopLimit() {
-	static const uint32_t limit = [] {
-		const char* value = std::getenv("KYTY_SHADER_LOOP_LIMIT");
-		return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10))
-		                        : (1u << 16u);
-	}();
-	return limit;
-}
-
 // True for loop headers whose branch exits the loop on one side: those can be cut off by
 // forcing the exit once the iteration counter passes the limit.
 bool LoopHeaderHasDirectExit(const IR::Block& block) {
@@ -373,6 +362,31 @@ void PatchStructuredPhis(ValueEmitContext& ctx, StructuredFunctionState& structu
 	}
 }
 
+// Loop watchdog on a back edge of any loop shape: count, and return from the function once the
+// count passes the limit. The latch block is split by a selection whose one side returns, so no
+// edge to the loop's merge block is added (its phis and dominance stay as they are).
+void EmitBackEdgeGuard(ValueEmitContext& ctx, const IR::Block& block) {
+	auto&      state = ctx.state;
+	const auto found = state.back_edge_counters.find(block.id);
+	if (found == state.back_edge_counters.end()) {
+		return;
+	}
+	const auto counter = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), counter, found->second);
+	const auto next = EmitBinaryU32(state, spv::OpIAdd, counter, ConstantU32(state, 1));
+	state.builder.AddFunction(spv::OpStore, found->second, next);
+	const auto over = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpUGreaterThanEqual, TypeBool(state), over, counter,
+	                          ConstantU32(state, ShaderLoopLimit()));
+	const auto stop_label = state.builder.AllocateId();
+	const auto cont_label = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpSelectionMerge, cont_label, spv::SelectionControlMaskNone);
+	state.builder.AddFunction(spv::OpBranchConditional, over, stop_label, cont_label);
+	EmitLabel(state, stop_label);
+	state.builder.AddFunction(spv::OpReturn);
+	EmitLabel(state, cont_label);
+}
+
 void EmitStructuredFunction(ValueEmitContext& ctx) {
 	const auto&             program = ctx.state.program;
 	StructuredFunctionState structured;
@@ -382,6 +396,7 @@ void EmitStructuredFunction(ValueEmitContext& ctx) {
 		EmitBlock(ctx, block, [&](ValueEmitContext& lane, const IR::Inst& inst) {
 			EmitStructuredInstruction(lane, structured, inst);
 		});
+		EmitBackEdgeGuard(ctx, *block);
 		structured.block_exit_labels.emplace(block, ctx.state.current_label);
 		EmitStructuredTerminator(ctx, block);
 	}
@@ -779,6 +794,7 @@ void EmitProgram(EmitterState& state) {
 		                          state.pixel_valid_mask_variable, spv::StorageClassFunction);
 	}
 	state.loop_counter_variables.clear();
+	state.back_edge_counters.clear();
 	if (ShaderLoopLimit() != 0 && !state.program.dispatcher_fallback) {
 		const auto new_counter = [&]() {
 			const auto variable = state.builder.AllocateId();
@@ -787,28 +803,39 @@ void EmitProgram(EmitterState& state) {
 			                          variable, spv::StorageClassFunction, ConstantU32(state, 0));
 			return variable;
 		};
-		for (const auto* block: program.blocks) {
-			const auto& term = block->terminator;
-			if (LoopHeaderHasDirectExit(*block)) {
-				state.loop_counter_variables.emplace(
-				    block->id, std::pair {new_counter(), term.merge_block->id});
-				continue;
+		// Self loops (header == latch) keep the header guard: a header must hold its
+		// OpLoopMerge, so it cannot be split. Every other back edge gets EmitBackEdgeGuard.
+		std::unordered_map<const IR::Block*, size_t> order;
+		for (size_t index = 0; index < program.blocks.size(); index++) {
+			order.emplace(program.blocks[index], index);
+		}
+		std::unordered_map<const IR::Block*, uint32_t> loop_counters;
+		const auto                                     counter_for = [&](const IR::Block* header) {
+			if (const auto it = loop_counters.find(header); it != loop_counters.end()) {
+				return it->second;
 			}
-			if (!term.loop_header || term.merge_block == nullptr) {
-				continue;
-			}
-			// do-while shape: the header does not exit; guard the latch, a conditional branch
-			// back to the header whose other target is the loop's merge block.
-			for (const auto* latch: program.blocks) {
-				const auto& lt = latch->terminator;
-				if (lt.kind == CFG::TerminatorKind::ConditionalBranch &&
-				    ((lt.true_block == block && lt.false_block == term.merge_block) ||
-				     (lt.false_block == block && lt.true_block == term.merge_block)) &&
-				    !state.loop_counter_variables.contains(latch->id)) {
-					state.loop_counter_variables.emplace(
-					    latch->id, std::pair {new_counter(), term.merge_block->id});
-					break;
+			const auto variable = new_counter();
+			loop_counters.emplace(header, variable);
+			return variable;
+		};
+		for (size_t index = 0; index < program.blocks.size(); index++) {
+			const auto* block = program.blocks[index];
+			const auto& term  = block->terminator;
+			for (const auto* target: {term.true_block, term.false_block}) {
+				const auto found = order.find(target);
+				if (target == nullptr || found == order.end() || found->second > index ||
+				    !program.blocks[found->second]->terminator.loop_header) {
+					continue;
 				}
+				if (target == block) {
+					if (LoopHeaderHasDirectExit(*block)) {
+						state.loop_counter_variables.emplace(
+						    block->id, std::pair {counter_for(block), term.merge_block->id});
+					}
+				} else if (!term.loop_header) {
+					state.back_edge_counters.emplace(block->id, counter_for(target));
+				}
+				break;
 			}
 		}
 	}
