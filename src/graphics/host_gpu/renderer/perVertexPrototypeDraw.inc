@@ -275,6 +275,8 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	scheduler.BeginRendering(rendering);
 	cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
 	KYTY_BENCH_TRACE_SITE();
+	BenchTrace::Record(BenchTrace::Tick(), "proto-draw", vs.stage.program->shader_hash,
+	                   state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0);
 	cmd.draw(count, 1, 0, 0);
 	scheduler.EndRendering();
 	if (HasShaderBufferWrites(state.ps_input_info.stage))
