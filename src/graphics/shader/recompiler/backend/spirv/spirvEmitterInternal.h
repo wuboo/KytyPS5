@@ -334,12 +334,9 @@ uint32_t ConstantBool(EmitterState& state, bool value);
 // Iteration cap for emitted loops (KYTY_SHADER_LOOP_LIMIT, default 1 << 16; 0 disables). A loop
 // that runs past it stops, so a shader fed bad data cannot hang the GPU.
 inline uint32_t ShaderLoopLimit() {
-	static const uint32_t limit = [] {
-		const char* value = std::getenv("KYTY_SHADER_LOOP_LIMIT");
-		return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10))
-		                        : (1u << 16u);
-	}();
-	return limit;
+	// Read per shader compile (cheap), so tests can switch it.
+	const char* value = std::getenv("KYTY_SHADER_LOOP_LIMIT");
+	return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : (1u << 16u);
 }
 
 uint32_t ConstantU64(EmitterState& state, uint64_t value);

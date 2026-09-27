@@ -13670,16 +13670,14 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
       EncodeSopp(0x02, 0xfffeu), // B -> C
       EncodeSopp(0x01),
   };
-  // The dispatcher loop carries an iteration counter (loop watchdog): one more phi and a few
-  // words compared to the bare goto loop.
   const auto dispatcher_result = compile("dispatcher", dispatcher,
-                                         {.words = 252,
-                                          .instructions = 71,
+                                         {.words = 242,
+                                          .instructions = 67,
                                           .variables = 3,
                                           .function_variables = 3,
                                           .loads = 3,
                                           .stores = 6,
-                                          .phis = 3,
+                                          .phis = 2,
                                           .labels = 13,
                                           .loop_merges = 1,
                                           .selection_merges = 1,
@@ -13688,10 +13686,27 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
                                           .switches = 1});
   Check(dispatcher_result.program.dispatcher_fallback &&
             (dispatcher_result.ir_dump.find("Phi") != std::string::npos) &&
-            SpirvInstructionOpcodeCount(dispatcher_result.spirv, 245u) == 3u &&
+            SpirvInstructionOpcodeCount(dispatcher_result.spirv, 245u) == 2u &&
             SpirvInstructionOpcodeCount(dispatcher_result.spirv, 251u) == 1u,
         "dispatcher size fixture lost its two control Phis or switch");
   CheckSpirvPhiParents(dispatcher_result.spirv);
+
+  // The size baselines above run with the loop watchdog off (see main). With it
+  // on, the guarded structured and dispatcher loops must still validate and
+  // carry their counters.
+  setenv("KYTY_SHADER_LOOP_LIMIT", "65536", 1);
+  {
+    auto options = MakeCompileOptions(ShaderType::Compute);
+    const auto guarded_structured = RecompileForTest(structured_phi, options);
+    CheckSpirvBinaryValidates(guarded_structured.spirv);
+    Check(MeasureSpirv(guarded_structured.spirv).function_variables >= 1u,
+          "loop watchdog added no counter to a structured loop");
+    const auto guarded_dispatcher = RecompileForTest(dispatcher, options);
+    CheckSpirvBinaryValidates(guarded_dispatcher.spirv);
+    Check(SpirvInstructionOpcodeCount(guarded_dispatcher.spirv, 245u) == 3u,
+          "loop watchdog did not count the dispatcher loop");
+  }
+  setenv("KYTY_SHADER_LOOP_LIMIT", "0", 1);
 }
 
 #include "ShaderRayTracingTests.inc"
@@ -13837,6 +13852,10 @@ void TestCoupledVertexAliasOutput() {
 int main(int argc, char** argv) {
   using namespace Libs::Graphics;
 
+  // Size baselines count every emitted instruction; they are measured without
+  // the loop watchdog, which TestNewShaderRecompilerSpirvSizeBaselines checks
+  // separately.
+  setenv("KYTY_SHADER_LOOP_LIMIT", "0", 1);
   EnsureConfigInitialized();
   if (argc == 2 && std::string_view(argv[1]) == "--per-vertex") {
     TestPerVertexPrototypeDetection();
