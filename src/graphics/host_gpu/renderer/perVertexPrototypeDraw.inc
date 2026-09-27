@@ -506,6 +506,18 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 			m_prototype_batch.ps_input_info  = state.ps_input_info;
 			m_prototype_batch.topology       = topology;
 			m_prototype_batch.programs       = programs;
+			m_prototype_batch.command_buffer_at_start = buffer.Handle();
+		} else if (m_prototype_batch.command_buffer_at_start != buffer.Handle()) {
+			// Diagnostic (bug #4 hunt): an implicit submit happened between this batch's first
+			// item and this one, without ever going through a flush hook.
+			static std::atomic<uint32_t> logged {0};
+			if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+				LOGF("[bench] prototype_batch: command buffer changed mid-batch (was %p, now %p), "
+				     "items=%zu\n",
+				     static_cast<void*>(static_cast<VkCommandBuffer>(m_prototype_batch.command_buffer_at_start)),
+				     static_cast<void*>(static_cast<VkCommandBuffer>(buffer.Handle())),
+				     m_prototype_batch.items.size());
+			}
 		}
 		PendingPrototypeReplayItem item;
 		item.extra_set       = extra_set;
@@ -586,6 +598,21 @@ void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 	if (batch.items.empty()) {
 		batch.items.clear();
 		return;
+	}
+	// Diagnostic (bug #4 hunt, 2026-09-28): confirm/deny whether an implicit submit -- one not
+	// tied to any PM4 opcode our flush hooks intercept -- happened between this batch's first
+	// item's capture and this flush. If so, that item's capture_barrier is recorded into an
+	// already-submitted, separate command buffer and does not protect this flush's replay draw.
+	if (batch.command_buffer_at_start != buffer.Handle()) {
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+			LOGF("[bench] prototype_batch: FLUSHING INTO A DIFFERENT COMMAND BUFFER than this "
+			     "batch started in (was %p, now %p), items=%zu -- capture barrier for at least "
+			     "the first item is not in this command buffer\n",
+			     static_cast<void*>(static_cast<VkCommandBuffer>(batch.command_buffer_at_start)),
+			     static_cast<void*>(static_cast<VkCommandBuffer>(buffer.Handle())),
+			     batch.items.size());
+		}
 	}
 	auto& graphics  = m_context.GetGraphics();
 	auto& scheduler = m_context.GetCommandScheduler();

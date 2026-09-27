@@ -319,6 +319,13 @@ private:
 		vk::PrimitiveTopology                       topology    = vk::PrimitiveTopology::eTriangleList;
 		const PerVertexPrototypePrograms*           programs    = nullptr;
 		std::vector<PendingPrototypeReplayItem>     items;
+		// Diagnostic (bug #4 hunt, 2026-09-28): the vk::CommandBuffer in use when this batch
+		// started. If a submit happens between an item's capture and the batch's eventual flush --
+		// e.g. triggered internally by some unrelated operation's own buffer-capacity management,
+		// not tied to any PM4 opcode our flush hooks intercept -- the capture's barrier is stuck in
+		// an already-submitted, separate command buffer and does not protect a replay draw recorded
+		// into a new one. See FlushPendingPrototypeBatch().
+		vk::CommandBuffer command_buffer_at_start = nullptr;
 	};
 	PendingPrototypeBatch m_prototype_batch;
 
