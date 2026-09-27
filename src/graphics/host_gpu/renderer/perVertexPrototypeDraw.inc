@@ -72,33 +72,23 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	// side-effecting buffer writes are excluded: skipping those would silently drop the write,
 	// not just the geometry output.
 	static const bool capture_cache_enabled = FrameTiming::OptEnabled("capture_cache");
-	// CORRECTNESS FIX (2026-09-28, found via the diagnostic below): the capture is only a pure
-	// function of {vertex bytes, index bytes, a few draw/emit params} -- what the cache key hashes
-	// -- if the captured VS reads NOTHING ELSE. It runs as compute with its full original resource
-	// bindings (PrepareBindings(vs.stage, ...) below covers general buffers/images/samplers, not
-	// just the vertex-fetch buffer decoded via vs.resources[]/vs.buffers[0]); if it declares any
-	// such resource (e.g. a per-object transform matrix in a uniform buffer), two objects with
-	// identical vertex bytes but a different bound resource could silently share a captured result
-	// that is only correct for one of them -- confirmed to actually happen in this game (a real VS
-	// hash logged with buffers=4). Exclude any shader with such resources from caching entirely
-	// rather than try to guess or hash which ones are actually safe to ignore.
-	const bool capture_has_external_resources =
+	// CORRECTNESS FIX (2026-09-28, found via a since-removed diagnostic): the capture is only a
+	// pure function of {vertex bytes, index bytes, a few draw/emit params} -- what the cache key
+	// hashed -- if the captured VS reads NOTHING ELSE. It runs as compute with its full original
+	// resource bindings (PrepareBindings(vs.stage, ...) below covers general buffers/images/
+	// samplers, not just the vertex-fetch buffer decoded via vs.resources[]/vs.buffers[0]); if it
+	// declares any such resource (e.g. a per-object transform matrix in a uniform buffer) whose
+	// content isn't hashed too, two objects with identical vertex bytes but a different bound
+	// resource could silently share a captured result that is only correct for one of them --
+	// confirmed to actually happen in this game (a real VS hash logged with buffers=4). General
+	// buffers are handled below (their bound bytes are hashed the same way the vertex buffer's
+	// are); images/samplers are not (no simple byte range to hash), so a VS using either is still
+	// excluded from caching entirely rather than guessed at.
+	const bool capture_has_uncoverable_resources =
 	    vs.stage.program != nullptr &&
-	    (!vs.stage.program->info.buffers.empty() || !vs.stage.program->info.images.empty() ||
-	     !vs.stage.program->info.samplers.empty());
-	if (capture_has_external_resources) {
-		static std::atomic<uint32_t> logged {0};
-		if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
-			const auto& sinfo = vs.stage.program->info;
-			LOGF("[bench] capture_cache: VS hash=0x%016llx declares external resources "
-			     "(buffers=%zu images=%zu samplers=%zu) not covered by the cache key -- excluded "
-			     "from caching\n",
-			     static_cast<unsigned long long>(vs.stage.program->shader_hash),
-			     sinfo.buffers.size(), sinfo.images.size(), sinfo.samplers.size());
-		}
-	}
+	    (!vs.stage.program->info.images.empty() || !vs.stage.program->info.samplers.empty());
 	const bool cache_eligible =
-	    capture_cache_enabled && !capture_has_writes && !capture_has_external_resources;
+	    capture_cache_enabled && !capture_has_writes && !capture_has_uncoverable_resources;
 	uint64_t            cache_key           = 0;
 	uint64_t            content_hash        = 0;
 	// Also used below by the batching key (Kierunek A), regardless of cache_eligible.
@@ -142,7 +132,38 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 			                            : reinterpret_cast<const void*>(index_source.address);
 			index_hash = XXH3_64bits(idx_bytes, index_source.size);
 		}
-		const std::array<uint64_t, 4> parts {meta_hash, attrs_hash, vertex_hash, index_hash};
+		// Hash the actual bound bytes of every general buffer resource the VS declares (e.g. a
+		// per-object transform matrix), the same way the vertex buffer's bytes are hashed above --
+		// see the correctness-fix note where cache_eligible is computed. Same decode as
+		// FindBuffers() (descriptors.cpp): a buffer resource pointing below the first page, or with
+		// a zero size, is degenerate/unbound and contributes nothing (matches FindBuffers treating
+		// it as an empty BufferSource).
+		uint64_t buffers_hash = 0;
+		if (!vs.stage.program->info.buffers.empty()) {
+			EXIT_IF(vs.stage.resources == nullptr);
+			const auto& snapshot     = *vs.stage.resources;
+			const auto& buffer_infos = vs.stage.program->info.buffers;
+			// Sized to the actual declared count, not ShaderInfo::MaxBuffers: that constant is a
+			// design intent, not a bound this vector's producer is verified to enforce.
+			std::vector<uint64_t> per_buffer_hashes(buffer_infos.size(), 0);
+			for (size_t i = 0; i < buffer_infos.size(); ++i) {
+				const auto descriptor =
+				    DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[i]);
+				const auto address        = descriptor.Base48();
+				const auto requested_size = descriptor.GetSize();
+				if (address < BufferCache::CACHING_PAGESIZE || requested_size == 0) {
+					continue;
+				}
+				const auto size = Libs::LibKernel::Memory::ClampRangeSize(address, requested_size);
+				const std::array<uint64_t, 2> src {
+				    address, XXH3_64bits(reinterpret_cast<const void*>(address), size)};
+				per_buffer_hashes[i] = XXH3_64bits(src.data(), src.size() * sizeof(uint64_t));
+			}
+			buffers_hash =
+			    XXH3_64bits(per_buffer_hashes.data(), buffer_infos.size() * sizeof(uint64_t));
+		}
+		const std::array<uint64_t, 5> parts {meta_hash, attrs_hash, vertex_hash, index_hash,
+		                                     buffers_hash};
 		content_hash = XXH3_64bits(parts.data(), parts.size() * sizeof(uint64_t));
 		const std::array<uint64_t, 3> key_parts {input.addr, vs_hash_for_cache, ps_hash_for_cache};
 		cache_key = XXH3_64bits(key_parts.data(), key_parts.size() * sizeof(uint64_t));
