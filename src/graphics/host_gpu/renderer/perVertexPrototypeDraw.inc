@@ -162,20 +162,6 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 			buffers_hash =
 			    XXH3_64bits(per_buffer_hashes.data(), buffer_infos.size() * sizeof(uint64_t));
 		}
-		// TEMP DIAGNOSTIC (2026-09-28): confirm whether buffers_hash genuinely varies draw to draw
-		// for the same object (real animation -- 0% hit rate would then be correct, not a bug) or
-		// is suspiciously unstable in some other way.
-		{
-			static std::atomic<uint32_t> logged {0};
-			if (logged.fetch_add(1, std::memory_order_relaxed) < 200) {
-				LOGF("[bench] capture_cache: addr=0x%016llx vertex_hash=0x%016llx "
-				     "buffers_hash=0x%016llx count64=%llu\n",
-				     static_cast<unsigned long long>(input.addr),
-				     static_cast<unsigned long long>(vertex_hash),
-				     static_cast<unsigned long long>(buffers_hash),
-				     static_cast<unsigned long long>(count64));
-			}
-		}
 		const std::array<uint64_t, 5> parts {meta_hash, attrs_hash, vertex_hash, index_hash,
 		                                     buffers_hash};
 		content_hash = XXH3_64bits(parts.data(), parts.size() * sizeof(uint64_t));
