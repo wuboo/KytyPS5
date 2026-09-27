@@ -513,6 +513,17 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		item.vs               = vs;
 		item.vertex_bindings  = std::move(vertex_bindings);
 		item.pixel_bindings   = std::move(pixel_bindings);
+		// `PreparedBindings::runtime` is a raw pointer that PrepareBindings() above set into
+		// `vs.stage`/`state.ps_input_info.stage` -- both part of the caller's stack-local
+		// DrawRenderState, gone as soon as that caller (DrawIndex/DrawAuto) returns, which happens
+		// right after this draw does. CommitBindings() at flush time only ever reads
+		// `runtime->program` (never `->resources`; confirmed by reading its body), so repointing
+		// these at copies this item/batch actually owns is enough to make them safe to use later:
+		// `item.vs.stage` for vertex (freshly copied above), and the batch's own ps_input_info for
+		// pixel (every item here was checked to share the same ps_hash, i.e. the same compiled
+		// program pointer, when it was allowed to join this batch).
+		item.vertex_bindings.runtime = &item.vs.stage;
+		item.pixel_bindings.runtime  = &m_prototype_batch.ps_input_info.stage;
 		if (!store_in_cache && hit == nullptr) {
 			item.owned_captured = std::move(captured);
 			item.owned_pool     = capture_pool;
