@@ -691,8 +691,18 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		                                                       target.info.channel_type)
 		                         .buffer_format != Prospero::BufferFormat::k32UInt);
 	}
+	if (mesh_active && !m_graphics.mesh_shader_enabled) {
+		// Bench bring-up: this host's Vulkan driver does not expose VK_EXT_mesh_shader (MoltenVK
+		// on this Mac reports no mesh shader support). Skip whatever needs it instead of aborting
+		// the whole process -- PrepareDrawRenderState() treats an empty GraphicsPrograms as "skip
+		// this draw", so the rest of the frame/scene keeps rendering.
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+			LOGF("PipelineCache: skipping mesh-shader draw, host has no mesh shader support\n");
+		}
+		return {};
+	}
 	if (mesh_active) {
-		EXIT_NOT_IMPLEMENTED(!m_graphics.mesh_shader_enabled);
 		auto& mesh              = vertex_info[0].mesh;
 		mesh.host_subgroup_size = m_graphics.subgroup_size;
 		const auto& limits      = m_graphics.mesh_shader_properties;
