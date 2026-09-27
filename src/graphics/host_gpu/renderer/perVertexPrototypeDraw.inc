@@ -81,6 +81,25 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	    state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0;
 	CachedPrototypeCapture* hit = nullptr;
 	if (cache_eligible) {
+		// URGENT CORRECTNESS CHECK (2026-09-28): does the captured VS declare general resources
+		// (uniform/constant buffers, images, samplers) beyond the raw vertex-fetch buffer? If so,
+		// and if any of them carries per-object data (e.g. a transform matrix) that the cache key
+		// below does not hash, two objects sharing the same {addr, vs_hash, ps_hash} and identical
+		// vertex bytes but a DIFFERENT bound resource (different transform) would silently share a
+		// captured result that is only correct for one of them.
+		if (vs.stage.program != nullptr) {
+			const auto& sinfo = vs.stage.program->info;
+			if (!sinfo.buffers.empty() || !sinfo.images.empty() || !sinfo.samplers.empty()) {
+				static std::atomic<uint32_t> logged {0};
+				if (logged.fetch_add(1, std::memory_order_relaxed) < 32) {
+					LOGF("[bench] capture_cache: CAPTURED VS hash=0x%016llx DECLARES EXTERNAL "
+					     "RESOURCES not covered by the cache key: buffers=%zu images=%zu "
+					     "samplers=%zu\n",
+					     static_cast<unsigned long long>(vs_hash_for_cache), sinfo.buffers.size(),
+					     sinfo.images.size(), sinfo.samplers.size());
+				}
+			}
+		}
 		struct CaptureKeyMeta {
 			uint64_t vs_hash;
 			uint64_t ps_hash;
