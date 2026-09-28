@@ -177,6 +177,10 @@ struct BufferAttributeGroup {
 
 struct VideoOutConfig {
 	Common::Mutex                       mutex;
+	// Guards what status queries read (flip_status, output_mode, size). `mutex` is held across a
+	// whole present, so queries that took it stalled the game's main loop for the length of the
+	// present; status_mutex is always taken last and held only for the copy.
+	Common::Mutex                       status_mutex;
 	Common::CondVar                     vblank_cond;
 	std::shared_ptr<VideoOutEventState> events      = std::make_shared<VideoOutEventState>();
 	uint32_t                            width       = 0;
@@ -624,6 +628,7 @@ VideoOutDriver::Impl::~Impl() {
 
 void VideoOutDriver::Impl::Init(uint32_t width, uint32_t height) {
 	for (auto& ctx: m_video_out_ctx) {
+		Common::LockGuard status_lock(ctx.status_mutex);
 		ctx.width  = width;
 		ctx.height = height;
 	}
@@ -664,11 +669,14 @@ int VideoOutDriver::Impl::Open(int bus_type, int index) {
 	if (++config.generation == 0) {
 		EXIT("video-out port generation wrapped\n");
 	}
-	config.output_mode               = VIDEO_OUT_OUTPUT_MODE_DEFAULT;
-	config.flip_status               = VideoOutFlipStatus();
-	config.flip_status.flipArg       = -1;
-	config.flip_status.currentBuffer = -1;
-	config.flip_status.count         = 0;
+	{
+		Common::LockGuard status_lock(config.status_mutex);
+		config.output_mode               = VIDEO_OUT_OUTPUT_MODE_DEFAULT;
+		config.flip_status               = VideoOutFlipStatus();
+		config.flip_status.flipArg       = -1;
+		config.flip_status.currentBuffer = -1;
+		config.flip_status.count         = 0;
+	}
 	config.pre_vblank_status         = VideoOutVblankStatus();
 	config.vblank_status             = VideoOutVblankStatus();
 
@@ -896,6 +904,7 @@ bool FlipQueue::Reserve(VideoOutConfig& cfg, int index, int64_t flip_arg, FlipRe
 	pending.push_back(r);
 	request_id = r.id;
 
+	Common::LockGuard status_lock(cfg.status_mutex);
 	cfg.flip_status.flipPendingNum = static_cast<int>(m_requests.size() + m_cpu_requests.size());
 	cfg.flip_status.submitProcessTimeCounter = r.submit_ptc;
 	if (source == FlipRequestSource::GpuEop) {
@@ -949,6 +958,7 @@ void FlipQueue::Cancel(VideoOutConfig& cfg) {
 		m_presenter.Discard(*frame);
 	}
 	Common::LockGuard lock(cfg.mutex);
+	Common::LockGuard status_lock(cfg.status_mutex);
 	cfg.flip_status.flipPendingNum = 0;
 	cfg.flip_status.gcQueueNum     = 0;
 }
@@ -1155,6 +1165,7 @@ bool FlipQueue::Flip(uint32_t micros) {
 	}
 	m_requests.pop_front();
 
+	r.cfg->status_mutex.Lock();
 	r.cfg->flip_status.count++;
 	Graphics::FrameTiming::OnGuestFlip();
 	r.cfg->flip_status.processTime              = LibKernel::KernelGetProcessTime();
@@ -1166,6 +1177,7 @@ bool FlipQueue::Flip(uint32_t micros) {
 	if (r.source == FlipRequestSource::GpuEop && r.cfg->flip_status.gcQueueNum > 0) {
 		r.cfg->flip_status.gcQueueNum--;
 	}
+	r.cfg->status_mutex.Unlock();
 	TriggerVideoOutEvents(*r.cfg, VideoOutEventKind::Flip, reinterpret_cast<void*>(r.flip_arg));
 
 	m_processing = false;
@@ -1185,7 +1197,7 @@ bool FlipQueue::Flip(uint32_t micros) {
 }
 
 void FlipQueue::GetFlipStatus(VideoOutConfig& cfg, VideoOutFlipStatus& out) {
-	Common::LockGuard lock(cfg.mutex);
+	Common::LockGuard lock(cfg.status_mutex);
 
 	out = cfg.flip_status;
 }
@@ -1676,7 +1688,7 @@ KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* stat
 
 	int32_t attribute3 = 0;
 	Loader::SystemContentParamSfoGetInt("ATTRIBUTE3", &attribute3);
-	ctx->mutex.Lock();
+	ctx->status_mutex.Lock();
 	// Primary output reports 4K unless param.json Video-out Info enables resolution detection.
 	status->resolution =
 	    ((attribute3 & 4) != 0 && ctx->width < 3840 && ctx->height < 2160 ? 1u : 2u);
@@ -1689,7 +1701,7 @@ KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* stat
 	status->reserved[0] = 0;
 	status->reserved[1] = 0;
 	status->reserved[2] = 0;
-	ctx->mutex.Unlock();
+	ctx->status_mutex.Unlock();
 
 	return OK;
 }
@@ -1771,7 +1783,9 @@ KYTY_SYSV_ABI int VideoOutConfigureOutput(int handle, uint64_t mode,
 	}
 
 	ctx->mutex.Lock();
+	ctx->status_mutex.Lock();
 	ctx->output_mode = mode;
+	ctx->status_mutex.Unlock();
 	TriggerVideoOutEvents(*ctx, VideoOutEventKind::OutputMode,
 	                      reinterpret_cast<void*>(ctx->output_mode));
 	ctx->mutex.Unlock();
