@@ -71,6 +71,20 @@ struct DrawIndexArgs {
 	uint32_t         render_target_slice_offset = 0;
 };
 
+// Args for a GNM indexed indirect draw whose count/instance/offset fields are read by the GPU
+// itself (native vkCmdDrawIndexedIndirect) instead of by the CPU -- see DrawIndexIndirect()'s
+// comment for why and its eligibility conditions; anything not eligible reads `args_addr` on the
+// CPU internally, same as before this existed.
+struct DrawIndexIndirectArgs {
+	uint64_t args_addr                 = 0; // guest DrawIndexedIndirectCommand-layout args
+	uint32_t index_type_and_size       = 0;
+	uint64_t index_addr                = 0; // base of the guest index buffer (unoffset)
+	// Index COUNT (VGT_INDEX_BUFFER_SIZE is a count of indices, not bytes -- see
+	// CommandProcessor::SetIndexBufferSize's caller). 0 = unknown; forces the CPU-read fallback.
+	uint32_t index_buffer_size = 0;
+	uint32_t render_target_slice_offset = 0;
+};
+
 struct DrawAutoArgs {
 	uint32_t         vertex_count               = 0;
 	uint32_t         instance_count             = 0;
@@ -192,6 +206,14 @@ public:
 	void DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer, uint64_t args_addr,
 	                      uint32_t mode);
 
+	// Indexed indirect draw. When eligible (see the .cpp), reads `args.args_addr` on the GPU
+	// itself via vkCmdDrawIndexedIndirect -- no CPU synchronization with whatever GPU work wrote
+	// it, unlike the CPU std::memcpy this replaces (bench-notes.md 2026-09-28, "DrawIndirect
+	// readback"). Not eligible falls back to reading it on the CPU internally, same behavior as
+	// before this existed.
+	void DrawIndexIndirect(uint64_t submit_id, CommandBuffer& buffer,
+	                       const DrawIndexIndirectArgs& args);
+
 	// Replays and clears any per-vertex-prototype draws batched by
 	// ExecutePerVertexPrototype() (bench-notes.md 2026-09-27 "Kierunek A"). The PM4 interpreter
 	// calls this before every op it does not itself know to be a compatible batchable draw, so a
@@ -228,10 +250,14 @@ private:
 	[[nodiscard]] bool PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
 	                                          uint32_t         render_target_slice_offset,
 	                                          DrawRenderState& state);
+	// `indirect_args_buffer` non-null draws with vkCmdDrawIndexedIndirect from
+	// [indirect_args_buffer, indirect_args_offset) instead of the concrete counts in `draw`/
+	// `emit` (only read otherwise); see DrawIndexIndirect(), the only caller that sets it.
 	void ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer, const DrawCallInfo& draw,
 	                         DrawRenderState& state, vk::PrimitiveTopology topology,
 	                         const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source,
-	                         bool primitive_restart_enable);
+	                         bool primitive_restart_enable, vk::Buffer indirect_args_buffer = nullptr,
+	                         vk::DeviceSize indirect_args_offset = 0);
 	void ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer& buffer,
 	                               const DrawCallInfo& draw, DrawRenderState& state,
 	                               vk::PrimitiveTopology topology, const DrawEmitInfo& emit,

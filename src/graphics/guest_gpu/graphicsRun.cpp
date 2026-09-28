@@ -1004,39 +1004,21 @@ void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t draw_initiato
 		return;
 	}
 
-	DrawIndexedIndirectArgs args {};
-	std::memcpy(&args, args_addr, sizeof(args));
-
-	uint64_t index_size = 0;
-	switch (m_index_type_and_size) {
-		case 0: index_size = 2; break;
-		case 1: index_size = 4; break;
-		case 2: index_size = 1; break;
-		default: EXIT("unknown index_type_and_size: %u\n", m_index_type_and_size);
-	}
-
-	auto* index_addr = reinterpret_cast<const void*>(
-	    m_index_base_addr + static_cast<uint64_t>(args.start_index_location) * index_size);
-
-	const uint32_t index_count =
-	    (m_index_buffer_size != 0 ? std::min(args.index_count_per_instance, m_index_buffer_size)
-	                              : args.index_count_per_instance);
-	if (GraphicsRunDebugDumpEnabled() && index_count != args.index_count_per_instance) {
-		static std::atomic<uint32_t> log_count {0};
-		if (log_count.fetch_add(1, std::memory_order_relaxed) < 64) {
-			LOGF("\t DrawIndexIndirect: clamped index_count from %" PRIu32 " to %" PRIu32
-			     " using INDEX_BUFFER_SIZE\n",
-			     args.index_count_per_instance, index_count);
-		}
-	}
-
-	m_num_instances = args.instance_count;
-	DrawIndex({.index_count    = index_count,
-	           .index_addr     = index_addr,
-	           .instance_count = args.instance_count,
-	           .base_vertex    = static_cast<int32_t>(args.base_vertex_location),
-	           .first_instance = args.start_instance_location,
-	           .offset_source  = DrawOffsetSource::IndirectArgs});
+	// Reads the args on the GPU itself when eligible (bench-notes.md 2026-09-28, "DrawIndirect
+	// readback") -- no CPU decode here at all, unlike the non-indexed branch above and unlike
+	// DrawIndirectMulti below, which still do. `m_num_instances` -- otherwise updated from
+	// args.instance_count here, as the non-indexed branch still does -- is deliberately left
+	// alone for the native path: on real GNM hardware an indirect draw's instance count isn't a
+	// register subsequent unrelated draws inherit from, so not maintaining that emulator-only
+	// side effect here is believed more correct, not less; flag this first if a game-specific bug
+	// ever traces back here.
+	m_renderer.GetRenderExecutor().DrawIndexIndirect(
+	    m_submit_id, CurrentBuffer(),
+	    {.args_addr                  = reinterpret_cast<uint64_t>(args_addr),
+	     .index_type_and_size        = m_index_type_and_size,
+	     .index_addr                 = m_index_base_addr,
+	     .index_buffer_size          = m_index_buffer_size,
+	     .render_target_slice_offset = 0});
 }
 
 void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_count_or_count,
