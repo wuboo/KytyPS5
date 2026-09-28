@@ -518,21 +518,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	// compatible draw is decided by the interpreter (graphicsRun.cpp) before it runs anything
 	// else, and by ExecutePreparedDraw() before it runs a non-matching draw -- both flush this
 	// batch first -- so a pending item here is never observed by anything else in the meantime.
-	static const bool batch_opt_enabled = FrameTiming::OptEnabled("prototype_batch");
-	// Diagnostic/mitigation gate (bug #4, bench-notes.md 2026-09-28): a deterministic guest
-	// null-pointer crash (RDI=0, offset 0x128) reproduces ~11-13s into astrobot-intro whenever
-	// batching is active, always while effect assets are streaming in -- pointing at a
-	// timing-sensitive guest-side race (an async-loaded object not yet ready) that batching's
-	// speedup newly exposes, not a bug in the batching logic itself. KYTY_PROTOTYPE_BATCH_MIN_FRAME
-	// defers activation until that many frames have presented, letting boot finish unaccelerated
-	// before the optimization engages. Unset (0) preserves prior behavior exactly.
-	static const uint64_t batch_min_frame = [] {
-		if (const char* env = std::getenv("KYTY_PROTOTYPE_BATCH_MIN_FRAME")) {
-			return static_cast<uint64_t>(std::strtoull(env, nullptr, 10));
-		}
-		return uint64_t {0};
-	}();
-	const bool batch_enabled = batch_opt_enabled && FrameTiming::PresentedFrames() >= batch_min_frame;
+	static const bool batch_enabled = FrameTiming::OptEnabled("prototype_batch");
 	// Exact byte equality (not just image identity) of color/depth info: these also carry
 	// blend-bypass/depth-test/stencil state that feeds GetGraphicsPipeline per item below, and
 	// which the shared BeginRendering doesn't otherwise account for. Comparing every byte can
