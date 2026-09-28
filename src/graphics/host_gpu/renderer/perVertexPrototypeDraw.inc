@@ -744,6 +744,16 @@ void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 		auto&      pipeline = *pipelines[i];
 		PreparedBindings* stages[] {&item.vertex_bindings, &item.pixel_bindings};
 		CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
+		if (!buffer.IsRendering()) {
+			// Something in CommitBindings (Image::Transit, the GDS barrier) ended the batch's
+			// render pass; the bind/draw below would run with no active render encoder.
+			static std::atomic<uint32_t> logged {0};
+			if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+				LOGF("[bench-batch-closed] item=%zu/%zu vs=0x%016llx ps=0x%016llx\n", i,
+				     batch.items.size(), static_cast<unsigned long long>(batch.vs_hash),
+				     static_cast<unsigned long long>(batch.ps_hash));
+			}
+		}
 		auto cmd = buffer.Handle();
 		cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline.pipeline_layout, 1, 1,
 		                       &item.extra_set, 0, nullptr);

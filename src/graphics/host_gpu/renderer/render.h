@@ -157,6 +157,7 @@ public:
 	};
 	[[nodiscard]] DynamicState& Dynamic() const noexcept { return m_dynamic; }
 	void                        InvalidateDynamicState() const noexcept { m_dynamic.valid = false; }
+	[[nodiscard]] bool          IsRendering() const noexcept { return m_rendering; }
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }
 	[[nodiscard]] RenderContext&    GetContext() const noexcept { return m_context; }
 	[[nodiscard]] HW::Context&      GetRegisters() const noexcept { return *m_registers; }
