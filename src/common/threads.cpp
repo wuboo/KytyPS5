@@ -25,6 +25,13 @@
 #include <unistd.h>
 #endif
 
+#if defined(__APPLE__)
+#include <pthread/qos.h>
+
+#include <cstdlib>
+#include <cstring>
+#endif
+
 #include <sstream>
 #include <string>
 #include <thread>
@@ -431,6 +438,18 @@ int Thread::GetProcessId() {
 	return _getpid();
 #else
 	return static_cast<int>(getpid());
+#endif
+}
+
+void Thread::SetLatencyCriticalQos() {
+#if defined(__APPLE__)
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_THREAD_QOS");
+		return value == nullptr || std::strcmp(value, "off") != 0;
+	}();
+	if (enabled) {
+		pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
+	}
 #endif
 }
 

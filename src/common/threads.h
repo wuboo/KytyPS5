@@ -46,6 +46,10 @@ public:
 	// Get current process id across platforms.
 	[[nodiscard]] static int GetProcessId();
 
+	// Ask the host scheduler to treat the calling thread as latency-critical (macOS: user-interactive
+	// QoS, which keeps it on performance cores). KYTY_THREAD_QOS=off disables. No-op elsewhere.
+	static void SetLatencyCriticalQos();
+
 	KYTY_CLASS_NO_COPY(Thread);
 
 private:
