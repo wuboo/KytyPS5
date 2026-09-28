@@ -1,38 +1,3 @@
-// Per-draw unpack + capture-only sets (2 sets, 7 storage buffers) come from shared pools
-// (KYTY_OPT_OFF=prototype_desc_pool disables): creating and destroying a pool per draw was ~10%
-// of this path in a scene with ~500 prototype draws per frame.
-vk::DescriptorPool RenderExecutor::AcquirePrototypeScratchPool() {
-	constexpr uint32_t MaxSets = 1024;
-	auto&              graphics  = m_context.GetGraphics();
-	auto&              scheduler = m_context.GetCommandScheduler();
-	if (m_prototype_scratch_pool != nullptr && m_prototype_scratch_sets + 2 <= MaxSets) {
-		m_prototype_scratch_sets += 2;
-		return m_prototype_scratch_pool;
-	}
-	if (m_prototype_scratch_pool != nullptr) {
-		// Every set of the full pool was recorded at or before the current tick.
-		scheduler.DeferOperation([this, pool = m_prototype_scratch_pool] {
-			m_context.GetGraphics().device.resetDescriptorPool(pool);
-			m_prototype_scratch_free.push_back(pool);
-		});
-		m_prototype_scratch_pool = nullptr;
-	}
-	if (!m_prototype_scratch_free.empty()) {
-		m_prototype_scratch_pool = m_prototype_scratch_free.back();
-		m_prototype_scratch_free.pop_back();
-	} else {
-		const vk::DescriptorPoolSize size(vk::DescriptorType::eStorageBuffer, MaxSets / 2 * 7);
-		vk::DescriptorPoolCreateInfo info {};
-		info.maxSets       = MaxSets;
-		info.poolSizeCount = 1;
-		info.pPoolSizes    = &size;
-		EXIT_IF(graphics.device.createDescriptorPool(&info, nullptr, &m_prototype_scratch_pool) !=
-		        vk::Result::eSuccess);
-	}
-	m_prototype_scratch_sets = 2;
-	return m_prototype_scratch_pool;
-}
-
 // Live PerVertex execution with GPU compute unpack and native C++ pipeline.
 void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer& buffer,
                                                const DrawCallInfo& draw, DrawRenderState& state,
@@ -318,19 +283,14 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	// Descriptor pool for the unpack set (4 storage buffers) and the capture-only extra set (3
 	// storage buffers, real bindings to attribute_buffer/captured/id_buffer); both are per-draw
 	// only, read solely by steps 1-2, and never cached.
-	static const bool  shared_scratch_pool = FrameTiming::OptEnabled("prototype_desc_pool");
-	vk::DescriptorPool unpack_pool         = nullptr;
-	if (shared_scratch_pool) {
-		unpack_pool = AcquirePrototypeScratchPool();
-	} else {
-		const vk::DescriptorPoolSize unpack_pool_size(vk::DescriptorType::eStorageBuffer, 7);
-		vk::DescriptorPoolCreateInfo unpack_pool_info {};
-		unpack_pool_info.maxSets       = 2;
-		unpack_pool_info.poolSizeCount = 1;
-		unpack_pool_info.pPoolSizes    = &unpack_pool_size;
-		EXIT_IF(graphics.device.createDescriptorPool(&unpack_pool_info, nullptr, &unpack_pool) !=
-		        vk::Result::eSuccess);
-	}
+	vk::DescriptorPool           unpack_pool;
+	const vk::DescriptorPoolSize unpack_pool_size(vk::DescriptorType::eStorageBuffer, 7);
+	vk::DescriptorPoolCreateInfo unpack_pool_info {};
+	unpack_pool_info.maxSets       = 2;
+	unpack_pool_info.poolSizeCount = 1;
+	unpack_pool_info.pPoolSizes    = &unpack_pool_size;
+	EXIT_IF(graphics.device.createDescriptorPool(&unpack_pool_info, nullptr, &unpack_pool) !=
+	        vk::Result::eSuccess);
 
 	// Descriptor pool for the replay-only extra set (3 storage buffers, all pointing at the
 	// still-alive `captured` buffer -- see below). On a cache miss this, along with `captured`,
@@ -521,13 +481,10 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	// read by steps 1-2 above; reclaim them
 	// now regardless of whether `captured`/`capture_pool`/`extra_set` end up cached below.
 	scheduler.DeferOperation([attr = std::move(attribute_buffer), id = std::move(id_buffer),
-	                          up = shared_scratch_pool ? vk::DescriptorPool {} : unpack_pool,
-	                          dev = graphics.device]() mutable {
+	                          up = unpack_pool, dev = graphics.device]() mutable {
 		attr.reset();
 		id.reset();
-		if (up) {
-			dev.destroyDescriptorPool(up);
-		}
+		dev.destroyDescriptorPool(up);
 	});
 	} // if (hit != nullptr) ... else
 
