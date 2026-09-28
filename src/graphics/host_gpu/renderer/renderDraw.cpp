@@ -1551,6 +1551,19 @@ void RenderExecutor::DrawIndexIndirect(uint64_t submit_id, CommandBuffer& buffer
 	                             IsIndirectEligiblePrimType(ucfg.GetPrimType()) &&
 	                             primitive_restart_native.has_value();
 
+	// TEMP diagnostic (2026-09-28): why does the menu scene's readback_wait_ns barely drop -- is
+	// this path mostly ineligible in practice, and if so, which check is rejecting it?
+	{
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 300) {
+			LOGF("[bench-indirect2] native=%d mesh=%d pvp=%d elem=%u primok=%d restartok=%d "
+			     "bufsize=%u\n",
+			     native_eligible ? 1 : 0, mesh_active ? 1 : 0, per_vertex_prototype ? 1 : 0,
+			     index_element_size, IsIndirectEligiblePrimType(ucfg.GetPrimType()) ? 1 : 0,
+			     primitive_restart_native.has_value() ? 1 : 0, args.index_buffer_size);
+		}
+	}
+
 	if (native_eligible) {
 		DrawIndexBufferSource index_source {};
 		index_source.address            = args.index_addr;
