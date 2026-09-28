@@ -1174,18 +1174,6 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 				if (length + moved_original >= JumpSize) {
 					trap = false;
 				} else {
-					// bench diag: a hot site that still traps; dump its code to see what blocks it.
-					if (std::binary_search(hot_sites.begin(), hot_sites.end(),
-					                       reinterpret_cast<uint64_t>(code))) {
-						char line[160];
-						int  n = std::snprintf(line, sizeof(line), "[wide-store-hot-stuck] site=0x%llx moved=%u len=%llu:",
-						                       static_cast<unsigned long long>(reinterpret_cast<uint64_t>(code)),
-						                       moved_count, static_cast<unsigned long long>(length));
-						for (int k = 0; k < 24 && n < 150; k++) {
-							n += std::snprintf(line + n, sizeof(line) - n, " %02x", code[k]);
-						}
-						LOGF("%s\n", line);
-					}
 					moved_count    = 0;
 					moved_original = 0;
 				}
