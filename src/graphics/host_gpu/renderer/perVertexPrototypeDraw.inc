@@ -602,6 +602,13 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 			}
 		}
 		PendingPrototypeReplayItem item;
+		// Same pipeline lookup as the immediate path below, done now rather than at flush time:
+		// GetGraphicsPipeline() reads live registers, which may already describe a later draw by the
+		// time the batch is flushed. No render pass is open here -- the capture dispatch above ended it.
+		item.pipeline = &m_context.GetPipelineCache().GetGraphicsPipeline(
+		    {state.color_info, state.color_count}, state.depth_info, {state.vertex_info.data(), 1},
+		    buffer, &state.ps_input_info, topology, false, programs->graphics);
+		item.registers = std::make_shared<HW::Context>(buffer.GetRegisters());
 		item.extra_set       = extra_set;
 		item.count           = count;
 		item.vs               = vs;
@@ -700,28 +707,11 @@ void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 	auto& scheduler = m_context.GetCommandScheduler();
 	scheduler.EndRendering();
 
-	// Pipeline lookup/creation happens for every item *before* BeginRendering below, exactly like
-	// the non-batched path (GetGraphicsPipeline is always called before AcquireRenderTargets/
-	// BeginRendering there too -- see the fallback path above). CreatePipelineInternal can record
-	// host-side setup for a pipeline shape not seen before (e.g. the RectList topology helper
-	// shaders); doing that while a dynamic-rendering region is active is not something either this
-	// path or the original one is meant to do, and on MoltenVK it is not guaranteed to just be
-	// rejected cleanly -- this is suspected to be exactly what produced bug #3 (a crash with no
-	// direct connection to this code, in a completely unrelated part of the emulator, consistent
-	// with state corruption from an encoder-level command sequencing violation rather than a plain
-	// out-of-bounds C++ write). Also fixes up `runtime` here, once each item's address in
-	// `batch.items` is final (see the note where items are appended) -- GetGraphicsPipeline reads
-	// `item.vs`, not the bindings, so this could as well happen in the second loop below, but
-	// keeping both fixups together in one place is less error-prone than splitting them.
-	std::vector<PipelineCache::Pipeline*> pipelines;
-	pipelines.reserve(batch.items.size());
+	// Pipelines were resolved when each item was appended (see there); `runtime` is fixed up here,
+	// once each item's address in `batch.items` is final (see the note where items are appended).
 	for (auto& item: batch.items) {
 		item.vertex_bindings.runtime = &item.vs.stage;
 		item.pixel_bindings.runtime  = &batch.ps_input_info.stage;
-		pipelines.push_back(&m_context.GetPipelineCache().GetGraphicsPipeline(
-		    {batch.color_info.data(), batch.color_count}, batch.depth_info, {&item.vs, 1}, buffer,
-		    batch.ps_active ? &batch.ps_input_info : nullptr, batch.topology, false,
-		    batch.programs->graphics));
 	}
 
 	// See the design note where items are appended: bindings/feedback-loop detection depend on
@@ -746,13 +736,13 @@ void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 	for (size_t i = 0; i < batch.items.size(); ++i) {
 		PreparedBindings* stages[] {&batch.items[i].vertex_bindings,
 		                            &batch.items[i].pixel_bindings};
-		TransitionBoundResources(buffer, stages, pipelines[i]->prototype_vertex_capture);
+		TransitionBoundResources(buffer, stages, batch.items[i].pipeline->prototype_vertex_capture);
 	}
 	FrameTiming::Add(FrameTiming::Counter::PrototypeRenderPasses);
 	scheduler.BeginRendering(rendering);
 	for (size_t i = 0; i < batch.items.size(); ++i) {
 		auto&      item     = batch.items[i];
-		auto&      pipeline = *pipelines[i];
+		auto&      pipeline = *item.pipeline;
 		PreparedBindings* stages[] {&item.vertex_bindings, &item.pixel_bindings};
 		CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
 		if (!buffer.IsRendering()) {
@@ -768,7 +758,8 @@ void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 		auto cmd = buffer.Handle();
 		cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline.pipeline_layout, 1, 1,
 		                       &item.extra_set, 0, nullptr);
-		SetGraphicsDynamicParams(buffer, cmd, item.vs, batch.depth_info, rendering);
+		SetGraphicsDynamicParams(buffer, cmd, item.vs, batch.depth_info, rendering,
+		                         item.registers.get());
 		if (graphics.attachment_feedback_loop_enabled)
 			cmd.setAttachmentFeedbackLoopEnableEXT(feedback_aspects);
 		cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);

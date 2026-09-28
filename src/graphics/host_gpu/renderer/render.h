@@ -336,6 +336,10 @@ private:
 		// draw would free them.
 		std::unique_ptr<Buffer> owned_captured;
 		vk::DescriptorPool      owned_pool = nullptr;
+		// Resolved when the draw is issued, from the registers current then: the guest may set
+		// registers for later draws before this batch is flushed (see ProcessPm4's flush hook).
+		PipelineCache::Pipeline*          pipeline = nullptr;
+		std::shared_ptr<const HW::Context> registers;
 	};
 	struct PendingPrototypeBatch {
 		bool                                       active      = false;

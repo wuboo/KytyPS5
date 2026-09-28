@@ -313,12 +313,15 @@ static void LogDrawInputState(const CommandBuffer& buffer, const RenderColorInfo
 	}
 }
 
+// `registers` defaults to the live context; a batched prototype replay passes the snapshot taken
+// when its draw was issued, since the guest may have rewritten the live registers since then.
 static void SetGraphicsDynamicParams(const CommandBuffer& buffer, vk::CommandBuffer vk_buffer,
                                      const ShaderVertexInputInfo& vs_input_info,
-                                     const RenderDepthInfo& depth, const RenderState& rendering) {
+                                     const RenderDepthInfo& depth, const RenderState& rendering,
+                                     const HW::Context* registers = nullptr) {
 	KYTY_PROFILER_FUNCTION();
 
-	const auto&        ctx = buffer.GetRegisters();
+	const auto&        ctx = registers != nullptr ? *registers : buffer.GetRegisters();
 	const auto&        vp  = ctx.GetScreenViewport();
 	const vk::Extent2D framebuffer_extent {rendering.width, rendering.height};
 	const auto&        outputs = vs_input_info.stage.program->info.outputs;
