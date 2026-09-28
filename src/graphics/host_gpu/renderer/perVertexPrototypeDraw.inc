@@ -234,11 +234,45 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		idx_buf_available  = vtx_buf_ptr->Size();
 	}
 
-	// GPU-side intermediate buffers for unpack and capture
-	auto id_buffer =
-	    std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags, count * 8);
-	auto attribute_buffer = std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Stream, 0,
-	                                                 AllFlags, count * num_attrs * 16);
+	// GPU-side intermediate buffers for unpack and capture. The vertex ids and unpacked
+	// attributes are read only by steps 1-2 of this draw, so they come from a ring
+	// (KYTY_OPT_OFF=prototype_ring disables): two fresh allocations per draw, and their deferred
+	// destruction, were ~22% of this path in a scene with ~500 prototype draws per frame.
+	static const bool ring_enabled = FrameTiming::OptEnabled("prototype_ring");
+	const uint64_t    id_size      = uint64_t {count} * 8;
+	const uint64_t    attr_size    = uint64_t {count} * num_attrs * 16;
+	std::unique_ptr<Buffer> id_buffer;
+	std::unique_ptr<Buffer> attribute_buffer;
+	vk::DescriptorBufferInfo id_info;
+	vk::DescriptorBufferInfo attr_info;
+	if (ring_enabled) {
+		constexpr uint64_t RingSize = uint64_t {512} << 20u;
+		if (m_prototype_ring == nullptr) {
+			m_prototype_ring =
+			    std::make_unique<StreamBuffer>(graphics, scheduler, MemoryUsage::Stream, RingSize);
+		}
+		const auto ring_alignment = std::max<uint64_t>(alignment, 16);
+		if (id_size + attr_size + 2 * ring_alignment <= RingSize) {
+			const auto [id_ptr, id_offset] = m_prototype_ring->Map(id_size, ring_alignment);
+			if (id_ptr != nullptr) {
+				m_prototype_ring->Commit();
+				const auto [attr_ptr, attr_offset] = m_prototype_ring->Map(attr_size, ring_alignment);
+				if (attr_ptr != nullptr) {
+					m_prototype_ring->Commit();
+					id_info   = {m_prototype_ring->Handle(), id_offset, id_size};
+					attr_info = {m_prototype_ring->Handle(), attr_offset, attr_size};
+				}
+			}
+		}
+	}
+	if (!id_info.buffer) {
+		id_buffer = std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags,
+		                                     id_size);
+		attribute_buffer = std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Stream, 0,
+		                                            AllFlags, attr_size);
+		id_info   = vk::DescriptorBufferInfo {id_buffer->Handle(), 0, id_buffer->Size()};
+		attr_info = vk::DescriptorBufferInfo {attribute_buffer->Handle(), 0, attribute_buffer->Size()};
+	}
 	captured = std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags,
 	                                    count64 * programs->layout.record_stride_vec4 * 16);
 	captured_size_for_log = captured->Size();
@@ -292,8 +326,8 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	const vk::DescriptorBufferInfo unpack_data[] {
 	    {idx_vk_buf, idx_aligned_offset, idx_size_bounded},
 	    {vtx_buf_ptr->Handle(), vtx_aligned_offset, vtx_size_bounded},
-	    {id_buffer->Handle(), 0, id_buffer->Size()},
-	    {attribute_buffer->Handle(), 0, attribute_buffer->Size()}};
+	    id_info,
+	    attr_info};
 	std::array<vk::WriteDescriptorSet, 4> unpack_writes;
 	for (uint32_t i = 0; i < 4; ++i) {
 		unpack_writes[i].dstSet          = unpack_set;
@@ -315,9 +349,9 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	        vk::Result::eSuccess);
 
 	const vk::DescriptorBufferInfo capture_extra_data[] {
-	    {attribute_buffer->Handle(), 0, attribute_buffer->Size()},
+	    attr_info,
 	    {captured->Handle(), 0, captured->Size()},
-	    {id_buffer->Handle(), 0, id_buffer->Size()}};
+	    id_info};
 	std::array<vk::WriteDescriptorSet, 3> capture_extra_writes;
 	for (uint32_t i = 0; i < 3; ++i) {
 		capture_extra_writes[i].dstSet          = capture_extra_set;
