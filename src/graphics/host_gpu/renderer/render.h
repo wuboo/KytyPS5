@@ -319,8 +319,6 @@ private:
 		vk::DescriptorSet        extra_set          = nullptr;
 	};
 	std::unordered_map<uint64_t, CachedPrototypeCapture> m_prototype_capture_cache;
-	// Ring for per-draw prototype scratch (vertex ids, unpacked attributes); created on first use.
-	std::unique_ptr<StreamBuffer> m_prototype_ring;
 
 	// Batching of consecutive per-vertex-prototype replay draws into one render pass (see
 	// perVertexPrototypeDraw.inc, bench-notes.md 2026-09-27 "Kierunek A"). A draw is appended here
