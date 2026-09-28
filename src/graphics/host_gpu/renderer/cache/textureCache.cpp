@@ -1342,6 +1342,31 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			}
 		}
 		if (!result) {
+			// bench diag: a fresh image over a range whose current contents only exist on the GPU
+			// (a render target never written back) samples stale guest memory: black textures.
+			static std::atomic<uint32_t> stale_logged {0};
+			for (const auto candidate: FindImagesInRegion(desc.info.data.address, desc.info.data.size,
+			                                              false)) {
+				const auto* other = m_slot_images.try_get(candidate);
+				if (other == nullptr || !other->IsGpuModified() ||
+				    stale_logged.fetch_add(1, std::memory_order_relaxed) >= 200) {
+					continue;
+				}
+				LOGF("[tex-stale] new=0x%" PRIx64 "+0x%" PRIx64 " fmt=%d %ux%ux%u tile=%u type=%u "
+				     "lv=%u ly=%u bind=%u | gpu=0x%" PRIx64 "+0x%" PRIx64 " fmt=%d %ux%ux%u tile=%u "
+				     "type=%u lv=%u ly=%u rt=%d\n",
+				     desc.info.data.address, desc.info.data.size,
+				     static_cast<int>(desc.info.pixel_format), desc.info.extent.width,
+				     desc.info.extent.height, desc.info.extent.depth,
+				     static_cast<uint32_t>(desc.info.tile_mode), static_cast<uint32_t>(desc.info.type),
+				     desc.info.resources.levels, desc.info.resources.layers,
+				     static_cast<uint32_t>(desc.type), other->info.data.address, other->info.data.size,
+				     static_cast<int>(other->info.pixel_format), other->info.extent.width,
+				     other->info.extent.height, other->info.extent.depth,
+				     static_cast<uint32_t>(other->info.tile_mode), static_cast<uint32_t>(other->info.type),
+				     other->info.resources.levels, other->info.resources.layers,
+				     other->usage.render_target ? 1 : 0);
+			}
 			result         = InsertImage(desc.info);
 			auto& inserted = m_slot_images[result];
 			if (m_buffer_cache.HasGpuDirtyBytes(inserted.info.data.address,
