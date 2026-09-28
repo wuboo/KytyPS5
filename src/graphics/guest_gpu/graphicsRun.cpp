@@ -851,6 +851,8 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			// else in the whole PM4 stream can ever observe a partially-applied batch. The other
 			// half of this decision -- whether a draw itself is batchable, and with what -- lives
 			// in RenderExecutor::ExecutePerVertexPrototype/FlushPendingPrototypeBatch.
+			m_renderer.GetRenderExecutor().m_diag_flush_reason = "pm4-op";
+			m_renderer.GetRenderExecutor().m_diag_flush_opcode = opcode;
 			m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
 		}
 
@@ -862,6 +864,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			// not a batchable draw opcode, or it *is* one and decided for itself whether to defer);
 			// flush again before giving up the command buffer across a suspend/resume boundary
 			// that may span an arbitrary amount of real time.
+			m_renderer.GetRenderExecutor().m_diag_flush_reason = "suspend";
 			m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
 			return;
 		}
@@ -880,6 +883,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	// End of this PM4 stream (buffer stack drained without a suspend): nothing can observe a
 	// pending batch until the next Process() call, but that may run on a different command buffer
 	// entirely, so it must not still be pending here.
+	m_renderer.GetRenderExecutor().m_diag_flush_reason = "end-of-stream";
 	m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
 }
 

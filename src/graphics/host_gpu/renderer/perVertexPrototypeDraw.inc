@@ -552,6 +552,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		// be true here). Flush first so draw order is preserved; the interpreter's own flush
 		// hooks don't know about these exclusions, since from PM4-opcode level this looks like
 		// any other eligible draw.
+		m_diag_flush_reason = "excluded";
 		FlushPendingPrototypeBatch(buffer);
 	}
 	// Exact byte equality (not just image identity) of color/depth info: these also carry
@@ -573,6 +574,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	    std::memcmp(&m_prototype_batch.depth_info, &state.depth_info, sizeof(RenderDepthInfo)) == 0;
 	if (batch_enabled) {
 		if (m_prototype_batch.active && !batch_matches) {
+			m_diag_flush_reason = "mismatch";
 			FlushPendingPrototypeBatch(buffer);
 		}
 		if (!m_prototype_batch.active) {
@@ -680,6 +682,23 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 	if (!m_prototype_batch.active) {
 		return;
+	}
+	{
+		static std::unordered_map<std::string, uint64_t> by_reason;
+		static uint64_t                                  flushes = 0;
+		std::string key = m_diag_flush_reason;
+		if (key == "pm4-op") {
+			char op[16];
+			std::snprintf(op, sizeof(op), "-0x%02x", m_diag_flush_opcode & 0xffu);
+			key += op;
+		}
+		by_reason[key]++;
+		if ((++flushes & 0x1fffu) == 0) {
+			for (const auto& [reason, n]: by_reason) {
+				LOGF("[bench-flush-reason] %s n=%llu\n", reason.c_str(), static_cast<unsigned long long>(n));
+			}
+		}
+		m_diag_flush_reason = "unset";
 	}
 	auto& batch = m_prototype_batch;
 	m_prototype_batch.active = false; // reentrancy guard: none of the calls below re-enter here
