@@ -13,6 +13,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cinttypes>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <magic_enum.hpp>
@@ -421,7 +422,12 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking) {
 			Common::Thread::SleepMicro(1000);
 			queued = SDL_GetAudioStreamQueued(port->stream);
 		}
-		if (port->queue_primed) {
+		// The queue-depth wait above already paces the game to the device. Sleeping until one
+		// buffer after the previous output on top of it ran the game ~6% slower than the device
+		// (the previous output time is taken after the call, and sleeps overshoot), so the queue
+		// drained and ran dry several times per second: audible crackling.
+		static const bool legacy_pacing = std::getenv("KYTY_AUDIO_LEGACY_PACING") != nullptr;
+		if (legacy_pacing && port->queue_primed) {
 			const auto next_time = port->last_output_time + buffer_us;
 			const auto now       = LibKernel::KernelGetProcessTime();
 			if (next_time > now) {
