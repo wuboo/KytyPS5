@@ -210,6 +210,7 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       m_download_buffer(graphics, scheduler, MemoryUsage::Download, 64 * MiB),
       m_device_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB),
       m_texture_cache(texture_cache) {
+	m_scheduler.SetPreSubmitHook([this] { FlushEagerReadbacks(); });
 	std::memset(m_gds_buffer.Mapped().data(), 0, static_cast<size_t>(m_gds_buffer.Size()));
 	m_gds_buffer.Flush(0, m_gds_buffer.Size());
 	SetVulkanObjectNameF(m_graphics.device, m_bda_pagetable_buffer.Handle(),
@@ -264,7 +265,23 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	}
 	FrameTiming::Add(FrameTiming::Counter::Readbacks);
 	const auto wait_begin = std::chrono::steady_clock::now();
+	const auto add_wait   = [&] {
+		FrameTiming::Add(FrameTiming::Counter::ReadbackWaitNs,
+		                 static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                                           std::chrono::steady_clock::now() - wait_begin)
+		                                           .count()));
+	};
+	if (!is_write && WaitEagerReadback(vaddr, size)) {
+		FrameTiming::Add(FrameTiming::Counter::ReadbackEagerHits);
+		add_wait();
+		return;
+	}
 	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write] {
+		// A download already queued for this page must land before this one decides anything.
+		(void)WaitEagerReadback(vaddr, size);
+		if (!is_write) {
+			NoteReadbackFault(vaddr);
+		}
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
 		}
@@ -289,10 +306,133 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 		}
 	});
-	FrameTiming::Add(FrameTiming::Counter::ReadbackWaitNs,
-	                 static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-	                                           std::chrono::steady_clock::now() - wait_begin)
-	                                           .count()));
+	add_wait();
+}
+
+namespace {
+bool EagerReadbackEnabled() {
+	static const bool enabled = FrameTiming::OptEnabled("eager_readback");
+	return enabled;
+}
+constexpr uint32_t EagerHotFaults = 4;   // faults on one tracker page before it counts as hot
+constexpr size_t   EagerMaxPages  = 256; // hot pages tracked at most
+} // namespace
+
+void BufferCache::NoteReadbackFault(uint64_t vaddr) {
+	if (!EagerReadbackEnabled()) {
+		return;
+	}
+	const auto page = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+	if (++m_readback_fault_counts[page] < EagerHotFaults) {
+		return;
+	}
+	std::lock_guard lock(m_eager_mutex);
+	if (m_eager_pages.size() < EagerMaxPages) {
+		m_eager_pages.try_emplace(page);
+	}
+}
+
+void BufferCache::NoteGpuWrite(uint64_t vaddr, uint64_t size) {
+	if (!EagerReadbackEnabled()) {
+		return;
+	}
+	std::lock_guard lock(m_eager_mutex);
+	if (m_eager_pages.empty()) {
+		return;
+	}
+	const auto end = vaddr + size;
+	for (auto page = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE); page < end;
+	     page += TRACKER_PAGE_SIZE) {
+		const auto found = m_eager_pages.find(page);
+		if (found == m_eager_pages.end()) {
+			continue;
+		}
+		found->second.seq++;
+		if (std::find(m_eager_pending.begin(), m_eager_pending.end(), page) ==
+		    m_eager_pending.end()) {
+			m_eager_pending.push_back(page);
+		}
+	}
+}
+
+void BufferCache::FlushEagerReadbacks() {
+	if (m_eager_pending.empty() || !GuestGpu::IsGpuThread()) {
+		return;
+	}
+	const auto tick = m_scheduler.CurrentTick();
+	for (const auto page: m_eager_pending) {
+		if (!m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE)) {
+			continue;
+		}
+		// Download every GPU-written range of the page, owner by owner, as ReadMemory does.
+		for (int guard = 0; guard < 8 && m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE);
+		     guard++) {
+			uint64_t first = 0;
+			m_gpu_modified_ranges.ForEachInRange(page, TRACKER_PAGE_SIZE,
+			                                     [&](uint64_t start, uint64_t) {
+				                                     if (first == 0) {
+					                                     first = start;
+				                                     }
+			                                     });
+			if (first == 0) {
+				break;
+			}
+			auto&      buffer = m_slot_buffers[FindBuffer(first, 1)];
+			const auto begin  = std::max(page, buffer.CpuAddress());
+			const auto end = std::min(page + TRACKER_PAGE_SIZE, buffer.CpuAddress() + buffer.Size());
+			if (!DownloadBufferMemory(buffer, begin, end - begin)) {
+				break;
+			}
+		}
+		if (m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE)) {
+			continue; // left to the synchronous path
+		}
+		uint64_t seq = 0;
+		{
+			std::lock_guard lock(m_eager_mutex);
+			auto&           entry = m_eager_pages[page];
+			entry.tick            = tick;
+			seq                   = entry.seq;
+		}
+		FrameTiming::Add(FrameTiming::Counter::ReadbackEagerDownloads);
+		// Queued after DownloadBufferMemory's own publication, so the bytes are in place.
+		m_scheduler.DeferPriorityOperation([this, page, tick, seq] {
+			std::lock_guard lock(m_eager_mutex);
+			auto&           entry = m_eager_pages[page];
+			if (entry.tick != tick) {
+				return;
+			}
+			entry.tick = 0;
+			if (entry.seq == seq) {
+				m_memory_tracker.UnmarkRegionAsGpuModified(page, TRACKER_PAGE_SIZE);
+			}
+		});
+	}
+	m_eager_pending.clear();
+}
+
+bool BufferCache::WaitEagerReadback(uint64_t vaddr, uint64_t size) {
+	if (!EagerReadbackEnabled() || CommandScheduler::InDeferredOperation()) {
+		return false;
+	}
+	const auto page = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+	if (Common::AlignDown(vaddr + size - 1, TRACKER_PAGE_SIZE) != page) {
+		return false;
+	}
+	uint64_t tick = 0;
+	{
+		std::lock_guard lock(m_eager_mutex);
+		const auto      found = m_eager_pages.find(page);
+		if (found == m_eager_pages.end() || found->second.tick == 0) {
+			return false;
+		}
+		tick = found->second.tick;
+	}
+	// The tick was taken while its command buffer was being submitted, so it is (or is about
+	// to be) in flight; a timeline wait may precede the signal operation.
+	m_scheduler.GetMasterSemaphore().Wait(tick);
+	m_scheduler.WaitPriorityOperations(tick);
+	return !m_memory_tracker.IsRegionGpuModified(page, TRACKER_PAGE_SIZE);
 }
 
 BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size) {
@@ -397,6 +537,9 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 
 bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t size, bool is_written,
                                     bool is_texel_buffer) {
+	if (is_written) {
+		NoteGpuWrite(vaddr, size);
+	}
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size = 0;
 	vk::Buffer                  source;

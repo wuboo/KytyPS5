@@ -13,7 +13,9 @@
 
 #include <array>
 #include <map>
+#include <mutex>
 #include <span>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -124,6 +126,17 @@ private:
 	// Queues backing publication; callers wait before clearing dirty pages or reusing their data.
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
 
+	// Eager readback (KYTY_OPT_OFF=eager_readback disables). Guest threads that poll a small
+	// GPU-written value read-fault on every GPU write, and each fault used to queue behind the
+	// GPU thread and drain the GPU. Once a tracker page has faulted often, a GPU write to it
+	// queues its download right before the submit that carries the write; the page stays
+	// protected until that download has landed, and then its completion unprotects it. A fault
+	// in between waits for that one submission only.
+	void NoteReadbackFault(uint64_t vaddr);
+	void NoteGpuWrite(uint64_t vaddr, uint64_t size);
+	void FlushEagerReadbacks();
+	[[nodiscard]] bool WaitEagerReadback(uint64_t vaddr, uint64_t size);
+
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
 	FaultManager                                      m_fault_manager;
@@ -144,6 +157,15 @@ private:
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;
+
+	struct EagerPage {
+		uint64_t tick = 0; // submission carrying the download; 0 when none is in flight
+		uint64_t seq  = 0; // GPU writes seen for the page; a newer write keeps it protected
+	};
+	std::unordered_map<uint64_t, uint32_t> m_readback_fault_counts; // GPU thread
+	std::vector<uint64_t>                  m_eager_pending;          // GPU thread
+	std::mutex                             m_eager_mutex;
+	std::unordered_map<uint64_t, EagerPage> m_eager_pages; // hot tracker pages, m_eager_mutex
 };
 
 } // namespace Libs::Graphics

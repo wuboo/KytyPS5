@@ -63,6 +63,8 @@ enum class Counter : uint32_t {
 	PrototypeRenderPasses, // BeginRendering calls forced by the prototype path specifically
 	PrototypeCaptureCacheHits, // of PrototypeDraws, how many reused a cached capture (skipped
 	                           // the compute unpack+capture stages entirely)
+	ReadbackEagerHits,      // read faults served by waiting for an eager page download
+	ReadbackEagerDownloads, // page downloads queued right after a GPU write (eager_readback)
 	Count,
 };
 

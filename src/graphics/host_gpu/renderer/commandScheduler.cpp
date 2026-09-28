@@ -402,6 +402,11 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
 
+	if (m_pre_submit && !m_in_pre_submit) {
+		m_in_pre_submit = true;
+		m_pre_submit();
+		m_in_pre_submit = false;
+	}
 	if (!m_command.m_recorded) {
 		FrameTiming::Add(FrameTiming::Counter::EmptySubmits);
 	}
