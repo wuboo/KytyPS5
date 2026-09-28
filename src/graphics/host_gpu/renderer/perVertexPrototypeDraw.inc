@@ -737,6 +737,17 @@ void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 	const auto           rendering =
 	    AcquireRenderTargets(buffer, batch.color_info.data(), batch.color_count, batch.depth_info,
 	                         feedback_aspects, first_stages);
+	// Bug #4 (bench-notes.md 2026-09-28): CommitBindings() below runs inside the render pass, and
+	// its image layout transitions (Image::Transit) end rendering whenever they record a barrier --
+	// confirmed live, right before the crash, on a texture-sampling UI sprite. The immediate path
+	// never hits this because it commits before BeginRendering. Do the transitions for every item
+	// here, after the render targets are acquired (same order as the immediate path) and before the
+	// pass begins; CommitBindings() then finds nothing left to transition.
+	for (size_t i = 0; i < batch.items.size(); ++i) {
+		PreparedBindings* stages[] {&batch.items[i].vertex_bindings,
+		                            &batch.items[i].pixel_bindings};
+		TransitionBoundResources(buffer, stages, pipelines[i]->prototype_vertex_capture);
+	}
 	FrameTiming::Add(FrameTiming::Counter::PrototypeRenderPasses);
 	scheduler.BeginRendering(rendering);
 	for (size_t i = 0; i < batch.items.size(); ++i) {

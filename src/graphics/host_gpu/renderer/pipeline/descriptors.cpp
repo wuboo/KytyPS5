@@ -930,52 +930,22 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 	}
 }
 
-void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
-                                    vk::PipelineBindPoint              pipeline_bind_point,
-                                    const PipelineCache::Pipeline&     pipeline,
-                                    std::span<PreparedBindings* const> prepared_bindings) {
-	KYTY_PROFILER_FUNCTION();
-	auto                           vk_buffer        = buffer.Handle();
-	size_t                         descriptor_count = 0;
-	size_t                         write_count      = 0;
-	ShaderRecompiler::IR::PushData push_data;
-	bool                           has_push_data = false;
-	constexpr auto                 GraphicsStages =
-	    vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eMeshEXT |
-	    vk::ShaderStageFlagBits::eTessellationControl |
-	    vk::ShaderStageFlagBits::eTessellationEvaluation | vk::ShaderStageFlagBits::eFragment;
-	vk::ShaderStageFlags push_stages = pipeline_bind_point == vk::PipelineBindPoint::eGraphics
-	                                       ? vk::ShaderStageFlagBits::eFragment
-	                                       : vk::ShaderStageFlags {};
-	for (const auto* prepared: prepared_bindings) {
-		EXIT_IF(prepared == nullptr || prepared->runtime == nullptr || !*prepared->runtime);
-		const auto& program = *prepared->runtime->program;
-		write_count += program.bindings.descriptors.size();
-		for (const auto& binding: program.bindings.descriptors) {
-			descriptor_count += NativeDescriptorCount(binding);
-		}
-		const auto shader_stage =
-		    (pipeline.prototype_vertex_capture ? vk::ShaderStageFlagBits::eCompute
-		                                       : NativeShaderStage(program.stage));
-		push_stages |= shader_stage;
-		EXIT_IF((pipeline_bind_point == vk::PipelineBindPoint::eGraphics &&
-		         (shader_stage & GraphicsStages) == vk::ShaderStageFlags {}) ||
-		        (pipeline_bind_point == vk::PipelineBindPoint::eCompute &&
-		         shader_stage != vk::ShaderStageFlagBits::eCompute));
-	}
-	m_descriptor_buffers.clear();
-	m_descriptor_images.clear();
-	m_descriptor_writes.clear();
-	m_descriptor_buffers.reserve(descriptor_count);
-	m_descriptor_images.reserve(descriptor_count);
-	m_descriptor_writes.reserve(write_count);
-
+// Resource-state half of CommitBindings(): the GDS dependency and each bound image's layout/access
+// transition, both of which can end the current render pass (Image::Transit ends rendering whenever
+// it records a barrier). Kept separate so a caller that must bind inside an already-begun render pass
+// can run it first, outside of it -- see FlushPendingPrototypeBatch(). Image transitions are no-ops
+// once an image is in the requested state, so the second run inside CommitBindings() records
+// nothing; the GDS barrier is unconditional, which is why GDS draws are not batched.
+void RenderExecutor::TransitionBoundResources(CommandBuffer&                     buffer,
+                                              std::span<PreparedBindings* const> prepared_bindings,
+                                              bool prototype_vertex_capture) {
+	auto vk_buffer = buffer.Handle();
 	for (auto* prepared: prepared_bindings) {
 		const auto& program     = *prepared->runtime->program;
 		auto&       descriptors = *prepared;
 		const auto  shader_stage =
-		    (pipeline.prototype_vertex_capture ? vk::ShaderStageFlagBits::eCompute
-		                                       : NativeShaderStage(program.stage));
+		    (prototype_vertex_capture ? vk::ShaderStageFlagBits::eCompute
+		                              : NativeShaderStage(program.stage));
 		const auto shader_stages = ShaderPipelineStages(shader_stage);
 		if (descriptors.gds.buffer != nullptr) {
 			buffer.EndRendering();
@@ -1034,6 +1004,54 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 			}
 			binding.layout = image.backing.state.layout;
 		}
+	}
+}
+
+void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
+                                    vk::PipelineBindPoint              pipeline_bind_point,
+                                    const PipelineCache::Pipeline&     pipeline,
+                                    std::span<PreparedBindings* const> prepared_bindings) {
+	KYTY_PROFILER_FUNCTION();
+	auto                           vk_buffer        = buffer.Handle();
+	size_t                         descriptor_count = 0;
+	size_t                         write_count      = 0;
+	ShaderRecompiler::IR::PushData push_data;
+	bool                           has_push_data = false;
+	constexpr auto                 GraphicsStages =
+	    vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eMeshEXT |
+	    vk::ShaderStageFlagBits::eTessellationControl |
+	    vk::ShaderStageFlagBits::eTessellationEvaluation | vk::ShaderStageFlagBits::eFragment;
+	vk::ShaderStageFlags push_stages = pipeline_bind_point == vk::PipelineBindPoint::eGraphics
+	                                       ? vk::ShaderStageFlagBits::eFragment
+	                                       : vk::ShaderStageFlags {};
+	for (const auto* prepared: prepared_bindings) {
+		EXIT_IF(prepared == nullptr || prepared->runtime == nullptr || !*prepared->runtime);
+		const auto& program = *prepared->runtime->program;
+		write_count += program.bindings.descriptors.size();
+		for (const auto& binding: program.bindings.descriptors) {
+			descriptor_count += NativeDescriptorCount(binding);
+		}
+		const auto shader_stage =
+		    (pipeline.prototype_vertex_capture ? vk::ShaderStageFlagBits::eCompute
+		                                       : NativeShaderStage(program.stage));
+		push_stages |= shader_stage;
+		EXIT_IF((pipeline_bind_point == vk::PipelineBindPoint::eGraphics &&
+		         (shader_stage & GraphicsStages) == vk::ShaderStageFlags {}) ||
+		        (pipeline_bind_point == vk::PipelineBindPoint::eCompute &&
+		         shader_stage != vk::ShaderStageFlagBits::eCompute));
+	}
+	m_descriptor_buffers.clear();
+	m_descriptor_images.clear();
+	m_descriptor_writes.clear();
+	m_descriptor_buffers.reserve(descriptor_count);
+	m_descriptor_images.reserve(descriptor_count);
+	m_descriptor_writes.reserve(write_count);
+
+	TransitionBoundResources(buffer, prepared_bindings, pipeline.prototype_vertex_capture);
+
+	for (auto* prepared: prepared_bindings) {
+		const auto& program     = *prepared->runtime->program;
+		auto&       descriptors = *prepared;
 
 		m_image_occurrences.assign(descriptors.images.size(), 0);
 		for (const auto& binding: program.bindings.descriptors) {
