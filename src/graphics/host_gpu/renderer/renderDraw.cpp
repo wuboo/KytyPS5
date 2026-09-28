@@ -1190,11 +1190,6 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		if (const auto* prototype = GetPerVertexPrototypePrograms(
 		        m_context.GetGraphics(), state.programs, state.vertex_info[0],
 		        m_context.GetPipelineCache().DriverCache())) {
-			// bench diag: KYTY_BENCH_SKIP_PROTOTYPE=1 drops every prototype draw (cost upper bound)
-			static const bool skip_prototype = std::getenv("KYTY_BENCH_SKIP_PROTOTYPE") != nullptr;
-			if (skip_prototype) {
-				return;
-			}
 			ExecutePerVertexPrototype(submit_id, buffer, draw, state, topology, emit, index_source,
 			                          primitive_restart_enable);
 			return;
