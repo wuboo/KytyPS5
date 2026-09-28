@@ -533,6 +533,19 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	// `.gds.buffer` for both stages, so this is free to check.
 	const bool item_uses_gds =
 	    vertex_bindings.gds.buffer != nullptr || pixel_bindings.gds.buffer != nullptr;
+	// TEMP diagnostic (bug #4 re-check, 2026-09-28): the GDS exclusion below did not stop the
+	// crash on a live rerun -- confirm/deny whether this draw's shader even uses GDS at all.
+	{
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 200) {
+			LOGF("[bench-gds-check] vs_hash=%llu ps_hash=%llu vtx_gds=%d pix_gds=%d "
+			     "count=%u batch_active=%d\n",
+			     static_cast<unsigned long long>(vs_hash_for_cache),
+			     static_cast<unsigned long long>(ps_hash_for_cache),
+			     vertex_bindings.gds.buffer != nullptr, pixel_bindings.gds.buffer != nullptr, count,
+			     m_prototype_batch.active);
+		}
+	}
 	const bool batch_enabled = batch_opt_enabled && !item_uses_gds;
 	if (!batch_enabled && m_prototype_batch.active) {
 		// Falling through to the immediate-replay path below despite an active pending batch --
