@@ -6,3 +6,8 @@ _Build/vscode-clang/
 _Build/
 cmake-build-debug/
 _PipelineCache/
+_ShaderCache/
+_SaveData/
+_TempData/
+_DownloadData/
+_Textures/
