@@ -465,6 +465,15 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		// be reading them.
 		static constexpr size_t kPrototypeCaptureCacheCap = 4096;
 		auto&                   slot = m_prototype_capture_cache[cache_key];
+		// A pending batch item may still use the capture this slot (or the evicted entry) holds --
+		// its draw is only recorded when the batch flushes, possibly after a submit that already ran
+		// the deferred free below. Confirmed as the cause of a guest crash with batching + register
+		// writes passing (bench-notes.md 2026-09-28, "Kierunek A v2"): record the batch first.
+		if (m_prototype_batch.active &&
+		    (slot.captured != nullptr ||
+		     m_prototype_capture_cache.size() > kPrototypeCaptureCacheCap)) {
+			FlushPendingPrototypeBatch(buffer);
+		}
 		if (slot.captured != nullptr) {
 			scheduler.DeferOperation([old_captured = std::move(slot.captured),
 			                          old_pool = slot.pool, dev = graphics.device]() mutable {
