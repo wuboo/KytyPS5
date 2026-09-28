@@ -518,7 +518,30 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	// compatible draw is decided by the interpreter (graphicsRun.cpp) before it runs anything
 	// else, and by ExecutePreparedDraw() before it runs a non-matching draw -- both flush this
 	// batch first -- so a pending item here is never observed by anything else in the meantime.
-	static const bool batch_enabled = FrameTiming::OptEnabled("prototype_batch");
+	static const bool batch_opt_enabled = FrameTiming::OptEnabled("prototype_batch");
+	// A shader using GDS (Global Data Share -- PS4/PS5 atomic counters / append-consume buffers)
+	// makes CommitBindings() end the current dynamic-rendering scope internally, to fence the GDS
+	// buffer outside of it (see its `descriptors.gds.buffer` branch, pipeline/descriptors.cpp).
+	// The immediate-replay path below calls CommitBindings() *before* BeginRendering(), so that's
+	// a harmless no-op there. FlushPendingPrototypeBatch() calls it per item *after*
+	// BeginRendering() (needed so all of a batch's draws share one render pass), so for a
+	// GDS-using item it silently ends the render pass mid-batch -- every bind/draw after that
+	// point, for this item and any batched with it, then runs with no active render encoder. This
+	// was bug #4 (bench-notes.md 2026-09-28): a deterministic guest crash at an unrelated address,
+	// identical every time, downstream of the resulting Metal/MoltenVK encoder corruption. Keep
+	// GDS-using draws out of the batch entirely; PrepareBindings() above already populated
+	// `.gds.buffer` for both stages, so this is free to check.
+	const bool item_uses_gds =
+	    vertex_bindings.gds.buffer != nullptr || pixel_bindings.gds.buffer != nullptr;
+	const bool batch_enabled = batch_opt_enabled && !item_uses_gds;
+	if (!batch_enabled && m_prototype_batch.active) {
+		// Falling through to the immediate-replay path below despite an active pending batch --
+		// only possible now for a GDS-using item (batch_opt_enabled is a process-wide constant,
+		// so when it alone gates this, m_prototype_batch.active can never be true here). Flush
+		// first so draw order is preserved; the interpreter's own flush hooks don't know about
+		// this GDS exclusion, since from PM4-opcode level this looks like any other eligible draw.
+		FlushPendingPrototypeBatch(buffer);
+	}
 	// Exact byte equality (not just image identity) of color/depth info: these also carry
 	// blend-bypass/depth-test/stencil state that feeds GetGraphicsPipeline per item below, and
 	// which the shared BeginRendering doesn't otherwise account for. Comparing every byte can
