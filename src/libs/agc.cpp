@@ -1569,7 +1569,11 @@ int KYTY_SYSV_ABI AgcSuspendPoint() {
 
 uint32_t* KYTY_SYSV_ABI AgcDcbContextStateOp(CommandBuffer* buf, uint32_t operation) {
 	PRINT_NAME();
-	LOGF("\t operation = 0x%08" PRIx32 "\n", operation);
+	// Hot per-draw call: logging every call cost ~13 us each (bench-notes 2026-09-28).
+	static std::atomic<uint32_t> log_count {0};
+	if (log_count.fetch_add(1, std::memory_order_relaxed) < 16) {
+		LOGF("\t operation = 0x%08" PRIx32 "\n", operation);
+	}
 
 	const auto size_dw = context_state_op_size_dw(operation);
 	if (buf == nullptr || size_dw == 0) {
@@ -3562,12 +3566,15 @@ uint32_t* KYTY_SYSV_ABI AgcUnknownKRzWekV120(CommandBuffer* buf, uint32_t arg1, 
                                              uint32_t arg3) {
 	PRINT_NAME();
 
-	LOGF("\t argc = 4\n"
-	     "\t arg0 = 0x%016" PRIx64 "\n"
-	     "\t arg1 = 0x%08" PRIx32 "\n"
-	     "\t arg2 = 0x%08" PRIx32 "\n"
-	     "\t arg3 = 0x%08" PRIx32 "\n",
-	     reinterpret_cast<uint64_t>(buf), arg1, arg2, arg3);
+	static std::atomic<uint32_t> log_count {0};
+	if (log_count.fetch_add(1, std::memory_order_relaxed) < 16) {
+		LOGF("\t argc = 4\n"
+		     "\t arg0 = 0x%016" PRIx64 "\n"
+		     "\t arg1 = 0x%08" PRIx32 "\n"
+		     "\t arg2 = 0x%08" PRIx32 "\n"
+		     "\t arg3 = 0x%08" PRIx32 "\n",
+		     reinterpret_cast<uint64_t>(buf), arg1, arg2, arg3);
+	}
 
 	if (buf == nullptr) {
 		return nullptr;
@@ -3809,15 +3816,18 @@ uint32_t* KYTY_SYSV_ABI AgcDcbGetLodStats(CommandBuffer* buf, uint8_t cache_poli
                                           uint32_t reporting_interval_in_100k_clocks) {
 	PRINT_NAME();
 
-	LOGF("\t cache_policy                      = 0x%02" PRIx8 "\n"
-	     "\t buffer                            = 0x%016" PRIx64 "\n"
-	     "\t buffer_size_in_bytes              = %" PRIu32 "\n"
-	     "\t reset_count                       = %" PRIu32 "\n"
-	     "\t force_reset                       = 0x%02" PRIx8 "\n"
-	     "\t report_and_reset                  = 0x%02" PRIx8 "\n"
-	     "\t reporting_interval_in_100k_clocks = %" PRIu32 "\n",
-	     cache_policy, reinterpret_cast<uint64_t>(buffer), buffer_size_in_bytes, reset_count,
-	     force_reset, report_and_reset, reporting_interval_in_100k_clocks);
+	static std::atomic<uint32_t> log_count {0};
+	if (log_count.fetch_add(1, std::memory_order_relaxed) < 16) {
+		LOGF("\t cache_policy                      = 0x%02" PRIx8 "\n"
+		     "\t buffer                            = 0x%016" PRIx64 "\n"
+		     "\t buffer_size_in_bytes              = %" PRIu32 "\n"
+		     "\t reset_count                       = %" PRIu32 "\n"
+		     "\t force_reset                       = 0x%02" PRIx8 "\n"
+		     "\t report_and_reset                  = 0x%02" PRIx8 "\n"
+		     "\t reporting_interval_in_100k_clocks = %" PRIu32 "\n",
+		     cache_policy, reinterpret_cast<uint64_t>(buffer), buffer_size_in_bytes, reset_count,
+		     force_reset, report_and_reset, reporting_interval_in_100k_clocks);
+	}
 
 	if (buf == nullptr) {
 		return nullptr;
