@@ -11,6 +11,8 @@
 
 #include <SDL3/SDL.h>
 #include <algorithm>
+#include <atomic>
+#include <cinttypes>
 #include <cstring>
 #include <limits>
 #include <magic_enum.hpp>
@@ -140,7 +142,8 @@ private:
 	static bool            QueueSdlAudio(PortOut* port, const void* data, bool blocking);
 };
 
-static Audio* g_audio = nullptr;
+static Audio*                 g_audio = nullptr;
+static std::atomic<uint32_t>  g_audio_clears {0};
 
 namespace AudioInternal {
 
@@ -361,6 +364,41 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking) {
 	const auto prepared_size = BytesPerSample(port->format) * output_channels * port->samples_num;
 
 	uint32_t min_queued_size = 0;
+	{
+		// Underrun statistics, logged every 5 s: an SDL queue that runs dry between two game
+		// buffers is an audible gap (crackle), as is the 200 ms clear below.
+		static uint64_t window_start = 0, last_call = 0, calls = 0, dry = 0, low = 0, max_gap = 0;
+		static int      min_queued_ms = 1 << 30;
+		const auto      now           = LibKernel::KernelGetProcessTime();
+		const auto      queued_now    = SDL_GetAudioStreamQueued(port->stream);
+		const auto      bytes_per_ms  = BytesPerSample(port->format) * OutputChannels(*port) *
+		                          std::max<uint32_t>(port->freq, 1) / 1000;
+		const int queued_ms = bytes_per_ms != 0 ? static_cast<int>(queued_now / bytes_per_ms) : 0;
+		if (port->type != AUDIO_OUT_PORT_TYPE_VIBRATION) {
+			calls++;
+			if (port->queue_primed && queued_now == 0) {
+				dry++;
+			} else if (port->queue_primed && queued_ms < 10) {
+				low++;
+			}
+			min_queued_ms = std::min(min_queued_ms, queued_ms);
+			if (last_call != 0) {
+				max_gap = std::max<uint64_t>(max_gap, now - last_call);
+			}
+			last_call = now;
+			if (window_start == 0) {
+				window_start = now;
+			} else if (now - window_start >= 5000000) {
+				LOGF("[audio-stats] calls=%" PRIu64 " dry=%" PRIu64 " low<10ms=%" PRIu64
+				     " min_queued_ms=%d max_gap_us=%" PRIu64 " clears=%u samples=%u freq=%u\n",
+				     calls, dry, low, min_queued_ms, max_gap, g_audio_clears.exchange(0),
+				     port->samples_num, port->freq);
+				window_start = now;
+				calls = dry = low = max_gap = 0;
+				min_queued_ms = 1 << 30;
+			}
+		}
+	}
 	if (blocking) {
 		constexpr uint64_t target_latency_us = 40000;
 		const auto buffer_us = port->freq != 0 ? (1000000ULL * port->samples_num) / port->freq : 0;
@@ -376,6 +414,7 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking) {
 		while (queued > static_cast<int>(min_queued_size)) {
 			if (LibKernel::KernelGetProcessTime() - wait_start > 200000) {
 				SDL_ClearAudioStream(port->stream);
+				g_audio_clears.fetch_add(1, std::memory_order_relaxed);
 				port->queue_primed = false;
 				break;
 			}
