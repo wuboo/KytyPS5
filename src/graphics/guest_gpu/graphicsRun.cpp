@@ -909,6 +909,15 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 	(void)count_in_dwords;
 	uint64_t value = 0;
 
+	{
+		// TEMP diagnostic (2026-09-28): SetPredication's op 0x01/0x03 also read a (likely
+		// GPU-written, occlusion-query-result) guest pointer directly on the CPU -- another
+		// possible source of the readback stalls DrawIndirect was suspected of alone.
+		static std::atomic<uint32_t> logged {0};
+		if ((op == 0x01 || op == 0x03) && logged.fetch_add(1, std::memory_order_relaxed) < 50) {
+			LOGF("[bench-indirect3] SetPredication op=%u wait_op=%u\n", op, wait_op);
+		}
+	}
 	switch (op) {
 		case 0x00: m_predicate_skip = false; return;
 		case 0x01: {
@@ -986,6 +995,13 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 
 void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t draw_initiator, bool indexed) {
 	BenchFlushEach();
+	{
+		// TEMP diagnostic (2026-09-28): confirm this is (still) being reached at all in this run.
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 50) {
+			LOGF("[bench-indirect3] DrawIndirect indexed=%d\n", indexed ? 1 : 0);
+		}
+	}
 	EXIT_NOT_IMPLEMENTED((draw_initiator & ~0x20u) != 2u);
 	EXIT_NOT_IMPLEMENTED(m_draw_indirect_args_base_addr == 0);
 
@@ -1026,6 +1042,17 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
                                          uint32_t stride_in_bytes, uint32_t draw_initiator,
                                          bool indexed) {
 	BenchFlushEach();
+	{
+		// TEMP diagnostic (2026-09-28): DrawIndexIndirect's native path shows zero rb_read_fault_gpu
+		// reduction in some runs of the same scenario -- is DrawIndirectMulti (unchanged, still a
+		// CPU readback of both count_addr and each item's args) the actual source instead?
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 50) {
+			LOGF("[bench-indirect3] DrawIndirectMulti indexed=%d max_count_or_count=%u "
+			     "has_count_addr=%d\n",
+			     indexed ? 1 : 0, max_count_or_count, count_addr != nullptr);
+		}
+	}
 	EXIT_NOT_IMPLEMENTED((draw_initiator & ~0x20u) != 2u);
 	EXIT_NOT_IMPLEMENTED(m_draw_indirect_args_base_addr == 0);
 
@@ -1162,6 +1189,13 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 	BenchFlushEach();
 	EXIT_NOT_IMPLEMENTED(args_addr == 0 || (args_addr & 3u) != 0);
 	if ((mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0) {
+		// TEMP diagnostic (2026-09-28): another CPU readback of a (possibly GPU-written) indirect
+		// buffer, unlike the ObtainBuffer-based native path a few lines down -- how often does
+		// this specific mode fire?
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 50) {
+			LOGF("[bench-indirect3] DispatchIndirect USE_THREAD_DIMENSIONS\n");
+		}
 		const auto* args = reinterpret_cast<const vk::DispatchIndirectCommand*>(args_addr);
 		DispatchDirect(args->x, args->y, args->z, mode);
 		return;
