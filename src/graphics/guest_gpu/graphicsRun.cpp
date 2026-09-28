@@ -909,17 +909,6 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 	(void)count_in_dwords;
 	uint64_t value = 0;
 
-	{
-		// TEMP diagnostic (PR #767 measurement): how often predication forces a full GPU drain.
-		static std::atomic<uint32_t> calls {0};
-		static std::atomic<uint32_t> drains {0};
-		const auto n = calls.fetch_add(1, std::memory_order_relaxed) + 1;
-		const auto d = drains.fetch_add(op == 0x03 && wait_op != 0 ? 1u : 0u, std::memory_order_relaxed) +
-		               (op == 0x03 && wait_op != 0 ? 1u : 0u);
-		if ((n & (n - 1)) == 0 || (n & 0x3ffu) == 0) {
-			LOGF("[bench-predicate] calls=%u drains=%u last_op=%u wait_op=%u\n", n, d, op, wait_op);
-		}
-	}
 	switch (op) {
 		case 0x00: m_predicate_skip = false; return;
 		case 0x01: {
