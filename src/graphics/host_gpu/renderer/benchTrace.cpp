@@ -142,6 +142,34 @@ bool SkipDraw(uint64_t vs_hash, uint64_t ps_hash) {
 	return false;
 }
 
+bool SkipBatch(uint64_t vs_hash, uint64_t ps_hash) {
+	static const std::vector<uint64_t> skip = [] {
+		std::vector<uint64_t> hashes;
+		if (const char* value = std::getenv("KYTY_BENCH_SKIP_BATCH"); value != nullptr) {
+			std::string list = value;
+			size_t      pos  = 0;
+			while (pos < list.size()) {
+				const auto end = list.find(',', pos);
+				hashes.push_back(std::strtoull(list.substr(pos, end - pos).c_str(), nullptr, 16));
+				pos = end == std::string::npos ? list.size() : end + 1;
+			}
+		}
+		return hashes;
+	}();
+	for (const auto hash: skip) {
+		if (hash != 0 && (hash == vs_hash || hash == ps_hash)) {
+			static std::atomic<uint32_t> logged {0};
+			if (logged.fetch_add(1, std::memory_order_relaxed) < 4) {
+				LOGF("[bench-skip] excluding vs=0x%016" PRIx64 " ps=0x%016" PRIx64
+				     " from prototype_batch\n",
+				     vs_hash, ps_hash);
+			}
+			return true;
+		}
+	}
+	return false;
+}
+
 bool SkipCompute(uint64_t shader_hash) {
 	static const std::vector<uint64_t> skip = [] {
 		std::vector<uint64_t> hashes;

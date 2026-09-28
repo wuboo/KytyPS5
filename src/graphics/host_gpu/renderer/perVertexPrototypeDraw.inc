@@ -534,13 +534,24 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	// both stages, so checking it here is free.
 	const bool item_uses_gds =
 	    vertex_bindings.gds.buffer != nullptr || pixel_bindings.gds.buffer != nullptr;
-	const bool batch_enabled = batch_opt_enabled && !item_uses_gds;
+	// Bug #4 (bench-notes.md 2026-09-28, "second round"): a specific VS/PS pair crashes
+	// deterministically when it goes through the batched path at all, even alone in a batch of
+	// one, for reasons that survived every mitigation tried (activation delay, batch-size cap,
+	// GDS exclusion) -- narrowing it to something about this exact shader specifically, not
+	// batching in general. KYTY_BENCH_SKIP_BATCH excludes it (and lets anything else be named
+	// later the same way) from batching only, same mechanism as the existing
+	// KYTY_BENCH_SKIP_DRAW/KYTY_BENCH_SKIP_CS bench switches -- the draw itself still renders via
+	// the immediate path below, nothing visible is lost, only this one shader's forced
+	// render-pass break stays unbatched.
+	const bool item_skipped_from_batch = BenchTrace::SkipBatch(vs_hash_for_cache, ps_hash_for_cache);
+	const bool batch_enabled = batch_opt_enabled && !item_uses_gds && !item_skipped_from_batch;
 	if (!batch_enabled && m_prototype_batch.active) {
 		// Falling through to the immediate-replay path below despite an active pending batch --
-		// only possible now for a GDS-using item (batch_opt_enabled is a process-wide constant,
-		// so when it alone gates this, m_prototype_batch.active can never be true here). Flush
-		// first so draw order is preserved; the interpreter's own flush hooks don't know about
-		// this GDS exclusion, since from PM4-opcode level this looks like any other eligible draw.
+		// only possible now for a GDS-using or SKIP_BATCH-listed item (batch_opt_enabled is a
+		// process-wide constant, so when it alone gates this, m_prototype_batch.active can never
+		// be true here). Flush first so draw order is preserved; the interpreter's own flush
+		// hooks don't know about these exclusions, since from PM4-opcode level this looks like
+		// any other eligible draw.
 		FlushPendingPrototypeBatch(buffer);
 	}
 	// Exact byte equality (not just image identity) of color/depth info: these also carry

@@ -13,6 +13,9 @@ void Dump(uint64_t tick);
 bool SkipCompute(uint64_t shader_hash);
 // True when KYTY_BENCH_SKIP_DRAW lists the draw's vertex or pixel shader hash (hex, comma sep.).
 bool SkipDraw(uint64_t vs_hash, uint64_t ps_hash);
+// True when KYTY_BENCH_SKIP_BATCH lists the draw's vertex or pixel shader hash (hex, comma
+// sep.): keeps the draw itself (unlike SkipDraw), only excludes it from prototype_batch.
+bool SkipBatch(uint64_t vs_hash, uint64_t ps_hash);
 // The main scheduler's tick being recorded (set by CommandScheduler::BeginNext).
 void     SetTick(uint64_t tick);
 uint64_t Tick();
