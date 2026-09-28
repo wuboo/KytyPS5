@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <functional>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -37,6 +38,9 @@ public:
 	void           Finish();
 	CommandBuffer& BeginCommand();
 	uint64_t       Submit(SubmitInfo submit = {});
+	// Runs on the recording thread just before a command buffer is closed for submission, so
+	// callers can append work that must follow everything recorded so far (not re-entrant).
+	void SetPreSubmitHook(std::function<void()> hook) { m_pre_submit = std::move(hook); }
 	// Deferred callbacks can observe an externally owned drain, but cannot initiate shutdown:
 	// the priority runner cannot join itself.
 	void                      Shutdown();
@@ -61,6 +65,9 @@ public:
 	[[nodiscard]] GraphicContext&  Graphics() const noexcept { return m_graphics; }
 
 private:
+	std::function<void()> m_pre_submit;
+	bool                  m_in_pre_submit = false;
+
 	class CommandPool {
 	public:
 		CommandPool(GraphicContext& graphics, MasterSemaphore& master);
