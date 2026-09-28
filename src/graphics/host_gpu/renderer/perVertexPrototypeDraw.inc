@@ -526,11 +526,12 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	// a harmless no-op there. FlushPendingPrototypeBatch() calls it per item *after*
 	// BeginRendering() (needed so all of a batch's draws share one render pass), so for a
 	// GDS-using item it silently ends the render pass mid-batch -- every bind/draw after that
-	// point, for this item and any batched with it, then runs with no active render encoder. This
-	// was bug #4 (bench-notes.md 2026-09-28): a deterministic guest crash at an unrelated address,
-	// identical every time, downstream of the resulting Metal/MoltenVK encoder corruption. Keep
-	// GDS-using draws out of the batch entirely; PrepareBindings() above already populated
-	// `.gds.buffer` for both stages, so this is free to check.
+	// point, for this item and any batched with it, then runs with no active render encoder,
+	// the same encoder-corruption class suspected for bug #3. Found while hunting bug #4
+	// (bench-notes.md 2026-09-28); live diagnostics ruled it out as bug #4's actual cause (that
+	// crash's draw doesn't use GDS), but it is a real, independent correctness gap in its own
+	// right, worth keeping fixed. PrepareBindings() above already populated `.gds.buffer` for
+	// both stages, so checking it here is free.
 	const bool item_uses_gds =
 	    vertex_bindings.gds.buffer != nullptr || pixel_bindings.gds.buffer != nullptr;
 	const bool batch_enabled = batch_opt_enabled && !item_uses_gds;
