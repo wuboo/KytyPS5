@@ -1491,29 +1491,13 @@ void RenderExecutor::DrawIndexIndirect(uint64_t submit_id, CommandBuffer& buffer
 
 	Common::LockGuard lock(m_context.GetMutex());
 
-	// TEMP diagnostic (2026-09-28): DrawIndirect is being called (confirmed) but DrawIndexIndirect
-	// never reaches its eligibility log -- find which early return is catching every call.
-	static std::atomic<uint32_t> diag3_entered {0};
-	if (diag3_entered.fetch_add(1, std::memory_order_relaxed) < 50) {
-		LOGF("[bench-indirect4] DrawIndexIndirect entered\n");
-	}
-
 	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer, args.render_target_slice_offset)) {
-		static std::atomic<uint32_t> diag3_a {0};
-		if (diag3_a.fetch_add(1, std::memory_order_relaxed) < 50) {
-			LOGF("[bench-indirect4] returned at ConsumeMetadataColorOperation/DepthStencilCopy/"
-			     "ResolveColorTargets\n");
-		}
 		ResetBindings();
 		return;
 	}
 
 	if (!DrawHasValidVertexShader(sh_ctx)) {
-		static std::atomic<uint32_t> diag3_b {0};
-		if (diag3_b.fetch_add(1, std::memory_order_relaxed) < 50) {
-			LOGF("[bench-indirect4] returned at DrawHasValidVertexShader\n");
-		}
 		return;
 	}
 
@@ -1522,10 +1506,6 @@ void RenderExecutor::DrawIndexIndirect(uint64_t submit_id, CommandBuffer& buffer
 
 	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
 	if (!GetDrawTopology(ucfg, topology)) {
-		static std::atomic<uint32_t> diag3_c {0};
-		if (diag3_c.fetch_add(1, std::memory_order_relaxed) < 50) {
-			LOGF("[bench-indirect4] returned at GetDrawTopology\n");
-		}
 		return;
 	}
 
@@ -1551,10 +1531,6 @@ void RenderExecutor::DrawIndexIndirect(uint64_t submit_id, CommandBuffer& buffer
 	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndex, 1, 1, 0};
 	DrawRenderState     state {};
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
-		static std::atomic<uint32_t> diag3_d {0};
-		if (diag3_d.fetch_add(1, std::memory_order_relaxed) < 50) {
-			LOGF("[bench-indirect4] returned at PrepareDrawRenderState\n");
-		}
 		ResetBindings();
 		return;
 	}
