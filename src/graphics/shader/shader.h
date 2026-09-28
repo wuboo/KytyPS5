@@ -314,6 +314,12 @@ struct ShaderMappedData {
 	uint32_t                   num_input_semantics = 0;
 	uint32_t                   code_size_bytes     = 0;
 	uint32_t                   scratch_size_dwords = 0;
+	// Declared (embedded-header) or content hash of the code bytes at this address, computed
+	// once by ShaderMapUserData() instead of on every PrepareProgram() call that uses this
+	// shader -- see its call site (src/libs/agc.cpp) and bench-notes.md 2026-09-28,
+	// "GetComputeProgram readback stall". 0 means not computed (an invalid code_size_bytes at
+	// registration time); callers fall back to computing it live in that case.
+	uint64_t hash = 0;
 };
 
 void ShaderInit();

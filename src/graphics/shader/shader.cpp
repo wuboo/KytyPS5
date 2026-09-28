@@ -70,26 +70,6 @@ void ShaderInit() {
 	g_shader_map = std::make_unique<std::unordered_map<uint64_t, ShaderMappedData>>();
 }
 
-void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
-	EXIT_IF(g_shader_map == nullptr);
-
-	std::scoped_lock lock(g_shader_map_mutex);
-
-	(*g_shader_map)[addr] = data;
-}
-
-static ShaderMappedData ShaderGetMappedData(uint64_t addr, const char* label) {
-	EXIT_IF(g_shader_map == nullptr);
-
-	std::scoped_lock lock(g_shader_map_mutex);
-
-	if (auto iter = g_shader_map->find(addr); iter != g_shader_map->end()) {
-		return iter->second;
-	}
-
-	EXIT("%s shader=0x%016" PRIx64 " is missing from ShaderMap\n", label, addr);
-}
-
 static const ShaderBinaryInfo* GetBinaryInfo(const uint32_t* code) {
 	EXIT_IF(code == nullptr);
 
@@ -104,6 +84,49 @@ static const ShaderBinaryInfo* GetBinaryInfo(const uint32_t* code) {
 static uint64_t GetDeclaredShaderHash(uint64_t shader_addr) {
 	const auto* header = GetBinaryInfo(reinterpret_cast<const uint32_t*>(shader_addr));
 	return header != nullptr ? (static_cast<uint64_t>(header->hash1) << 32u) | header->hash0 : 0;
+}
+
+void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
+	EXIT_IF(g_shader_map == nullptr);
+
+	ShaderMappedData entry = data;
+	// Computed once here instead of on every PrepareProgram() call downstream that uses this
+	// shader (bench-notes.md 2026-09-28, "GetComputeProgram readback stall"): those calls
+	// otherwise re-read these same guest bytes on literally every draw/dispatch, and when the
+	// memory happens to be tracked as GPU-modified again by the time of the next call (observed,
+	// not fully explained -- possibly page-granularity false sharing with genuinely GPU-written
+	// data), each re-read pays a full synchronous GPU-drain fault. Measured as the actual,
+	// dominant cause of ~97s/165s of blocked GPU-thread time in one scene -- not DrawIndirect, as
+	// first suspected. Left 0 (a request to compute it live, same as before this existed) when
+	// code_size_bytes can't be trusted yet, matching GetShaderParams()'s own validation of it.
+	if (data.code_size_bytes != 0 && data.code_size_bytes % sizeof(uint32_t) == 0) {
+		entry.hash = GetDeclaredShaderHash(addr);
+		if (entry.hash == 0) {
+			entry.hash = XXH3_64bits(reinterpret_cast<const void*>(addr), data.code_size_bytes);
+		}
+	}
+
+	std::scoped_lock lock(g_shader_map_mutex);
+
+	(*g_shader_map)[addr] = entry;
+}
+
+static ShaderMappedData ShaderGetMappedData(uint64_t addr, const char* label) {
+	EXIT_IF(g_shader_map == nullptr);
+
+	std::scoped_lock lock(g_shader_map_mutex);
+
+	if (auto iter = g_shader_map->find(addr); iter != g_shader_map->end()) {
+		return iter->second;
+	}
+
+	EXIT("%s shader=0x%016" PRIx64 " is missing from ShaderMap\n", label, addr);
+}
+
+// GetDeclaredShaderHash(addr), preferring the hash ShaderMapUserData() already computed once
+// (nearly always available -- see there) over re-reading the shader's guest bytes again.
+static uint64_t GetOrComputeDeclaredHash(uint64_t shader_addr, const ShaderMappedData& data) {
+	return data.hash != 0 ? data.hash : GetDeclaredShaderHash(shader_addr);
 }
 
 static ShaderParams GetShaderParams(uint64_t shader_addr, const char* label, uint64_t declared_hash,
@@ -765,7 +788,7 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 	const bool  merged = (context.GetShaderStages() & 0x20u) != 0;
 	auto        params = GetShaderParams(
 	    regs.es_regs.data_addr, "ShaderRecompiler VS",
-	    GetDeclaredShaderHash(regs.es_regs.data_addr),
+	    GetOrComputeDeclaredHash(regs.es_regs.data_addr, data),
 	    std::span<const uint32_t>(regs.gs_user_sgpr.value, regs.gs_regs.rsrc2.user_sgpr), data,
 	    merged ? 8u : 0u);
 	if (!merged) {
@@ -793,7 +816,7 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 		const auto back = ShaderGetMappedData(regs.gs_regs.data_addr, "ShaderGetInputInfoGS():");
 		const auto back_params =
 		    GetShaderParams(regs.gs_regs.data_addr, "ShaderRecompiler GS",
-		                    GetDeclaredShaderHash(regs.gs_regs.data_addr), {}, back);
+		                    GetOrComputeDeclaredHash(regs.gs_regs.data_addr, back), {}, back);
 		params.back_code         = back_params.code;
 		params.user_data[0]      = static_cast<uint32_t>(regs.gs_regs.user_data_addr);
 		params.user_data[1]      = static_cast<uint32_t>(regs.gs_regs.user_data_addr >> 32u);
@@ -845,12 +868,13 @@ PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context&
 	const auto evaluation_users = std::span(regs.gs_user_sgpr.value, regs.gs_regs.rsrc2.user_sgpr);
 	std::array<ShaderParams, 3> params {
 	    GetShaderParams(regs.ls_regs.data_addr, "ShaderRecompiler LS",
-	                    GetDeclaredShaderHash(regs.ls_regs.data_addr), local_users, local),
+	                    GetOrComputeDeclaredHash(regs.ls_regs.data_addr, local), local_users, local),
 	    GetShaderParams(regs.hs_regs.data_addr, "ShaderRecompiler HS",
-	                    GetDeclaredShaderHash(regs.hs_regs.data_addr), local_users, control, 8u),
+	                    GetOrComputeDeclaredHash(regs.hs_regs.data_addr, control), local_users,
+	                    control, 8u),
 	    GetShaderParams(regs.es_regs.data_addr, "ShaderRecompiler TES",
-	                    GetDeclaredShaderHash(regs.es_regs.data_addr), evaluation_users,
-	                    evaluation),
+	                    GetOrComputeDeclaredHash(regs.es_regs.data_addr, evaluation),
+	                    evaluation_users, evaluation),
 	};
 	// The fused HS back half receives its separate user-data address in s0:s1.
 	// RDNA2 reserves s0:s7 before the native HS user SGPRs.
@@ -893,7 +917,7 @@ PrepareProgram(const HW::PixelShaderInfo& regs, const HW::ShaderRegisters& sh,
 	ShaderGetStaticInputInfoPS(regs, sh, target_export_mapping, data, ps_info);
 	return GetShaderParams(
 	    regs.ps_regs.data_addr, "ShaderRecompiler PS",
-	    GetDeclaredShaderHash(regs.ps_regs.data_addr),
+	    GetOrComputeDeclaredHash(regs.ps_regs.data_addr, data),
 	    std::span<const uint32_t>(regs.ps_user_sgpr.value, regs.ps_regs.rsrc2.user_sgpr), data);
 }
 
@@ -903,7 +927,7 @@ ShaderParams PrepareProgram(const HW::ComputeShaderInfo& regs, const HW::ShaderR
 	ShaderGetStaticInputInfoCS(regs, sh, data, info);
 	return GetShaderParams(
 	    regs.cs_regs.data_addr, "ShaderRecompiler CS",
-	    GetDeclaredShaderHash(regs.cs_regs.data_addr),
+	    GetOrComputeDeclaredHash(regs.cs_regs.data_addr, data),
 	    std::span<const uint32_t>(regs.cs_user_sgpr.value, regs.cs_regs.user_sgpr), data);
 }
 
