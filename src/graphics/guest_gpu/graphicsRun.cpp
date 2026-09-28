@@ -843,19 +843,6 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			// else in the whole PM4 stream can ever observe a partially-applied batch. The other
 			// half of this decision -- whether a draw itself is batchable, and with what -- lives
 			// in RenderExecutor::ExecutePerVertexPrototype/FlushPendingPrototypeBatch.
-			if (m_renderer.GetRenderExecutor().HasPendingPrototypeBatch()) {
-				// TEMP diagnostic: which opcodes break prototype batches.
-				static std::array<std::atomic<uint32_t>, 256> by_op {};
-				static std::atomic<uint32_t>                 total {0};
-				by_op[opcode & 0xffu].fetch_add(1, std::memory_order_relaxed);
-				if (((total.fetch_add(1, std::memory_order_relaxed) + 1) & 0x3fffu) == 0) {
-					for (uint32_t op = 0; op < 256; op++) {
-						if (const auto n = by_op[op].load(std::memory_order_relaxed); n != 0) {
-							LOGF("[bench-batch-break] op=0x%02x n=%u\n", op, n);
-						}
-					}
-				}
-			}
 			m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
 		}
 

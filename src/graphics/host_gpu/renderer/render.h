@@ -221,7 +221,6 @@ public:
 	// pending batch is always flushed before anything else in the command stream can observe it;
 	// a no-op when nothing is pending.
 	void FlushPendingPrototypeBatch(CommandBuffer& buffer);
-	[[nodiscard]] bool HasPendingPrototypeBatch() const noexcept { return m_prototype_batch.active; }
 
 	void PrepareBindings(const ShaderStageRuntime& runtime, PreparedBindings& prepared);
 	void FindBuffers(PreparedBindings& bindings);
