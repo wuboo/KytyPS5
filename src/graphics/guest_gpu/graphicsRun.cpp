@@ -986,14 +986,6 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 
 void CommandProcessor::DrawIndirect(uint32_t data_offset, uint32_t draw_initiator, bool indexed) {
 	BenchFlushEach();
-	{
-		// TEMP diagnostic (2026-09-28): is this CPU-readback indirect-draw path used at all by
-		// this game, and how often -- worth a native vkCmdDrawIndirect implementation or not.
-		static std::atomic<uint32_t> logged {0};
-		if (logged.fetch_add(1, std::memory_order_relaxed) < 20) {
-			LOGF("[bench-indirect] DrawIndirect indexed=%d\n", indexed ? 1 : 0);
-		}
-	}
 	EXIT_NOT_IMPLEMENTED((draw_initiator & ~0x20u) != 2u);
 	EXIT_NOT_IMPLEMENTED(m_draw_indirect_args_base_addr == 0);
 
@@ -1052,14 +1044,6 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
                                          uint32_t stride_in_bytes, uint32_t draw_initiator,
                                          bool indexed) {
 	BenchFlushEach();
-	{
-		// TEMP diagnostic (2026-09-28): same question as DrawIndirect, for the multi-draw variant.
-		static std::atomic<uint32_t> logged {0};
-		if (logged.fetch_add(1, std::memory_order_relaxed) < 20) {
-			LOGF("[bench-indirect] DrawIndirectMulti indexed=%d max_count_or_count=%u\n",
-			     indexed ? 1 : 0, max_count_or_count);
-		}
-	}
 	EXIT_NOT_IMPLEMENTED((draw_initiator & ~0x20u) != 2u);
 	EXIT_NOT_IMPLEMENTED(m_draw_indirect_args_base_addr == 0);
 
