@@ -22,6 +22,7 @@
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <memory>
@@ -1279,6 +1280,20 @@ static int NativeMutexLock(PthreadMutexPrivate* mutex, KernelUseconds* timeout_u
 	}
 
 	if (timeout_us == nullptr) {
+		// Spin briefly before sleeping (KYTY_MUTEX_SPIN iterations, 0 disables): the game's
+		// critical sections are short, PS5 mutexes spin before blocking, and a host
+		// condition-variable sleep and wake-up costs tens of microseconds per handoff.
+		static const int spin_limit = [] {
+			const char* value = std::getenv("KYTY_MUTEX_SPIN");
+			return value != nullptr ? std::atoi(value) : 64;
+		}();
+		for (int spin = 0; spin < spin_limit && mutex->owner != nullptr; spin++) {
+			lock.unlock();
+			for (int pause = 0; pause < 16; pause++) {
+				__builtin_ia32_pause();
+			}
+			lock.lock();
+		}
 		while (mutex->owner != nullptr) {
 			mutex->cv.wait_for(lock, std::chrono::microseconds(SIGNAL_APC_POLL_MICROS));
 			if (mutex->owner != nullptr) {
