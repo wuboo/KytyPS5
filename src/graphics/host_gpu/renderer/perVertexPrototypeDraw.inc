@@ -606,6 +606,22 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 			item.owned_pool     = capture_pool;
 		}
 		m_prototype_batch.items.push_back(std::move(item));
+		// Diagnostic/mitigation for bug #4 (bench-notes.md 2026-09-28): the crash reproduces at
+		// the exact same guest draw regardless of how long batching has been active for (a
+		// KYTY_PROTOTYPE_BATCH_MIN_FRAME activation-delay experiment still hit it), which rules
+		// out "boot isn't finished yet" and points at holding a render pass open *while* this
+		// draw happens as the trigger -- plausibly starving something the guest's async asset
+		// loader depends on. Capping how many draws a batch can hold open, independent of when it
+		// started, tests that theory cheaply. 0 (default) means no cap, i.e. prior behavior.
+		static const uint64_t batch_max_size = [] {
+			if (const char* env = std::getenv("KYTY_PROTOTYPE_BATCH_MAX_SIZE")) {
+				return static_cast<uint64_t>(std::strtoull(env, nullptr, 10));
+			}
+			return uint64_t {0};
+		}();
+		if (batch_max_size != 0 && m_prototype_batch.items.size() >= batch_max_size) {
+			FlushPendingPrototypeBatch(buffer);
+		}
 		return;
 	}
 
