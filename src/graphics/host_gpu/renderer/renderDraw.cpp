@@ -681,7 +681,6 @@ static bool ConsumeMetadataColorOperation(const CommandBuffer& buffer) {
 void RenderExecutor::FlushPrototypeBatchBeforeSpecialOps(CommandBuffer& buffer) {
 	if (m_prototype_batch.active &&
 	    buffer.GetRegisters().GetColorControl().mode != static_cast<uint8_t>(CbColorMode::Normal)) {
-		m_diag_flush_reason = "special-op";
 		FlushPendingPrototypeBatch(buffer);
 	}
 }
@@ -1200,7 +1199,6 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// batch first, same reasoning as the PM4-interpreter-level flush in graphicsRun.cpp -- two
 	// consecutive IT_DRAW_INDEX_2 packets reach the same opcode check there, so only the check
 	// here (now that we know this one isn't prototype-eligible) can catch that case.
-	m_diag_flush_reason = "prepared-draw";
 	FlushPendingPrototypeBatch(buffer);
 	auto&      ucfg = buffer.GetUserConfig();
 	const auto vertex_stages =

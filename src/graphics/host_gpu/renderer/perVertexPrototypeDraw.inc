@@ -474,6 +474,15 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		// be reading them.
 		static constexpr size_t kPrototypeCaptureCacheCap = 4096;
 		auto&                   slot = m_prototype_capture_cache[cache_key];
+		// A pending batch item may still use the capture this slot (or the evicted entry) holds --
+		// its draw is only recorded when the batch flushes, possibly after a submit that already ran
+		// the deferred free below. Confirmed as the cause of a guest crash with batching + register
+		// writes passing (bench-notes.md 2026-09-28, "Kierunek A v2"): record the batch first.
+		if (m_prototype_batch.active &&
+		    (slot.captured != nullptr ||
+		     m_prototype_capture_cache.size() > kPrototypeCaptureCacheCap)) {
+			FlushPendingPrototypeBatch(buffer);
+		}
 		if (slot.captured != nullptr) {
 			scheduler.DeferOperation([old_captured = std::move(slot.captured),
 			                          old_pool = slot.pool, dev = graphics.device]() mutable {
@@ -552,7 +561,6 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		// be true here). Flush first so draw order is preserved; the interpreter's own flush
 		// hooks don't know about these exclusions, since from PM4-opcode level this looks like
 		// any other eligible draw.
-		m_diag_flush_reason = "excluded";
 		FlushPendingPrototypeBatch(buffer);
 	}
 	// Exact byte equality (not just image identity) of color/depth info: these also carry
@@ -574,7 +582,6 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	    std::memcmp(&m_prototype_batch.depth_info, &state.depth_info, sizeof(RenderDepthInfo)) == 0;
 	if (batch_enabled) {
 		if (m_prototype_batch.active && !batch_matches) {
-			m_diag_flush_reason = "mismatch";
 			FlushPendingPrototypeBatch(buffer);
 		}
 		if (!m_prototype_batch.active) {
@@ -682,23 +689,6 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 	if (!m_prototype_batch.active) {
 		return;
-	}
-	{
-		static std::unordered_map<std::string, uint64_t> by_reason;
-		static uint64_t                                  flushes = 0;
-		std::string key = m_diag_flush_reason;
-		if (key == "pm4-op") {
-			char op[16];
-			std::snprintf(op, sizeof(op), "-0x%02x", m_diag_flush_opcode & 0xffu);
-			key += op;
-		}
-		by_reason[key]++;
-		if ((++flushes & 0x1fffu) == 0) {
-			for (const auto& [reason, n]: by_reason) {
-				LOGF("[bench-flush-reason] %s n=%llu\n", reason.c_str(), static_cast<unsigned long long>(n));
-			}
-		}
-		m_diag_flush_reason = "unset";
 	}
 	auto& batch = m_prototype_batch;
 	m_prototype_batch.active = false; // reentrancy guard: none of the calls below re-enter here
