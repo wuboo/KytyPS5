@@ -674,6 +674,19 @@ static bool ConsumeMetadataColorOperation(const CommandBuffer& buffer) {
 	       mode == static_cast<uint8_t>(CbColorMode::DccDecompress);
 }
 
+// Register writes no longer flush a pending prototype batch (see ProcessPm4), so a draw arriving
+// with a non-Normal color mode may be about to run a metadata operation, resolve or depth copy in
+// place of drawing -- recorded immediately, i.e. before the batch's draws that the guest issued
+// earlier. Flush first in that case; ordinary draws (Normal mode) keep batching.
+void RenderExecutor::FlushPrototypeBatchBeforeSpecialOps(CommandBuffer& buffer) {
+	if (m_prototype_batch.active &&
+	    buffer.GetRegisters().GetColorControl().mode != static_cast<uint8_t>(CbColorMode::Normal)) {
+		m_diag_flush_reason = "special-op";
+		FlushPendingPrototypeBatch(buffer);
+	}
+}
+
+
 struct DrawEmitInfo {
 	int32_t  vertex_offset  = 0;
 	uint32_t first_vertex   = 0;
@@ -1389,6 +1402,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		return;
 	}
 
+	FlushPrototypeBatchBeforeSpecialOps(buffer);
 	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer, args.render_target_slice_offset)) {
 		ResetBindings();
@@ -1496,6 +1510,7 @@ void RenderExecutor::DrawIndexIndirect(uint64_t submit_id, CommandBuffer& buffer
 
 	Common::LockGuard lock(m_context.GetMutex());
 
+	FlushPrototypeBatchBeforeSpecialOps(buffer);
 	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer, args.render_target_slice_offset)) {
 		ResetBindings();
@@ -1642,6 +1657,7 @@ void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const D
 		return;
 	}
 
+	FlushPrototypeBatchBeforeSpecialOps(buffer);
 	if (ConsumeMetadataColorOperation(buffer) || DepthStencilCopy(buffer) ||
 	    ResolveColorTargets(buffer, args.render_target_slice_offset)) {
 		ResetBindings();

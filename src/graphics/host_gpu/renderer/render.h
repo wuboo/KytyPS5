@@ -221,6 +221,7 @@ public:
 	// pending batch is always flushed before anything else in the command stream can observe it;
 	// a no-op when nothing is pending.
 	void FlushPendingPrototypeBatch(CommandBuffer& buffer);
+	void FlushPrototypeBatchBeforeSpecialOps(CommandBuffer& buffer);
 	// TEMP diagnostic: why the next FlushPendingPrototypeBatch() call happens.
 	const char* m_diag_flush_reason = "unset";
 	uint32_t    m_diag_flush_opcode = 0;
