@@ -496,7 +496,6 @@ void GuestGpu::ThreadRun(void* data) {
 	auto* gpu = static_cast<GuestGpu*>(data);
 	EXIT_IF(gpu == nullptr);
 	KYTY_PROFILER_THREAD("Thread_Gpu");
-	Common::Thread::SetLatencyCriticalQos();
 	g_gpu_thread = true;
 	g_gpu_state  = gpu;
 

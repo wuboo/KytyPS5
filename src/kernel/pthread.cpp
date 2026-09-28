@@ -3201,7 +3201,6 @@ static void* RunThread(void* arg) {
 	void* ret    = nullptr;
 
 	thread->unique_id = Common::Thread::GetThreadIdUnique();
-	Common::Thread::SetLatencyCriticalQos();
 
 	g_pthread_self = thread;
 
