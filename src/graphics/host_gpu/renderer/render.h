@@ -173,6 +173,9 @@ public:
 	void                           FindBuffers(std::span<PreparedBindings* const> stages);
 	void                           RebindBuffers(PreparedBindings& bindings);
 	void                           RebindImages(PreparedBindings& bindings);
+	void TransitionBoundResources(CommandBuffer&                     buffer,
+	                              std::span<PreparedBindings* const> bindings,
+	                              bool                               prototype_vertex_capture);
 	void CommitBindings(CommandBuffer& buffer, vk::PipelineBindPoint pipeline_bind_point,
 	                    const PipelineCache::Pipeline&     pipeline,
 	                    std::span<PreparedBindings* const> bindings);
