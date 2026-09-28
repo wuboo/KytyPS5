@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "graphics/host_gpu/renderer/benchTrace.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/presentation/videoOut.h"
@@ -11,6 +12,9 @@
 #include <atomic>
 #include <cinttypes>
 #include <cstdlib>
+#if defined(__APPLE__)
+#include <execinfo.h>
+#endif
 
 namespace Libs::Graphics {
 
@@ -142,6 +146,35 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	} else {
 		FrameTiming::Add(on_gpu_thread ? FrameTiming::Counter::ReadbackReadFaultGpu
 		                               : FrameTiming::Counter::ReadbackReadFault);
+		// TEMP diagnostic (2026-09-28): DrawIndirect/DrawIndirectMulti/DispatchIndirect's
+		// USE_THREAD_DIMENSIONS mode/SetPredication were all checked and ruled out as the source
+		// of this game's ~97s/165s of readback_wait_ns in the menu scene -- log what's actually
+		// running (BenchTrace's "current operation", set before draw/dispatch/fill/copy) and a
+		// raw backtrace (execinfo, not a debugger -- lldb doesn't attach reliably here) to find
+		// the real one instead of guessing from function names again.
+		if (on_gpu_thread) {
+			static std::atomic<uint32_t> logged {0};
+			if (logged.fetch_add(1, std::memory_order_relaxed) < 40) {
+				const char* kind  = "none";
+				uint64_t    hash0 = 0;
+				uint64_t    hash1 = 0;
+				BenchTrace::GetCurrent(kind, hash0, hash1);
+				LOGF("[bench-fault] addr=0x%016" PRIx64 " current=%s hash0=0x%016" PRIx64
+				     " hash1=0x%016" PRIx64 "\n",
+				     fault_vaddr, kind, hash0, hash1);
+#if defined(__APPLE__)
+				void* frames[16];
+				const int n = backtrace(frames, 16);
+				char** syms = backtrace_symbols(frames, n);
+				if (syms != nullptr) {
+					for (int i = 0; i < n; i++) {
+						LOGF("[bench-fault]   %s\n", syms[i]);
+					}
+					free(syms);
+				}
+#endif
+			}
+		}
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
 	}
 	return true;

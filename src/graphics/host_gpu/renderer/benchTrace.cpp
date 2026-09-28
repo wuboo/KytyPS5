@@ -79,6 +79,12 @@ void SetCurrent(const char* kind, uint64_t hash0, uint64_t hash1) {
 	g_current = {kind, hash0, hash1};
 }
 
+void GetCurrent(const char*& kind, uint64_t& hash0, uint64_t& hash1) {
+	kind  = g_current.kind;
+	hash0 = g_current.hash0;
+	hash1 = g_current.hash1;
+}
+
 void RecordGpuWrite(uint64_t vaddr, uint64_t size) {
 	g_writes[g_next_write.fetch_add(1, std::memory_order_relaxed) % WriteCapacity] = {
 	    vaddr, size, Tick(), g_current};
