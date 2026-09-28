@@ -840,15 +840,33 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		// dynamic state) when each of its draws was issued, so they need not flush it. Astro Bot
 		// sets SH/context registers between every pair of draws; without this, batches never grew
 		// past one draw (bench-notes.md 2026-09-28, "Kierunek A v2").
-		const bool register_write =
-		    opcode == Pm4::IT_SET_SH_REG || opcode == Pm4::IT_SET_SH_REG_INDIRECT ||
-		    opcode == Pm4::IT_SET_CONTEXT_REG || opcode == Pm4::IT_SET_CONTEXT_REG_INDIRECT ||
-		    opcode == Pm4::IT_NUM_INSTANCES || opcode == Pm4::IT_INDEX_TYPE ||
-		    opcode == Pm4::IT_INDEX_BASE || opcode == Pm4::IT_INDEX_BUFFER_SIZE;
+		// TEMP bisect switch: KYTY_BATCH_PASS_OPS=hex,hex,... overrides which opcodes pass.
+		static const std::array<bool, 256> pass_ops = [] {
+			std::array<bool, 256> ops {};
+			if (const char* v = std::getenv("KYTY_BATCH_PASS_OPS"); v != nullptr) {
+				std::string list = v;
+				size_t      pos  = 0;
+				while (pos < list.size()) {
+					const auto end = list.find(',', pos);
+					ops[std::strtoul(list.substr(pos, end - pos).c_str(), nullptr, 16) & 0xffu] = true;
+					pos = end == std::string::npos ? list.size() : end + 1;
+				}
+				LOGF("[bench] KYTY_BATCH_PASS_OPS=%s\n", v);
+				return ops;
+			}
+			for (const auto op: {Pm4::IT_SET_SH_REG, Pm4::IT_SET_SH_REG_INDIRECT, Pm4::IT_SET_CONTEXT_REG,
+			                      Pm4::IT_SET_CONTEXT_REG_INDIRECT, Pm4::IT_NUM_INSTANCES, Pm4::IT_INDEX_TYPE,
+			                      Pm4::IT_INDEX_BASE, Pm4::IT_INDEX_BUFFER_SIZE, Pm4::IT_DRAW_INDEX_OFFSET_2}) {
+				ops[op] = true;
+			}
+			return ops;
+		}();
+		const bool register_write = pass_ops[opcode & 0xffu] && opcode != Pm4::IT_DRAW_INDEX_OFFSET_2;
 		// IT_DRAW_INDEX_OFFSET_2 is how Astro Bot issues most of its draws; like the other draw
 		// opcodes it decides for itself (ExecutePreparedDraw/ExecutePerVertexPrototype) whether a
 		// pending batch must be flushed first.
-		const bool draw = opcode == Pm4::IT_DRAW_INDEX_2 || opcode == Pm4::IT_DRAW_INDEX_OFFSET_2 ||
+		const bool draw = opcode == Pm4::IT_DRAW_INDEX_2 ||
+		                  (opcode == Pm4::IT_DRAW_INDEX_OFFSET_2 && pass_ops[opcode & 0xffu]) ||
 		                  opcode == Pm4::IT_DISPATCH_DRAW_PREAMBLE || opcode == Pm4::IT_DRAW_INDEX_AUTO;
 		if (!draw && !register_write) {
 			// Every op other than a (possibly per-vertex-prototype) draw must see this op's
