@@ -571,6 +571,21 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	    m_prototype_batch.ps_active == state.ps_active && m_prototype_batch.topology == topology &&
 	    m_prototype_batch.programs == programs &&
 	    std::memcmp(&m_prototype_batch.depth_info, &state.depth_info, sizeof(RenderDepthInfo)) == 0;
+	if (batch_enabled && m_prototype_batch.active && !batch_matches) {
+		// TEMP diagnostic: which field keeps consecutive prototype draws out of one batch.
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 200) {
+			const bool depth_same = std::memcmp(&m_prototype_batch.depth_info, &state.depth_info,
+			                                    sizeof(RenderDepthInfo)) == 0;
+			LOGF("[bench-batch-mismatch] colors=%d vs=%d ps=%d ps_active=%d topo=%d programs=%d "
+			     "depth=%d\n",
+			     colors_match ? 1 : 0, m_prototype_batch.vs_hash == vs_hash_for_cache ? 1 : 0,
+			     m_prototype_batch.ps_hash == ps_hash_for_cache ? 1 : 0,
+			     m_prototype_batch.ps_active == state.ps_active ? 1 : 0,
+			     m_prototype_batch.topology == topology ? 1 : 0,
+			     m_prototype_batch.programs == programs ? 1 : 0, depth_same ? 1 : 0);
+		}
+	}
 	if (batch_enabled) {
 		if (m_prototype_batch.active && !batch_matches) {
 			FlushPendingPrototypeBatch(buffer);
