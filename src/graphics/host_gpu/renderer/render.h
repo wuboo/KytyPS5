@@ -321,6 +321,12 @@ private:
 	std::unordered_map<uint64_t, CachedPrototypeCapture> m_prototype_capture_cache;
 	// Ring for per-draw prototype scratch (vertex ids, unpacked attributes); created on first use.
 	std::unique_ptr<StreamBuffer> m_prototype_ring;
+	// Shared descriptor pools for the per-draw prototype unpack/capture sets: allocated from until
+	// full, then reset once their last submission retired and reused.
+	[[nodiscard]] vk::DescriptorPool AcquirePrototypeScratchPool();
+	vk::DescriptorPool               m_prototype_scratch_pool = nullptr;
+	uint32_t                         m_prototype_scratch_sets = 0;
+	std::vector<vk::DescriptorPool>  m_prototype_scratch_free;
 
 	// Batching of consecutive per-vertex-prototype replay draws into one render pass (see
 	// perVertexPrototypeDraw.inc, bench-notes.md 2026-09-27 "Kierunek A"). A draw is appended here
