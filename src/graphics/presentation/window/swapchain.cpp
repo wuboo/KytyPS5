@@ -15,6 +15,10 @@
 #include "graphics/presentation/window/windowInternal.h"
 
 #include <algorithm>
+#include <chrono>
+#include <cstdio>
+#include <cstdlib>
+#include <string>
 #include <deque>
 #include <limits>
 #include <memory>
@@ -783,6 +787,91 @@ RenderContext& Presenter::Renderer() const noexcept {
 	return m_impl->renderer;
 }
 
+namespace {
+
+// Bench: KYTY_FRAME_DUMP_DIR=<dir> writes the presented guest frame every KYTY_FRAME_DUMP_EVERY_S
+// seconds (default 15) as frame_<seconds>.ppm, independent of whether the host window is visible
+// (a window capture of an occluded window only returns its thumbnail).
+struct FrameDumpConfig {
+	std::string dir;
+	uint64_t    every_us = 15000000;
+};
+
+const FrameDumpConfig& GetFrameDumpConfig() {
+	static const FrameDumpConfig config = [] {
+		FrameDumpConfig c;
+		if (const char* dir = std::getenv("KYTY_FRAME_DUMP_DIR"); dir != nullptr) {
+			c.dir = dir;
+		}
+		if (const char* every = std::getenv("KYTY_FRAME_DUMP_EVERY_S"); every != nullptr) {
+			c.every_us = std::max<uint64_t>(1, std::strtoull(every, nullptr, 10)) * 1000000;
+		}
+		return c;
+	}();
+	return config;
+}
+
+bool FrameDumpDue(uint64_t* stamp_s) {
+	const auto& config = GetFrameDumpConfig();
+	if (config.dir.empty()) {
+		return false;
+	}
+	static const auto start = std::chrono::steady_clock::now();
+	static uint64_t   next  = config.every_us;
+	const auto        now_us = static_cast<uint64_t>(
+        std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() -
+                                                              start)
+            .count());
+	if (now_us < next) {
+		return false;
+	}
+	*stamp_s = now_us / 1000000;
+	next     = now_us - now_us % config.every_us + config.every_us;
+	return true;
+}
+
+void WriteFrameDump(const uint8_t* pixels, uint32_t width, uint32_t height, vk::Format format,
+                    uint64_t stamp_s) {
+	const auto path = GetFrameDumpConfig().dir + "/frame_" + std::to_string(stamp_s) + ".ppm";
+	FILE*      file = std::fopen(path.c_str(), "wb");
+	if (file == nullptr) {
+		return;
+	}
+	std::fprintf(file, "P6\n%u %u\n255\n", width, height);
+	std::vector<uint8_t> row(static_cast<size_t>(width) * 3);
+	for (uint32_t y = 0; y < height; y++) {
+		const auto* src = reinterpret_cast<const uint32_t*>(pixels) + static_cast<size_t>(y) * width;
+		for (uint32_t x = 0; x < width; x++) {
+			const uint32_t v = src[x];
+			uint8_t        r = 0, g = 0, b = 0;
+			switch (format) {
+				case vk::Format::eB8G8R8A8Unorm:
+				case vk::Format::eB8G8R8A8Srgb:
+					b = v & 0xffu, g = (v >> 8u) & 0xffu, r = (v >> 16u) & 0xffu;
+					break;
+				case vk::Format::eA2B10G10R10UnormPack32:
+					r = static_cast<uint8_t>((v & 0x3ffu) >> 2u);
+					g = static_cast<uint8_t>(((v >> 10u) & 0x3ffu) >> 2u);
+					b = static_cast<uint8_t>(((v >> 20u) & 0x3ffu) >> 2u);
+					break;
+				case vk::Format::eA2R10G10B10UnormPack32:
+					b = static_cast<uint8_t>((v & 0x3ffu) >> 2u);
+					g = static_cast<uint8_t>(((v >> 10u) & 0x3ffu) >> 2u);
+					r = static_cast<uint8_t>(((v >> 20u) & 0x3ffu) >> 2u);
+					break;
+				default: r = v & 0xffu, g = (v >> 8u) & 0xffu, b = (v >> 16u) & 0xffu; break;
+			}
+			row[x * 3] = r, row[x * 3 + 1] = g, row[x * 3 + 2] = b;
+		}
+		std::fwrite(row.data(), 1, row.size(), file);
+	}
+	std::fclose(file);
+	LOGF("[frame-dump] %s (%ux%u format=%d)\n", path.c_str(), width, height,
+	     static_cast<int>(format));
+}
+
+} // namespace
+
 void Presenter::Present(Frame& frame, bool reuse) {
 	KYTY_PROFILER_FUNCTION();
 	m_impl->frames.ValidateForPresent(&frame, reuse);
@@ -793,6 +882,10 @@ void Presenter::Present(Frame& frame, bool reuse) {
 	if (swapchain.NeedsResize()) {
 		m_impl->RecoverSwapchain(Swapchain::Status::Recreate);
 	}
+	std::unique_ptr<Buffer> dump;
+	vk::Extent3D            dump_extent {};
+	vk::Format              dump_format = vk::Format::eUndefined;
+	uint64_t                dump_stamp  = 0;
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {
 		auto status = swapchain.AcquireNextImage();
 		if (status != Swapchain::Status::Success) {
@@ -805,6 +898,34 @@ void Presenter::Present(Frame& frame, bool reuse) {
 			const bool        draw_system_overlay =
 			    overlay_visual.active && swapchain.PrepareSystemOverlay();
 			swapchain.RecordPresentCommands(command, frame.image, draw_system_overlay);
+			uint64_t stamp_s = 0;
+			if (dump == nullptr && FrameDumpDue(&stamp_s) &&
+			    frame.image.extent.width * frame.image.extent.height != 0) {
+				const auto& src  = frame.image;
+				const auto  size = static_cast<uint64_t>(src.extent.width) * src.extent.height * 4;
+				dump = std::make_unique<Buffer>(m_impl->window.graphic_ctx, m_impl->present_scheduler,
+				                                MemoryUsage::Download, 0,
+				                                vk::BufferUsageFlagBits::eTransferDst, size);
+				dump_extent = src.extent;
+				dump_format = src.format;
+				dump_stamp  = stamp_s;
+				vk::BufferImageCopy region {};
+				region.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+				region.imageSubresource.layerCount = 1;
+				region.imageExtent                 = vk::Extent3D {src.extent.width, src.extent.height, 1};
+				command.Handle().copyImageToBuffer(src.image, vk::ImageLayout::eTransferSrcOptimal,
+				                                   dump->Handle(), 1, &region);
+				vk::BufferMemoryBarrier to_host {};
+				to_host.srcAccessMask       = vk::AccessFlagBits::eTransferWrite;
+				to_host.dstAccessMask       = vk::AccessFlagBits::eHostRead;
+				to_host.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				to_host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+				to_host.buffer              = dump->Handle();
+				to_host.size                = size;
+				command.Handle().pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+				                                 vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1,
+				                                 &to_host, 0, nullptr);
+			}
 			frame.present_tick = swapchain.Submit(m_impl->present_scheduler);
 		}
 		status = swapchain.Present();
@@ -817,6 +938,14 @@ void Presenter::Present(Frame& frame, bool reuse) {
 		                                         std::memory_order_release);
 		m_impl->window.UpdateTitle();
 		FrameTiming::OnFramePresented();
+		if (dump != nullptr) {
+			m_impl->present_scheduler.Wait(frame.present_tick);
+			dump->Invalidate(0, dump->Size());
+			if (!dump->Mapped().empty()) {
+				WriteFrameDump(dump->Mapped().data(), dump_extent.width, dump_extent.height,
+				               dump_format, dump_stamp);
+			}
+		}
 		m_impl->frames.Release(&frame, true);
 		return;
 	}
