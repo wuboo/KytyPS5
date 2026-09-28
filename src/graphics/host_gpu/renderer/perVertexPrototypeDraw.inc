@@ -456,11 +456,14 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 
 	static uint64_t draw_counter = 0;
 	draw_counter++;
-	LOGF("PerVertexPrototype: recorded draw submission=%llu vertices=%u instances=%u "
-	     "capture_bytes=%llu layout_stride=%u cache_hit=%d\n",
-	     static_cast<unsigned long long>(draw_counter), count, draw.instance_count,
-	     static_cast<unsigned long long>(captured_size_for_log),
-	     programs->layout.record_stride_vec4, hit != nullptr ? 1 : 0);
+	// Per-draw logging cost ~4% of this path in a scene with ~500 such draws per frame.
+	if (draw_counter <= 64) {
+		LOGF("PerVertexPrototype: recorded draw submission=%llu vertices=%u instances=%u "
+		     "capture_bytes=%llu layout_stride=%u cache_hit=%d\n",
+		     static_cast<unsigned long long>(draw_counter), count, draw.instance_count,
+		     static_cast<unsigned long long>(captured_size_for_log),
+		     programs->layout.record_stride_vec4, hit != nullptr ? 1 : 0);
+	}
 
 	// `extra_set` is fully decided from here on (either from the cache, or freshly captured
 	// above); settle its ownership before choosing whether to replay now or batch it, so both
