@@ -47,20 +47,6 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		return;
 	}
 	const auto count     = static_cast<uint32_t>(count64);
-	{
-		// bench diag: census of prototype (VS, PS) pairs, logged on first use
-		static std::mutex                                           census_mutex;
-		static std::set<std::pair<uint64_t, uint64_t>>              census;
-		const auto key = std::pair {vs.stage.program->shader_hash,
-		                            state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0};
-		std::lock_guard lock(census_mutex);
-		if (census.insert(key).second) {
-			LOGF("[proto-census] vs=0x%016" PRIx64 " ps=0x%016" PRIx64 " count=%u inst=%u attrs=%u "
-			     "frame=%" PRIu64 "\n",
-			     key.first, key.second, count, draw.instance_count, num_attrs,
-			     FrameTiming::PresentedFrames());
-		}
-	}
 	// Diagnostic: this path costs orders of magnitude more per draw than a native vertex stage
 	// (a compute unpack + a compute capture + a graphics replay, each with its own barrier and,
 	// because Vulkan forbids vkCmdDispatch inside an active dynamic-rendering region, its own
