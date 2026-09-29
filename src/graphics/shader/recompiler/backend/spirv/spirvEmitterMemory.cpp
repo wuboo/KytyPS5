@@ -1173,20 +1173,42 @@ void EmitReadConstBuffer(ValueEmitContext& ctx, const IR::Inst& inst) {
 	if (mem.runtime_descriptor) {
 		const auto* handle = inst.Arg(0).Resolve().TryInstruction();
 		if (handle == nullptr || handle->GetOpcode() != IR::ValueOpcode::GetBufferResource ||
-		    handle->NumArgs() < 2u) {
+		    handle->NumArgs() < 3u) {
 			ctx.Fail(inst, "runtime scalar buffer has no descriptor");
 			return;
 		}
-		const auto high = EmitBitFieldUExtract(state, ctx.Arg(*handle, 1), ConstantU32(state, 0),
-		                                       ConstantU32(state, 16));
-		const auto base = DeviceAddressFromWords(state, ctx.Arg(*handle, 0), high);
-		const auto byte = Binary(state, spv::OpIAdd, TypeU32(state), ctx.Arg(inst, 1),
-		                         ConstantU32(state, static_cast<uint32_t>(mem.offset)));
+		const auto dword1 = ctx.Arg(*handle, 1);
+		const auto high   = EmitBitFieldUExtract(state, dword1, ConstantU32(state, 0),
+		                                         ConstantU32(state, 16));
+		const auto base   = DeviceAddressFromWords(state, ctx.Arg(*handle, 0), high);
+		const auto byte   = Binary(state, spv::OpIAdd, TypeU32(state), ctx.Arg(inst, 1),
+		                           ConstantU32(state, static_cast<uint32_t>(mem.offset)));
 		const auto aligned =
 		    Binary(state, spv::OpBitwiseAnd, TypeU32(state), byte, ConstantU32(state, ~3u));
-		const auto guest = Binary(state, spv::OpIAdd, TypeScalarU64(state), base,
-		                          Unary(state, spv::OpUConvert, TypeScalarU64(state), aligned));
-		ctx.Define(inst, LoadBda(ctx, guest, ConstantBool(state, true), 32u));
+		// Same byte size as SrtWalker::EvaluateRawRead: stride is V# dword1[29:16],
+		// num_records is dword 2. A zero stride means the record count is the size.
+		const auto stride   = EmitBitFieldUExtract(state, dword1, ConstantU32(state, 16),
+		                                           ConstantU32(state, 14));
+		const auto records  = ctx.Arg(*handle, 2);
+		const auto stride64 = Unary(state, spv::OpUConvert, TypeScalarU64(state), stride);
+		const auto records64 =
+		    Unary(state, spv::OpUConvert, TypeScalarU64(state), records);
+		const auto product =
+		    Binary(state, spv::OpIMul, TypeScalarU64(state), stride64, records64);
+		const auto stride_zero =
+		    Binary(state, spv::OpIEqual, TypeBool(state), stride, ConstantU32(state, 0));
+		const auto size = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpSelect, TypeScalarU64(state), size, stride_zero,
+		                          records64, product);
+		const auto aligned64 = Unary(state, spv::OpUConvert, TypeScalarU64(state), aligned);
+		const auto end       = Binary(state, spv::OpIAdd, TypeScalarU64(state), aligned64,
+		                              ConstantDeviceAddress(state, 4));
+		const auto in_bounds =
+		    Binary(state, spv::OpULessThanEqual, TypeBool(state), end, size);
+		const auto guest = Binary(state, spv::OpIAdd, TypeScalarU64(state), base, aligned64);
+		ctx.Define(inst, EmitValueOrZeroIfCondition(state, in_bounds, [&]() {
+			           return LoadBda(ctx, guest, ConstantBool(state, true), 32u);
+		           }));
 		return;
 	}
 	mem.kind           = IR::ResourceKind::ScalarBuffer;
