@@ -29,6 +29,7 @@ struct TranslateResult {
 	std::string decoded_dump;
 	std::string cfg_dump;
 	bool        skip_dispatch = false;
+	bool        ray_traced    = false;
 };
 
 struct CompileResult {

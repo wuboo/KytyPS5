@@ -636,7 +636,8 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 	IR::TrackResources(ir);
 	IR::EliminateDeadCode(ir.blocks);
 	TranslateResult result;
-	result.program = std::move(ir);
+	result.program    = std::move(ir);
+	result.ray_traced = decoded.has_bvh;
 	if (options.dump_ir) {
 		result.decoded_dump = std::move(decoded_dump);
 		result.cfg_dump     = CFG::GraphToString(cfg);

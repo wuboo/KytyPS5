@@ -479,9 +479,18 @@ struct PipelineCache::ProgramCache {
 			            .try_emplace(lookup_key,
 			                         ShaderRecompiler::IR::ExtractResourcePlan(translated.program))
 			            .first;
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(entry->second.resource_plan,
-			                                                    runtime, entry->second.resources,
-			                                                    entry->second.specialization));
+			if (!ShaderRecompiler::IR::MaterializeResources(entry->second.resource_plan, runtime,
+			                                                entry->second.resources,
+			                                                entry->second.specialization)) {
+				// Ray-tracing shaders pick descriptor tables at run time more often than others;
+				// one that cannot be resolved is skipped as before BVH intersections were stubbed.
+				EXIT_IF(!translated.ray_traced);
+				PipelineCacheLog("Warning: skipping ray-tracing shader 0x{:016x}: its resources "
+				                 "could not be resolved",
+				                 params.hash);
+				entry->second.skip_dispatch = true;
+				return {};
+			}
 		}
 		entry->second.permutations.push_back(
 		    CompilePermutation(params, options, std::move(translated), entry->second.specialization,
