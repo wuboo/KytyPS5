@@ -201,6 +201,36 @@ void TestDynamicReadRemainsTyped() {
         "dynamic scalar read received a fake flattened slot");
 }
 
+void TestLoopVaryingAddressIsDynamic() {
+  Fixture fixture;
+  const auto varying_memory = fixture.AddMemory(ResourceKind::ScalarAddress);
+  const auto flat_memory = fixture.AddMemory(ResourceKind::ScalarAddress);
+  const auto payload = fixture.Emit(ValueOpcode::GetUserData,
+                                    {Value(static_cast<ScalarReg>(2))});
+  const auto lane = fixture.Emit(ValueOpcode::ReadLane, {payload, Value(0u)});
+  const auto shifted =
+      fixture.Emit(ValueOpcode::ShiftLeftLogical32, {lane, Value(2u)});
+  const auto sum = fixture.Emit(ValueOpcode::IAdd32, {Value(0x1000u), shifted});
+  const auto varying = RawRead(
+      fixture, Address(fixture, sum, Value(0u)), Value(0u), varying_memory);
+  fixture.Emit(ValueOpcode::GetBufferResource,
+               {varying, Value(0u), Value(16u), Value(0u)});
+  const auto flat = RawRead(
+      fixture, Address(fixture, Value(0x2000u), Value(0u)), Value(4u), flat_memory);
+  fixture.Emit(ValueOpcode::GetBufferResource,
+               {flat, Value(0u), Value(16u), Value(0u)});
+
+  fixture.Plan();
+  Check(fixture.program.dynamic_reads == std::vector<Value>{varying},
+        "loop-varying SRT address was not kept as a runtime read");
+  Check(fixture.program.srt_reads.size() == 1 &&
+            fixture.program.srt_reads[0].value.Resolve() != varying.Resolve(),
+        "loop-varying SRT address was flattened, or the static read was not");
+  Check(varying.ResolveInstruction() != nullptr &&
+            varying.ResolveInstruction()->GetOpcode() == ValueOpcode::LoadAddressU32,
+        "loop-varying read was rewritten instead of executed in the shader");
+}
+
 void TestNestedSrtWalk() {
   Fixture fixture;
   const auto memory = fixture.AddMemory(ResourceKind::ScalarAddress);
@@ -827,6 +857,7 @@ int main() {
     TestRawScalarComponentAlignment();
     TestScalarMemoryDomainMismatchFails();
     TestDynamicReadRemainsTyped();
+    TestLoopVaryingAddressIsDynamic();
     TestNestedSrtWalk();
     TestShaderBaseAndUserData();
     TestCarryAndBitFields();

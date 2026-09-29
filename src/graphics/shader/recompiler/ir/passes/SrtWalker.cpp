@@ -401,7 +401,11 @@ private:
 			return;
 		}
 		const auto offset = inst->Arg(1).Resolve();
-		if (!offset.IsImmediate() || offset.GetType() != Type::U32) {
+		// A non-immediate offset, or an address the CPU walker cannot fold (a loop-varying
+		// Phi or ReadLane), stays in the shader and is loaded through the physical pointer.
+		// Flattening it would ask RefreshFlatBuffer for one value per dispatch.
+		if (!offset.IsImmediate() || offset.GetType() != Type::U32 ||
+		    !ValidateRuntimeValue(m_program, value)) {
 			if (std::ranges::find(m_program.dynamic_reads, value) ==
 			    m_program.dynamic_reads.end()) {
 				m_program.dynamic_reads.push_back(value);
