@@ -69,6 +69,9 @@ struct MemoryInfo {
 	bool                    offen                    = false;
 	bool                    coherent                 = false;
 	bool                    planning_only            = false;
+	// Descriptor words are computed in the shader (a loop-varying SRT load). The scalar
+	// buffer load reads through the physical address in that descriptor instead of a binding.
+	bool                    runtime_descriptor       = false;
 
 	[[nodiscard]] bool SupportsIndirectBufferLoad(ValueOpcode opcode) const {
 		return !formatted && !typed && data_bits == 32u &&

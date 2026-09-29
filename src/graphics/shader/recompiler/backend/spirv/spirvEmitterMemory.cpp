@@ -1169,7 +1169,26 @@ uint32_t EmitReadConst(ValueEmitContext& ctx, const IR::Inst& inst) {
 void EmitReadConstBuffer(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto mem = ctx.Memory(inst);
 	if (mem.planning_only) return;
-	auto& state        = ctx.state;
+	auto& state = ctx.state;
+	if (mem.runtime_descriptor) {
+		const auto* handle = inst.Arg(0).Resolve().TryInstruction();
+		if (handle == nullptr || handle->GetOpcode() != IR::ValueOpcode::GetBufferResource ||
+		    handle->NumArgs() < 2u) {
+			ctx.Fail(inst, "runtime scalar buffer has no descriptor");
+			return;
+		}
+		const auto high = EmitBitFieldUExtract(state, ctx.Arg(*handle, 1), ConstantU32(state, 0),
+		                                       ConstantU32(state, 16));
+		const auto base = DeviceAddressFromWords(state, ctx.Arg(*handle, 0), high);
+		const auto byte = Binary(state, spv::OpIAdd, TypeU32(state), ctx.Arg(inst, 1),
+		                         ConstantU32(state, static_cast<uint32_t>(mem.offset)));
+		const auto aligned =
+		    Binary(state, spv::OpBitwiseAnd, TypeU32(state), byte, ConstantU32(state, ~3u));
+		const auto guest = Binary(state, spv::OpIAdd, TypeScalarU64(state), base,
+		                          Unary(state, spv::OpUConvert, TypeScalarU64(state), aligned));
+		ctx.Define(inst, LoadBda(ctx, guest, ConstantBool(state, true), 32u));
+		return;
+	}
 	mem.kind           = IR::ResourceKind::ScalarBuffer;
 	const auto address = Binary(state, spv::OpIAdd, TypeU32(state), ctx.Arg(inst, 1),
 	                            ConstantU32(state, mem.offset));

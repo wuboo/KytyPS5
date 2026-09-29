@@ -1222,6 +1222,11 @@ private:
 		if (buffer != BufferAccess::None) {
 			if (!GetHandle(inst.Arg(0), ValueOpcode::GetBufferResource, 4, flags.pc, handle,
 			               source)) {
+				if (op == ValueOpcode::ReadConstBuffer) {
+					m_program.memory_info[flags.index].runtime_descriptor = true;
+					m_info.uses_dma                                       = true;
+					return;
+				}
 				if (memory.kind != ResourceKind::Buffer || !memory.SupportsIndirectBufferLoad(op)) {
 					Fail(flags.pc,
 					     "buffer descriptor is not a valid runtime value; GPU-selected access "
