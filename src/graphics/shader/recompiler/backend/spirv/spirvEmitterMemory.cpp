@@ -1103,7 +1103,22 @@ uint32_t EmitAppendConsume(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto count = Binary(state, spv::OpIAdd, TypeU32(state),
 	                          Unary(state, spv::OpBitCount, TypeU32(state), low),
 	                          Unary(state, spv::OpBitCount, TypeU32(state), high));
-	const auto first = ctx.FirstLane(ballot);
+	// A pixel wave's exec holds live pixels only, but the host subgroup also runs helper
+	// invocations, and their atomics do nothing and return undefined values. If the first lane
+	// is a helper, the counter would not move and the whole subgroup would reuse indices (guest
+	// linked lists built with these indices then get cycles). The count keeps the helpers so
+	// that it matches V_MBCNT over the same exec.
+	auto live_ballot = ballot;
+	if (state.program.stage == ShaderType::Pixel && state.lane_count == 1) {
+		const auto helper     = EmitHelperInvocation(state);
+		const auto not_helper = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLogicalNot, TypeBool(state), not_helper, helper);
+		const auto live = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformBallot, TypeU32Vector(state, 4), live,
+		                          ConstantU32(state, spv::ScopeSubgroup), not_helper);
+		live_ballot = Binary(state, spv::OpBitwiseAnd, TypeU32Vector(state, 4), ballot, live);
+	}
+	const auto first = ctx.FirstLane(live_ballot);
 	const auto source_lane =
 	    state.lane_count == 2
 	        ? Binary(state, spv::OpBitwiseAnd, TypeU32(state), first, ConstantU32(state, 31))

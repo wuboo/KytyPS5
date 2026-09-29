@@ -120,6 +120,7 @@ struct EmitterState {
 	const IR::Block*                                 current_block             = nullptr;
 	uint32_t                                         pixel_valid_mask_variable = 0;
 	uint32_t                                         subgroup_local_invocation_id_variable = 0;
+	uint32_t                                         helper_invocation_variable            = 0;
 	// Metal has no subgroup builtins in vertex functions; derive the lane from the vertex index.
 	bool                                             vertex_lane_from_index                = false;
 	// Loop watchdog: Function-storage u32 counter per structured loop header (by block id).
@@ -286,6 +287,8 @@ uint32_t OutputVariableForExport(const EmitterState& state, const IR::ExportInfo
 uint32_t ConstantU32(EmitterState& state, uint32_t value);
 
 uint32_t EmitSubgroupLocalInvocationId(EmitterState& state);
+
+uint32_t EmitHelperInvocation(EmitterState& state);
 
 [[noreturn]] void ExitDescriptorBindingFailure(const EmitterState&       state,
                                                IR::DescriptorBindingKind kind, uint32_t resource,

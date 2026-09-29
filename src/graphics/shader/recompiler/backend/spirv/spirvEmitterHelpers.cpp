@@ -147,6 +147,19 @@ uint32_t EmitSubgroupLocalInvocationId(EmitterState& state) {
 	return state.lane_half == 0 ? value : EmitAddU32(state, value, ConstantU32(state, 32));
 }
 
+uint32_t EmitHelperInvocation(EmitterState& state) {
+	if (state.helper_invocation_variable == 0) {
+		const auto variable = DefineInterfaceVariable(state, TypeBool(state), spv::StorageClassInput,
+		                                              "gl_HelperInvocation");
+		state.builder.AddAnnotation(spv::OpDecorate, variable, spv::DecorationBuiltIn,
+		                            spv::BuiltInHelperInvocation);
+		state.helper_invocation_variable = variable;
+	}
+	const auto value = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeBool(state), value, state.helper_invocation_variable);
+	return value;
+}
+
 uint32_t InputVariableForKind(const EmitterState& state, IR::StageInputKind kind) {
 	for (const auto& input: state.inputs) {
 		if (input.kind == kind) {
