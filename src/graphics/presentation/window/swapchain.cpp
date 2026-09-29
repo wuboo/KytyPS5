@@ -792,8 +792,12 @@ namespace {
 // Bench: KYTY_FRAME_DUMP_DIR=<dir> writes the presented guest frame every KYTY_FRAME_DUMP_EVERY_S
 // seconds (default 15) as frame_<seconds>.ppm, independent of whether the host window is visible
 // (a window capture of an occluded window only returns its thumbnail).
+// KYTY_FRAME_VIDEO_PIPE=<fifo> instead streams frames as raw rgb24 1280x720 (for ffmpeg -f rawvideo)
+// every KYTY_FRAME_DUMP_EVERY_MS milliseconds; a gap repeats the last frame, so the video keeps
+// wall-clock time.
 struct FrameDumpConfig {
 	std::string dir;
+	std::string video;
 	uint64_t    every_us = 15000000;
 };
 
@@ -806,6 +810,13 @@ const FrameDumpConfig& GetFrameDumpConfig() {
 		if (const char* every = std::getenv("KYTY_FRAME_DUMP_EVERY_S"); every != nullptr) {
 			c.every_us = std::max<uint64_t>(1, std::strtoull(every, nullptr, 10)) * 1000000;
 		}
+		if (const char* video = std::getenv("KYTY_FRAME_VIDEO_PIPE"); video != nullptr) {
+			c.video    = video;
+			c.every_us = 100000;
+		}
+		if (const char* every = std::getenv("KYTY_FRAME_DUMP_EVERY_MS"); every != nullptr) {
+			c.every_us = std::max<uint64_t>(1, std::strtoull(every, nullptr, 10)) * 1000;
+		}
 		return c;
 	}();
 	return config;
@@ -813,7 +824,7 @@ const FrameDumpConfig& GetFrameDumpConfig() {
 
 bool FrameDumpDue(uint64_t* stamp_s) {
 	const auto& config = GetFrameDumpConfig();
-	if (config.dir.empty()) {
+	if (config.dir.empty() && config.video.empty()) {
 		return false;
 	}
 	static const auto start = std::chrono::steady_clock::now();
@@ -825,13 +836,69 @@ bool FrameDumpDue(uint64_t* stamp_s) {
 	if (now_us < next) {
 		return false;
 	}
-	*stamp_s = now_us / 1000000;
+	*stamp_s = config.video.empty() ? now_us / 1000000 : now_us;
 	next     = now_us - now_us % config.every_us + config.every_us;
 	return true;
 }
 
+void DecodeDumpPixel(uint32_t v, vk::Format format, uint32_t* rgb) {
+	uint32_t r = 0, g = 0, b = 0;
+	switch (format) {
+		case vk::Format::eB8G8R8A8Unorm:
+		case vk::Format::eB8G8R8A8Srgb: b = v & 0xffu, g = (v >> 8u) & 0xffu, r = (v >> 16u) & 0xffu; break;
+		case vk::Format::eA2B10G10R10UnormPack32:
+			r = (v & 0x3ffu) >> 2u, g = ((v >> 10u) & 0x3ffu) >> 2u, b = ((v >> 20u) & 0x3ffu) >> 2u;
+			break;
+		case vk::Format::eA2R10G10B10UnormPack32:
+			b = (v & 0x3ffu) >> 2u, g = ((v >> 10u) & 0x3ffu) >> 2u, r = ((v >> 20u) & 0x3ffu) >> 2u;
+			break;
+		default: r = v & 0xffu, g = (v >> 8u) & 0xffu, b = (v >> 16u) & 0xffu; break;
+	}
+	rgb[0] += r, rgb[1] += g, rgb[2] += b;
+}
+
+void WriteFrameVideo(const uint8_t* pixels, uint32_t width, uint32_t height, vk::Format format,
+                     uint64_t stamp_us) {
+	constexpr uint32_t OUT_W = 1280, OUT_H = 720;
+	const auto&        config = GetFrameDumpConfig();
+	static FILE*       pipe   = std::fopen(config.video.c_str(), "wb");
+	static uint64_t    last_us = 0;
+	static std::vector<uint8_t> out(static_cast<size_t>(OUT_W) * OUT_H * 3);
+	if (pipe == nullptr) {
+		return;
+	}
+	const auto* src = reinterpret_cast<const uint32_t*>(pixels);
+	for (uint32_t oy = 0; oy < OUT_H; oy++) {
+		const uint32_t y0 = oy * height / OUT_H, y1 = std::max(y0 + 1, (oy + 1) * height / OUT_H);
+		for (uint32_t ox = 0; ox < OUT_W; ox++) {
+			const uint32_t x0 = ox * width / OUT_W, x1 = std::max(x0 + 1, (ox + 1) * width / OUT_W);
+			uint32_t       rgb[3] {};
+			for (uint32_t y = y0; y < y1; y++) {
+				for (uint32_t x = x0; x < x1; x++) {
+					DecodeDumpPixel(src[static_cast<size_t>(y) * width + x], format, rgb);
+				}
+			}
+			const uint32_t n = (y1 - y0) * (x1 - x0);
+			auto*          o = &out[(static_cast<size_t>(oy) * OUT_W + ox) * 3];
+			o[0] = static_cast<uint8_t>(rgb[0] / n), o[1] = static_cast<uint8_t>(rgb[1] / n),
+			o[2] = static_cast<uint8_t>(rgb[2] / n);
+		}
+	}
+	const uint64_t copies =
+	    last_us == 0 ? 1 : std::clamp<uint64_t>((stamp_us - last_us + config.every_us / 2) / config.every_us, 1, 600);
+	last_us = stamp_us;
+	for (uint64_t i = 0; i < copies; i++) {
+		std::fwrite(out.data(), 1, out.size(), pipe);
+	}
+	std::fflush(pipe);
+}
+
 void WriteFrameDump(const uint8_t* pixels, uint32_t width, uint32_t height, vk::Format format,
                     uint64_t stamp_s) {
+	if (!GetFrameDumpConfig().video.empty()) {
+		WriteFrameVideo(pixels, width, height, format, stamp_s);
+		return;
+	}
 	const auto path = GetFrameDumpConfig().dir + "/frame_" + std::to_string(stamp_s) + ".ppm";
 	FILE*      file = std::fopen(path.c_str(), "wb");
 	if (file == nullptr) {
