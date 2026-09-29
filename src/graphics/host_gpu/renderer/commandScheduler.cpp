@@ -128,6 +128,14 @@ void CommandScheduler::Shutdown() {
 	if (!m_command.IsInvalid()) {
 		Submit();
 	}
+	if (m_async_submit) {
+		DrainAsyncSubmits();
+		m_submit_thread.request_stop();
+		m_submit_cv.notify_all();
+		if (m_submit_thread.joinable()) {
+			m_submit_thread.join();
+		}
+	}
 	m_master.Wait(CurrentTick() - 1);
 	PopPendingOperations();
 	DrainPriorityOperations();
@@ -416,43 +424,108 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	auto&      graphics = m_graphics;
 	EXIT_IF(graphics.queue == nullptr);
 
-	vk::Result result;
-	uint64_t   tick;
-	{
+	SubmitJob job;
+	job.buffer          = buffer;
+	job.debug_op        = m_command.m_debug_op;
+	job.debug_submit_id = m_command.m_debug_submit_id;
+	job.debug_args[0]   = m_command.m_debug_arg0;
+	job.debug_args[1]   = m_command.m_debug_arg1;
+	job.debug_args[2]   = m_command.m_debug_arg2;
+	job.debug_args[3]   = m_command.m_debug_arg3;
+	job.debug_arg4      = m_command.m_debug_arg4;
+	// Only timeline-only submissions may be deferred: a binary semaphore wait/signal must reach
+	// the queue before whatever the caller does next (e.g. vkQueuePresentKHR).
+	const bool deferrable =
+	    m_async_submit && submit.num_wait_semaphores == 0 && submit.num_signal_semaphores == 0;
+	uint64_t tick = 0;
+	if (deferrable) {
+		std::lock_guard lock(m_submit_mutex);
+		tick = m_master.NextTick();
+		submit.AddSignal(m_master.Handle(), tick);
+		job.submit = submit;
+		job.tick   = tick;
+		m_submit_jobs.push_back(job);
+		m_submit_cv.notify_one();
+	} else {
+		DrainAsyncSubmits();
 		Common::LockGuard lock(graphics.queue_mutex);
 		tick = m_master.NextTick();
 		submit.AddSignal(m_master.Handle(), tick);
-
-		vk::TimelineSemaphoreSubmitInfo timeline_info {};
-		timeline_info.waitSemaphoreValueCount   = submit.num_wait_semaphores;
-		timeline_info.pWaitSemaphoreValues      = submit.wait_ticks.data();
-		timeline_info.signalSemaphoreValueCount = submit.num_signal_semaphores;
-		timeline_info.pSignalSemaphoreValues    = submit.signal_ticks.data();
-
-		vk::SubmitInfo submit_info {};
-		submit_info.pNext                = &timeline_info;
-		submit_info.waitSemaphoreCount   = submit.num_wait_semaphores;
-		submit_info.pWaitSemaphores      = submit.wait_semaphores.data();
-		submit_info.pWaitDstStageMask    = submit.wait_stages.data();
-		submit_info.commandBufferCount   = 1;
-		submit_info.pCommandBuffers      = &buffer;
-		submit_info.signalSemaphoreCount = submit.num_signal_semaphores;
-		submit_info.pSignalSemaphores    = submit.signal_semaphores.data();
-
-		result = graphics.queue.submit(1, &submit_info, nullptr);
+		job.submit = submit;
+		job.tick   = tick;
+		QueueSubmitNow(job);
 	}
 	FrameTiming::OnQueueSubmit();
 
-	if (result != vk::Result::eSuccess) {
-		ReportVulkanFatal("vkQueueSubmit", result, tick, m_command.m_debug_op,
-		                  m_command.m_debug_submit_id, m_command.m_debug_arg0,
-		                  m_command.m_debug_arg1, m_command.m_debug_arg2, m_command.m_debug_arg3,
-		                  m_command.m_debug_arg4);
-	}
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
-
 	m_command.m_buffer = nullptr;
 	return tick;
+}
+
+void CommandScheduler::QueueSubmitNow(SubmitJob& job) {
+	vk::TimelineSemaphoreSubmitInfo timeline_info {};
+	timeline_info.waitSemaphoreValueCount   = job.submit.num_wait_semaphores;
+	timeline_info.pWaitSemaphoreValues      = job.submit.wait_ticks.data();
+	timeline_info.signalSemaphoreValueCount = job.submit.num_signal_semaphores;
+	timeline_info.pSignalSemaphoreValues    = job.submit.signal_ticks.data();
+
+	vk::SubmitInfo submit_info {};
+	submit_info.pNext                = &timeline_info;
+	submit_info.waitSemaphoreCount   = job.submit.num_wait_semaphores;
+	submit_info.pWaitSemaphores      = job.submit.wait_semaphores.data();
+	submit_info.pWaitDstStageMask    = job.submit.wait_stages.data();
+	submit_info.commandBufferCount   = 1;
+	submit_info.pCommandBuffers      = &job.buffer;
+	submit_info.signalSemaphoreCount = job.submit.num_signal_semaphores;
+	submit_info.pSignalSemaphores    = job.submit.signal_semaphores.data();
+
+	const auto result = m_graphics.queue.submit(1, &submit_info, nullptr);
+	if (result != vk::Result::eSuccess) {
+		ReportVulkanFatal("vkQueueSubmit", result, job.tick, job.debug_op, job.debug_submit_id,
+		                  job.debug_args[0], job.debug_args[1], job.debug_args[2],
+		                  job.debug_args[3], job.debug_arg4);
+	}
+	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+}
+
+void CommandScheduler::EnableAsyncSubmit() {
+	if (!FrameTiming::OptEnabled("async_submit") || m_async_submit) {
+		return;
+	}
+	m_async_submit  = true;
+	m_submit_thread = std::jthread([this](std::stop_token stop) { SubmitThread(stop); });
+}
+
+void CommandScheduler::SubmitThread(std::stop_token stop) {
+	for (;;) {
+		SubmitJob job;
+		{
+			std::unique_lock lock(m_submit_mutex);
+			m_submit_cv.wait(lock, [&] { return stop.stop_requested() || !m_submit_jobs.empty(); });
+			if (m_submit_jobs.empty()) {
+				return;
+			}
+			job = m_submit_jobs.front();
+			m_submit_jobs.pop_front();
+			m_submit_busy = true;
+		}
+		{
+			Common::LockGuard lock(m_graphics.queue_mutex);
+			QueueSubmitNow(job);
+		}
+		{
+			std::lock_guard lock(m_submit_mutex);
+			m_submit_busy = false;
+		}
+		m_submit_cv.notify_all();
+	}
+}
+
+void CommandScheduler::DrainAsyncSubmits() {
+	if (!m_async_submit) {
+		return;
+	}
+	std::unique_lock lock(m_submit_mutex);
+	m_submit_cv.wait(lock, [&] { return m_submit_jobs.empty() && !m_submit_busy; });
 }
 
 void CommandScheduler::BeginNext() {

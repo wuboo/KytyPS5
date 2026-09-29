@@ -8,6 +8,7 @@
 
 #include <chrono>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #include <mutex>
 
@@ -42,6 +43,14 @@ public:
 	// Runs on the recording thread just before a command buffer is closed for submission, so
 	// callers can append work that must follow everything recorded so far (not re-entrant).
 	void SetPreSubmitHook(std::function<void()> hook) { m_pre_submit = std::move(hook); }
+	// Hand finished command buffers to a submit thread (KYTY_OPT_OFF=async_submit disables).
+	// MoltenVK encodes the whole Metal command buffer inside vkQueueSubmit, which was a quarter of
+	// the GPU thread in menus. Submissions keep their tick order; ones that wait on or signal a
+	// binary semaphore drain the thread and are submitted inline. Only for the renderer's
+	// scheduler (the presenter's waits on swapchain binary semaphores).
+	void EnableAsyncSubmit();
+	// Returns once every submission handed to the submit thread is on the Vulkan queue.
+	void WaitSubmitted() { DrainAsyncSubmits(); }
 	// Deferred callbacks can observe an externally owned drain, but cannot initiate shutdown:
 	// the priority runner cannot join itself.
 	void                      Shutdown();
@@ -65,6 +74,25 @@ public:
 private:
 	std::function<void()> m_pre_submit;
 	bool                  m_in_pre_submit = false;
+
+	struct SubmitJob {
+		vk::CommandBuffer buffer;
+		SubmitInfo        submit;
+		uint64_t          tick     = 0;
+		uint32_t          debug_op = 0;
+		uint64_t          debug_submit_id = 0;
+		uint32_t          debug_args[4]   = {};
+		uint64_t          debug_arg4      = 0;
+	};
+	void SubmitThread(std::stop_token stop);
+	void DrainAsyncSubmits();
+	void QueueSubmitNow(SubmitJob& job);
+	bool                    m_async_submit = false;
+	std::mutex              m_submit_mutex;
+	std::condition_variable m_submit_cv;
+	std::deque<SubmitJob>   m_submit_jobs;
+	bool                    m_submit_busy = false;
+	std::jthread            m_submit_thread;
 
 	class CommandPool {
 	public:

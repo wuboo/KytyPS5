@@ -1586,6 +1586,8 @@ void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
 
 	m_renderer.GetVideoOut().PrepareFlip(request_id, command);
 	GetScheduler().Flush();
+	// The presenter submits on its own scheduler; the frame's work must be queued first.
+	GetScheduler().WaitSubmitted();
 	m_renderer.GetVideoOut().CompleteFlip(request_id);
 }
 
