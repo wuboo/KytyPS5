@@ -651,6 +651,15 @@ void Translator::IMAGE_GET_LOD(const Decoder::Instruction& inst) {
 	WriteImageComponents(inst.dst, result, memory, 2u);
 }
 
+// Ray tracing is not implemented. Every ray misses: a box node reports four invalid children
+// and a triangle node an invalid (NaN) hit, so guest traversal loops run out of nodes and the
+// shader writes its "no hit" result (lit, unoccluded, sky) instead of the dispatch being skipped.
+void Translator::IMAGE_BVH_INTERSECT_RAY(const Decoder::Instruction& inst) {
+	for (uint32_t component = 0; component < 4u; component++) {
+		WriteOperand(OffsetOperand(inst.dst, component), IR::U32(IR::Value(0xffffffffu)));
+	}
+}
+
 void Translator::IMAGE_LOAD(const Decoder::Instruction& inst) {
 	const auto memory   = MemoryInfoFromDecoded(inst);
 	const auto resource = GetImageResource(memory);
@@ -1044,6 +1053,8 @@ void Translator::EmitMemory(const Decoder::Instruction& inst) {
 		case Decoder::Opcode::FLAT_STORE_DWORDX4: return FLAT_STORE(inst);
 
 		case Decoder::Opcode::IMAGE_GET_RESINFO: return IMAGE_GET_RESINFO(inst);
+		case Decoder::Opcode::IMAGE_BVH_INTERSECT_RAY:
+		case Decoder::Opcode::IMAGE_BVH64_INTERSECT_RAY: return IMAGE_BVH_INTERSECT_RAY(inst);
 		case Decoder::Opcode::IMAGE_GET_LOD: return IMAGE_GET_LOD(inst);
 		case Decoder::Opcode::IMAGE_LOAD:
 		case Decoder::Opcode::IMAGE_LOAD_MIP: return IMAGE_LOAD(inst);

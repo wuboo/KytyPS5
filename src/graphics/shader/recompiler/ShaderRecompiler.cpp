@@ -22,6 +22,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <map>
 #include <span>
@@ -526,16 +527,32 @@ TranslateResult TranslateProgram(std::span<const uint32_t> code, const CompileOp
 
 	// Temporary workaround for games that compile ray-tracing shaders before
 	// the player can select a mode without ray tracing.
-	if (options.stage == ShaderType::Compute && decoded.has_bvh) {
+	// KYTY_RT_SKIP=1 restores skipping, instead of running with every ray missing.
+	static const bool rt_skip = [] {
+		const char* value = std::getenv("KYTY_RT_SKIP");
+		return value != nullptr && value[0] != '0';
+	}();
+	if (options.stage == ShaderType::Compute && decoded.has_bvh && rt_skip) {
 		static std::atomic_flag warned = ATOMIC_FLAG_INIT;
 		if (!warned.test_and_set(std::memory_order_relaxed)) {
-			const auto& bvh = decoded.instructions.back();
+			const auto& bvh = *std::find_if(
+			    decoded.instructions.begin(), decoded.instructions.end(), [](const auto& inst) {
+				    return inst.opcode == Decoder::Opcode::IMAGE_BVH_INTERSECT_RAY ||
+				           inst.opcode == Decoder::Opcode::IMAGE_BVH64_INTERSECT_RAY;
+			    });
 			Log::WriteToConsoleAndLog(fmt::format(
 			    "Warning: ray tracing is not implemented; skipping compute dispatches containing "
 			    "BVH intersection instructions (shader=0x{:016x}, pc=0x{:08x}, opcode=0x{:02x}).\n",
 			    options.shader_hash, bvh.pc, bvh.opcode_id));
 		}
 		return {.skip_dispatch = true};
+	}
+	if (decoded.has_bvh) {
+		static std::atomic_flag warned_miss = ATOMIC_FLAG_INIT;
+		if (!warned_miss.test_and_set(std::memory_order_relaxed)) {
+			Log::WriteToConsoleAndLog(
+			    "Warning: ray tracing is not implemented; BVH intersections report a miss\n");
+		}
 	}
 
 	std::string decoded_dump;
