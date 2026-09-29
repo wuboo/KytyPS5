@@ -632,6 +632,12 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 			return false;
 		}
 	}
+	// A null guest pointer (a table the guest leaves unset because the path that reads it
+	// is not taken) would fault; its descriptors read as zero, i.e. null resources.
+	if (address < 0x10000u) {
+		result = 0;
+		return true;
+	}
 	uint32_t word = 0;
 	if (m_runtime.read_memory != nullptr) {
 		if (!m_runtime.read_memory(m_runtime.userdata, address, {&word, 1})) {
