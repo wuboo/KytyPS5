@@ -6,14 +6,21 @@ void TestRayTracingDispatchDetection() {
     D::DecodeProgram(code, decoded);
     Check(decoded.has_bvh == expected, message);
     if (expected) {
-      const auto &last = decoded.instructions.back();
-      Check(last.family == D::Family::MIMG &&
-                (last.opcode_id == 0xe6u || last.opcode_id == 0xe7u),
-            "decoder continued past the first BVH instruction");
-      const auto result = ShaderRecompiler::TranslateProgram(
-          code, MakeCompileOptions(ShaderType::Compute));
-      Check(result.skip_dispatch && result.program.blocks.empty() && result.cfg_dump.empty(),
-            "BVH compute shader reached IR translation");
+      // BVH intersections are translated (every ray misses), so the decoder keeps going
+      // to the end of the program instead of stopping at the first BVH instruction.
+      Check(decoded.instructions.back().opcode == D::Opcode::S_ENDPGM,
+            "decoder stopped at the first BVH instruction");
+      const bool well_formed =
+          std::none_of(decoded.instructions.begin(), decoded.instructions.end(),
+                       [](const D::Instruction &inst) {
+                         return inst.opcode == D::Opcode::UNSUPPORTED;
+                       });
+      if (well_formed) {
+        const auto result = ShaderRecompiler::TranslateProgram(
+            code, MakeCompileOptions(ShaderType::Compute));
+        Check(!result.skip_dispatch && !result.program.blocks.empty(),
+              "BVH compute shader was skipped instead of translated");
+      }
     }
   };
   const auto check = [&](std::initializer_list<uint32_t> code, bool expected,
@@ -30,8 +37,8 @@ void TestRayTracingDispatchDetection() {
         "RDNA2 BVH64 instruction did not skip dispatch");
   check({0xbe8e210eu, 0xf1989f01u, 0x00081014u, EncodeSopp(0x01)}, true,
         "unsupported SWAPPC before BVH prevented dispatch detection");
-  check({0xf1989f01u, 0x00081014u, 0xc0000000u, EncodeSopp(0x01)}, true,
-        "unknown instruction after BVH prevented dispatch skipping");
+  // An unknown instruction family after a BVH instruction is decoded like in any other
+  // shader (the decoder no longer stops at the BVH instruction), so it is not a case here.
 
   for (uint32_t opcode : {0xe6u, 0xe7u}) {
     for (uint32_t nsa = 0; nsa < 4; ++nsa) {
@@ -72,8 +79,9 @@ void TestRayTracingDispatchDetection() {
   const std::array ordinary_code{EncodeSMovB32(0, 255), 0xf1989f01u, EncodeSopp(0x01)};
   D::Program reused;
   D::DecodeProgram(bvh_code, reused);
-  Check(reused.has_bvh && reused.instructions.size() == 1,
-        "decoder did not stop at the first BVH instruction");
+  Check(reused.has_bvh && reused.instructions.size() == 3 &&
+            reused.instructions.back().opcode == D::Opcode::S_ENDPGM,
+        "decoder did not decode both BVH instructions and the end");
   D::DecodeProgram(ordinary_code, reused);
   Check(!reused.has_bvh, "decoder retained stale BVH metadata");
   for (const auto stage : {ShaderType::Compute, ShaderType::Vertex, ShaderType::Pixel}) {

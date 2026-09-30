@@ -7802,9 +7802,12 @@ void TestNewShaderRecompilerCfgLoopHeaderDynamicScalarBufferLoadStructured() {
 
   auto options = MakeCompileOptions(ShaderType::Compute);
   options.dump_ir = true;
-  ExpectFatal([&] { (void)RecompileForTest(shader, options); },
-              "self-modifying scalar-buffer descriptor did not terminate "
-              "compilation");
+  // A scalar-buffer descriptor that is not a static runtime value is read through its
+  // physical address in the shader (runtime_descriptor) instead of ending compilation.
+  const auto result = RecompileForTest(shader, options);
+  Check(!result.spirv.empty(),
+        "scalar-buffer load through a shader-computed descriptor did not compile");
+  CheckSpirvBinaryValidates(result.spirv);
 }
 
 void TestNewShaderRecompilerCfgLoopHeaderBufferLoadDispatcher() {
