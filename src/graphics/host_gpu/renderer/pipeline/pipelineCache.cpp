@@ -31,7 +31,9 @@
 #include <cstring>
 #include <fmt/format.h>
 #include <limits>
+#include <mutex>
 #include <span>
+#include <unordered_set>
 #include <spirv-tools/libspirv.hpp>
 #include <string_view>
 #include <thread>
@@ -786,8 +788,21 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		// staged mesh outputs, so the reported shared limit is conservative. Let the driver
 		// decide whether the pipeline fits.
 		if (mesh.lds_size_dwords * sizeof(uint32_t) > limits.maxMeshSharedMemorySize) {
-			LOGF("mesh shader LDS above reported host limit: LDS=%u bytes limit=%u\n",
-			     mesh.lds_size_dwords * 4u, limits.maxMeshSharedMemorySize);
+			// Once per shader. Printing this on every mesh draw wrote about 126k lines in a
+			// 300 s ship run, and the log itself was a large part of the cost.
+			const uint64_t hash = vertex_params[0].hash;
+			static std::mutex seen_mu;
+			static std::unordered_set<uint64_t> seen;
+			bool first = false;
+			{
+				const std::lock_guard lock(seen_mu);
+				first = seen.insert(hash).second;
+			}
+			if (first) {
+				LOGF("mesh shader LDS above reported host limit: hash=0x%016" PRIx64
+				     " LDS=%u bytes limit=%u\n",
+				     hash, mesh.lds_size_dwords * 4u, limits.maxMeshSharedMemorySize);
+			}
 		}
 	}
 	ShaderParams pixel_params;
