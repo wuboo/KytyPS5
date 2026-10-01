@@ -192,7 +192,10 @@ void RememberPerVertexPrototypeShader(const ShaderProgram&                    pr
 		    host_subgroup_size, static_cast<uint32_t>(vs.resources_num), layout.record_stride_vec4,
 		    layout.clip_slot, layout.location_to_slot};
 		it->second.capture_words = Spirv::EmitProgram(result.program, options.input_info, &capture);
-		EXIT_IF(!tools.Validate(it->second.capture_words));
+		// Validation of our own emitter output is ~30% of a vertex permutation's cost; bench-only
+		// switch KYTY_PV_SKIP_VALIDATE=1 skips it (the first draw would still be validated by Vulkan).
+		static const bool skip_validate = std::getenv("KYTY_PV_SKIP_VALIDATE") != nullptr;
+		EXIT_IF(!skip_validate && !tools.Validate(it->second.capture_words));
 	}
 }
 
