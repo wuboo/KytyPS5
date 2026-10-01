@@ -42,5 +42,24 @@ int main() {
         }
     }
     std::puts("PASS: multiline PerVertex parsing (LF/CRLF, adjacent and final lines)");
+
+    std::string wide_vs;
+    std::string wide_ps;
+    for (int i = 0; i < 13; ++i) {
+        wide_vs += "OpDecorate %p" + std::to_string(i) + " Location " + std::to_string(i) + "\n";
+        wide_vs += "%p" + std::to_string(i) + " = OpVariable %ptr Output\n";
+        wide_ps += "OpDecorate %in" + std::to_string(i) + " PerVertexKHR\n";
+        wide_ps += "OpDecorate %in" + std::to_string(i) + " Location " + std::to_string(i) + "\n";
+    }
+    Libs::Graphics::PerVertexLayout wide_layout;
+    std::map<uint32_t, std::string>  wide_params;
+    if (!Libs::Graphics::DerivePerVertexLayout(wide_vs, wide_ps, wide_layout, wide_params) ||
+        wide_layout.num_params != 13 || wide_layout.location_to_slot.size() != 13 ||
+        wide_layout.location_to_slot.at(0) != 1 || wide_layout.location_to_slot.at(12) != 13 ||
+        wide_layout.record_stride_vec4 != 14) {
+        std::fprintf(stderr, "FAIL: layout with 13 parameters was rejected or mis-slotted\n");
+        return EXIT_FAILURE;
+    }
+    std::puts("PASS: 13 vertex parameters (above the old 12-attribute unpack cap)");
     return EXIT_SUCCESS;
 }

@@ -39,6 +39,11 @@ struct PerVertexUnpackPipeline {
 	vk::Pipeline            pipeline;
 };
 
+// Vulkan's minimum maxPushConstantsSize is 128 bytes, which held 12 Attrs. MoltenVK reports
+// 4096 (MVKDevice.mm), so 16 Attrs (160 bytes) fit on this host. RES_MAX stays 32; a draw past
+// this cap is skipped instead of exiting.
+constexpr uint32_t kPerVertexPrototypeMaxAttributes = 16;
+
 struct UnpackPushConstants {
 	uint32_t total_invocations; // word 0
 	uint32_t index_count;       // word 1
@@ -48,16 +53,16 @@ struct UnpackPushConstants {
 	uint32_t vertex_stride;     // word 5
 	uint32_t num_records;       // word 6: strict logical guest buffer bound
 	uint32_t packed_flags; // word 7: [15:0] index_base_offset, [16] is_indexed, [18:17] index_type,
-	                       // [22:19] num_attributes
+	                       // [23:19] num_attributes (5 bits; 16 must not truncate to 0)
 	struct Attr {
 		uint32_t meta;       // [15:0] byte offset, [19:17] component count, [22:20] format kind
 		uint32_t bit_counts; // [cnt0, cnt1, cnt2, cnt3]
-	} attrs[12];             // words 8..31 (24 uints)
+	} attrs[kPerVertexPrototypeMaxAttributes];
 };
 static_assert(sizeof(UnpackPushConstants::Attr) == 8);
 static_assert(offsetof(UnpackPushConstants, attrs) == 32);
 static_assert(offsetof(UnpackPushConstants::Attr, bit_counts) == 4);
-static_assert(sizeof(UnpackPushConstants) == 128);
+static_assert(sizeof(UnpackPushConstants) == 160);
 
 const PerVertexPrototypePrograms*
 GetPerVertexPrototypePrograms(GraphicContext&                        graphics,
