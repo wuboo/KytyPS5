@@ -93,6 +93,11 @@ vk::PolygonMode ResolvePolygonMode(const HW::ModeControl& mode, bool cull_front,
 	}
 }
 
+// Bumped by hand when the emulator-side layout of the cache file changes. The blob itself is the
+// driver's vkGetPipelineCacheData output, which the driver validates and keys by shader content,
+// so a rebuilt emulator keeps its warm cache; entries for changed shaders simply do not hit.
+constexpr uint32_t kPipelineCacheFormat = 1;
+
 std::string DriverCacheSignature(const vk::PhysicalDeviceProperties& properties) {
 	constexpr char hex[] = "0123456789abcdef";
 	std::string    uuid(VK_UUID_SIZE * 2, '0');
@@ -100,8 +105,7 @@ std::string DriverCacheSignature(const vk::PhysicalDeviceProperties& properties)
 		uuid[i * 2]     = hex[properties.pipelineCacheUUID[i] >> 4u];
 		uuid[i * 2 + 1] = hex[properties.pipelineCacheUUID[i] & 0xfu];
 	}
-	// Driver cache entries already distinguish shader code and pipeline state across builds.
-	return fmt::format("KytyPC2:{:08x}:{:08x}:{:08x}:{}\n",
+	return fmt::format("KytyPC3:{}:{:08x}:{:08x}:{:08x}:{}\n", kPipelineCacheFormat,
 	                   properties.vendorID, properties.deviceID, properties.driverVersion, uuid);
 }
 
@@ -559,7 +563,7 @@ void PipelineCache::InitializeDriverCache() {
 			    XXH3_64bits(initial_data.data(), initial_data.size()) != payload_hash) {
 				initial_data.clear();
 				PipelineCacheLog(
-				    "Vulkan pipeline cache: invalidating {} (driver or data mismatch)",
+				    "Vulkan pipeline cache: invalidating {} (driver, format, or data mismatch)",
 				    path);
 			}
 		} else {
