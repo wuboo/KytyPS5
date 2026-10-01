@@ -2,7 +2,6 @@
 
 #include "common/file.h"
 #include "common/threads.h"
-#include "graphics/presentation/frameTiming.h"
 #include "kytyGitVersion.h"
 
 #include <algorithm>
@@ -17,6 +16,7 @@
 #include <set>
 #include <spirv/unified1/spirv.hpp>
 #include <sstream>
+#include <cstdlib>
 #include <string>
 #include <vector>
 #include <xxhash.h>
@@ -83,7 +83,12 @@ static void ScanVertexOutputs(const std::string& vs_source, std::set<std::string
 bool DerivePerVertexVertexLayout(const std::string& vs_source, PerVertexLayout& layout,
                                  std::map<uint32_t, std::string>& vs_param_vars) {
 	// KYTY_OPT_OFF=pv_layout_scan restores the regex implementation.
-	static const bool scan = FrameTiming::OptEnabled("pv_layout_scan");
+	// Same rule as FrameTiming::OptEnabled, inlined so this file links into its unit test alone.
+	static const bool scan = [] {
+		const char* value = std::getenv("KYTY_OPT_OFF");
+		return value == nullptr ||
+		       ("," + std::string(value) + ",").find(",pv_layout_scan,") == std::string::npos;
+	}();
 	std::set<std::string> vs_outputs;
 	vs_param_vars.clear();
 	if (scan) {
