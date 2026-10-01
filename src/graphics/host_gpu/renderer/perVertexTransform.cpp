@@ -2,12 +2,15 @@
 
 #include "common/file.h"
 #include "common/threads.h"
+#include "graphics/presentation/frameTiming.h"
 #include "kytyGitVersion.h"
 
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
+#include <cctype>
 #include <cstring>
+#include <string_view>
 #include <fmt/format.h>
 #include <map>
 #include <regex>
@@ -46,29 +49,74 @@ static std::string CompleteEntryPointInterface(const std::string& source) {
 	return std::regex_replace(source, entry_re, "$1" + interfaces);
 }
 
-bool DerivePerVertexVertexLayout(const std::string& vs_source, PerVertexLayout& layout,
-                                 std::map<uint32_t, std::string>& vs_param_vars) {
-	std::regex var_re(R"(^\s*(%\S+)\s*=\s*OpVariable\s+%\S+\s+Output\s*$)", kMultilineRegex);
-	std::set<std::string> vs_outputs;
-	for (auto it = std::sregex_iterator(vs_source.begin(), vs_source.end(), var_re);
-	     it != std::sregex_iterator(); ++it) {
-		vs_outputs.insert((*it)[1]);
-	}
-	if (vs_outputs.empty()) return false;
-
-	bool has_clip = vs_outputs.find("%gl_ClipDistance") != vs_outputs.end();
-
-	vs_param_vars.clear();
-	for (const auto& var: vs_outputs) {
-		if (var == "%outPerVertex" || var == "%gl_ClipDistance" || var == "%gl_PointSize") continue;
-		std::regex  loc_re(R"(^\s*OpDecorate\s+)" + var + R"(\s+Location\s+(\d+)\s*$)",
-		                   kMultilineRegex);
-		std::smatch m;
-		if (std::regex_search(vs_source, m, loc_re)) {
-			uint32_t loc       = static_cast<uint32_t>(std::stoul(m[1]));
-			vs_param_vars[loc] = var;
+// Output-variable names and their Location decorations, found with one linear pass over the
+// disassembly (same lines the two regexes in the fallback branch below match).
+static void ScanVertexOutputs(const std::string& vs_source, std::set<std::string>& vs_outputs,
+                              std::map<std::string, uint32_t>& var_locations) {
+	std::string_view rest(vs_source);
+	while (!rest.empty()) {
+		const auto eol  = rest.find('\n');
+		auto       line = rest.substr(0, eol);
+		rest            = eol == std::string_view::npos ? std::string_view {} : rest.substr(eol + 1);
+		std::string_view tok[6];
+		int              n = 0;
+		for (size_t i = 0; i < line.size() && n < 6;) {
+			while (i < line.size() && std::isspace(static_cast<unsigned char>(line[i]))) ++i;
+			if (i >= line.size()) break;
+			size_t j = i;
+			while (j < line.size() && !std::isspace(static_cast<unsigned char>(line[j]))) ++j;
+			tok[n++] = line.substr(i, j - i);
+			i        = j;
+		}
+		if (n == 5 && tok[0].starts_with('%') && tok[1] == "=" && tok[2] == "OpVariable" &&
+		    tok[3].starts_with('%') && tok[4] == "Output") {
+			vs_outputs.emplace(tok[0]);
+		} else if (n == 4 && tok[0] == "OpDecorate" && tok[2] == "Location" &&
+		           std::ranges::all_of(tok[3], [](char c) { return c >= '0' && c <= '9'; })) {
+			// regex_search keeps the first matching decoration per variable
+			var_locations.emplace(std::string(tok[1]),
+			                      static_cast<uint32_t>(std::stoul(std::string(tok[3]))));
 		}
 	}
+}
+
+bool DerivePerVertexVertexLayout(const std::string& vs_source, PerVertexLayout& layout,
+                                 std::map<uint32_t, std::string>& vs_param_vars) {
+	// KYTY_OPT_OFF=pv_layout_scan restores the regex implementation.
+	static const bool scan = FrameTiming::OptEnabled("pv_layout_scan");
+	std::set<std::string> vs_outputs;
+	vs_param_vars.clear();
+	if (scan) {
+		std::map<std::string, uint32_t> var_locations;
+		ScanVertexOutputs(vs_source, vs_outputs, var_locations);
+		if (vs_outputs.empty()) return false;
+		for (const auto& var: vs_outputs) {
+			if (var == "%outPerVertex" || var == "%gl_ClipDistance" || var == "%gl_PointSize")
+				continue;
+			if (const auto it = var_locations.find(var); it != var_locations.end())
+				vs_param_vars[it->second] = var;
+		}
+	} else {
+		std::regex var_re(R"(^\s*(%\S+)\s*=\s*OpVariable\s+%\S+\s+Output\s*$)",
+		                  kMultilineRegex);
+		for (auto it = std::sregex_iterator(vs_source.begin(), vs_source.end(), var_re);
+		     it != std::sregex_iterator(); ++it) {
+			vs_outputs.insert((*it)[1]);
+		}
+		if (vs_outputs.empty()) return false;
+		for (const auto& var: vs_outputs) {
+			if (var == "%outPerVertex" || var == "%gl_ClipDistance" || var == "%gl_PointSize")
+				continue;
+			std::regex  loc_re(R"(^\s*OpDecorate\s+)" + var + R"(\s+Location\s+(\d+)\s*$)",
+			                   kMultilineRegex);
+			std::smatch m;
+			if (std::regex_search(vs_source, m, loc_re)) {
+				uint32_t loc       = static_cast<uint32_t>(std::stoul(m[1]));
+				vs_param_vars[loc] = var;
+			}
+		}
+	}
+	const bool has_clip = vs_outputs.find("%gl_ClipDistance") != vs_outputs.end();
 
 	layout.has_clip   = has_clip;
 	layout.num_params = static_cast<uint32_t>(vs_param_vars.size());
