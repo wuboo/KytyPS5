@@ -488,6 +488,16 @@ add_executable(resource_materialization_tests EXCLUDE_FROM_ALL
 target_link_libraries(resource_materialization_tests fmt::fmt)
 target_include_directories(resource_materialization_tests PRIVATE ${inc_headers})
 
+add_executable(shader_disk_cache_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ShaderDiskCacheTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
+)
+target_link_libraries(shader_disk_cache_tests fmt::fmt)
+target_include_directories(shader_disk_cache_tests PRIVATE ${inc_headers})
+
 add_executable(resource_tracking_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ResourceTrackingTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
@@ -605,6 +615,7 @@ if(BUILD_TESTING)
 	add_test(NAME pad_script_parser COMMAND $<TARGET_FILE:pad_script_parser_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
+	add_test(NAME shader_disk_cache COMMAND $<TARGET_FILE:shader_disk_cache_tests>)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
 	add_test(NAME event_queue_lifetime COMMAND $<TARGET_FILE:event_queue_lifetime_tests>)
 	add_test(NAME kernel_file_system COMMAND $<TARGET_FILE:kernel_file_system_tests>)
@@ -671,6 +682,7 @@ if(BUILD_TESTING)
 		push_descriptor_policy_tests
 		shader_vertex_metadata_tests
 		resource_materialization_tests
+		shader_disk_cache_tests
 		resource_tracking_tests
 		event_queue_lifetime_tests
 		kernel_file_system_tests

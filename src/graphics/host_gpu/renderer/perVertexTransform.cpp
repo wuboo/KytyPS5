@@ -722,10 +722,12 @@ std::string GetPerVertexTransformSignature() {
 #ifndef KYTY_PER_VERTEX_TRANSFORM_SIGNATURE
 #define KYTY_PER_VERTEX_TRANSFORM_SIGNATURE "none"
 #endif
-#ifndef KYTY_GIT_REVISION
-#define KYTY_GIT_REVISION "unknown"
+#ifndef KYTY_RECOMPILER_SIGNATURE
+#define KYTY_RECOMPILER_SIGNATURE "unknown"
 #endif
-	return fmt::format("v2:{}:{}:env=vk1.2:num_ids", KYTY_GIT_REVISION,
+	// The transformed shaders are derived from recompiler output, so the recompiler's source hash
+	// (not the commit) is what has to invalidate them.
+	return fmt::format("v3:{}:{}:env=vk1.2:num_ids", KYTY_RECOMPILER_SIGNATURE,
 	                   KYTY_PER_VERTEX_TRANSFORM_SIGNATURE);
 }
 

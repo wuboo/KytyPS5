@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/shader/recompiler/ShaderDiskCache.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
@@ -29,6 +30,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fmt/format.h>
 #include <limits>
 #include <mutex>
@@ -37,6 +39,7 @@
 #include <spirv-tools/libspirv.hpp>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -274,6 +277,118 @@ bool ValidateShaderSpirv(const char* label, uint64_t shader_hash,
 	return false;
 }
 
+
+// On-disk cache of recompiler results (see ShaderDiskCache.h). Files live next to the transformed
+// per-vertex shaders in _ShaderCache/<title>/ and are named by a 128-bit hash of everything that
+// determines the result: the guest code, the stage's static state, the options and environment
+// switches the recompiler reads, and the hash of the recompiler's own sources (generated at build
+// time), so changing the recompiler invalidates every entry without touching the files.
+#ifndef KYTY_RECOMPILER_SIGNATURE
+#define KYTY_RECOMPILER_SIGNATURE "none"
+#endif
+
+constexpr uint32_t kShaderCacheFileMagic = 0x4b534443; // "KSDC"
+
+class ShaderKeyBuilder {
+public:
+	template <typename T>
+	requires(std::is_arithmetic_v<T> || std::is_enum_v<T>)
+	void Add(T value) {
+		const auto* bytes = reinterpret_cast<const uint8_t*>(&value);
+		m_bytes.insert(m_bytes.end(), bytes, bytes + sizeof(T));
+	}
+	void AddWords(std::span<const uint32_t> words) {
+		Add(static_cast<uint64_t>(words.size()));
+		// Long inputs (guest code) are folded to a hash first to keep the key buffer small.
+		Add(XXH3_64bits(words.data(), words.size_bytes()));
+	}
+	void AddString(std::string_view text) {
+		Add(static_cast<uint64_t>(text.size()));
+		m_bytes.insert(m_bytes.end(), text.begin(), text.end());
+	}
+	[[nodiscard]] std::string Finish() const {
+		const auto hash = XXH3_128bits(m_bytes.data(), m_bytes.size());
+		return fmt::format("{:016x}{:016x}", hash.high64, hash.low64);
+	}
+
+private:
+	std::vector<uint8_t> m_bytes;
+};
+
+void AddEnvironmentToKey(ShaderKeyBuilder& key) {
+	// Switches that change recompiler output. Diagnostic-only variables are left out on purpose.
+	for (const char* name: {"KYTY_OPT_OFF", "KYTY_RT_SKIP", "KYTY_SHADER_LOOP_LIMIT",
+	                        "KYTY_VS_LANE_FROM_INDEX", "KYTY_BENCH_DROP_DIVERGENT_BARRIERS"}) {
+		const char* value = std::getenv(name);
+		key.AddString(name);
+		key.AddString(value != nullptr ? value : "\x01unset");
+	}
+}
+
+std::filesystem::path ShaderCacheFile(const std::string& title_id, std::string_view kind,
+                                      const std::string& key) {
+	return std::filesystem::path("_ShaderCache") / title_id / fmt::format("rc_{}_{}.bin", kind, key);
+}
+
+bool ReadShaderCacheFile(const std::filesystem::path& path, std::vector<uint8_t>& payload) {
+	if (!Common::File::IsFileExisting(path)) return false;
+	Common::File file(path, Common::File::Mode::Read);
+	if (file.IsInvalid()) return false;
+	const auto size = file.Size();
+	struct Header {
+		uint32_t magic;
+		uint32_t format;
+		uint64_t payload_size;
+		uint64_t payload_hash;
+	} header {};
+	if (size < sizeof(header) || size > 256u * 1024u * 1024u) {
+		file.Close();
+		return false;
+	}
+	uint32_t header_read = 0;
+	file.Read(&header, sizeof(header), &header_read);
+	if (header_read != sizeof(header) || header.magic != kShaderCacheFileMagic ||
+	    header.format != ShaderRecompiler::DiskCache::kFormatVersion ||
+	    header.payload_size != size - sizeof(header)) {
+		file.Close();
+		return false;
+	}
+	payload.resize(header.payload_size);
+	uint32_t payload_read = 0;
+	file.Read(payload.data(), static_cast<uint32_t>(payload.size()), &payload_read);
+	file.Close();
+	return payload_read == payload.size() &&
+	       XXH3_64bits(payload.data(), payload.size()) == header.payload_hash;
+}
+
+void WriteShaderCacheFile(const std::filesystem::path& path, const std::vector<uint8_t>& payload) {
+	if (payload.empty() || !Common::File::CreateDirectories(path.parent_path())) return;
+	const struct {
+		uint32_t magic;
+		uint32_t format;
+		uint64_t payload_size;
+		uint64_t payload_hash;
+	} header {kShaderCacheFileMagic, ShaderRecompiler::DiskCache::kFormatVersion, payload.size(),
+	          XXH3_64bits(payload.data(), payload.size())};
+	static std::atomic<uint64_t> s_counter = 0;
+	const auto                   temp = std::filesystem::path(
+        path.string() + fmt::format(".tmp.{}.{}", Common::Thread::GetProcessId(), s_counter++));
+	Common::File file;
+	uint32_t     header_written  = 0;
+	uint32_t     payload_written = 0;
+	if (file.Create(temp)) {
+		file.Write(&header, sizeof(header), &header_written);
+		file.Write(payload.data(), static_cast<uint32_t>(payload.size()), &payload_written);
+	}
+	const bool flushed = !file.IsInvalid() && file.Flush();
+	file.Close();
+	if (header_written != sizeof(header) || payload_written != payload.size() || !flushed ||
+	    !Common::File::RenameFile(temp, path)) {
+		std::error_code error;
+		std::filesystem::remove(temp, error);
+	}
+}
+
 } // namespace
 
 struct PipelineCache::ProgramCache {
@@ -329,7 +444,8 @@ struct PipelineCache::ProgramCache {
 	                               const ShaderRecompiler::CompileOptions&      options,
 	                               ShaderRecompiler::TranslateResult            translated,
 	                               ShaderRecompiler::IR::ResourceSpecialization specialization,
-	                               uint32_t push_data_start_dword) {
+	                               uint32_t push_data_start_dword,
+	                               const std::filesystem::path& cache_path = {}) {
 		const char* stage_name = nullptr;
 		switch (options.stage) {
 			case ShaderType::Vertex: stage_name = "vs"; break;
@@ -359,11 +475,101 @@ struct PipelineCache::ProgramCache {
 		}
 		const ShaderProgram handle {.id = ++next_shader_id, .module = module};
 		RememberPerVertexPrototypeShader(handle, result, options, graphics.subgroup_size);
-		return {
+		Permutation permutation {
 		    .specialization = std::move(specialization),
 		    .program        = std::move(result.program).TakeCompiledInfo(),
 		    .handle         = handle,
 		};
+		if (!cache_path.empty()) {
+			WriteShaderCacheFile(cache_path, ShaderRecompiler::DiskCache::SerializePermutation(
+			                                     permutation.program, result.spirv));
+		}
+		return permutation;
+	}
+
+	// Rebuilds a permutation from the disk cache; false when there is no usable entry.
+	bool LoadPermutation(const std::filesystem::path&                        cache_path,
+	                     const ShaderRecompiler::CompileOptions&             options,
+	                     const ShaderRecompiler::IR::ResourceSpecialization& specialization,
+	                     Permutation&                                        permutation) {
+		std::vector<uint8_t> payload;
+		if (!ReadShaderCacheFile(cache_path, payload)) return false;
+		ShaderRecompiler::CompileResult          result;
+		ShaderRecompiler::IR::CompiledShaderInfo info;
+		if (!ShaderRecompiler::DiskCache::DeserializePermutation(payload, info, result.spirv) ||
+		    info.shader_hash != options.shader_hash) {
+			return false;
+		}
+		const auto module = CompileSPV(result.spirv, graphics.device);
+		EXIT_IF(module == nullptr);
+		const ShaderProgram handle {.id = ++next_shader_id, .module = module};
+		RememberPerVertexPrototypeShader(handle, result, options, graphics.subgroup_size);
+		permutation = {
+		    .specialization = specialization,
+		    .program        = std::move(info),
+		    .handle         = handle,
+		};
+		return true;
+	}
+
+	bool DiskCacheEnabled(ShaderType stage, uint64_t shader_hash) {
+		static const bool enabled = FrameTiming::OptEnabled("shader_disk_cache") &&
+		                            std::string_view(KYTY_RECOMPILER_SIGNATURE) != "none";
+		if (!enabled) return false;
+		// Vertex shaders re-emit SPIR-V from the full IR for the per-vertex prototype.
+		if (stage == ShaderType::Vertex && PerVertexPrototypeEnabled()) return false;
+		if (BenchDumpShader(shader_hash)) return false;
+		if (!disk_title_ready) {
+			disk_title_ready = true;
+			disk_title       = PipelineCacheTitleId();
+		}
+		return !disk_title.empty();
+	}
+
+	std::string PlanKey(const ShaderParams& params, const ShaderRecompiler::CompileOptions& options) {
+		ShaderKeyBuilder key;
+		key.Add(ShaderRecompiler::DiskCache::kFormatVersion);
+		key.AddString(KYTY_RECOMPILER_SIGNATURE);
+		key.Add(lookup_key.stage);
+		key.Add(lookup_key.hash);
+		key.Add(lookup_key.user_data_count);
+		key.Add(lookup_key.code_size);
+		key.AddWords(lookup_key.static_state);
+		key.AddWords(params.code);
+		key.AddWords(params.back_code);
+		key.Add(options.wave_size);
+		key.Add(options.user_data_base);
+		key.Add(graphics.subgroup_size);
+		AddEnvironmentToKey(key);
+		return key.Finish();
+	}
+
+	static std::string PermutationKey(const std::string&                                  plan_key,
+	                                  const ShaderRecompiler::IR::ResourceSpecialization& spec,
+	                                  uint32_t push_data_start_dword) {
+		ShaderKeyBuilder key;
+		key.AddString(plan_key);
+		key.Add(push_data_start_dword);
+		key.Add(static_cast<uint64_t>(spec.buffers.size()));
+		for (const auto& buffer: spec.buffers) {
+			key.Add(buffer.packed_stride);
+			key.Add(buffer.descriptor_format);
+			key.Add(buffer.descriptor_swizzle);
+		}
+		key.Add(static_cast<uint64_t>(spec.images.size()));
+		for (const auto& image: spec.images) {
+			key.Add(image.numeric_class);
+			key.Add(image.dimension);
+			key.Add(image.mip_count);
+			key.Add(image.conversion_format);
+			key.Add(image.shader_swizzle);
+			key.Add(image.indirect_root);
+			key.Add(image.indirect_mapping_offset);
+			key.Add(image.indirect_search_iterations);
+			key.Add(image.cube);
+			key.Add(image.fmask);
+		}
+		return key.Finish();
 	}
 
 	template <typename InputInfo>
@@ -475,33 +681,86 @@ struct PipelineCache::ProgramCache {
 		} else {
 			options.wave_size = input_info.wave_size;
 		}
-		auto translated = ShaderRecompiler::TranslateProgram(params.code, options);
-		if (translated.skip_dispatch) {
-			entry = programs.try_emplace(lookup_key, ShaderRecompiler::IR::ResourcePlan {}).first;
+		// Ray-tracing shaders pick descriptor tables at run time more often than others; one that
+		// cannot be resolved is skipped as before BVH intersections were stubbed.
+		const auto materialize_new_entry = [&](bool ray_traced) {
+			if (ShaderRecompiler::IR::MaterializeResources(entry->second.resource_plan, runtime,
+			                                               entry->second.resources,
+			                                               entry->second.specialization)) {
+				return true;
+			}
+			EXIT_IF(!ray_traced);
+			PipelineCacheLog("Warning: skipping ray-tracing shader 0x{:016x}: its resources "
+			                 "could not be resolved",
+			                 params.hash);
 			entry->second.skip_dispatch = true;
-			return {};
+			return false;
+		};
+
+		const bool            disk_cache = !options.dump_ir && DiskCacheEnabled(stage, params.hash);
+		std::string           plan_key;
+		std::filesystem::path plan_path;
+		std::filesystem::path permutation_path;
+		bool                  added = false;
+		if (disk_cache) {
+			plan_key  = PlanKey(params, options);
+			plan_path = ShaderCacheFile(disk_title, "plan", plan_key);
+			if (entry == programs.end()) {
+				std::vector<uint8_t>               payload;
+				ShaderRecompiler::IR::ResourcePlan plan;
+				bool                               ray_traced = false;
+				if (ReadShaderCacheFile(plan_path, payload) &&
+				    ShaderRecompiler::DiskCache::DeserializePlan(payload, plan, ray_traced) &&
+				    plan.shader_hash == params.hash) {
+					entry = programs.try_emplace(lookup_key, std::move(plan)).first;
+					if (!materialize_new_entry(ray_traced)) {
+						return {};
+					}
+				}
+			}
+			if (entry != programs.end()) {
+				permutation_path = ShaderCacheFile(
+				    disk_title, "perm",
+				    PermutationKey(plan_key, entry->second.specialization, push_data_cursor));
+				Permutation loaded;
+				if (LoadPermutation(permutation_path, options, entry->second.specialization,
+				                    loaded)) {
+					entry->second.permutations.push_back(std::move(loaded));
+					added = true;
+				}
+			}
 		}
-		if (entry == programs.end()) {
-			entry = programs
-			            .try_emplace(lookup_key,
-			                         ShaderRecompiler::IR::ExtractResourcePlan(translated.program))
-			            .first;
-			if (!ShaderRecompiler::IR::MaterializeResources(entry->second.resource_plan, runtime,
-			                                                entry->second.resources,
-			                                                entry->second.specialization)) {
-				// Ray-tracing shaders pick descriptor tables at run time more often than others;
-				// one that cannot be resolved is skipped as before BVH intersections were stubbed.
-				EXIT_IF(!translated.ray_traced);
-				PipelineCacheLog("Warning: skipping ray-tracing shader 0x{:016x}: its resources "
-				                 "could not be resolved",
-				                 params.hash);
+		if (!added) {
+			auto translated = ShaderRecompiler::TranslateProgram(params.code, options);
+			if (translated.skip_dispatch) {
+				entry =
+				    programs.try_emplace(lookup_key, ShaderRecompiler::IR::ResourcePlan {}).first;
 				entry->second.skip_dispatch = true;
 				return {};
 			}
+			if (entry == programs.end()) {
+				entry = programs
+				            .try_emplace(lookup_key, ShaderRecompiler::IR::ExtractResourcePlan(
+				                                         translated.program))
+				            .first;
+				if (!materialize_new_entry(translated.ray_traced)) {
+					return {};
+				}
+				if (disk_cache) {
+					WriteShaderCacheFile(plan_path,
+					                     ShaderRecompiler::DiskCache::SerializePlan(
+					                         entry->second.resource_plan, translated.ray_traced));
+				}
+			}
+			if (disk_cache && permutation_path.empty()) {
+				permutation_path = ShaderCacheFile(
+				    disk_title, "perm",
+				    PermutationKey(plan_key, entry->second.specialization, push_data_cursor));
+			}
+			entry->second.permutations.push_back(CompilePermutation(
+			    params, options, std::move(translated), entry->second.specialization,
+			    push_data_cursor, disk_cache ? permutation_path : std::filesystem::path {}));
 		}
-		entry->second.permutations.push_back(
-		    CompilePermutation(params, options, std::move(translated), entry->second.specialization,
-		                       push_data_cursor));
 		const auto& permutation = entry->second.permutations.back();
 		input_info.stage = {.program = &permutation.program, .resources = &entry->second.resources};
 		permutation.program.bindings.AdvancePushData(push_data_cursor);
@@ -538,6 +797,8 @@ struct PipelineCache::ProgramCache {
 	ProgramKey                                                  lookup_key;
 	GraphicContext&                                             graphics;
 	uint64_t                                                    next_shader_id = 0;
+	std::string                                                 disk_title;
+	bool                                                        disk_title_ready = false;
 };
 
 PipelineCache::PipelineCache(GraphicContext& graphics)
