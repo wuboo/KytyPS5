@@ -74,6 +74,23 @@ void TestRejectsBadInput() {
   Check(ParseFails("1:"), "no action");
 }
 
+void TestTilt() {
+  const auto entries = ParseOk("5-9:tilt:30,-10,2+cross");
+  Check(entries.size() == 1, "one tilt entry");
+  Check(entries[0].tilt, "tilt set");
+  Check(entries[0].tilt_roll == 30.0 && entries[0].tilt_pitch == -10.0, "roll and pitch");
+  Check(entries[0].tilt_ramp == 2.0, "ramp");
+  Check(entries[0].buttons == 0x00004000u, "tilt combines with buttons");
+  Check(IsActive(entries[0], 8.9, 0.0) && !IsActive(entries[0], 9.0, 0.0), "tilt range");
+  const auto plain = ParseOk("1:tilt:0,15");
+  Check(plain[0].tilt && plain[0].tilt_ramp == 0.0, "ramp defaults to zero");
+  Check(!ParseOk("1:cross")[0].tilt, "no tilt by default");
+  Check(ParseFails("1:tilt:10"), "tilt needs roll and pitch");
+  Check(ParseFails("1:tilt:a,b"), "tilt needs numbers");
+  Check(ParseFails("1:tilt:1,2,3,4"), "tilt takes at most three values");
+  Check(ParseFails("1:tilt:1,2,-1"), "negative ramp");
+}
+
 } // namespace
 
 int main() {
@@ -82,6 +99,7 @@ int main() {
   TestHoldAndCombinedActions();
   TestSeparatorsAndComments();
   TestRejectsBadInput();
+  TestTilt();
   std::printf("PadScriptParserTests: ok\n");
   return 0;
 }

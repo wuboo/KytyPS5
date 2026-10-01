@@ -12,7 +12,9 @@
 //   hold    := length in the start unit, 'f' prefix required for frames
 // A bare start holds for the default point length of its unit.
 // Actions: cross circle square triangle options touchpad l1 r1 l2 r2 l3 r3 up down left right,
-//          left-stick-{left,right,up,down}, right-stick-{left,right,up,down}.
+//          left-stick-{left,right,up,down}, right-stick-{left,right,up,down},
+//          tilt:<roll>,<pitch>[,<ramp>] (degrees; holds the pad tilted for the entry, easing in over
+//          <ramp> units of the entry's start unit).
 
 #include <cstdint>
 #include <cstdlib>
@@ -33,6 +35,11 @@ struct Entry {
 	uint32_t buttons     = 0;
 	// Stick deflection per axis: -1, 0 or +1 (LeftX, LeftY, RightX, RightY).
 	int8_t sticks[4] = {0, 0, 0, 0};
+	// Pad tilt in degrees (roll about the pad's z axis, pitch about x); ramp in the start unit.
+	bool   tilt       = false;
+	double tilt_roll  = 0.0;
+	double tilt_pitch = 0.0;
+	double tilt_ramp  = 0.0;
 };
 
 struct Defaults {
@@ -41,7 +48,49 @@ struct Defaults {
 };
 
 // Button bits match PAD_BUTTON_* in controller.h.
+inline std::string_view Trim(std::string_view text) {
+	while (!text.empty() && (text.front() == ' ' || text.front() == '\t' || text.front() == '\r')) {
+		text.remove_prefix(1);
+	}
+	while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r')) {
+		text.remove_suffix(1);
+	}
+	return text;
+}
+
+inline bool ParseTilt(std::string_view args, Entry& entry) {
+	double values[3] = {0.0, 0.0, 0.0};
+	int    count     = 0;
+	while (true) {
+		if (count == 3) {
+			return false;
+		}
+		const auto  comma = args.find(',');
+		const std::string copy(Trim(args.substr(0, comma)));
+		char*             end = nullptr;
+		values[count++]       = std::strtod(copy.c_str(), &end);
+		if (copy.empty() || end != copy.c_str() + copy.size()) {
+			return false;
+		}
+		if (comma == std::string_view::npos) {
+			break;
+		}
+		args.remove_prefix(comma + 1);
+	}
+	if (count < 2 || values[2] < 0.0) {
+		return false;
+	}
+	entry.tilt       = true;
+	entry.tilt_roll  = values[0];
+	entry.tilt_pitch = values[1];
+	entry.tilt_ramp  = values[2];
+	return true;
+}
+
 inline bool LookupAction(std::string_view name, Entry& entry) {
+	if (name.substr(0, 5) == "tilt:") {
+		return ParseTilt(name.substr(5), entry);
+	}
 	struct Button {
 		std::string_view name;
 		uint32_t         bit;
@@ -77,16 +126,6 @@ inline bool LookupAction(std::string_view name, Entry& entry) {
 		}
 	}
 	return false;
-}
-
-inline std::string_view Trim(std::string_view text) {
-	while (!text.empty() && (text.front() == ' ' || text.front() == '\t' || text.front() == '\r')) {
-		text.remove_prefix(1);
-	}
-	while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r')) {
-		text.remove_suffix(1);
-	}
-	return text;
 }
 
 inline bool ParseNumber(std::string_view text, Unit& unit, double& value) {

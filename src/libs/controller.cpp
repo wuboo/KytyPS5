@@ -128,6 +128,7 @@ public:
 	void TouchPad(int id, int finger, bool down, float x, float y);
 	void Motion(int id, Sensor sensor, const float* data, uint64_t time_us);
 	void SetMotionSensorState(bool enable);
+	void MotionPose(int id, const float* accel_g, const float* orientation);
 	void ResetOrientation();
 	void ToggleGyroEmulation(int id);
 	void ResetInputState();
@@ -710,6 +711,19 @@ void GameController::Motion(int id, Sensor sensor, const float* data, uint64_t t
 	AddState();
 }
 
+void GameController::MotionPose(int id, const float* accel_g, const float* orientation) {
+	Common::LockGuard lock(m_mutex);
+	if (id != m_active_id || !m_motion_enabled) {
+		return;
+	}
+	std::copy_n(accel_g, 3, m_state.accel.begin());
+	std::copy_n(orientation, 4, m_state.orientation.begin());
+	m_state.gyro = {};
+	m_gyro_time  = 0;
+	m_state.time = LibKernel::KernelGetProcessTime();
+	AddState();
+}
+
 void GameController::SetMotionSensorState(bool enable) {
 	Common::LockGuard lock(m_mutex);
 	if (m_motion_enabled != enable) {
@@ -1123,6 +1137,10 @@ void ToggleGyroEmulation(int id) {
 	if (auto* player = PlayerForDevice(id)) {
 		player->ToggleGyroEmulation(id);
 	}
+}
+
+void SetMotionPose(int id, const float* accel_g, const float* orientation) {
+	g_controller->MotionPose(id, accel_g, orientation);
 }
 
 void ResetInputState() {
