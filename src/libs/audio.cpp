@@ -259,6 +259,15 @@ bool Audio::OpenSdlDevice(PortOut* port) {
 		SDL_QuitSubSystem(SDL_INIT_AUDIO);
 		return false;
 	}
+	// KYTY_AUDIO_GAIN=<0..1> scales output volume (e.g. 0.05 for benchmark runs). Playback and
+	// queue pacing are unchanged; only the samples get quieter.
+	static const float gain = [] {
+		const char* v = std::getenv("KYTY_AUDIO_GAIN");
+		return v != nullptr ? std::clamp(std::strtof(v, nullptr), 0.0f, 1.0f) : 1.0f;
+	}();
+	if (gain != 1.0f) {
+		SDL_SetAudioStreamGain(port->stream, gain);
+	}
 	if (!SDL_ResumeAudioStreamDevice(port->stream)) {
 		LOGF("AudioOut: SDL_ResumeAudioStreamDevice failed: %s\n", SDL_GetError());
 		CloseSdlDevice(port);
