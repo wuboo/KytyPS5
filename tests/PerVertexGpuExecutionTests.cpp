@@ -369,12 +369,12 @@ struct PushConstants {
     struct Attr {
         uint32_t meta;
         uint32_t bit_counts;
-    } attrs[12];
+    } attrs[16];
 };
 static_assert(sizeof(PushConstants::Attr) == 8);
 static_assert(offsetof(PushConstants, attrs) == 32);
 static_assert(offsetof(PushConstants::Attr, bit_counts) == 4);
-static_assert(sizeof(PushConstants) == 128);
+static_assert(sizeof(PushConstants) == 160);
 
 } // namespace
 
@@ -496,7 +496,7 @@ int main(int argc, char** argv) {
 
         const uint32_t* read_ids = reinterpret_cast<const uint32_t*>(id_buf.mapped);
         const float* read_attrs = reinterpret_cast<const float*>(attr_buf.mapped);
-        const uint32_t attribute_count = (push.packed_flags >> 19u) & 0x0fu;
+        const uint32_t attribute_count = (push.packed_flags >> 19u) & 0x1fu;
 
         for (uint32_t i = 0; i < push.total_invocations; ++i) {
             uint32_t exp_vtx = expected_vtx_ids[i];
@@ -808,6 +808,17 @@ int main(int argc, char** argv) {
         push.first_vertex = 1;
         push.packed_flags = 12u << 19u;
         DispatchAndVerifyStrict("Twelve attributes", push, {1, 2});
+    }
+
+    // Test 6b: Sixteen attributes. A 4-bit count would store 16 as 0.
+    {
+        PushConstants push = base_push;
+        for (uint32_t i = 12; i < 16; ++i) push.attrs[i] = push.attrs[i % 4u];
+        push.total_invocations = 2;
+        push.index_count = 2;
+        push.first_vertex = 1;
+        push.packed_flags = 16u << 19u;
+        DispatchAndVerifyStrict("Sixteen attributes", push, {1, 2});
     }
 
     // =========================================================================
