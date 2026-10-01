@@ -11,8 +11,25 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	EXIT_IF(programs == nullptr || !state.ps_active ||
 	        topology != vk::PrimitiveTopology::eTriangleList || primitive_restart_enable ||
 	        draw.index_count % 3 != 0);
-	EXIT_IF(vs.logical_stage != ShaderType::Vertex || vs.buffers_num != 1 ||
-	        vs.resources_num == 0 || vs.resources_num > 12);
+	EXIT_IF(vs.logical_stage != ShaderType::Vertex || vs.buffers_num != 1 || vs.resources_num <= 0);
+	if (vs.resources_num > static_cast<int>(kPerVertexPrototypeMaxAttributes)) {
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+			const uint64_t hash = vs.stage.program != nullptr ? vs.stage.program->shader_hash : 0;
+			LOGF("PerVertexPrototype: skipping draw, VS 0x%016llx has %d attributes (limit %u)\n",
+			     static_cast<unsigned long long>(hash), vs.resources_num,
+			     kPerVertexPrototypeMaxAttributes);
+		}
+		return;
+	}
+	if (vs.resources_num > 12) {
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 4) {
+			const uint64_t hash = vs.stage.program != nullptr ? vs.stage.program->shader_hash : 0;
+			LOGF("PerVertexPrototype: VS 0x%016llx draws with %d attributes\n",
+			     static_cast<unsigned long long>(hash), vs.resources_num);
+		}
+	}
 	const bool capture_has_writes = HasShaderBufferWrites(vs.stage);
 	EXIT_IF(capture_has_writes && !programs->native_capture);
 	const auto&    input     = vs.buffers[0];
@@ -373,7 +390,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		}
 	}
 	unpack_push.packed_flags =
-	    (index_byte_adjust & 0xffffu) | (idx_flag << 16u) | ((num_attrs & 0x0fu) << 19u);
+	    (index_byte_adjust & 0xffffu) | (idx_flag << 16u) | ((num_attrs & 0x1fu) << 19u);
 
 	for (uint32_t i = 0; i < num_attrs; ++i) {
 		const auto&    descriptor  = vs.resources[i];

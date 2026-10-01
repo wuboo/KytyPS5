@@ -162,7 +162,8 @@ void RememberPerVertexPrototypeShader(const ShaderProgram&                    pr
 		using namespace ShaderRecompiler;
 		// Keep unsupported capture interfaces on the existing guarded prototype path.
 		if ((host_subgroup_size != 32 && host_subgroup_size != 64) || vs.buffers_num != 1 ||
-		    vs.resources_num <= 0 || vs.resources_num > 12 ||
+		    vs.resources_num <= 0 ||
+		    vs.resources_num > static_cast<int>(kPerVertexPrototypeMaxAttributes) ||
 		    std::ranges::any_of(result.program.info.inputs,
 		                        [&](const IR::StageInput& input) {
 			                        return (input.kind != IR::StageInputKind::VertexIndex &&
