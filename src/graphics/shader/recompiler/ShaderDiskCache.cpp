@@ -1,7 +1,6 @@
 #include "graphics/shader/recompiler/ShaderDiskCache.h"
 
 #include <cstring>
-#include <limits>
 #include <type_traits>
 #include <unordered_map>
 
@@ -389,7 +388,7 @@ void Serialize(Archive& ar, IR::ResourcePlan& plan, ValueTable& table) {
 			if (!ar.Ok()) break;
 			const auto fixed_args = IR::NumArgsOf(opcode);
 			if (static_cast<uint32_t>(opcode) >= static_cast<uint32_t>(IR::ValueOpcode::Count) ||
-			    (fixed_args != std::numeric_limits<size_t>::max() && fixed_args != args)) {
+			    (opcode != IR::ValueOpcode::Phi && fixed_args != args)) {
 				ar.Fail();
 				break;
 			}
