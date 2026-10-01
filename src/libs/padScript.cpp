@@ -7,7 +7,9 @@
 #include "libs/padScriptParser.h"
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -57,11 +59,30 @@ int StickValue(int8_t direction) {
 	return direction < 0 ? 0 : (direction > 0 ? 255 : 128);
 }
 
+// Pad pose for a roll (about z) and pitch (about x) in degrees: gravity in the pad frame, in G,
+// and the orientation quaternion (x, y, z, w) of Rz(roll) * Rx(pitch).
+void TiltPose(double roll_deg, double pitch_deg, float* accel, float* orientation) {
+	constexpr double DEG = 3.14159265358979323846 / 180.0;
+	const double     r   = roll_deg * DEG;
+	const double     p   = pitch_deg * DEG;
+	accel[0]             = static_cast<float>(std::sin(r));
+	accel[1]             = static_cast<float>(std::cos(r) * std::cos(p));
+	accel[2]             = static_cast<float>(-std::cos(r) * std::sin(p));
+	const double cr = std::cos(r * 0.5), sr = std::sin(r * 0.5);
+	const double cp = std::cos(p * 0.5), sp = std::sin(p * 0.5);
+	orientation[0]  = static_cast<float>(cr * sp);
+	orientation[1]  = static_cast<float>(sr * sp);
+	orientation[2]  = static_cast<float>(sr * cp);
+	orientation[3]  = static_cast<float>(cr * cp);
+}
+
 void Run() {
 	static constexpr Axis AXES[4] = {Axis::LeftX, Axis::LeftY, Axis::RightX, Axis::RightY};
 
 	uint32_t applied_buttons = 0;
 	int8_t   applied_sticks[4] {};
+	bool     tilted = false;
+	double   applied_roll = 0.0, applied_pitch = 0.0;
 
 	while (!g_stop.load(std::memory_order_relaxed)) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(2));
@@ -77,9 +98,20 @@ void Run() {
 
 		uint32_t buttons = 0;
 		int8_t   sticks[4] {};
+		bool     tilt = false;
+		double   roll = 0.0, pitch = 0.0;
 		for (const auto& entry: g_entries) {
 			if (IsActive(entry, seconds, frames)) {
 				buttons |= entry.buttons;
+				if (entry.tilt) {
+					const double now  = entry.start_unit == Unit::Frames ? frames : seconds;
+					const double fade = entry.tilt_ramp > 0.0
+					                        ? std::min(1.0, (now - entry.start) / entry.tilt_ramp)
+					                        : 1.0;
+					tilt  = true;
+					roll  = entry.tilt_roll * fade;
+					pitch = entry.tilt_pitch * fade;
+				}
 				for (int axis = 0; axis < 4; axis++) {
 					if (entry.sticks[axis] != 0) {
 						sticks[axis] = entry.sticks[axis];
@@ -113,9 +145,24 @@ void Run() {
 		}
 		applied_buttons = buttons;
 
+		// While a tilt entry is active the pose is refreshed every tick; on release it returns level.
+		if (tilt || tilted) {
+			if (tilt != tilted || roll != applied_roll || pitch != applied_pitch) {
+				float accel[3];
+				float orientation[4];
+				TiltPose(roll, pitch, accel, orientation);
+				SetMotionPose(HOST_INPUT_CONTROLLER_ID, accel, orientation);
+				applied_roll  = roll;
+				applied_pitch = pitch;
+				changed       = changed || tilt != tilted;
+			}
+			tilted = tilt;
+		}
+
 		if (changed && g_log) {
-			LOGF("[pad-script] t=%.3fs frame=%.0f buttons=0x%08x sticks=%d,%d,%d,%d\n", seconds,
-			     frames, buttons, sticks[0], sticks[1], sticks[2], sticks[3]);
+			LOGF("[pad-script] t=%.3fs frame=%.0f buttons=0x%08x sticks=%d,%d,%d,%d tilt=%d(%.1f,%.1f)\n",
+			     seconds, frames, buttons, sticks[0], sticks[1], sticks[2], sticks[3],
+			     tilt ? 1 : 0, roll, pitch);
 		}
 	}
 }
