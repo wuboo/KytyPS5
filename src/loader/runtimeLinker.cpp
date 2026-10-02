@@ -2003,10 +2003,12 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			                                             program->red_zone_trampoline_size);
 			LOGF("Guest 256-bit store splitting: %s, candidates=%" PRIu64 ", patched=%" PRIu64
 			     " (via padding=%" PRIu64 ", ud2=%" PRIu64 ", moved=%" PRIu64 "), short=%" PRIu64
-			     ", unsupported=%" PRIu64 ", trampoline bytes=%" PRIu64 "\n",
+			     ", unsupported=%" PRIu64 ", trampoline bytes=%" PRIu64 ", sse4a=%" PRIu64
+			     ", sse4a skipped=%" PRIu64 "\n",
 			     Common::PathToString(program->file_name.filename()).c_str(), result.candidates,
 			     result.patched, result.via_cave, result.trapped, result.relocated,
-			     result.too_short, result.unsupported, result.trampoline_bytes);
+			     result.too_short, result.unsupported, result.trampoline_bytes, result.sse4a,
+			     result.sse4a_skipped);
 		}
 		if (std::getenv("KYTY_BENCH_WIDE_STORES") != nullptr) {
 			X64InstructionEmulator::LogWideStores(

@@ -912,6 +912,202 @@ static WideStoreTrap* FindWideStoreTrapEntry(uint64_t site) {
 	return nullptr;
 }
 
+// Trampoline builder for the SSE4a bit-field instructions, which raise SIGILL under Rosetta (about
+// 18 us per execution with the signal handler). Semantics match TryEmulateSse4a: the field is
+// clamped to the register, EXTRQ zeroes the upper half, INSERTQ keeps it.
+namespace {
+struct Opd {
+	ZydisEncoderOperand op {};
+	static Opd R(ZydisRegister reg) {
+		Opd o;
+		o.op.type      = ZYDIS_OPERAND_TYPE_REGISTER;
+		o.op.reg.value = reg;
+		return o;
+	}
+	static Opd X(uint32_t index) { return R(static_cast<ZydisRegister>(ZYDIS_REGISTER_XMM0 + index)); }
+	static Opd I(uint64_t value) {
+		Opd o;
+		o.op.type     = ZYDIS_OPERAND_TYPE_IMMEDIATE;
+		o.op.imm.u    = value;
+		return o;
+	}
+	static Opd S(int64_t value) {
+		Opd o;
+		o.op.type     = ZYDIS_OPERAND_TYPE_IMMEDIATE;
+		o.op.imm.s    = value;
+		return o;
+	}
+	static Opd M(ZydisRegister base, int64_t displacement, uint16_t size) {
+		Opd o;
+		o.op.type             = ZYDIS_OPERAND_TYPE_MEMORY;
+		o.op.mem.base         = base;
+		o.op.mem.displacement = displacement;
+		o.op.mem.size         = size;
+		return o;
+	}
+};
+
+struct Sse4aTrampoline {
+	uint8_t  bytes[512] {};
+	uint64_t length  = 0;
+	uint64_t address = 0;
+	bool     ok      = true;
+
+	void Insn(ZydisMnemonic mnemonic, std::initializer_list<Opd> operands) {
+		ZydisEncoderRequest request {};
+		request.machine_mode  = ZYDIS_MACHINE_MODE_LONG_64;
+		request.mnemonic      = mnemonic;
+		request.operand_count = static_cast<uint8_t>(operands.size());
+		uint32_t i            = 0;
+		for (const auto& operand: operands) {
+			request.operands[i++] = operand.op;
+		}
+		uint64_t encoded = 0;
+		ok = ok && EncodeAt(request, address + length, bytes + length, sizeof(bytes) - length, &encoded);
+		length += encoded;
+	}
+	// psllq/psrlq xmm, count (both 64-bit lanes shift); a count of 0 is skipped
+	void Shift(ZydisMnemonic mnemonic, uint32_t reg, uint32_t count) {
+		if (count != 0) {
+			Insn(mnemonic, {Opd::X(reg), Opd::I(count)});
+		}
+	}
+};
+
+constexpr auto RAX = ZYDIS_REGISTER_RAX;
+constexpr auto RCX = ZYDIS_REGISTER_RCX;
+constexpr auto RDX = ZYDIS_REGISTER_RDX;
+constexpr auto RSP = ZYDIS_REGISTER_RSP;
+
+// EXTRQ xmmD, imm8 length, imm8 index
+void EmitExtrqImm(Sse4aTrampoline& t, uint32_t dest, uint32_t length, uint32_t index) {
+	t.Insn(ZYDIS_MNEMONIC_MOVQ, {Opd::X(dest), Opd::X(dest)}); // low 64 bits, upper half zeroed
+	t.Shift(ZYDIS_MNEMONIC_PSLLQ, dest, 64 - length - index);
+	t.Shift(ZYDIS_MNEMONIC_PSRLQ, dest, 64 - length);
+}
+
+// EXTRQ xmmD, xmmS: length = byte 0 of S, index = byte 1 of S. rax, rcx, rdx and the flags are saved
+// below the red zone.
+void EmitExtrqReg(Sse4aTrampoline& t, uint32_t dest, uint32_t src) {
+	t.Insn(ZYDIS_MNEMONIC_LEA, {Opd::R(RSP), Opd::M(RSP, -(128 + 32), 8)});
+	t.Insn(ZYDIS_MNEMONIC_MOV, {Opd::M(RSP, 0, 8), Opd::R(RAX)});
+	t.Insn(ZYDIS_MNEMONIC_MOV, {Opd::M(RSP, 8, 8), Opd::R(RCX)});
+	t.Insn(ZYDIS_MNEMONIC_MOV, {Opd::M(RSP, 16, 8), Opd::R(RDX)});
+	t.Insn(ZYDIS_MNEMONIC_PUSHFQ, {});
+	t.Insn(ZYDIS_MNEMONIC_MOVQ, {Opd::R(RAX), Opd::X(src)});
+	t.Insn(ZYDIS_MNEMONIC_MOV, {Opd::R(RCX), Opd::R(RAX)});
+	t.Insn(ZYDIS_MNEMONIC_SHR, {Opd::R(RCX), Opd::I(8)});
+	t.Insn(ZYDIS_MNEMONIC_AND, {Opd::R(RCX), Opd::I(63)}); // index
+	t.Insn(ZYDIS_MNEMONIC_AND, {Opd::R(RAX), Opd::I(63)}); // length, 0 means 64
+	t.Insn(ZYDIS_MNEMONIC_LEA, {Opd::R(RDX), Opd::M(RAX, -1, 8)});
+	t.Insn(ZYDIS_MNEMONIC_SAR, {Opd::R(RDX), Opd::I(63)});
+	t.Insn(ZYDIS_MNEMONIC_AND, {Opd::R(RDX), Opd::I(64)});
+	t.Insn(ZYDIS_MNEMONIC_OR, {Opd::R(RAX), Opd::R(RDX)});
+	t.Insn(ZYDIS_MNEMONIC_MOV, {Opd::R(RDX), Opd::I(64)});
+	t.Insn(ZYDIS_MNEMONIC_SUB, {Opd::R(RDX), Opd::R(RCX)}); // room above the index
+	t.Insn(ZYDIS_MNEMONIC_CMP, {Opd::R(RAX), Opd::R(RDX)});
+	t.Insn(ZYDIS_MNEMONIC_CMOVNBE, {Opd::R(RAX), Opd::R(RDX)}); // length = min(length, room)
+	t.Insn(ZYDIS_MNEMONIC_MOVQ, {Opd::R(RDX), Opd::X(dest)});
+	t.Insn(ZYDIS_MNEMONIC_SHR, {Opd::R(RDX), Opd::R(ZYDIS_REGISTER_CL)});
+	t.Insn(ZYDIS_MNEMONIC_MOV, {Opd::R(RCX), Opd::I(64)});
+	t.Insn(ZYDIS_MNEMONIC_SUB, {Opd::R(RCX), Opd::R(RAX)});
+	t.Insn(ZYDIS_MNEMONIC_SHL, {Opd::R(RDX), Opd::R(ZYDIS_REGISTER_CL)});
+	t.Insn(ZYDIS_MNEMONIC_SHR, {Opd::R(RDX), Opd::R(ZYDIS_REGISTER_CL)});
+	t.Insn(ZYDIS_MNEMONIC_MOVQ, {Opd::X(dest), Opd::R(RDX)}); // upper half zeroed
+	t.Insn(ZYDIS_MNEMONIC_POPFQ, {});
+	t.Insn(ZYDIS_MNEMONIC_MOV, {Opd::R(RDX), Opd::M(RSP, 16, 8)});
+	t.Insn(ZYDIS_MNEMONIC_MOV, {Opd::R(RCX), Opd::M(RSP, 8, 8)});
+	t.Insn(ZYDIS_MNEMONIC_MOV, {Opd::R(RAX), Opd::M(RSP, 0, 8)});
+	t.Insn(ZYDIS_MNEMONIC_LEA, {Opd::R(RSP), Opd::M(RSP, 128 + 32, 8)});
+}
+
+// INSERTQ xmmD, xmmS, imm8 length, imm8 index: three scratch xmm registers saved below the red zone.
+void EmitInsertqImm(Sse4aTrampoline& t, uint32_t dest, uint32_t src, uint32_t length, uint32_t index) {
+	uint32_t scratch[3] {};
+	uint32_t found = 0;
+	for (uint32_t r = 0; r < 16 && found < 3; r++) {
+		if (r != dest && r != src) {
+			scratch[found++] = r;
+		}
+	}
+	const uint32_t a = scratch[0], b = scratch[1], c = scratch[2];
+	t.Insn(ZYDIS_MNEMONIC_LEA, {Opd::R(RSP), Opd::M(RSP, -(128 + 48), 8)});
+	t.Insn(ZYDIS_MNEMONIC_MOVDQU, {Opd::M(RSP, 0, 16), Opd::X(a)});
+	t.Insn(ZYDIS_MNEMONIC_MOVDQU, {Opd::M(RSP, 16, 16), Opd::X(b)});
+	t.Insn(ZYDIS_MNEMONIC_MOVDQU, {Opd::M(RSP, 32, 16), Opd::X(c)});
+	// a = the field of src moved to bit index
+	t.Insn(ZYDIS_MNEMONIC_MOVQ, {Opd::X(a), Opd::X(src)});
+	t.Shift(ZYDIS_MNEMONIC_PSLLQ, a, 64 - length);
+	t.Shift(ZYDIS_MNEMONIC_PSRLQ, a, 64 - length);
+	t.Shift(ZYDIS_MNEMONIC_PSLLQ, a, index);
+	// b = bits of dest below the field, c = bits above it
+	t.Insn(ZYDIS_MNEMONIC_MOVQ, {Opd::X(b), Opd::X(dest)});
+	t.Insn(ZYDIS_MNEMONIC_MOVDQA, {Opd::X(c), Opd::X(b)});
+	if (index != 0) {
+		t.Shift(ZYDIS_MNEMONIC_PSLLQ, b, 64 - index);
+		t.Shift(ZYDIS_MNEMONIC_PSRLQ, b, 64 - index);
+	} else {
+		t.Insn(ZYDIS_MNEMONIC_PXOR, {Opd::X(b), Opd::X(b)});
+	}
+	if (index + length < 64) {
+		t.Shift(ZYDIS_MNEMONIC_PSRLQ, c, index + length);
+		t.Shift(ZYDIS_MNEMONIC_PSLLQ, c, index + length);
+	} else {
+		t.Insn(ZYDIS_MNEMONIC_PXOR, {Opd::X(c), Opd::X(c)});
+	}
+	t.Insn(ZYDIS_MNEMONIC_POR, {Opd::X(b), Opd::X(c)});
+	t.Insn(ZYDIS_MNEMONIC_POR, {Opd::X(b), Opd::X(a)});
+	t.Insn(ZYDIS_MNEMONIC_MOVSD, {Opd::X(dest), Opd::X(b)}); // low 64 bits only: the upper half stays
+	t.Insn(ZYDIS_MNEMONIC_MOVDQU, {Opd::X(c), Opd::M(RSP, 32, 16)});
+	t.Insn(ZYDIS_MNEMONIC_MOVDQU, {Opd::X(b), Opd::M(RSP, 16, 16)});
+	t.Insn(ZYDIS_MNEMONIC_MOVDQU, {Opd::X(a), Opd::M(RSP, 0, 16)});
+	t.Insn(ZYDIS_MNEMONIC_LEA, {Opd::R(RSP), Opd::M(RSP, 128 + 48, 8)});
+}
+
+// Emits the replacement of an EXTRQ / INSERTQ (immediate forms, EXTRQ register form). False when the
+// instruction is not one of those: it stays on the SIGILL path.
+bool EmitSse4a(Sse4aTrampoline& t, const ZydisDecodedInstruction& instruction,
+               const ZydisDecodedOperand* operands) {
+	const bool extrq  = instruction.mnemonic == ZYDIS_MNEMONIC_EXTRQ;
+	const bool insert = instruction.mnemonic == ZYDIS_MNEMONIC_INSERTQ;
+	if ((!extrq && !insert) || operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+	    operands[0].reg.value < ZYDIS_REGISTER_XMM0 || operands[0].reg.value > ZYDIS_REGISTER_XMM15) {
+		return false;
+	}
+	const uint32_t dest = operands[0].reg.value - ZYDIS_REGISTER_XMM0;
+	if (extrq && instruction.operand_count_visible == 2 &&
+	    operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER && operands[1].reg.value >= ZYDIS_REGISTER_XMM0 &&
+	    operands[1].reg.value <= ZYDIS_REGISTER_XMM15) {
+		EmitExtrqReg(t, dest, operands[1].reg.value - ZYDIS_REGISTER_XMM0);
+		return t.ok;
+	}
+	const uint32_t imm_at = insert ? 2 : 1;
+	if (instruction.operand_count_visible != imm_at + 2 ||
+	    operands[imm_at].type != ZYDIS_OPERAND_TYPE_IMMEDIATE ||
+	    operands[imm_at + 1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE ||
+	    (insert && (operands[1].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+	                operands[1].reg.value < ZYDIS_REGISTER_XMM0 ||
+	                operands[1].reg.value > ZYDIS_REGISTER_XMM15))) {
+		return false;
+	}
+	// Same clamping as ExtractBitField / InsertBitField.
+	uint32_t length = static_cast<uint32_t>(operands[imm_at].imm.value.u) & 0x3fu;
+	uint32_t index  = static_cast<uint32_t>(operands[imm_at + 1].imm.value.u) & 0x3fu;
+	if (length == 0) {
+		length = 64;
+	}
+	if (length > 64 - index) {
+		length = 64 - index;
+	}
+	if (insert) {
+		EmitInsertqImm(t, dest, operands[1].reg.value - ZYDIS_REGISTER_XMM0, length, index);
+	} else {
+		EmitExtrqImm(t, dest, length, index);
+	}
+	return t.ok;
+}
+} // namespace
+
 WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* cursor,
                                      uint64_t trampoline_end) {
 	WideStoreSplitResult result;
@@ -939,7 +1135,13 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 	// execution cannot fall into (branches target the aligned code after it).
 	std::vector<Cave>     caves;
 	std::vector<uint64_t> branch_targets;
-	std::vector<uint64_t> candidates; // offsets of VEX vector moves, checked in the phases
+	std::vector<uint64_t> candidates; // offsets of VEX vector moves and SSE4a ops, checked in the phases
+	// SSE4a EXTRQ/INSERTQ become a jump to an SSE2 trampoline like the wide stores (short ones through
+	// padding or by moving the next instructions). KYTY_OPT_OFF=sse4a_patch keeps the SIGILL path.
+	static const bool sse4a_enabled = [] {
+		const char* value = std::getenv("KYTY_OPT_OFF");
+		return value == nullptr || std::strstr(value, "sse4a_patch") == nullptr;
+	}();
 	bool                  after_unconditional = false;
 	uint64_t          nop_start           = 0;
 	uint64_t          nop_size            = 0;
@@ -984,6 +1186,10 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			continue;
 		}
 		end_nops();
+		if (sse4a_enabled &&
+		    (instruction.mnemonic == ZYDIS_MNEMONIC_EXTRQ || instruction.mnemonic == ZYDIS_MNEMONIC_INSERTQ)) {
+			candidates.push_back(offset);
+		}
 		if (instruction.encoding == ZYDIS_INSTRUCTION_ENCODING_VEX) {
 			switch (instruction.mnemonic) {
 				case ZYDIS_MNEMONIC_VMOVUPS:
@@ -1098,10 +1304,21 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			}
 			const uint64_t length = instruction.length;
 			offset += length;
-			if (!IsPlainWideStore(instruction, operands) || (phase == 0) != (length >= JumpSize)) {
+			const bool sse4a = instruction.mnemonic == ZYDIS_MNEMONIC_EXTRQ ||
+			                   instruction.mnemonic == ZYDIS_MNEMONIC_INSERTQ;
+			if ((!sse4a && !IsPlainWideStore(instruction, operands)) || (phase == 0) != (length >= JumpSize)) {
 				continue;
 			}
-			result.candidates++;
+			Sse4aTrampoline sse4a_code;
+			if (sse4a) {
+				sse4a_code.address = *cursor;
+				if (!EmitSse4a(sse4a_code, instruction, operands)) {
+					result.sse4a_skipped++;
+					continue;
+				}
+			} else {
+				result.candidates++;
+			}
 			uint64_t                      cave = 0;
 			std::array<uint64_t, MaxHops> path {};
 			uint32_t                      hops = 0;
@@ -1131,7 +1348,7 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 				const char* value = std::getenv("KYTY_WIDE_STORE_MOVE");
 				return value == nullptr || std::strcmp(value, "hot") != 0;
 			}();
-			if (trap && (move_all || std::binary_search(hot_sites.begin(), hot_sites.end(),
+			if (trap && (sse4a || move_all || std::binary_search(hot_sites.begin(), hot_sites.end(),
 			                                            reinterpret_cast<uint64_t>(code)))) {
 				while (length + moved_original < JumpSize && moved_count < moved_ips.size()) {
 					const uint64_t ip = reinterpret_cast<uint64_t>(code) + length + moved_original;
@@ -1178,13 +1395,17 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 					moved_original = 0;
 				}
 			}
+			if (sse4a && trap) {
+				result.sse4a_skipped++; // short, no padding in reach and nothing movable: SIGILL path
+				continue;
+			}
 			const auto& mem = operands[0];
-			if (mem.mem.segment != ZYDIS_REGISTER_DS && mem.mem.segment != ZYDIS_REGISTER_SS &&
+			if (!sse4a && mem.mem.segment != ZYDIS_REGISTER_DS && mem.mem.segment != ZYDIS_REGISTER_SS &&
 			    mem.mem.segment != ZYDIS_REGISTER_NONE) {
 				result.unsupported++;
 				continue;
 			}
-			const auto ymm = operands[1].reg.value;
+			const auto ymm = sse4a ? ZYDIS_REGISTER_YMM0 : operands[1].reg.value;
 			const auto xmm =
 			    static_cast<ZydisRegister>(ZYDIS_REGISTER_XMM0 + (ymm - ZYDIS_REGISTER_YMM0));
 
@@ -1195,7 +1416,7 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			low.operand_count   = 2;
 			const uint64_t site = reinterpret_cast<uint64_t>(code);
 			const uint64_t back = site + length;
-			SetMemoryOperand(low.operands[0], mem, back, 0);
+			if (!sse4a) SetMemoryOperand(low.operands[0], mem, back, 0);
 			low.operands[1].type      = ZYDIS_OPERAND_TYPE_REGISTER;
 			low.operands[1].reg.value = xmm;
 			// High half: vextractf128 xmmword [mem + 16], ymmN, 1
@@ -1203,19 +1424,22 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			high.machine_mode  = ZYDIS_MACHINE_MODE_LONG_64;
 			high.mnemonic      = ZYDIS_MNEMONIC_VEXTRACTF128;
 			high.operand_count = 3;
-			SetMemoryOperand(high.operands[0], mem, back, 16);
+			if (!sse4a) SetMemoryOperand(high.operands[0], mem, back, 16);
 			high.operands[1].type      = ZYDIS_OPERAND_TYPE_REGISTER;
 			high.operands[1].reg.value = ymm;
 			high.operands[2].type      = ZYDIS_OPERAND_TYPE_IMMEDIATE;
 			high.operands[2].imm.u     = 1;
 
 			const uint64_t trampoline = *cursor;
-			uint8_t        buffer[128];
+			uint8_t        buffer[640];
 			uint64_t       low_length  = 0;
 			uint64_t       high_length = 0;
-			if (!EncodeAt(low, trampoline, buffer, sizeof(buffer), &low_length) ||
-			    !EncodeAt(high, trampoline + low_length, buffer + low_length,
-			              sizeof(buffer) - low_length, &high_length)) {
+			if (sse4a) {
+				std::memcpy(buffer, sse4a_code.bytes, sse4a_code.length);
+				low_length = sse4a_code.length;
+			} else if (!EncodeAt(low, trampoline, buffer, sizeof(buffer), &low_length) ||
+			           !EncodeAt(high, trampoline + low_length, buffer + low_length,
+			                     sizeof(buffer) - low_length, &high_length)) {
 				result.unsupported++;
 				continue;
 			}
@@ -1226,11 +1450,28 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 				ZydisDecodedInstruction insn {};
 				ZydisDecodedOperand     ops[ZYDIS_MAX_OPERAND_COUNT] {};
 				ZydisEncoderRequest     request {};
-				moved_ok =
-				    ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, reinterpret_cast<uint8_t*>(ip),
-				                                        address + size - ip, &insn, ops)) &&
-				    ZYAN_SUCCESS(ZydisEncoderDecodedInstructionToEncoderRequest(
-				        &insn, ops, insn.operand_count_visible, &request));
+				moved_ok = ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, reinterpret_cast<uint8_t*>(ip),
+				                                               address + size - ip, &insn, ops));
+				if (!moved_ok) {
+					break;
+				}
+				if (sse4a_enabled) {
+					// A moved EXTRQ/INSERTQ gets the same SSE2 replacement as a patched one.
+					Sse4aTrampoline moved_code;
+					moved_code.address = trampoline + low_length + high_length + moved_length;
+					if (EmitSse4a(moved_code, insn, ops)) {
+						if (low_length + high_length + moved_length + moved_code.length > sizeof(buffer)) {
+							moved_ok = false;
+							break;
+						}
+						std::memcpy(buffer + low_length + high_length + moved_length, moved_code.bytes,
+						            moved_code.length);
+						moved_length += moved_code.length;
+						continue;
+					}
+				}
+				moved_ok = ZYAN_SUCCESS(ZydisEncoderDecodedInstructionToEncoderRequest(
+				    &insn, ops, insn.operand_count_visible, &request));
 				if (!moved_ok) {
 					break;
 				}
@@ -1315,7 +1556,7 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 					std::fflush(split_log);
 				}
 				result.via_cave++;
-				result.patched++;
+				sse4a ? result.sse4a++ : result.patched++;
 				continue;
 			}
 			if (trap) {
@@ -1370,7 +1611,7 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 			if (phase == 0 && length >= JumpSize + ShortJumpSize) {
 				caves.push_back({site + JumpSize, length - JumpSize, 0});
 			}
-			result.patched++;
+			sse4a ? result.sse4a++ : result.patched++;
 		}
 	}
 	return result;

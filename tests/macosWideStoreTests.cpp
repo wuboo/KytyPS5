@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
+#include <vector>
 #include <sys/mman.h>
 #include <sys/wait.h>
 #include <unistd.h>
@@ -253,6 +254,142 @@ void TestRipRelativeStore() {
 	Check(area.code[0x800 + 32] == 0, "RIP-relative store wrote nothing past its target");
 }
 
+
+uint64_t RefExtract(uint64_t value, uint32_t length, uint32_t index) {
+	length &= 0x3f;
+	index &= 0x3f;
+	if (length == 0) length = 64;
+	if (length > 64 - index) length = 64 - index;
+	const uint64_t mask = length == 64 ? UINT64_MAX : ((uint64_t {1} << length) - 1);
+	return (value >> index) & mask;
+}
+
+uint64_t RefInsert(uint64_t dst, uint64_t src, uint32_t length, uint32_t index) {
+	length &= 0x3f;
+	index &= 0x3f;
+	if (length == 0) length = 64;
+	if (length > 64 - index) length = 64 - index;
+	const uint64_t mask = length == 64 ? UINT64_MAX : ((uint64_t {1} << length) - 1);
+	return (dst & ~(mask << index)) | ((src & mask) << index);
+}
+
+// f(rdi = dest low, rsi = src low, rdx = dest high, rcx = out[], r8 = marker): xmm2..4 hold the marker, rdx
+// a marker, the red zone gets markers and CF is set, then <sse4a instruction> and the results are stored:
+// out = {dest low (returned in rax), dest high, xmm2, xmm3, xmm4, [rsp-8], [rsp-128], CF, rdx}.
+using Sse4aFunc = uint64_t (*)(uint64_t, uint64_t, uint64_t, uint64_t*, uint64_t);
+
+uint8_t Rex(uint32_t xmm, uint32_t gpr) {
+	return static_cast<uint8_t>(0x48 | (xmm >= 8 ? 4 : 0) | (gpr >= 8 ? 1 : 0));
+}
+uint8_t ModRm(uint32_t reg, uint32_t rm) {
+	return static_cast<uint8_t>(0xc0 | ((reg & 7) << 3) | (rm & 7));
+}
+
+// kind: 0 extrq imm, 1 insertq imm, 2 extrq register form
+void RunSse4aCase(int kind, uint32_t dest, uint32_t src, uint32_t length, uint32_t index, uint64_t lo,
+                  uint64_t hi, uint64_t source, int* cases, int* bad) {
+	auto                 area = MakeCode();
+	std::vector<uint8_t> code;
+	auto add = [&](std::initializer_list<uint8_t> bytes) { code.insert(code.end(), bytes); };
+	add({0x66, Rex(dest, 7), 0x0f, 0x6e, ModRm(dest, 7)});                     // movq xmm<dest>, rdi
+	if (src != dest) {
+		add({0x66, Rex(src, 6), 0x0f, 0x6e, ModRm(src, 6)});                    // movq xmm<src>, rsi
+	}
+	add({0x66, Rex(dest, 2), 0x0f, 0x3a, 0x22, ModRm(dest, 2), 0x01});        // pinsrq xmm<dest>, rdx, 1
+	add({0x66, 0x49, 0x0f, 0x6e, 0xd0, 0x66, 0x49, 0x0f, 0x6e, 0xd8, 0x66, 0x49, 0x0f, 0x6e, 0xe0}); // xmm2..4 = r8
+	add({0x48, 0xc7, 0x44, 0x24, 0xf8, 0x34, 0x12, 0x00, 0x00});              // mov qword [rsp-8], 0x1234
+	add({0x48, 0xc7, 0x44, 0x24, 0x80, 0x78, 0x56, 0x00, 0x00});              // mov qword [rsp-128], 0x5678
+	add({0x48, 0xc7, 0xc2, 0xaa, 0x55, 0x00, 0x00, 0xf9});                    // mov rdx, 0x55aa; stc
+	if (kind == 1) {
+		const uint8_t rex = static_cast<uint8_t>(0x40 | (dest >= 8 ? 4 : 0) | (src >= 8 ? 1 : 0));
+		if (rex != 0x40) {
+			add({0xf2, rex});
+		} else {
+			add({0xf2});
+		}
+		add({0x0f, 0x78, ModRm(dest, src), static_cast<uint8_t>(length), static_cast<uint8_t>(index)});
+	} else if (kind == 0) {
+		if (dest >= 8) {
+			add({0x66, 0x41});
+		} else {
+			add({0x66});
+		}
+		add({0x0f, 0x78, ModRm(0, dest), static_cast<uint8_t>(length), static_cast<uint8_t>(index)});
+	} else {
+		const uint8_t rex = static_cast<uint8_t>(0x40 | (dest >= 8 ? 4 : 0) | (src >= 8 ? 1 : 0));
+		if (rex != 0x40) {
+			add({0x66, rex, 0x0f, 0x79, ModRm(dest, src)});
+		} else {
+			add({0x66, 0x0f, 0x79, ModRm(dest, src)});
+		}
+	}
+	add({0x48, 0x89, 0x51, 0x40,                                                // mov [rcx+0x40], rdx
+	     0xba, 0x00, 0x00, 0x00, 0x00, 0x48, 0x83, 0xd2, 0x00,                  // mov edx, 0; adc rdx, 0
+	     0x48, 0x89, 0x51, 0x38});                                              // mov [rcx+0x38], rdx
+	add({0x66, Rex(dest, 0), 0x0f, 0x7e, ModRm(dest, 0)});                      // movq rax, xmm<dest>
+	add({0x66, Rex(dest, 1), 0x0f, 0x3a, 0x16, static_cast<uint8_t>(0x41 | ((dest & 7) << 3)), 0x08, 0x01}); // pextrq [rcx+8], xmm<dest>, 1
+	add({0x66, 0x0f, 0xd6, 0x51, 0x10, 0x66, 0x0f, 0xd6, 0x59, 0x18, 0x66, 0x0f, 0xd6, 0x61, 0x20}); // [rcx+16..] = xmm2..4
+	add({0x48, 0x8b, 0x54, 0x24, 0xf8, 0x48, 0x89, 0x51, 0x28});               // out[5] = [rsp-8]
+	add({0x48, 0x8b, 0x54, 0x24, 0x80, 0x48, 0x89, 0x51, 0x30});               // out[6] = [rsp-128]
+	add({0xc3});
+	std::memcpy(area.code, code.data(), code.size());
+	auto       cursor = area.trampolines;
+	const auto result = Loader::X64InstructionEmulator::SplitWideStores(
+	    reinterpret_cast<uint64_t>(area.code), code.size(), &cursor, area.end);
+	Check(result.sse4a == 1 && result.sse4a_skipped == 0, "sse4a instruction patched");
+	constexpr uint64_t marker = 0x1111222233334444ull;
+	uint64_t           out[16] {};
+	const auto         low = reinterpret_cast<Sse4aFunc>(area.code)(lo, source, hi, out, marker);
+	uint64_t           want = 0, want_hi = 0;
+	if (kind == 1) {
+		want    = RefInsert(lo, source, length, index);
+		want_hi = hi;
+	} else if (kind == 0) {
+		want = RefExtract(lo, length, index);
+	} else {
+		const uint64_t control = dest == src ? lo : source;
+		want                   = RefExtract(lo, static_cast<uint32_t>(control & 0xff), static_cast<uint32_t>((control >> 8) & 0xff));
+	}
+	(*cases)++;
+	if (low != want || out[1] != want_hi || out[2] != marker || (dest != 2 && out[3] != marker) || out[4] != marker ||
+	    out[5] != 0x1234 || out[6] != 0x5678 || out[7] != 1 || out[8] != 0x55aa) {
+		(*bad)++;
+		std::fprintf(stderr, "sse4a kind=%d x%u,x%u len=%u idx=%u got %016llx/%016llx want %016llx/%016llx cf=%llu rdx=%llx\n",
+		             kind, dest, src, length, index, (unsigned long long)low, (unsigned long long)out[1],
+		             (unsigned long long)want, (unsigned long long)want_hi, (unsigned long long)out[7],
+		             (unsigned long long)out[8]);
+	}
+}
+
+void TestSse4aPatch() {
+	const uint64_t lo = 0x0123456789abcdefull, hi = 0xfedcba9876543210ull, s = 0xdeadbeefcafef00dull;
+	const uint32_t lengths[] = {0, 1, 3, 8, 16, 31, 32, 33, 48, 63, 64};
+	const uint32_t indexes[] = {0, 1, 5, 8, 16, 31, 32, 47, 60, 63, 64};
+	for (int kind = 0; kind < 3; kind++) {
+		int cases = 0, bad = 0;
+		for (uint32_t length: lengths) {
+			for (uint32_t index: indexes) {
+				const uint32_t pairs[][2] = {{0, 1}, {9, 10}, {1, 1}};
+				for (const auto& pair: pairs) {
+					if (kind != 2 && pair[0] == pair[1]) {
+						continue;
+					}
+					// register form: the control bytes come from the source register
+					const uint64_t source = kind == 2 ? ((s & ~0xffffull) | (length & 0xff) | ((index & 0xffull) << 8)) : s;
+					const uint64_t dest_lo = kind == 2 && pair[0] == pair[1] ? source : lo;
+					RunSse4aCase(kind, pair[0], pair[1], length, index, dest_lo, hi, source, &cases, &bad);
+					if (kind == 2 && pair[0] == pair[1]) {
+						continue;
+					}
+				}
+			}
+		}
+		const char* name = kind == 0 ? "extrq imm" : kind == 1 ? "insertq imm" : "extrq reg";
+		Check(bad == 0, name);
+		std::printf("sse4a %s: %d cases, %d bad\n", name, cases, bad);
+	}
+}
+
 } // namespace
 
 int main() {
@@ -271,6 +408,7 @@ int main() {
         TestShortStoreWithoutPaddingTraps();
         TestShortStoreViaInt3Padding();
         TestRipRelativeStore();
+	TestSse4aPatch();
 
 	if (g_failures != 0) {
 		std::fprintf(stderr, "%d check(s) failed\n", g_failures);

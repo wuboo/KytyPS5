@@ -19,6 +19,8 @@ struct WideStoreSplitResult {
 	uint64_t relocated        = 0; // hot short stores patched by moving the next instructions along
 	uint64_t unsupported = 0; // segment override, encoder failure or trampoline area full
 	uint64_t trampoline_bytes = 0;
+	uint64_t sse4a            = 0; // EXTRQ/INSERTQ (immediate forms) replaced by a jump to an SSE2 trampoline
+	uint64_t sse4a_skipped    = 0; // EXTRQ/INSERTQ left to the SIGILL emulation (register forms)
 };
 
 // Rosetta aborts the process when a 256-bit store that crosses into a write-protected page
