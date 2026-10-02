@@ -1081,6 +1081,9 @@ bool ComputePerVertexRecordRange(bool indexed, const void* index_data, uint64_t 
                                  uint32_t first_vertex, int32_t vertex_offset,
                                  uint32_t num_records, PerVertexRecordRange& range) {
 	if (!indexed) {
+		// The shader computes first_vertex + local in 32 bits, so past 2^32 it wraps to low
+		// records that a 64-bit range would miss.
+		if (static_cast<uint64_t>(first_vertex) + index_count > (uint64_t {1} << 32u)) return false;
 		const uint64_t first = first_vertex;
 		const uint64_t end   = std::min<uint64_t>(first + index_count, num_records);
 		range                = first < end ? PerVertexRecordRange {first, end} : PerVertexRecordRange {};
