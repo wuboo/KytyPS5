@@ -858,9 +858,14 @@ const std::vector<uint64_t>& WideStoreHotSites() {
 	return sites;
 }
 
-// Async-signal-safe: formats with no allocation and writes with one write().
+// Async-signal-safe: formats with no allocation and writes with one write(). Sites already on the
+// list (loaded at startup, sorted, read-only afterwards) are not appended again.
 void RecordHotWideStore(uint64_t site) {
 	if (g_wide_store_hot_fd < 0) {
+		return;
+	}
+	const auto& known = WideStoreHotSites();
+	if (std::binary_search(known.begin(), known.end(), site)) {
 		return;
 	}
 	char buffer[20];
