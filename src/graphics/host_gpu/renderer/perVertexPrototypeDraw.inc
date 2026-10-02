@@ -140,15 +140,31 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		                          draw.IsIndexed() ? index_element_size : 0u};
 		const uint64_t meta_hash  = XXH3_64bits(&meta, sizeof(meta));
 		const uint64_t attrs_hash = XXH3_64bits(vs.resources, sizeof(vs.resources[0]) * num_attrs);
-		const uint64_t vertex_hash =
-		    XXH3_64bits(reinterpret_cast<const void*>(input.addr), vtx_total_bytes);
-		uint64_t index_hash = 0;
+		uint64_t    index_hash = 0;
+		const void* idx_bytes  = nullptr;
 		if (draw.IsIndexed()) {
-			const void* idx_bytes = index_source.host_data != nullptr
-			                            ? index_source.host_data
-			                            : reinterpret_cast<const void*>(index_source.address);
+			idx_bytes = index_source.host_data != nullptr
+			                ? index_source.host_data
+			                : reinterpret_cast<const void*>(index_source.address);
 			index_hash = XXH3_64bits(idx_bytes, index_source.size);
 		}
+		// The unpack pass reads only the records the draw references, so only those bytes can
+		// change the capture; hashing the whole V# range (often a shared mesh pool) was ~35-60% of
+		// the GPU thread in the chase/level samples. Both the record range and the bytes below it
+		// are functions of {index bytes, draw params}, which are hashed too.
+		// KYTY_OPT_OFF=pv_hash_range hashes the whole range again.
+		static const bool hash_range_enabled = FrameTiming::OptEnabled("pv_hash_range");
+		const uint8_t*    vertex_bytes       = reinterpret_cast<const uint8_t*>(input.addr);
+		uint64_t          vertex_hash_size   = vtx_total_bytes;
+		PerVertexRecordRange record_range;
+		if (hash_range_enabled &&
+		    ComputePerVertexRecordRange(draw.IsIndexed(), idx_bytes, index_source.size,
+		                                index_element_size, draw.index_count, emit.first_vertex,
+		                                emit.vertex_offset, input.num_records, record_range)) {
+			vertex_bytes += record_range.first * input.stride;
+			vertex_hash_size = (record_range.end - record_range.first) * input.stride;
+		}
+		const uint64_t vertex_hash = XXH3_64bits(vertex_bytes, vertex_hash_size);
 		// Hash the actual bound bytes of every general buffer resource the VS declares (e.g. a
 		// per-object transform matrix), the same way the vertex buffer's bytes are hashed above --
 		// see the correctness-fix note where cache_eligible is computed. Same decode as
@@ -630,7 +646,21 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 				     m_prototype_batch.items.size());
 			}
 		}
-		PendingPrototypeReplayItem item;
+		// Built in place: each item embeds a ShaderVertexInputInfo (~10 KB), and filling a local
+		// that is then moved into the vector copies it again, plus once per element on every
+		// reallocation (std::vector::push_back was 3-6% of the GPU thread in the samples).
+		// KYTY_OPT_OFF=pv_batch_inplace restores the local + push_back.
+		static const bool batch_inplace_enabled = FrameTiming::OptEnabled("pv_batch_inplace");
+		if (batch_inplace_enabled && m_prototype_batch.items.capacity() < 64) {
+			m_prototype_batch.items.reserve(64);
+		}
+		std::optional<PendingPrototypeReplayItem> local_item;
+		if (!batch_inplace_enabled) {
+			local_item.emplace();
+		}
+		PendingPrototypeReplayItem& item = batch_inplace_enabled
+		                                       ? m_prototype_batch.items.emplace_back()
+		                                       : *local_item;
 		// Same pipeline lookup as the immediate path below, done now rather than at flush time:
 		// GetGraphicsPipeline() reads live registers, which may already describe a later draw by the
 		// time the batch is flushed. No render pass is open here -- the capture dispatch above ended it.
@@ -662,7 +692,9 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 			item.owned_captured = std::move(captured);
 			item.owned_pool     = capture_pool;
 		}
-		m_prototype_batch.items.push_back(std::move(item));
+		if (!batch_inplace_enabled) {
+			m_prototype_batch.items.push_back(std::move(*local_item));
+		}
 		return;
 	}
 

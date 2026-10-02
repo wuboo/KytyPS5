@@ -1047,4 +1047,55 @@ bool SaveTransformedShadersToDisk(const std::string& title_id, uint64_t vs_hash,
 	                                    ps_hash, layout, cap_words, frag_words, replay_words);
 }
 
+namespace {
+
+template <typename T>
+bool ScanIndexRange(const void* data, uint32_t count, int32_t vertex_offset, uint32_t num_records,
+                    PerVertexRecordRange& range) {
+	const auto* bytes = static_cast<const uint8_t*>(data);
+	// The shader adds vertex_offset in 32-bit signed math; 64-bit here only differs where that
+	// would wrap, which is rejected below so the caller falls back to the whole buffer.
+	int64_t lo = INT64_MAX;
+	int64_t hi = INT64_MIN;
+	for (uint32_t i = 0; i < count; ++i) {
+		T raw;
+		std::memcpy(&raw, bytes + static_cast<size_t>(i) * sizeof(T), sizeof(T));
+		const int64_t adjusted = static_cast<int64_t>(raw) + vertex_offset;
+		if (adjusted < INT32_MIN || adjusted > INT32_MAX) return false;
+		if (adjusted < 0 || adjusted >= static_cast<int64_t>(num_records)) continue;
+		lo = std::min(lo, adjusted);
+		hi = std::max(hi, adjusted);
+	}
+	if (lo > hi) {
+		range = {};
+		return true;
+	}
+	range = {static_cast<uint64_t>(lo), static_cast<uint64_t>(hi) + 1};
+	return true;
+}
+
+} // namespace
+
+bool ComputePerVertexRecordRange(bool indexed, const void* index_data, uint64_t index_bytes,
+                                 uint32_t index_element_size, uint32_t index_count,
+                                 uint32_t first_vertex, int32_t vertex_offset,
+                                 uint32_t num_records, PerVertexRecordRange& range) {
+	if (!indexed) {
+		const uint64_t first = first_vertex;
+		const uint64_t end   = std::min<uint64_t>(first + index_count, num_records);
+		range                = first < end ? PerVertexRecordRange {first, end} : PerVertexRecordRange {};
+		return true;
+	}
+	if (index_data == nullptr || (index_element_size != 1 && index_element_size != 2 &&
+	                              index_element_size != 4) ||
+	    static_cast<uint64_t>(index_count) * index_element_size > index_bytes) {
+		return false;
+	}
+	switch (index_element_size) {
+	case 1: return ScanIndexRange<uint8_t>(index_data, index_count, vertex_offset, num_records, range);
+	case 2: return ScanIndexRange<uint16_t>(index_data, index_count, vertex_offset, num_records, range);
+	default: return ScanIndexRange<uint32_t>(index_data, index_count, vertex_offset, num_records, range);
+	}
+}
+
 } // namespace Libs::Graphics

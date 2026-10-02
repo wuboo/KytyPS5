@@ -60,6 +60,49 @@ int main() {
         std::fprintf(stderr, "FAIL: layout with 13 parameters was rejected or mis-slotted\n");
         return EXIT_FAILURE;
     }
+    {
+        using Libs::Graphics::ComputePerVertexRecordRange;
+        using Libs::Graphics::PerVertexRecordRange;
+        PerVertexRecordRange r;
+        const uint16_t idx16[] = {7, 3, 9, 3, 12, 5};
+        const uint8_t  idx8[]  = {200, 4, 10};
+        const uint32_t idx32[] = {1u, 0x7fffffffu, 6u};
+        bool           ok      = true;
+        // Non-indexed: first_vertex + local, clipped to num_records.
+        ok = ok && ComputePerVertexRecordRange(false, nullptr, 0, 0, 30, 10, 0, 100, r) &&
+             r.first == 10 && r.end == 40;
+        ok = ok && ComputePerVertexRecordRange(false, nullptr, 0, 0, 30, 90, 0, 100, r) &&
+             r.first == 90 && r.end == 100;
+        ok = ok && ComputePerVertexRecordRange(false, nullptr, 0, 0, 30, 100, 0, 100, r) &&
+             r.first == r.end;
+        // Indexed 16-bit, with vertex_offset; indices outside [0, num_records) are ignored.
+        ok = ok && ComputePerVertexRecordRange(true, idx16, sizeof(idx16), 2, 6, 0, 0, 100, r) &&
+             r.first == 3 && r.end == 13;
+        ok = ok && ComputePerVertexRecordRange(true, idx16, sizeof(idx16), 2, 6, 0, -4, 100, r) &&
+             r.first == 1 && r.end == 9;
+        ok = ok && ComputePerVertexRecordRange(true, idx16, sizeof(idx16), 2, 6, 0, 0, 10, r) &&
+             r.first == 3 && r.end == 10;
+        ok = ok && ComputePerVertexRecordRange(true, idx16, sizeof(idx16), 2, 6, 0, 1000, 100, r) &&
+             r.first == r.end;
+        // Only the first index_count indices count.
+        ok = ok && ComputePerVertexRecordRange(true, idx16, sizeof(idx16), 2, 2, 0, 0, 100, r) &&
+             r.first == 3 && r.end == 8;
+        // 8-bit and 32-bit indices.
+        ok = ok && ComputePerVertexRecordRange(true, idx8, sizeof(idx8), 1, 3, 0, 0, 256, r) &&
+             r.first == 4 && r.end == 201;
+        ok = ok && ComputePerVertexRecordRange(true, idx32, sizeof(idx32), 4, 3, 0, 0, 100, r) &&
+             r.first == 1 && r.end == 7;
+        // Not derivable with certainty: short index data, bad element size, 32-bit wrap.
+        ok = ok && !ComputePerVertexRecordRange(true, idx16, sizeof(idx16), 2, 7, 0, 0, 100, r);
+        ok = ok && !ComputePerVertexRecordRange(true, idx16, sizeof(idx16), 3, 2, 0, 0, 100, r);
+        ok = ok && !ComputePerVertexRecordRange(true, nullptr, 0, 2, 0, 0, 0, 100, r);
+        ok = ok && !ComputePerVertexRecordRange(true, idx32, sizeof(idx32), 4, 3, 0, 0x7fffffff, 100, r);
+        if (!ok) {
+            std::fprintf(stderr, "FAIL: ComputePerVertexRecordRange\n");
+            return EXIT_FAILURE;
+        }
+        std::puts("PASS: ComputePerVertexRecordRange");
+    }
     std::puts("PASS: 13 vertex parameters (above the old 12-attribute unpack cap)");
     return EXIT_SUCCESS;
 }
