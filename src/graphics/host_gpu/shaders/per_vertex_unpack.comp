@@ -15,8 +15,8 @@ layout(push_constant) uniform PushConstants {
 	uint first_instance;
 	uint vertex_stride;
 	uint num_records;
-	uint packed_flags; // [15:0] index offset, [16] indexed, [18:17] index type, [22:19] attributes
-	AttrDesc attrs[12];
+	uint packed_flags; // [15:0] index offset, [16] indexed, [18:17] index type, [23:19] attributes
+	AttrDesc attrs[16];
 } push;
 
 layout(set = 0, binding = 0, std430) readonly buffer IndexBuffer {
@@ -112,7 +112,7 @@ void main() {
 	uint vertex_id = VertexIndex(local);
 	id_buffer.ids[invocation] = uvec2(vertex_id != 0xffffffffu ? vertex_id : 0u, instance);
 
-	uint attribute_count = (push.packed_flags >> 19u) & 0x0fu;
+	uint attribute_count = (push.packed_flags >> 19u) & 0x1fu;
 	uint output_base     = invocation * attribute_count;
 	for (uint attr = 0; attr < attribute_count; ++attr) {
 		attribute_buffer.attributes[output_base + attr] = DecodeAttribute(vertex_id, attr);
