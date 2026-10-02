@@ -14,6 +14,20 @@ constexpr uint32_t    kPerVertexTransformVersion = 2;
 
 std::string GetPerVertexTransformSignature();
 
+// Records [first, end) of the vertex buffer that per_vertex_unpack.comp can read for a draw
+// (VertexIndex(): first_vertex + local for non-indexed draws, index + vertex_offset for indexed
+// ones; records at or past num_records are dropped by the shader). Returns false when the range
+// cannot be derived with certainty (unsupported index size, short index data, arithmetic that
+// would overflow the shader's 32-bit math); the caller then has to use the whole buffer.
+struct PerVertexRecordRange {
+	uint64_t first = 0;
+	uint64_t end   = 0; // first == end: the draw reads no vertex data
+};
+bool ComputePerVertexRecordRange(bool indexed, const void* index_data, uint64_t index_bytes,
+                                 uint32_t index_element_size, uint32_t index_count,
+                                 uint32_t first_vertex, int32_t vertex_offset,
+                                 uint32_t num_records, PerVertexRecordRange& range);
+
 struct PerVertexLayout {
 	uint32_t                                   num_params         = 0;
 	bool                                       has_clip           = false;
