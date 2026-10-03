@@ -65,6 +65,8 @@ enum class Counter : uint32_t {
 	                           // the compute unpack+capture stages entirely)
 	ReadbackEagerHits,      // read faults served by waiting for an eager page download
 	ReadbackEagerDownloads, // page downloads queued right after a GPU write (eager_readback)
+	PrototypeRangeMemoHits, // record ranges of indexed prototype draws taken from the memo
+	PrototypeRangeMemoMisses, // ... and the ones that had to scan the index buffer
 	Count,
 };
 

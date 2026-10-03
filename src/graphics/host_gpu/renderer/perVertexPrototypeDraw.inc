@@ -153,14 +153,44 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		// the GPU thread in the chase/level samples. Both the record range and the bytes below it
 		// are functions of {index bytes, draw params}, which are hashed too.
 		// KYTY_OPT_OFF=pv_hash_range hashes the whole range again.
+		// The scan of the index buffer for that range was a third of this function in the chase
+		// samples; indexed meshes recur with identical indices, so the range is memoized by the
+		// index hash above. KYTY_OPT_OFF=pv_range_memo scans every time.
 		static const bool hash_range_enabled = FrameTiming::OptEnabled("pv_hash_range");
+		static const bool range_memo_enabled = FrameTiming::OptEnabled("pv_range_memo");
 		const uint8_t*    vertex_bytes       = reinterpret_cast<const uint8_t*>(input.addr);
 		uint64_t          vertex_hash_size   = vtx_total_bytes;
 		PerVertexRecordRange record_range;
-		if (hash_range_enabled &&
-		    ComputePerVertexRecordRange(draw.IsIndexed(), idx_bytes, index_source.size,
-		                                index_element_size, draw.index_count, emit.first_vertex,
-		                                emit.vertex_offset, input.num_records, record_range)) {
+		bool range_known = false;
+		if (hash_range_enabled) {
+			const auto compute = [&] {
+				return ComputePerVertexRecordRange(draw.IsIndexed(), idx_bytes, index_source.size,
+				                                   index_element_size, draw.index_count,
+				                                   emit.first_vertex, emit.vertex_offset,
+				                                   input.num_records, record_range);
+			};
+			if (range_memo_enabled && draw.IsIndexed() && idx_bytes != nullptr) {
+				const PerVertexRangeMemo::Key memo_key {index_hash,
+				                                        index_source.size,
+				                                        index_element_size,
+				                                        draw.index_count,
+				                                        emit.vertex_offset,
+				                                        input.num_records};
+				const auto memoized = m_prototype_range_memo.Find(memo_key);
+				if (memoized.found) {
+					FrameTiming::Add(FrameTiming::Counter::PrototypeRangeMemoHits);
+					record_range = memoized.range;
+					range_known  = memoized.derivable;
+				} else {
+					FrameTiming::Add(FrameTiming::Counter::PrototypeRangeMemoMisses);
+					range_known = compute();
+					m_prototype_range_memo.Insert(memo_key, range_known, record_range);
+				}
+			} else {
+				range_known = compute();
+			}
+		}
+		if (range_known) {
 			vertex_bytes += record_range.first * input.stride;
 			vertex_hash_size = (record_range.end - record_range.first) * input.stride;
 		}

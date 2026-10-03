@@ -1101,4 +1101,21 @@ bool ComputePerVertexRecordRange(bool indexed, const void* index_data, uint64_t 
 	}
 }
 
+uint64_t PerVertexRangeMemo::Bucket(const Key& key) {
+	return XXH3_64bits(&key, sizeof(key));
+}
+
+PerVertexRangeMemo::Result PerVertexRangeMemo::Find(const Key& key) const {
+	const auto it = m_entries.find(Bucket(key));
+	if (it == m_entries.end() || !(it->second.key == key)) return {};
+	return {true, it->second.derivable, it->second.range};
+}
+
+void PerVertexRangeMemo::Insert(const Key& key, bool derivable, const PerVertexRecordRange& range) {
+	// Static meshes recur every frame, so a full memo mostly holds dead entries (streamed-out
+	// meshes, per-frame dynamic geometry); starting over is cheaper than tracking recency.
+	if (m_entries.size() >= kMaxEntries) m_entries.clear();
+	m_entries[Bucket(key)] = {key, derivable, range};
+}
+
 } // namespace Libs::Graphics

@@ -4,6 +4,7 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "graphics/host_gpu/renderer/perVertexTransform.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
@@ -319,6 +320,7 @@ private:
 		vk::DescriptorSet        extra_set          = nullptr;
 	};
 	std::unordered_map<uint64_t, CachedPrototypeCapture> m_prototype_capture_cache;
+	PerVertexRangeMemo                                   m_prototype_range_memo;
 
 	// Batching of consecutive per-vertex-prototype replay draws into one render pass (see
 	// perVertexPrototypeDraw.inc, bench-notes.md 2026-09-27 "Kierunek A"). A draw is appended here

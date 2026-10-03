@@ -60,6 +60,8 @@ constexpr const char* kCounterNames[] = {
     "prototype_capture_cache_hits",
     "rb_eager_hits",
     "rb_eager_downloads",
+    "prototype_range_memo_hits",
+    "prototype_range_memo_misses",
 };
 static_assert(std::size(kCounterNames) == static_cast<size_t>(Counter::Count));
 
