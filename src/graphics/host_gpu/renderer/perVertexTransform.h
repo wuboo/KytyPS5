@@ -5,6 +5,7 @@
 #include <map>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -27,6 +28,45 @@ bool ComputePerVertexRecordRange(bool indexed, const void* index_data, uint64_t 
                                  uint32_t index_element_size, uint32_t index_count,
                                  uint32_t first_vertex, int32_t vertex_offset,
                                  uint32_t num_records, PerVertexRecordRange& range);
+
+// Memo of ComputePerVertexRecordRange for indexed draws. The range depends only on the index
+// bytes (identified by their 64-bit content hash, which the capture cache key needs anyway) and
+// the draw parameters below, so a mesh drawn again with unchanged indices skips the scan of every
+// index. Entries compare all fields, so a hash-bucket collision is a miss, never a wrong range.
+class PerVertexRangeMemo {
+public:
+	struct Key {
+		uint64_t index_hash         = 0;
+		uint64_t index_bytes        = 0;
+		uint32_t index_element_size = 0;
+		uint32_t index_count        = 0;
+		int32_t  vertex_offset      = 0;
+		uint32_t num_records        = 0;
+		bool     operator==(const Key&) const = default;
+	};
+	// `found` is set to whether the key was known; the result is only valid then. A key whose
+	// range is not derivable is memoized too (derivable == false), so the caller falls back to the
+	// whole buffer without rescanning.
+	struct Result {
+		bool                 found      = false;
+		bool                 derivable  = false;
+		PerVertexRecordRange range;
+	};
+	[[nodiscard]] Result Find(const Key& key) const;
+	void                 Insert(const Key& key, bool derivable, const PerVertexRecordRange& range);
+	[[nodiscard]] size_t Size() const { return m_entries.size(); }
+
+	static constexpr size_t kMaxEntries = 8192;
+
+private:
+	struct Entry {
+		Key                  key;
+		bool                 derivable = false;
+		PerVertexRecordRange range;
+	};
+	[[nodiscard]] static uint64_t Bucket(const Key& key);
+	std::unordered_map<uint64_t, Entry> m_entries;
+};
 
 struct PerVertexLayout {
 	uint32_t                                   num_params         = 0;

@@ -138,6 +138,51 @@ int main() {
         }
         std::puts("PASS: ComputePerVertexRecordRange");
     }
+    {
+        using Libs::Graphics::PerVertexRangeMemo;
+        using Libs::Graphics::PerVertexRecordRange;
+        PerVertexRangeMemo memo;
+        const PerVertexRangeMemo::Key key {0x1234u, 12, 2, 6, -4, 100};
+        bool ok = !memo.Find(key).found;
+        memo.Insert(key, true, PerVertexRecordRange {1, 9});
+        auto hit = memo.Find(key);
+        ok = ok && hit.found && hit.derivable && hit.range.first == 1 && hit.range.end == 9;
+        // Any differing field is a different mesh/draw.
+        auto other = key;
+        other.index_hash ^= 1;
+        ok = ok && !memo.Find(other).found;
+        other = key;
+        other.vertex_offset = 0;
+        ok = ok && !memo.Find(other).found;
+        other = key;
+        other.num_records = 10;
+        ok = ok && !memo.Find(other).found;
+        other = key;
+        other.index_count = 5;
+        ok = ok && !memo.Find(other).found;
+        // A key that is not derivable is remembered as such.
+        other = key;
+        other.index_element_size = 4;
+        memo.Insert(other, false, {});
+        hit = memo.Find(other);
+        ok  = ok && hit.found && !hit.derivable;
+        // Overflowing the memo starts it over without growing past the bound.
+        for (uint64_t i = 0; i < PerVertexRangeMemo::kMaxEntries + 10; ++i) {
+            auto k = key;
+            k.index_hash = 0x10000u + i;
+            memo.Insert(k, true, PerVertexRecordRange {i, i + 1});
+        }
+        ok = ok && memo.Size() <= PerVertexRangeMemo::kMaxEntries;
+        auto last = key;
+        last.index_hash = 0x10000u + PerVertexRangeMemo::kMaxEntries + 9;
+        hit = memo.Find(last);
+        ok  = ok && hit.found && hit.range.first == PerVertexRangeMemo::kMaxEntries + 9;
+        if (!ok) {
+            std::fprintf(stderr, "FAIL: PerVertexRangeMemo\n");
+            return EXIT_FAILURE;
+        }
+        std::puts("PASS: PerVertexRangeMemo");
+    }
     std::puts("PASS: 13 vertex parameters (above the old 12-attribute unpack cap)");
     return EXIT_SUCCESS;
 }
