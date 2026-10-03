@@ -646,21 +646,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 				     m_prototype_batch.items.size());
 			}
 		}
-		// Built in place: each item embeds a ShaderVertexInputInfo (~10 KB), and filling a local
-		// that is then moved into the vector copies it again, plus once per element on every
-		// reallocation (std::vector::push_back was 3-6% of the GPU thread in the samples).
-		// KYTY_OPT_OFF=pv_batch_inplace restores the local + push_back.
-		static const bool batch_inplace_enabled = FrameTiming::OptEnabled("pv_batch_inplace");
-		if (batch_inplace_enabled && m_prototype_batch.items.capacity() < 64) {
-			m_prototype_batch.items.reserve(64);
-		}
-		std::optional<PendingPrototypeReplayItem> local_item;
-		if (!batch_inplace_enabled) {
-			local_item.emplace();
-		}
-		PendingPrototypeReplayItem& item = batch_inplace_enabled
-		                                       ? m_prototype_batch.items.emplace_back()
-		                                       : *local_item;
+		PendingPrototypeReplayItem item;
 		// Same pipeline lookup as the immediate path below, done now rather than at flush time:
 		// GetGraphicsPipeline() reads live registers, which may already describe a later draw by the
 		// time the batch is flushed. No render pass is open here -- the capture dispatch above ended it.
@@ -692,9 +678,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 			item.owned_captured = std::move(captured);
 			item.owned_pool     = capture_pool;
 		}
-		if (!batch_inplace_enabled) {
-			m_prototype_batch.items.push_back(std::move(*local_item));
-		}
+		m_prototype_batch.items.push_back(std::move(item));
 		return;
 	}
 
