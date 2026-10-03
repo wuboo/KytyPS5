@@ -464,6 +464,108 @@ void TestPatchedReciprocalSquareRoot() {
 	CheckPatchedReciprocalSquareRoot(kPlainVrsqrtpsIndirectBranch, false);
 }
 
+// One module with an EXTRQ and a 256-bit store, both loader fixes active (AMD CPU patcher and the
+// wide store split). They share the trampoline area behind the module: the split must continue
+// behind the patcher's trampolines instead of overwriting them from the start of the area.
+constexpr size_t kComboAreaSize = 16 * kPageSize;
+constexpr size_t kComboStoreAt  = 64;
+
+constexpr uint8_t kComboWideCopy[] = {
+	0xc5, 0xfc, 0x10, 0x06,       // vmovups ymm0, [rsi]
+	0xc5, 0xfc, 0x11, 0x47, 0x40, // vmovups [rdi + 0x40], ymm0
+	0xc5, 0xf8, 0x77,             // vzeroupper
+	0xc3,                         // ret
+};
+
+struct ComboArea {
+	uint8_t *code       = nullptr;
+	uint8_t *trampoline = nullptr;
+	uint64_t patcher_bytes = 0;
+	uint64_t split_start   = 0;
+	Loader::GuestInstructionPatchResult patch {};
+	Loader::X64InstructionEmulator::WideStoreSplitResult split {};
+	std::array<uint8_t, 4096> patcher_snapshot {};
+};
+
+// start_after_patcher == false reproduces the old loader, which started the split at the area start.
+ComboArea BuildComboArea(bool start_after_patcher) {
+	ComboArea combo;
+	auto *area = static_cast<uint8_t *>(::mmap(nullptr, kComboAreaSize, PROT_READ | PROT_WRITE | PROT_EXEC,
+	                                           MAP_PRIVATE | MAP_ANON, -1, 0));
+	Check(area != MAP_FAILED, "map RWX combo area");
+	std::memcpy(area, kExtrqXmm2Len40Index0, sizeof(kExtrqXmm2Len40Index0));
+	std::memcpy(area + kComboStoreAt, kComboWideCopy, sizeof(kComboWideCopy));
+	combo.code       = area;
+	combo.trampoline = area + kPageSize;
+	const uint64_t trampoline_size = kComboAreaSize - kPageSize;
+
+	Loader::RegisterGuestInstructionPatchModule(area, kPageSize, combo.trampoline, trampoline_size);
+	const std::array<uintptr_t, 2> function_starts {reinterpret_cast<uintptr_t>(area),
+	                                                 reinterpret_cast<uintptr_t>(area) + kComboStoreAt};
+	const Loader::GuestInstructionHostFeatures host {false, false, false};
+	combo.patch = Loader::PatchGuestInstructions(reinterpret_cast<uintptr_t>(area),
+	                                             kComboStoreAt + sizeof(kComboWideCopy), function_starts,
+	                                             false, true, host);
+	combo.patcher_bytes = Loader::GetGuestInstructionTrampolineBytesUsed(area);
+	std::memcpy(combo.patcher_snapshot.data(), combo.trampoline, combo.patcher_snapshot.size());
+
+	uint64_t cursor = reinterpret_cast<uint64_t>(combo.trampoline) +
+	                  (start_after_patcher ? combo.patcher_bytes : 0);
+	combo.split_start = cursor;
+	combo.split = Loader::X64InstructionEmulator::SplitWideStores(
+	    reinterpret_cast<uint64_t>(area) + kComboStoreAt, sizeof(kComboWideCopy), &cursor,
+	    reinterpret_cast<uint64_t>(area) + kComboAreaSize);
+	Loader::UnregisterGuestInstructionPatchModule(area);
+	return combo;
+}
+
+uint64_t JumpTarget(const uint8_t *site) {
+	Check(site[0] == 0xe9, "site was rewritten into a rel32 jump");
+	int32_t rel = 0;
+	std::memcpy(&rel, site + 1, sizeof(rel));
+	return reinterpret_cast<uint64_t>(site) + 5 + static_cast<int64_t>(rel);
+}
+
+void TestPatcherAndWideStoreSplitShareTrampolines() {
+	const auto combo = BuildComboArea(true);
+	Check(combo.patch.extrq.found == 1 && combo.patch.extrq.native == 1, "EXTRQ patched natively");
+	Check(combo.split.candidates == 1 && combo.split.patched == 1, "256-bit store split");
+	Check(combo.patcher_bytes != 0, "patcher used part of the trampoline area");
+
+	const auto area_start   = reinterpret_cast<uint64_t>(combo.trampoline);
+	const auto patcher_site = JumpTarget(combo.code);
+	const auto split_site   = JumpTarget(combo.code + kComboStoreAt + 4); // behind the vmovups load
+	Check(patcher_site >= area_start && patcher_site < area_start + combo.patcher_bytes,
+	      "EXTRQ trampoline lies in the patcher's part of the area");
+	Check(split_site >= area_start + combo.patcher_bytes &&
+	          split_site < area_start + combo.patcher_bytes + combo.split.trampoline_bytes,
+	      "split trampoline lies behind the patcher's, ranges are disjoint");
+	Check(combo.patcher_bytes <= combo.patcher_snapshot.size() &&
+	          std::memcmp(combo.patcher_snapshot.data(), combo.trampoline, combo.patcher_bytes) == 0,
+	      "the split left the patcher's trampolines untouched");
+
+	// Both patched routines still give the right answers.
+	uint64_t out[2] {};
+	const int before = IllegalHits();
+	reinterpret_cast<BlobFn>(combo.code)(out, 0.0, 0.0, std::bit_cast<double>(0xaabbccddeeff1122ull));
+	Check(IllegalHits() == before, "patched EXTRQ raises no SIGILL");
+	Check(out[0] == 0xddeeff1122ull, "patched EXTRQ result");
+
+	uint8_t source[32];
+	for (size_t i = 0; i < sizeof(source); ++i) source[i] = static_cast<uint8_t>(i + 1);
+	uint8_t destination[0x40 + 32] {};
+	reinterpret_cast<void (*)(uint8_t *, const uint8_t *)>(combo.code + kComboStoreAt)(destination, source);
+	Check(std::memcmp(destination + 0x40, source, sizeof(source)) == 0, "split store copied all 32 bytes");
+}
+
+// Guards the test itself: started at the area start, as the loader used to, the split overwrites
+// the patcher's trampolines.
+void TestSplitFromAreaStartClobbersPatcherTrampolines() {
+	const auto combo = BuildComboArea(false);
+	Check(std::memcmp(combo.patcher_snapshot.data(), combo.trampoline, combo.patcher_bytes) != 0,
+	      "starting the split at the area start overwrites the patcher's trampolines");
+}
+
 } // namespace
 
 int main() {
@@ -483,6 +585,8 @@ int main() {
 	TestPatchedInsertqIndexedRexHigh();
 	TestPatchedInsertqRegister();
 	TestPatchedReciprocalSquareRoot();
+	TestPatcherAndWideStoreSplitShareTrampolines();
+	TestSplitFromAreaStartClobbersPatcherTrampolines();
 	std::printf("macosSse4aTests: all passed\n");
 	return 0;
 }
