@@ -5,7 +5,6 @@
 #include "common/debugCounters.h"
 #include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
-#include "graphics/host_gpu/renderer/benchTrace.h"
 #include "graphics/presentation/frameTiming.h"
 
 #include <algorithm>

@@ -3,7 +3,6 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
-#include "graphics/host_gpu/renderer/benchTrace.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"

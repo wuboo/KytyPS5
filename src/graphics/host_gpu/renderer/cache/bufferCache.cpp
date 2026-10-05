@@ -7,7 +7,6 @@
 #include "common/profiler.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/graphicContext.h"
-#include "graphics/host_gpu/renderer/benchTrace.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -422,7 +421,7 @@ void BufferCache::FlushEagerReadbacks() {
 			auto&      buffer = m_slot_buffers[FindBuffer(first, 1)];
 			const auto begin  = std::max(page, buffer.CpuAddress());
 			const auto end = std::min(page + TRACKER_PAGE_SIZE, buffer.CpuAddress() + buffer.Size());
-			if (!DownloadBufferMemory(buffer, begin, end - begin)) {
+			if (!DownloadBufferMemory<true>(buffer, begin, end - begin)) {
 				break;
 			}
 		}
