@@ -34,15 +34,14 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	EXIT_IF(capture_has_writes && !programs->native_capture);
 	const auto&    input     = vs.buffers[0];
 	const uint32_t num_attrs = vs.resources_num;
-	EXIT_IF(input.stride == 0 || input.fetch_index != 0 ||
-	        input.attr_num != static_cast<int>(num_attrs) || input.addr == 0);
+	EXIT_IF(input.stride == 0 || input.fetch_index != 0 || input.addr == 0);
 
 	for (uint32_t i = 0; i < num_attrs; ++i) {
-		EXIT_IF(input.attr_indices[i] != static_cast<int>(i));
 		const auto& descriptor = vs.resources[i];
 		const auto  format     = ShaderRecompiler::Format::GetFormatInfo(descriptor.Format());
+		const auto  attr_offset = static_cast<uint32_t>(descriptor.Base48() - input.addr);
 		EXIT_IF(format.byte_size > input.stride ||
-		        input.attr_offsets[i] > input.stride - format.byte_size ||
+		        attr_offset > input.stride - format.byte_size ||
 		        descriptor.SwizzleEnabled() || descriptor.AddTid());
 		std::array<uint8_t, 16> bytes {};
 		std::array<uint32_t, 4> decoded {};
@@ -434,7 +433,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	for (uint32_t i = 0; i < num_attrs; ++i) {
 		const auto&    descriptor  = vs.resources[i];
 		const auto     format_info = ShaderRecompiler::Format::GetFormatInfo(descriptor.Format());
-		const uint32_t byte_offset = vertex_byte_adjust + input.attr_offsets[i];
+		const uint32_t byte_offset = vertex_byte_adjust + static_cast<uint32_t>(descriptor.Base48() - input.addr);
 		uint32_t       format_kind = 0;
 		if (descriptor.Format() == Prospero::BufferFormat::k16_16_16_16Float) {
 			format_kind = 3;
@@ -681,17 +680,17 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
 	    {state.color_info, state.color_count}, state.depth_info, {state.vertex_info.data(), 1},
 	    buffer, &state.ps_input_info, topology, false, programs->graphics);
+	vk::ImageAspectFlags feedback_aspects;
+	const auto           rendering =
+	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
+	                         feedback_aspects, stages);
 	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
 	cmd = buffer.Handle();
 	cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline.pipeline_layout, 1, 1,
 	                       &extra_set, 0, nullptr);
 	SetGraphicsDynamicParams(buffer, cmd, vs, state.depth_info, rendering);
 	if (graphics.attachment_feedback_loop_enabled)
-		cmd.setAttachmentFeedbackLoopEnableEXT(
-		    rendering.depth_stencil_attachment.image_layout ==
-		            vk::ImageLayout::eAttachmentFeedbackLoopOptimalEXT
-		        ? vk::ImageAspectFlags {vk::ImageAspectFlagBits::eDepth}
-		        : vk::ImageAspectFlags {});
+		cmd.setAttachmentFeedbackLoopEnableEXT(feedback_aspects);
 	scheduler.BeginRendering(rendering);
 	cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
 	cmd.draw(count, 1, 0, 0);
@@ -771,8 +770,6 @@ void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 		if (graphics.attachment_feedback_loop_enabled)
 			cmd.setAttachmentFeedbackLoopEnableEXT(feedback_aspects);
 		cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
-		KYTY_BENCH_TRACE_SITE();
-		BenchTrace::Record(BenchTrace::Tick(), "proto-draw", batch.vs_hash, batch.ps_hash);
 		cmd.draw(item.count, 1, 0, 0);
 		if (batch.ps_active && HasShaderBufferWrites(batch.ps_input_info.stage))
 			ShaderWriteBarrier(cmd, vk::PipelineStageFlagBits::eFragmentShader);

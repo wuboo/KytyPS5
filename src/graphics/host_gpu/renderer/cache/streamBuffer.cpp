@@ -4,7 +4,6 @@
 #include "common/assert.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
-#include "graphics/host_gpu/renderer/benchTrace.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 
