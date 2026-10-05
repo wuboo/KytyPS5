@@ -223,8 +223,9 @@ void DefineVertexCapture(EmitterState& state) {
 	}
 	for (uint32_t binding = 0; binding < 3; binding++) {
 		const auto components = Fused(state) && binding != 1 ? 1u : binding == 2 ? 2u : 4u;
-		const auto element =
-		    binding == 1 ? TypeF32Vector(state, 4) : TypeU32Vector(state, components);
+		const auto element = binding == 1       ? TypeF32Vector(state, 4)
+		                     : components == 1u ? TypeU32(state)
+		                                        : TypeU32Vector(state, components);
 		const auto array = state.builder.DecoratedType(
 		    spv::OpTypeRuntimeArray,
 		    {{spv::OpDecorate, {spv::DecorationArrayStride, components * 4}}}, element);

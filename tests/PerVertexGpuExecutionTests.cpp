@@ -1237,6 +1237,217 @@ OpFunctionEnd
     }
     std::printf("PASS: Captured Buffer verified bit-for-bit against CPU model across 3 vertices\n");
 
+    {
+        // KYTY_OPT_ON=pv_fused_unpack: the capture that decodes the guest vertices itself must
+        // write exactly the record the unpack -> capture pair writes, for every format kind,
+        // indexed/linear draws, instancing and out-of-range vertices.
+        using namespace Libs::Graphics;
+        using namespace ShaderRecompiler;
+        using IR::Value;
+        using O = IR::ValueOpcode;
+        IR::Program program;
+        program.stage = ShaderType::Vertex;
+        program.wave_size = 64;
+        program.srt_plan_complete = program.resource_tracking_complete = program.shader_info_complete = true;
+        program.block_storage.push_back(std::make_unique<IR::Block>());
+        program.blocks.push_back(program.block_storage.back().get());
+        program.block_info.emplace_back();
+        program.info.inputs = {{IR::StageInputKind::VertexIndex}, {IR::StageInputKind::InstanceIndex},
+                               {IR::StageInputKind::Parameter, 0, 4}, {IR::StageInputKind::Parameter, 1, 4},
+                               {IR::StageInputKind::Parameter, 2, 4}, {IR::StageInputKind::Parameter, 3, 4}};
+        program.info.outputs = {{IR::StageOutputKind::Position}, {IR::StageOutputKind::Parameter, 0, 0},
+                                {IR::StageOutputKind::Parameter, 1, 1}, {IR::StageOutputKind::Parameter, 2, 2}};
+        program.export_info = {{.kind = IR::ExportTargetKind::Position, .en = 15},
+                               {.kind = IR::ExportTargetKind::Parameter, .target = 0, .en = 15},
+                               {.kind = IR::ExportTargetKind::Parameter, .target = 1, .en = 15},
+                               {.kind = IR::ExportTargetKind::Parameter, .target = 2, .en = 15}};
+        IR::IREmitter emit(program.blocks.front());
+        const auto vertex = emit.Emit(O::GetBuiltin, {Value(static_cast<uint32_t>(IR::StageInputKind::VertexIndex)), Value(0u)});
+        const auto instance = emit.Emit(O::GetBuiltin, {Value(static_cast<uint32_t>(IR::StageInputKind::InstanceIndex)), Value(0u)});
+        for (uint32_t attr = 0; attr < 4; attr++) {
+            std::array<Value, 4> v;
+            for (uint32_t c = 0; c < 4; c++) v[c] = emit.Emit(O::GetAttribute, {Value(attr), Value(c)});
+            auto packed = emit.Emit(O::CompositeConstructU32x4, {v[0], v[1], v[2], v[3]});
+            if (attr == 0) {
+                emit.Emit(O::SetAttribute, {packed, Value(true)}, IR::ExportFlags{0});
+            } else if (attr == 3) {
+                // Last export also carries the vertex and instance ids.
+                packed = emit.Emit(O::CompositeConstructU32x4, {v[0], v[3], vertex, instance});
+                emit.Emit(O::SetAttribute, {packed, Value(true)}, IR::ExportFlags{3});
+            } else {
+                emit.Emit(O::SetAttribute, {packed, Value(true)}, IR::ExportFlags{attr});
+            }
+        }
+        IR::AllocateBindings(program);
+        ShaderVertexInputInfo vertex_info {};
+        Spirv::VertexCaptureInfo old_info {.host_subgroup_size = 32, .num_attributes = 4, .record_stride_vec4 = 5,
+                                           .clip_slot = 4, .parameter_slots = {{0, 1}, {1, 2}, {2, 3}}};
+        auto new_info = old_info;
+        new_info.fused = true;
+        const auto old_words = Spirv::EmitProgram(program, {.vertex = &vertex_info}, &old_info);
+        const auto new_words = Spirv::EmitProgram(program, {.vertex = &vertex_info}, &new_info);
+        spvtools::SpirvTools fused_tools(SPV_ENV_VULKAN_1_2);
+        if (!fused_tools.Validate(old_words) || !fused_tools.Validate(new_words)) Fail("fused capture SPIR-V validation");
+
+        auto make_module = [&](const std::vector<uint32_t>& words) {
+            VkShaderModuleCreateInfo info {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+            info.codeSize = words.size() * sizeof(uint32_t);
+            info.pCode = words.data();
+            VkShaderModule m = VK_NULL_HANDLE;
+            Check(vk_create_shader_module(dev.device, &info, nullptr, &m), "fused test module");
+            return m;
+        };
+        VkDescriptorSetLayoutBinding fb[3] {};
+        for (uint32_t i = 0; i < 3; i++) fb[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo fdsl_info {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+        fdsl_info.bindingCount = 3;
+        fdsl_info.pBindings = fb;
+        VkDescriptorSetLayout fset_layout = VK_NULL_HANDLE;
+        Check(vk_create_descriptor_set_layout(dev.device, &fdsl_info, nullptr, &fset_layout), "fused set layout");
+        VkDescriptorSetLayout fdsls[2] = {dummy_dsl, fset_layout};
+        // Guest user data block (128 bytes) followed by the fused unpack parameters.
+        const VkPushConstantRange fpush {VK_SHADER_STAGE_COMPUTE_BIT, 0, 128 + sizeof(PushConstants)};
+        VkPipelineLayoutCreateInfo fpl_info {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        fpl_info.setLayoutCount = 2;
+        fpl_info.pSetLayouts = fdsls;
+        fpl_info.pushConstantRangeCount = 1;
+        fpl_info.pPushConstantRanges = &fpush;
+        VkPipelineLayout fpl = VK_NULL_HANDLE;
+        Check(vk_create_pipeline_layout(dev.device, &fpl_info, nullptr, &fpl), "fused pipeline layout");
+        auto make_pipeline = [&](VkShaderModule m) {
+            VkComputePipelineCreateInfo info {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+            info.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+            info.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+            info.stage.module = m;
+            info.stage.pName = "main";
+            info.layout = fpl;
+            VkPipeline pipe = VK_NULL_HANDLE;
+            Check(vk_create_compute_pipelines(dev.device, VK_NULL_HANDLE, 1, &info, nullptr, &pipe), "fused test pipeline");
+            return pipe;
+        };
+        const VkPipeline old_pipe = make_pipeline(make_module(old_words));
+        const VkPipeline new_pipe = make_pipeline(make_module(new_words));
+
+        VkDescriptorPoolSize fpool_size {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16};
+        VkDescriptorPoolCreateInfo fpool_info {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+        fpool_info.maxSets = 4;
+        fpool_info.poolSizeCount = 1;
+        fpool_info.pPoolSizes = &fpool_size;
+        VkDescriptorPool fpool = VK_NULL_HANDLE;
+        Check(vk_create_descriptor_pool(dev.device, &fpool_info, nullptr, &fpool), "fused pool");
+        const size_t record_bytes = 64 * 5 * 16;
+        GpuBuffer old_out = CreateBuffer(dev, record_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        GpuBuffer new_out = CreateBuffer(dev, record_bytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        auto make_set = [&](VkBuffer b0, VkDeviceSize s0, VkBuffer b1, VkBuffer b2, VkDeviceSize s2) {
+            VkDescriptorSet set = VK_NULL_HANDLE;
+            VkDescriptorSetAllocateInfo alloc {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            alloc.descriptorPool = fpool;
+            alloc.descriptorSetCount = 1;
+            alloc.pSetLayouts = &fset_layout;
+            Check(vk_allocate_descriptor_sets(dev.device, &alloc, &set), "fused set");
+            const VkDescriptorBufferInfo bi[3] {{b0, 0, s0}, {b1, 0, record_bytes}, {b2, 0, s2}};
+            VkWriteDescriptorSet w[3] {};
+            for (uint32_t i = 0; i < 3; i++) {
+                w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                w[i].dstSet = set;
+                w[i].dstBinding = i;
+                w[i].descriptorCount = 1;
+                w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                w[i].pBufferInfo = &bi[i];
+            }
+            vk_update_descriptor_sets(dev.device, 3, w, 0, nullptr);
+            return set;
+        };
+        // Private unpack set: earlier parts of this test repoint desc_set's buffers.
+        VkDescriptorSet unpack_set = VK_NULL_HANDLE;
+        {
+            VkDescriptorSetAllocateInfo alloc {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            alloc.descriptorPool = fpool;
+            alloc.descriptorSetCount = 1;
+            alloc.pSetLayouts = &set_layout;
+            Check(vk_allocate_descriptor_sets(dev.device, &alloc, &unpack_set), "fused unpack set");
+            const VkDescriptorBufferInfo bi[4] {{idx_buf_16.buffer, 0, idx_buf_16.size}, {vtx_buf.buffer, 0, vtx_buf.size},
+                                                {id_buf.buffer, 0, id_buf.size}, {attr_buf.buffer, 0, attr_buf.size}};
+            VkWriteDescriptorSet w[4] {};
+            for (uint32_t i = 0; i < 4; i++) {
+                w[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                w[i].dstSet = unpack_set;
+                w[i].dstBinding = i;
+                w[i].descriptorCount = 1;
+                w[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                w[i].pBufferInfo = &bi[i];
+            }
+            vk_update_descriptor_sets(dev.device, 4, w, 0, nullptr);
+        }
+        const VkDescriptorSet old_set = make_set(attr_buf.buffer, attr_buf.size, old_out.buffer, id_buf.buffer, id_buf.size);
+        const VkDescriptorSet linear_set = make_set(vtx_buf.buffer, vtx_buf.size, new_out.buffer, vtx_buf.buffer, vtx_buf.size);
+        const VkDescriptorSet indexed_set = make_set(vtx_buf.buffer, vtx_buf.size, new_out.buffer, idx_buf_16.buffer, idx_buf_16.size);
+
+        struct Draw { bool indexed; uint32_t index_count, instances, first_vertex, first_instance; int32_t vertex_offset; };
+        const Draw draws[] {
+            {false, 8, 1, 0, 0, 0}, {false, 5, 3, 2, 7, 0}, {false, 8, 1, 6, 0, 0},
+            {true, 8, 1, 0, 0, 0}, {true, 8, 2, 0, 4, 0}, {true, 6, 1, 0, 0, -2}, {true, 8, 1, 0, 0, 3}};
+        for (const auto& d : draws) {
+            PushConstants push = base_push;
+            push.total_invocations = d.index_count * d.instances;
+            push.index_count = d.index_count;
+            push.first_vertex = d.first_vertex;
+            push.vertex_offset = d.vertex_offset;
+            push.first_instance = d.first_instance;
+            push.packed_flags = (d.indexed ? ((1u << 16u) | (1u << 17u)) : 0u) | (4u << 19u);
+            std::memset(old_out.mapped, 0xcd, old_out.size);
+            std::memset(new_out.mapped, 0xcd, new_out.size);
+            const uint32_t user_data[32] {};
+            for (int pass = 0; pass < 2; pass++) {
+                VkCommandBufferBeginInfo bi {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+                Check(vk_begin_command_buffer(cmd, &bi), "begin fused equivalence");
+                if (pass == 0) {
+                    vk_cmd_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
+                    vk_cmd_bind_descriptor_sets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_layout, 0, 1, &unpack_set, 0, nullptr);
+                    vk_cmd_push_constants(cmd, pipeline_layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+                    vk_cmd_dispatch(cmd, 1, 1, 1);
+                    VkMemoryBarrier mb {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+                    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+                    mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+                    vk_cmd_pipeline_barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 1, &mb, 0, nullptr, 0, nullptr);
+                }
+                const VkDescriptorSet set = pass == 0 ? old_set : (d.indexed ? indexed_set : linear_set);
+                vk_cmd_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pass == 0 ? old_pipe : new_pipe);
+                vk_cmd_bind_descriptor_sets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fpl, 0, 1, &resource_set, 0, nullptr);
+                vk_cmd_bind_descriptor_sets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, fpl, 1, 1, &set, 0, nullptr);
+                vk_cmd_push_constants(cmd, fpl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(user_data), user_data);
+                if (pass == 1) vk_cmd_push_constants(cmd, fpl, VK_SHADER_STAGE_COMPUTE_BIT, 128, sizeof(push), &push);
+                vk_cmd_dispatch(cmd, (push.total_invocations + 63u) / 64u, 1, 1);
+                Check(vk_end_command_buffer(cmd), "end fused equivalence");
+                VkSubmitInfo submit {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+                submit.commandBufferCount = 1;
+                submit.pCommandBuffers = &cmd;
+                Check(vk_queue_submit(dev.queue, 1, &submit, VK_NULL_HANDLE), "submit fused equivalence");
+                Check(vk_queue_wait_idle(dev.queue), "wait fused equivalence");
+            }
+            // The unpack-based capture sizes its draw from the whole id buffer here, so compare the
+            // records of the draw only and require the fused capture to leave the tail untouched.
+            const size_t used = static_cast<size_t>(push.total_invocations) * 5 * 16;
+            bool tail_clean = true;
+            for (size_t i = used; i < new_out.size; i++) tail_clean &= static_cast<const uint8_t*>(new_out.mapped)[i] == 0xcd;
+            if (!tail_clean) Fail("fused capture wrote beyond the draw");
+            if (std::memcmp(old_out.mapped, new_out.mapped, used) != 0) {
+                std::fprintf(stderr, "fused capture differs: indexed=%d count=%u instances=%u first_vertex=%u voff=%d\n",
+                             d.indexed, d.index_count, d.instances, d.first_vertex, d.vertex_offset);
+                const auto* o = static_cast<const uint32_t*>(old_out.mapped);
+                const auto* n = static_cast<const uint32_t*>(new_out.mapped);
+                for (uint32_t w = 0, shown = 0; w < push.total_invocations * 20 && shown < 12; w++) {
+                    if (o[w] != n[w]) {
+                        std::fprintf(stderr, "  lane %u word %u: unpack=%08x fused=%08x\n", w / 20, w % 20, o[w], n[w]);
+                        shown++;
+                    }
+                }
+                Fail("fused capture record differs from unpack -> capture");
+            }
+        }
+        std::puts("PASS: fused capture (KYTY_OPT_ON=pv_fused_unpack) matches unpack -> capture bit-for-bit");
+    }
+
     if (wave64_capture_only) {
         using namespace Libs::Graphics;
         using namespace ShaderRecompiler;
