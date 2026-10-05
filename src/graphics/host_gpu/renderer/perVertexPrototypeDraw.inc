@@ -298,16 +298,23 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	}
 
 	// GPU-side intermediate buffers for unpack and capture
-	auto id_buffer =
-	    std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags, count * 8);
-	auto attribute_buffer = std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Stream, 0,
-	                                                 AllFlags, count * num_attrs * 16);
+	// KYTY_OPT_ON=pv_fused_unpack: the capture shader decodes the guest vertices itself, so the
+	// unpack pass, its descriptor set and the two intermediate buffers are not needed.
+	const bool fused = programs->fused_capture;
+	std::unique_ptr<Buffer> id_buffer, attribute_buffer;
+	if (!fused) {
+		id_buffer = std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags,
+		                                     count * 8);
+		attribute_buffer = std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Stream, 0,
+		                                            AllFlags, count * num_attrs * 16);
+	}
 	captured = std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags,
 	                                    count64 * programs->layout.record_stride_vec4 * 16);
 	captured_size_for_log = captured->Size();
 
 	const auto* unpack_pipeline =
-	    GetPerVertexUnpackPipeline(graphics, m_context.GetPipelineCache().DriverCache());
+	    fused ? nullptr
+	          : GetPerVertexUnpackPipeline(graphics, m_context.GetPipelineCache().DriverCache());
 
 	// Descriptor pool for the unpack set (4 storage buffers) and the capture-only extra set (3
 	// storage buffers, real bindings to attribute_buffer/captured/id_buffer); both are per-draw
@@ -337,9 +344,11 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	vk::DescriptorSetAllocateInfo unpack_alloc {};
 	unpack_alloc.descriptorPool     = unpack_pool;
 	unpack_alloc.descriptorSetCount = 1;
-	unpack_alloc.pSetLayouts        = &unpack_pipeline->set_layout;
-	EXIT_IF(graphics.device.allocateDescriptorSets(&unpack_alloc, &unpack_set) !=
-	        vk::Result::eSuccess);
+	if (!fused) {
+		unpack_alloc.pSetLayouts = &unpack_pipeline->set_layout;
+		EXIT_IF(graphics.device.allocateDescriptorSets(&unpack_alloc, &unpack_set) !=
+		        vk::Result::eSuccess);
+	}
 
 	const uint64_t idx_bytes_raw = draw.IsIndexed() ? (index_source.size + index_byte_adjust)
 	                                                : (vtx_total_bytes + vertex_byte_adjust);
@@ -352,20 +361,23 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	const uint64_t vtx_size_bounded =
 	    std::min(Common::AlignUp(vtx_bytes_raw, 4) + 4, vtx_buf_available);
 
-	const vk::DescriptorBufferInfo unpack_data[] {
-	    {idx_vk_buf, idx_aligned_offset, idx_size_bounded},
-	    {vtx_buf_ptr->Handle(), vtx_aligned_offset, vtx_size_bounded},
-	    {id_buffer->Handle(), 0, id_buffer->Size()},
-	    {attribute_buffer->Handle(), 0, attribute_buffer->Size()}};
-	std::array<vk::WriteDescriptorSet, 4> unpack_writes;
-	for (uint32_t i = 0; i < 4; ++i) {
-		unpack_writes[i].dstSet          = unpack_set;
-		unpack_writes[i].dstBinding      = i;
-		unpack_writes[i].descriptorCount = 1;
-		unpack_writes[i].descriptorType  = vk::DescriptorType::eStorageBuffer;
-		unpack_writes[i].pBufferInfo     = &unpack_data[i];
+	const vk::DescriptorBufferInfo vtx_info {vtx_buf_ptr->Handle(), vtx_aligned_offset,
+	                                         vtx_size_bounded};
+	const vk::DescriptorBufferInfo idx_info {idx_vk_buf, idx_aligned_offset, idx_size_bounded};
+	if (!fused) {
+		const vk::DescriptorBufferInfo unpack_data[] {
+		    idx_info, vtx_info, {id_buffer->Handle(), 0, id_buffer->Size()},
+		    {attribute_buffer->Handle(), 0, attribute_buffer->Size()}};
+		std::array<vk::WriteDescriptorSet, 4> unpack_writes;
+		for (uint32_t i = 0; i < 4; ++i) {
+			unpack_writes[i].dstSet          = unpack_set;
+			unpack_writes[i].dstBinding      = i;
+			unpack_writes[i].descriptorCount = 1;
+			unpack_writes[i].descriptorType  = vk::DescriptorType::eStorageBuffer;
+			unpack_writes[i].pBufferInfo     = &unpack_data[i];
+		}
+		graphics.device.updateDescriptorSets(4, unpack_writes.data(), 0, nullptr);
 	}
-	graphics.device.updateDescriptorSets(4, unpack_writes.data(), 0, nullptr);
 
 	// Allocate and update the capture-only extra set (real bindings; used solely by step 2 below,
 	// never cached and never rewritten again after this).
@@ -378,9 +390,9 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	        vk::Result::eSuccess);
 
 	const vk::DescriptorBufferInfo capture_extra_data[] {
-	    {attribute_buffer->Handle(), 0, attribute_buffer->Size()},
+	    fused ? vtx_info : vk::DescriptorBufferInfo {attribute_buffer->Handle(), 0, attribute_buffer->Size()},
 	    {captured->Handle(), 0, captured->Size()},
-	    {id_buffer->Handle(), 0, id_buffer->Size()}};
+	    fused ? idx_info : vk::DescriptorBufferInfo {id_buffer->Handle(), 0, id_buffer->Size()}};
 	std::array<vk::WriteDescriptorSet, 3> capture_extra_writes;
 	for (uint32_t i = 0; i < 3; ++i) {
 		capture_extra_writes[i].dstSet          = capture_extra_set;
@@ -467,22 +479,24 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 
 	cmd = buffer.Handle();
 
-	// Step 1: GPU unpack compute pass
-	cmd.bindPipeline(vk::PipelineBindPoint::eCompute, unpack_pipeline->pipeline);
-	cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, unpack_pipeline->pipeline_layout, 0, 1,
-	                       &unpack_set, 0, nullptr);
-	cmd.pushConstants(unpack_pipeline->pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
-	                  sizeof(unpack_push), &unpack_push);
-	KYTY_BENCH_TRACE_SITE();
-	cmd.dispatch((count + 63) / 64, 1, 1);
+	if (!fused) {
+		// Step 1: GPU unpack compute pass
+		cmd.bindPipeline(vk::PipelineBindPoint::eCompute, unpack_pipeline->pipeline);
+		cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, unpack_pipeline->pipeline_layout, 0,
+		                       1, &unpack_set, 0, nullptr);
+		cmd.pushConstants(unpack_pipeline->pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
+		                  sizeof(unpack_push), &unpack_push);
+		KYTY_BENCH_TRACE_SITE();
+		cmd.dispatch((count + 63) / 64, 1, 1);
 
-	// Barrier: Unpack -> Capture compute
-	vk::MemoryBarrier unpack_barrier {};
-	unpack_barrier.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
-	unpack_barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
-	cmd.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
-	                    vk::PipelineStageFlagBits::eComputeShader, {}, 1, &unpack_barrier, 0,
-	                    nullptr, 0, nullptr);
+		// Barrier: Unpack -> Capture compute
+		vk::MemoryBarrier unpack_barrier {};
+		unpack_barrier.srcAccessMask = vk::AccessFlagBits::eShaderWrite;
+		unpack_barrier.dstAccessMask = vk::AccessFlagBits::eShaderRead;
+		cmd.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,
+		                    vk::PipelineStageFlagBits::eComputeShader, {}, 1, &unpack_barrier, 0,
+		                    nullptr, 0, nullptr);
+	}
 
 	// Step 2: Capture compute pass
 	PreparedBindings* vertex_stage[] {&vertex_bindings};
@@ -493,6 +507,14 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	                       programs->capture_pipeline.pipeline_layout, 1, 1, &capture_extra_set, 0,
 	                       nullptr);
 	cmd.bindPipeline(vk::PipelineBindPoint::eCompute, programs->capture_pipeline.pipeline);
+	if (fused) {
+		// The fused capture reads the unpack parameters from the push block right after the
+		// guest's 128 bytes of user data (UnpackPushConstants layout).
+		cmd.pushConstants(programs->capture_pipeline.pipeline_layout,
+		                  vk::ShaderStageFlagBits::eCompute,
+		                  ShaderRecompiler::IR::NativePushConstantSize, sizeof(unpack_push),
+		                  &unpack_push);
+	}
 	KYTY_BENCH_TRACE_SITE();
 	cmd.dispatch(programs->native_capture ? (count + 63u) / 64u : count, 1, 1);
 	if (capture_has_writes) ShaderWriteBarrier(cmd, vk::PipelineStageFlagBits::eComputeShader);

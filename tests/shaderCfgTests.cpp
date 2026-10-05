@@ -13419,6 +13419,62 @@ void TestSpirvEmissionOwnsRequirements() {
         "emission reused requirements from an earlier IR version");
 }
 
+// KYTY_OPT_ON=pv_fused_unpack: the capture decodes guest vertices itself (no attribute/id buffers).
+void TestFusedVertexCaptureEmission() {
+  using namespace ShaderRecompiler;
+  using IR::Value;
+  using O = IR::ValueOpcode;
+  IR::Program program;
+  program.stage = ShaderType::Vertex;
+  program.wave_size = 64;
+  program.srt_plan_complete = program.resource_tracking_complete = program.shader_info_complete = true;
+  program.block_storage.push_back(std::make_unique<IR::Block>());
+  program.blocks.push_back(program.block_storage.back().get());
+  program.block_info.emplace_back();
+  program.info.inputs = {{IR::StageInputKind::VertexIndex},
+                         {IR::StageInputKind::InstanceIndex},
+                         {IR::StageInputKind::Parameter, 0, 4},
+                         {IR::StageInputKind::Parameter, 1, 4}};
+  program.info.outputs = {{IR::StageOutputKind::Position}, {IR::StageOutputKind::Parameter, 0, 0}};
+  program.export_info = {{.kind = IR::ExportTargetKind::Position, .en = 15},
+                         {.kind = IR::ExportTargetKind::Parameter, .en = 15}};
+  IR::IREmitter emit(program.blocks.front());
+  const auto vertex = emit.Emit(O::GetBuiltin, {Value(static_cast<uint32_t>(IR::StageInputKind::VertexIndex)), Value(0u)});
+  const auto instance = emit.Emit(O::GetBuiltin, {Value(static_cast<uint32_t>(IR::StageInputKind::InstanceIndex)), Value(0u)});
+  std::array<Value, 4> position;
+  for (uint32_t c = 0; c < 4; c++) position[c] = emit.Emit(O::GetAttribute, {Value(0u), Value(c)});
+  const auto pos = emit.Emit(O::CompositeConstructU32x4, {position[0], position[1], position[2], position[3]});
+  emit.Emit(O::SetAttribute, {pos, Value(true)}, IR::ExportFlags{0});
+  std::array<Value, 4> second;
+  for (uint32_t c = 0; c < 4; c++) second[c] = emit.Emit(O::GetAttribute, {Value(1u), Value(c)});
+  const auto param = emit.Emit(O::CompositeConstructU32x4, {vertex, instance, second[0], second[3]});
+  emit.Emit(O::SetAttribute, {param, Value(true)}, IR::ExportFlags{1});
+  IR::AllocateBindings(program);
+  ShaderVertexInputInfo vertex_info {};
+  Spirv::VertexCaptureInfo capture {.host_subgroup_size = 32, .num_attributes = 2,
+                                    .record_stride_vec4 = 3, .clip_slot = 2,
+                                    .parameter_slots = {{0, 1}}};
+  const auto legacy = Spirv::EmitProgram(program, {.vertex = &vertex_info}, &capture);
+  CheckSpirvBinaryValidates(legacy);
+  capture.fused = true;
+  for (const uint32_t subgroup : {32u, 64u}) {
+    capture.host_subgroup_size = subgroup;
+    const auto fused = Spirv::EmitProgram(program, {.vertex = &vertex_info}, &capture);
+    CheckSpirvBinaryValidates(fused);
+    const auto text = DisassembleSpirvBinary(fused);
+    // Push block grows past the 128 guest bytes; vertex/index buffers are raw dwords.
+    Check(text.find("Offset 128") != std::string::npos,
+          "fused capture lacks the unpack parameters in the push block");
+    Check(text.find("UnpackHalf2x16") != std::string::npos,
+          "fused capture does not decode half vertex formats");
+    Check(text.find("ArrayStride 16") == std::string::npos ||
+              DisassembleSpirvBinary(legacy).find("ArrayStride 16") != std::string::npos,
+          "fused capture kept an attribute-sized (uvec4) buffer");
+    Check(DisassembleSpirvBinary(legacy).find("Offset 128") == std::string::npos,
+          "default capture must not change its push block");
+  }
+}
+
 void TestRepeatedExportsHaveOneInterface() {
   const uint32_t shader[] = {EncodeExp0(0x0c, 0xf), EncodeExp1(0, 1, 2, 3),
                              EncodeExp0(0x0c, 0xf), EncodeExp1(0, 1, 2, 3),
@@ -13865,6 +13921,7 @@ int main(int argc, char** argv) {
     return 0;
   }
   TestRayTracingDispatchDetection();
+  TestFusedVertexCaptureEmission();
   TestResourceDescriptorClassification();
   TestShaderBufferResourceSize();
   TestNativeShaderResourceDependencies();

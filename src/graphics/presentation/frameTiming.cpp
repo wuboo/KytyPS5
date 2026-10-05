@@ -138,6 +138,14 @@ bool OptEnabled(const char* name) {
 	return disabled.find("," + std::string(name) + ",") == std::string::npos;
 }
 
+bool OptForcedOn(const char* name) {
+	static const std::string enabled = [] {
+		const char* value = std::getenv("KYTY_OPT_ON");
+		return value != nullptr ? "," + std::string(value) + "," : std::string();
+	}();
+	return enabled.find("," + std::string(name) + ",") != std::string::npos;
+}
+
 uint64_t PresentedFrames() {
 	return g_presented_frames.load(std::memory_order_relaxed);
 }

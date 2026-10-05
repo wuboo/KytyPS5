@@ -94,6 +94,10 @@ struct EmitterState {
 	std::array<uint32_t, 3>                          capture_buffers {};
 	std::array<uint32_t, 2>                          capture_index {};
 	std::array<uint32_t, 2>                          capture_valid {};
+	// Fused capture: decoded per-lane vertex id (0 when out of range), validity and instance.
+	std::array<uint32_t, 2>                          capture_vertex {};
+	std::array<uint32_t, 2>                          capture_vertex_ok {};
+	std::array<uint32_t, 2>                          capture_instance {};
 	uint32_t                                         storage_buffer_variable     = 0;
 	uint32_t                                         storage_buffer_u64_variable = 0;
 	std::array<uint32_t, IR::ShaderInfo::MaxBuffers> memory_byte_offsets {};

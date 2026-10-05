@@ -144,6 +144,18 @@ uint32_t PushConstantArrayType(EmitterState& state) {
 }
 
 uint32_t PushConstantBlockType(EmitterState& state) {
+	if (state.vertex_capture != nullptr && state.vertex_capture->fused) {
+		const auto fused = state.builder.DecoratedType(
+		    spv::OpTypeArray, {{spv::OpDecorate, {spv::DecorationArrayStride, sizeof(uint32_t)}}},
+		    TypeU32(state), ConstantU32(state, kFusedCapturePushDwords));
+		return state.builder.DecoratedType(
+		    spv::OpTypeStruct,
+		    {{spv::OpMemberDecorate, {0, spv::DecorationOffset, 0}},
+		     {spv::OpMemberDecorate,
+		      {1, spv::DecorationOffset, IR::PushData::DwordCount * sizeof(uint32_t)}},
+		     {spv::OpDecorate, {spv::DecorationBlock}}},
+		    PushConstantArrayType(state), fused);
+	}
 	return state.builder.DecoratedType(spv::OpTypeStruct,
 	                                   {{spv::OpMemberDecorate, {0, spv::DecorationOffset, 0}},
 	                                    {spv::OpDecorate, {spv::DecorationBlock}}},
@@ -167,7 +179,8 @@ uint32_t F32ArrayType(EmitterState& state, uint32_t count) {
 }
 
 void DefineDescriptors(EmitterState& state) {
-	if (state.program.bindings.UsesPushData() || state.program.stage == ShaderType::Mesh) {
+	if (state.program.bindings.UsesPushData() || state.program.stage == ShaderType::Mesh ||
+	    (state.vertex_capture != nullptr && state.vertex_capture->fused)) {
 		const auto type              = PushConstantBlockType(state);
 		state.push_constant_variable = state.builder.DefineGlobalVariable(
 		    TypePointer(state, spv::StorageClassPushConstant, type), spv::StorageClassPushConstant);

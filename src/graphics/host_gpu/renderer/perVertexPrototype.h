@@ -25,6 +25,7 @@ void RememberPerVertexPrototypeShader(const ShaderProgram&                    pr
 
 struct PerVertexPrototypePrograms {
 	bool                            native_capture = false;
+	bool                            fused_capture  = false; // KYTY_OPT_ON=pv_fused_unpack
 	vk::ShaderModule                capture;
 	PipelineCache::GraphicsPrograms graphics;
 	vk::DescriptorSetLayout         extra_layout;

@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
@@ -57,6 +58,7 @@ struct Original {
 	bool                  per_vertex;
 	std::vector<uint32_t> words;
 	std::vector<uint32_t> capture_words;
+	bool                  fused_capture = false;
 };
 std::map<uint64_t, Original>                                        originals;
 std::map<std::pair<uint64_t, uint64_t>, PerVertexPrototypePrograms> variants;
@@ -190,8 +192,10 @@ void RememberPerVertexPrototypeShader(const ShaderProgram&                    pr
 		if (!DerivePerVertexVertexLayout(vs_source, layout, params)) return;
 		const Spirv::VertexCaptureInfo capture {
 		    host_subgroup_size, static_cast<uint32_t>(vs.resources_num), layout.record_stride_vec4,
-		    layout.clip_slot, layout.location_to_slot};
+		    layout.clip_slot, layout.location_to_slot,
+		    FrameTiming::OptForcedOn("pv_fused_unpack")};
 		it->second.capture_words = Spirv::EmitProgram(result.program, options.input_info, &capture);
+		it->second.fused_capture = capture.fused;
 		// Validation of our own emitter output is ~30% of a vertex permutation's cost; bench-only
 		// switch KYTY_PV_SKIP_VALIDATE=1 skips it (the first draw would still be validated by Vulkan).
 		static const bool skip_validate = std::getenv("KYTY_PV_SKIP_VALIDATE") != nullptr;
@@ -337,6 +341,7 @@ const PerVertexPrototypePrograms* GetPerVertexPrototypePrograms(
 
 	PerVertexPrototypePrograms value {};
 	value.native_capture            = !vs->second.capture_words.empty();
+	value.fused_capture             = value.native_capture && vs->second.fused_capture;
 	value.graphics                  = programs;
 	value.layout                    = layout;
 	value.capture                   = CompileSPV(cap_words, graphics.device);
@@ -378,7 +383,8 @@ const PerVertexPrototypePrograms* GetPerVertexPrototypePrograms(
 	const vk::DescriptorSetLayout layouts[] {value.capture_pipeline.descriptor_set_layout,
 	                                         value.extra_layout};
 	const vk::PushConstantRange   push(vk::ShaderStageFlagBits::eCompute, 0,
-	                                   ShaderRecompiler::IR::NativePushConstantSize);
+	                                   ShaderRecompiler::IR::NativePushConstantSize +
+	                                       (value.fused_capture ? sizeof(UnpackPushConstants) : 0));
 	vk::PipelineLayoutCreateInfo  layout_info {};
 	layout_info.setLayoutCount         = 2;
 	layout_info.pSetLayouts            = layouts;
