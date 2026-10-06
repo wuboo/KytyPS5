@@ -29,6 +29,13 @@ public:
 	// scanning at most max_bytes. Returns the page start of vaddr when that page is unwatched.
 	[[nodiscard]] uint64_t WatchedRunEnd(uint64_t vaddr, uint64_t max_bytes) const noexcept;
 
+	// A read fault the caches could not satisfy (no GPU data to download). When the tracker
+	// state of vaddr's page allows reads but the host page is not readable, set the protection
+	// the tracker expects (Read or ReadWrite) and return true; *previous_host_protection gets
+	// the host VM_PROT bits seen before (-1 when the platform cannot tell). Returns false when
+	// nothing was changed (page unknown, tracker wants no access, or already readable).
+	bool RestoreReadAccess(uint64_t vaddr, int* previous_host_protection = nullptr);
+
 private:
 	struct Impl;
 	std::unique_ptr<Impl> m_impl;

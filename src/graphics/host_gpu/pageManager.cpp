@@ -31,6 +31,12 @@
 #else
 #include <unistd.h>
 #endif
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#else
+#include "graphics/host_gpu/hostMemory.h"
+#endif
 
 namespace Libs::Graphics {
 namespace {
@@ -88,6 +94,26 @@ void ValidateRange(uint64_t vaddr, uint64_t size) {
 	if (!GuestRange {vaddr, size}.Valid()) {
 		Fatal("invalid range vaddr=0x%016" PRIx64 ", size=0x%016" PRIx64, vaddr, size);
 	}
+}
+
+// Host protection of the page at addr as VM_PROT bits (1 read, 2 write, 4 execute); -1 when unknown.
+int HostPageProtection(uint64_t addr) {
+#if defined(__APPLE__)
+	mach_vm_address_t              region_addr = addr;
+	mach_vm_size_t                 region_size = 0;
+	vm_region_basic_info_data_64_t info {};
+	mach_msg_type_number_t         count       = VM_REGION_BASIC_INFO_COUNT_64;
+	mach_port_t                    object_name = MACH_PORT_NULL;
+	if (mach_vm_region(mach_task_self(), &region_addr, &region_size, VM_REGION_BASIC_INFO_64,
+	                   reinterpret_cast<vm_region_info_t>(&info), &count,
+	                   &object_name) != KERN_SUCCESS ||
+	    region_addr > addr) {
+		return 0;
+	}
+	return static_cast<int>(info.protection);
+#else
+	return HostMemoryRangeIsReadable(addr, 1) ? 1 : 0;
+#endif
 }
 
 } // namespace
@@ -347,6 +373,29 @@ uint64_t PageManager::WatchedRunEnd(uint64_t vaddr, uint64_t max_bytes) const no
 		}
 	}
 	return std::min(page, limit);
+}
+
+bool PageManager::RestoreReadAccess(uint64_t vaddr, int* previous_host_protection) {
+	const auto page   = Common::AlignDown(vaddr, PAGE_SIZE);
+	auto*      region = m_impl->FindRegion(page);
+	if (region == nullptr) {
+		return false;
+	}
+	const auto region_base = Common::AlignDown(page, REGION_SIZE);
+	SpinGuard  lock(region->lock);
+	const auto mode = region->pages[static_cast<size_t>((page - region_base) / PAGE_SIZE)].Perms();
+	if (mode == Common::VirtualMemory::Mode::NoAccess) {
+		return false;
+	}
+	const auto host = HostPageProtection(page);
+	if (previous_host_protection != nullptr) {
+		*previous_host_protection = host;
+	}
+	if (host < 0 || (host & 1) != 0) {
+		return false;
+	}
+	m_impl->Protect(page, PAGE_SIZE, mode);
+	return true;
 }
 
 template void PageManager::UpdatePageWatchersForRegion<true, true>(uint64_t, RegionBits&);

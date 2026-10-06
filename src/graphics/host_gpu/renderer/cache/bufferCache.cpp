@@ -309,7 +309,7 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	});
 }
 
-void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
+bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
 		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
@@ -326,9 +326,10 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	if (!is_write && WaitEagerReadback(vaddr, size)) {
 		FrameTiming::Add(FrameTiming::Counter::ReadbackEagerHits);
 		add_wait();
-		return;
+		return true;
 	}
-	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write] {
+	bool downloaded = true;
+	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, &downloaded] {
 		// A download already queued for this page must land before this one decides anything.
 		(void)WaitEagerReadback(vaddr, size);
 		if (!is_write) {
@@ -342,12 +343,25 @@ void BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		if (DownloadBufferMemory<false>(buffer, vaddr, size)) {
 			FrameTiming::Add(FrameTiming::Counter::ReadbackDownloads);
 			m_memory_tracker.UnmarkRegionAsGpuModified(vaddr, size);
+		} else if (!is_write) {
+			// A read fault that downloads nothing leaves the page protected and faults again;
+			// the caller restores access.
+			downloaded = false;
+			static std::atomic<uint64_t> noops {0};
+			const auto                   n = noops.fetch_add(1, std::memory_order_relaxed) + 1;
+			if ((n & (n - 1)) == 0) {
+				LOGF("[read-fault-noop] n=%" PRIu64 " addr=0x%016" PRIx64
+				     " tracker_gpu_modified=%d dirty_ranges=%d\n",
+				     n, vaddr, IsRegionGpuModified(vaddr, 1) ? 1 : 0,
+				     HasGpuDirtyBytes(vaddr, 1) ? 1 : 0);
+			}
 		}
 		if (is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 		}
 	});
 	add_wait();
+	return downloaded;
 }
 
 namespace {
