@@ -524,6 +524,11 @@ add_executable(resource_materialization_tests EXCLUDE_FROM_ALL
 target_link_libraries(resource_materialization_tests fmt::fmt xbyak::xbyak)
 target_include_directories(resource_materialization_tests PRIVATE ${inc_headers})
 
+add_executable(env_audit_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/EnvAuditTests.cpp"
+)
+target_include_directories(env_audit_tests PRIVATE ${inc_headers})
+
 add_executable(resource_tracking_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ResourceTrackingTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
@@ -686,6 +691,7 @@ if(BUILD_TESTING)
 	add_test(NAME pad_script_parser COMMAND $<TARGET_FILE:pad_script_parser_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
+	add_test(NAME env_audit COMMAND $<TARGET_FILE:env_audit_tests>)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
 	add_test(NAME event_queue_lifetime COMMAND $<TARGET_FILE:event_queue_lifetime_tests>)
 	add_test(NAME kernel_file_system COMMAND $<TARGET_FILE:kernel_file_system_tests>)
@@ -766,6 +772,7 @@ if(BUILD_TESTING)
 		pad_script_parser_tests
 		shader_vertex_metadata_tests
 		resource_materialization_tests
+		env_audit_tests
 		resource_tracking_tests
 		event_queue_lifetime_tests
 		kernel_file_system_tests
