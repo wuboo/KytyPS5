@@ -673,6 +673,61 @@ void CheckDeathCase(const char *name) {
 #endif
 }
 
+void TestRestoreReadAccess() {
+  PageManager manager;
+  constexpr auto page_size = TRACKER_PAGE_SIZE;
+  constexpr auto region_size = TRACKER_REGION_SIZE;
+  auto *memory = Allocate(region_size * 2);
+  const auto allocation_base = reinterpret_cast<uint64_t>(memory);
+  const auto region_base =
+      (allocation_base + region_size - 1) & ~(region_size - 1);
+  const auto page = [&](uint64_t index) {
+    return reinterpret_cast<void *>(region_base + page_size * index);
+  };
+
+  Check(!manager.RestoreReadAccess(region_base),
+        "page of an unknown region was restored");
+
+  RegionBits write_mask;
+  write_mask.Set(3);
+  manager.UpdatePageWatchersForRegion<true>(region_base, write_mask);
+  RegionBits read_mask;
+  read_mask.Set(5);
+  manager.UpdatePageWatchersForRegion<true, true>(region_base, read_mask);
+  Check(Protection(page(3)) == PAGE_READONLY && Protection(page(5)) == PAGE_NOACCESS,
+        "watchers did not protect the pages");
+
+  // Protection lost behind the tracker's back: the page is write-watched (Read expected).
+  DWORD old_protection = 0;
+  Check(VirtualProtect(page(3), page_size, PAGE_NOACCESS, &old_protection) != 0,
+        "test protect failed");
+  int previous = -1;
+  Check(manager.RestoreReadAccess(region_base + page_size * 3 + 0x123, &previous),
+        "unreadable write-watched page was not restored");
+  Check(previous == 0, "previous host protection was not reported as none");
+  Check(Protection(page(3)) == PAGE_READONLY,
+        "write-watched page was not restored to Read");
+  Check(!manager.RestoreReadAccess(region_base + page_size * 3),
+        "readable page was changed");
+
+  // Unwatched page of a known region (ReadWrite expected).
+  Check(VirtualProtect(page(4), page_size, PAGE_NOACCESS, &old_protection) != 0,
+        "test protect failed");
+  Check(manager.RestoreReadAccess(region_base + page_size * 4),
+        "unreadable clean page was not restored");
+  Check(Protection(page(4)) == PAGE_READWRITE,
+        "clean page was not restored to ReadWrite");
+
+  // The tracker itself wants no access here: the GPU readback path owns it.
+  Check(!manager.RestoreReadAccess(region_base + page_size * 5) &&
+            Protection(page(5)) == PAGE_NOACCESS,
+        "page the tracker keeps unreadable was restored");
+
+  manager.UpdatePageWatchersForRegion<false, true>(region_base, read_mask);
+  manager.UpdatePageWatchersForRegion<false>(region_base, write_mask);
+  Check(VirtualFree(memory, 0, MEM_RELEASE) != 0, "free failed");
+}
+
 void TestFatalPaths() {
   for (const char *name :
        {"invalid-range", "unknown-untrack", "destructor-watch",
@@ -705,6 +760,7 @@ int main(int argc, char **argv) {
   TestRegionEndpointBatching();
   TestReadWriteWatcherInteractions();
   TestConcurrentSharedWatchers();
+  TestRestoreReadAccess();
   TestFatalPaths();
   std::puts("PageManagerTests: all cases passed");
   return 0;

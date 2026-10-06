@@ -11,6 +11,8 @@
 #include <atomic>
 #include <cinttypes>
 #include <cstdlib>
+#include <mutex>
+#include <unordered_set>
 
 namespace Libs::Graphics {
 
@@ -104,7 +106,23 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	} else {
 		FrameTiming::Add(on_gpu_thread ? FrameTiming::Counter::ReadbackReadFaultGpu
 		                               : FrameTiming::Counter::ReadbackReadFault);
-		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		const bool downloaded = m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		if (!downloaded && access != PageFaultAccess::Execute) {
+			// Nothing to download and the tracker wants the page readable, yet it faulted:
+			// the protection was lost outside the tracker. Put back what the tracker expects
+			// instead of refaulting forever.
+			int host_protection = -1;
+			if (m_page_manager.RestoreReadAccess(fault_vaddr, &host_protection)) {
+				static std::mutex                   mutex;
+				static std::unordered_set<uint64_t> logged;
+				std::lock_guard                     lock(mutex);
+				const auto page = fault_vaddr & ~(m_page_manager.GetPageSize() - 1);
+				if (logged.size() < 4096 && logged.insert(page).second) {
+					LOGF("[read-fault-restore] addr=0x%016" PRIx64 " host_prot=%d\n", page,
+					     host_protection);
+				}
+			}
+		}
 		if (access == PageFaultAccess::Execute) {
 			// Fetching code from a watched page is neither a read nor a write the caches can
 			// satisfy, and a read leaves the protection in place, so the fetch would fault
