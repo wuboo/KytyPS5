@@ -91,6 +91,24 @@ void TestTilt() {
   Check(ParseFails("1:tilt:1,2,-1"), "negative ramp");
 }
 
+void TestFlipClock() {
+  std::vector<Entry> entries;
+  Options options;
+  std::string error;
+  Check(Parse("clock: flip\nf6000-f6100:cross; f7000:circle", Defaults{}, entries, options, error),
+        "flip clock script parses");
+  Check(options.flip_clock && entries.size() == 2, "flip clock flag and entries");
+  Check(IsActive(entries[0], 0.0, 6050.0) && !IsActive(entries[0], 0.0, 6100.0), "absolute flips");
+  Check(Parse("f10:cross", Defaults{}, entries, options, error) && !options.flip_clock,
+        "default clock is presented frames");
+  Check(!Parse("clock: flip\n5:cross", Defaults{}, entries, options, error) && !error.empty(),
+        "seconds anchor rejected under flip clock");
+  Check(!Parse("clock: wall\nf1:cross", Defaults{}, entries, options, error), "unknown clock");
+  Check(ParseOk("clock: presented\nf1:cross").size() == 1, "presented clock accepted");
+  Check(ParseFails("clock: flip\n1:cross"), "legacy overload also rejects seconds");
+  Check(ParseOk("clock: flip\nf1:cross").size() == 1, "legacy overload ignores the header");
+}
+
 } // namespace
 
 int main() {
@@ -100,6 +118,7 @@ int main() {
   TestSeparatorsAndComments();
   TestRejectsBadInput();
   TestTilt();
+  TestFlipClock();
   std::printf("PadScriptParserTests: ok\n");
   return 0;
 }

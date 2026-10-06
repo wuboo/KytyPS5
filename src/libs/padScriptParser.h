@@ -11,6 +11,9 @@
 //   end     := number in the start unit, exclusive ('f' prefix optional)
 //   hold    := length in the start unit, 'f' prefix required for frames
 // A bare start holds for the default point length of its unit.
+// A line "clock: flip" (before the entries) switches frame anchors from "presented frames since the
+// first pad read" to the absolute guest flip number (the `flips` column of frames.csv), so the same
+// anchor hits the same game moment in every run; seconds anchors are rejected in that mode.
 // Actions: cross circle square triangle options touchpad l1 r1 l2 r2 l3 r3 up down left right,
 //          left-stick-{left,right,up,down}, right-stick-{left,right,up,down},
 //          tilt:<roll>,<pitch>[,<ramp>] (degrees; holds the pad tilted for the entry, easing in over
@@ -45,6 +48,10 @@ struct Entry {
 struct Defaults {
 	double point_seconds = 0.3;
 	double point_frames  = 8.0;
+};
+
+struct Options {
+	bool flip_clock = false; // Frame anchors are absolute guest flips.
 };
 
 // Button bits match PAD_BUTTON_* in controller.h.
@@ -204,8 +211,9 @@ inline bool ParseEntry(std::string_view text, const Defaults& defaults, Entry& e
 
 // Returns false and sets error (prefixed with the entry text) on the first bad entry.
 inline bool Parse(std::string_view script, const Defaults& defaults, std::vector<Entry>& entries,
-                  std::string& error) {
+                  Options& options, std::string& error) {
 	entries.clear();
+	options = Options {};
 	while (!script.empty()) {
 		const auto end  = script.find_first_of(";\n");
 		auto       item = script.substr(0, end);
@@ -219,14 +227,36 @@ inline bool Parse(std::string_view script, const Defaults& defaults, std::vector
 		if (item.empty()) {
 			continue;
 		}
+		if (item.substr(0, 6) == "clock:") {
+			const auto mode = Trim(item.substr(6));
+			if (mode == "flip") {
+				options.flip_clock = true;
+			} else if (mode != "presented") {
+				error = std::string(item) + ": unknown clock (flip|presented)";
+				return false;
+			} else {
+				options.flip_clock = false;
+			}
+			continue;
+		}
 		Entry entry;
 		if (!ParseEntry(item, defaults, entry, error)) {
 			error = std::string(item) + ": " + error;
 			return false;
 		}
+		if (options.flip_clock && entry.start_unit == Unit::Seconds) {
+			error = std::string(item) + ": seconds anchor not allowed with 'clock: flip'";
+			return false;
+		}
 		entries.push_back(entry);
 	}
 	return true;
+}
+
+inline bool Parse(std::string_view script, const Defaults& defaults, std::vector<Entry>& entries,
+                  std::string& error) {
+	Options options;
+	return Parse(script, defaults, entries, options, error);
 }
 
 // Whether the entry is held at the given position (both measured from the script origin).

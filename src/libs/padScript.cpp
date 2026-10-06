@@ -30,6 +30,7 @@ std::atomic<bool>     g_origin_ready {false};
 std::atomic<int64_t>  g_origin_ns {0};
 std::atomic<uint64_t> g_origin_frame {0};
 bool                  g_log = false;
+bool                  g_flip_clock = false;
 
 double EnvNumber(const char* name, double fallback) {
 	const char* value = std::getenv(name);
@@ -179,11 +180,14 @@ void Start() {
 	defaults.point_frames  = EnvNumber("KYTY_PAD_FRAME_HOLD", 8.0);
 
 	std::string error;
-	if (!Parse(LoadScript(value), defaults, g_entries, error)) {
+	Options options;
+	if (!Parse(LoadScript(value), defaults, g_entries, options, error)) {
 		EXIT("KYTY_PAD_SCRIPT: %s\n", error.c_str());
 	}
+	g_flip_clock = options.flip_clock;
 	g_log = std::getenv("KYTY_PAD_SCRIPT_LOG") != nullptr;
-	LOGF("[pad-script] %zu entries loaded\n", g_entries.size());
+	LOGF("[pad-script] %zu entries loaded, clock=%s\n", g_entries.size(),
+	     g_flip_clock ? "flip" : "presented");
 
 	// Detached: the emulator often leaves through exit(), where a joinable global thread
 	// would terminate the process.
