@@ -1,0 +1,26 @@
+#version 450
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+layout(local_size_x = 256) in;
+layout(buffer_reference, std430) buffer Words { uint v[]; };
+layout(push_constant) uniform PC {
+	uint64_t big;
+	uint64_t hdr;
+	uint     quarter_words; // power of two
+	uint     mult;          // odd
+} pc;
+// Invocation i writes one word into quarter (i & 3); the position inside the quarter is a bijection of (i >> 2),
+// so the CPU can recompute every address and value. The seed is read from the header import (CPU wrote it AFTER
+// the import: proves GPU sees CPU stores without a copy); hdr[1] is written back (GPU->CPU through the 2nd import).
+void main() {
+	uint  i = gl_GlobalInvocationID.x;
+	Words h = Words(pc.hdr);
+	Words b = Words(pc.big);
+	uint  seed = h.v[0];
+	uint  q    = i & 3u;
+	uint  t    = ((i >> 2) * pc.mult) & (pc.quarter_words - 1u);
+	b.v[q * pc.quarter_words + t] = (i * 2654435761u) ^ seed;
+	if (i == 0u) {
+		h.v[1] = 0xC0FFEEu;
+	}
+}
