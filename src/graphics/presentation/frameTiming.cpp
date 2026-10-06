@@ -142,4 +142,8 @@ uint64_t PresentedFrames() {
 	return g_presented_frames.load(std::memory_order_relaxed);
 }
 
+uint64_t GuestFlips() {
+	return g_guest_flips.load(std::memory_order_relaxed);
+}
+
 } // namespace Libs::Graphics::FrameTiming

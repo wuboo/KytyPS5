@@ -79,6 +79,9 @@ bool OptEnabled(const char* name);
 // Number of frames presented since startup.
 uint64_t PresentedFrames();
 
+// Guest flips so far: the `flips` column of KYTY_FRAME_LOG.
+uint64_t GuestFlips();
+
 } // namespace Libs::Graphics::FrameTiming
 
 #endif /* KYTY_GRAPHICS_PRESENTATION_FRAMETIMING_H_ */
