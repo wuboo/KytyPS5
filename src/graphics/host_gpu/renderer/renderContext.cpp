@@ -105,6 +105,13 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		FrameTiming::Add(on_gpu_thread ? FrameTiming::Counter::ReadbackReadFaultGpu
 		                               : FrameTiming::Counter::ReadbackReadFault);
 		m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		if (access == PageFaultAccess::Execute) {
+			// Fetching code from a watched page is neither a read nor a write the caches can
+			// satisfy, and a read leaves the protection in place, so the fetch would fault
+			// again forever. The guest owns code it runs: stop watching the page.
+			m_buffer_cache.InvalidateMemory(fault_vaddr, fault_size);
+			m_texture_cache.InvalidateMemory(fault_vaddr, fault_size);
+		}
 	}
 	return true;
 }
