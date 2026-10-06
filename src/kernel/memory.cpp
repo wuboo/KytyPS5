@@ -3887,8 +3887,31 @@ bool ProtectGuestMemory(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode,
 }
 
 bool ProtectGuestHostMemory(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode) {
-	return g_guest_address_space != nullptr &&
-	       g_guest_address_space->ProtectTransient(vaddr, size, mode);
+	if (g_guest_address_space == nullptr) {
+		return false;
+	}
+	// The memory tracker protects pages as Read or ReadWrite, which also drops the execute bit.
+	// Guest code (and the instruction trampolines behind a module) is registered with the GPU
+	// like any other memory; losing PROT_EXEC there makes every fetch fault as Execute, which
+	// the tracker cannot resolve. Keep the execute bit on pages the guest mapped executable.
+	if ((mode == VirtualMemory::Mode::Read || mode == VirtualMemory::Mode::ReadWrite) &&
+	    g_virtual_ranges != nullptr) {
+		std::vector<VirtualRanges::Range> ranges;
+		if (g_virtual_ranges->QuerySpan(vaddr, size, &ranges)) {
+			for (const auto& range: ranges) {
+				const bool execute = (range.protection & PROT_CPU_EXEC) != 0;
+				const auto host_mode =
+				    execute ? (mode == VirtualMemory::Mode::Read ? VirtualMemory::Mode::ExecuteRead
+				                                                 : VirtualMemory::Mode::ExecuteReadWrite)
+				            : mode;
+				if (!g_guest_address_space->ProtectTransient(range.start, range.size, host_mode)) {
+					return false;
+				}
+			}
+			return true;
+		}
+	}
+	return g_guest_address_space->ProtectTransient(vaddr, size, mode);
 }
 
 bool FreeGuestMemory(uint64_t vaddr, uint64_t size) {
