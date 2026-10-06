@@ -2,6 +2,7 @@
 #define EMULATOR_INCLUDE_EMULATOR_COMMON_ENVAUDIT_H_
 
 #include <algorithm>
+#include <cstddef>
 #include <span>
 #include <string>
 #include <string_view>
@@ -25,6 +26,18 @@ inline std::string FormatKytyEnvironment(const char* const* env,
 		text += '\n';
 	}
 	return text;
+}
+
+// Number of KYTY_* variables in `env` that are not in `known`.
+inline size_t CountUnknownKytyEnvironment(const char* const* env,
+                                          std::span<const std::string_view> known) {
+	size_t count = 0;
+	for (; env != nullptr && *env != nullptr; ++env) {
+		const std::string_view entry(*env);
+		if (!entry.starts_with("KYTY_")) continue;
+		if (std::ranges::find(known, entry.substr(0, entry.find('='))) == known.end()) ++count;
+	}
+	return count;
 }
 
 } // namespace Common

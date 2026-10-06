@@ -28,6 +28,7 @@
 #include "loader/systemContent.h"
 #include "loader/timer.h"
 
+#include <cstdio>
 #include <cstdlib>
 #include <string_view>
 #if defined(__APPLE__)
@@ -100,7 +101,7 @@ static void MountSandboxDirs() {
 static void LogKytyEnvironment() {
 	static constexpr std::string_view known[] = {
 	    "KYTY_AUDIO_GAIN", "KYTY_BENCH_DROP_DIVERGENT_BARRIERS", "KYTY_BENCH_FOREGROUND",
-	    "KYTY_BORDERLESS", "KYTY_DIAG_SOFT_MATERIALIZE", "KYTY_FRAME_DUMP_DIR",
+	    "KYTY_BORDERLESS", "KYTY_ENV_STRICT", "KYTY_FRAME_DUMP_DIR",
 	    "KYTY_FRAME_DUMP_EVERY_S", "KYTY_FRAME_LOG", "KYTY_LAZY_FLUSH_MAX", "KYTY_OPT_OFF",
 	    "KYTY_OPT_ON", "KYTY_PAD_FRAME_HOLD", "KYTY_PAD_HOLD", "KYTY_PAD_SCRIPT",
 	    "KYTY_PAD_SCRIPT_LOG", "KYTY_PER_VERTEX_PROTOTYPE", "KYTY_PV_SKIP_VALIDATE",
@@ -117,6 +118,15 @@ static void LogKytyEnvironment() {
 	const auto text = Common::FormatKytyEnvironment(env, known);
 	if (!text.empty()) {
 		Log::WriteToConsoleAndLog(text);
+	}
+	// KYTY_ENV_STRICT=1: a misspelled or unported switch aborts the run instead of being ignored.
+	const char* strict = std::getenv("KYTY_ENV_STRICT");
+	if (strict != nullptr && strict[0] != '\0' && strict[0] != '0') {
+		if (const auto unknown = Common::CountUnknownKytyEnvironment(env, known); unknown != 0) {
+			std::fprintf(stderr, "KYTY_ENV_STRICT=1: exiting, %zu unknown KYTY_* variable(s)\n",
+			             unknown);
+			std::exit(2);
+		}
 	}
 }
 

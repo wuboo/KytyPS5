@@ -28,5 +28,7 @@ int main() {
 	      "unknown variable not marked");
 	Check(text.find("KYTY_OPT_OFF=\n") != std::string::npos, "empty value lost or marked unknown");
 	Check(Common::FormatKytyEnvironment(nullptr, known).empty(), "null environment not empty");
+	Check(Common::CountUnknownKytyEnvironment(env, known) == 2, "unknown count wrong");
+	Check(Common::CountUnknownKytyEnvironment(nullptr, known) == 0, "null environment counted");
 	return 0;
 }
