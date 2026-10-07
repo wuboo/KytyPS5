@@ -36,7 +36,9 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdint>
+#include <limits>
 #include <cstdio>
 #include <cstdlib>
 #include <string_view>
@@ -4439,6 +4441,102 @@ void TestFloatComparisonInputModes() {
       }
     }
     Check(comparisons == 2, "comparison input-mode fixture did not translate both precisions");
+  }
+}
+
+// GCN float compares: ordered ops (LT/EQ/LE/GT/LG/GE) are false when either operand is NaN; the
+// "not" family (NGE/NLG/NGT/NLE/NEQ/NLT) is the exact negation of the matching ordered op, so it is
+// true for NaN. V_CVT_I32_F32 / V_CVT_U32_F32 clamp (NaN -> 0, +-inf -> limits) before OpConvertFTo*.
+void TestNanSemanticsOfFloatCompareAndConvert() {
+  using namespace ShaderRecompiler;
+  using VO = IR::ValueOpcode;
+  struct Case {
+    uint32_t opcode; // VOPC opcode (CMPX = +0x10)
+    VO       ir;
+    bool   (*gcn)(float, float); // GCN truth derived from the ordered base op
+  };
+  const Case cases[] = {
+      {0x09, VO::FPUnordLessThan32, [](float a, float b) { return !(a >= b); }},         // NGE
+      {0x0a, VO::FPUnordEqual32, [](float a, float b) { return !(a < b || a > b); }},   // NLG
+      {0x0b, VO::FPUnordLessThanEqual32, [](float a, float b) { return !(a > b); }},    // NGT
+      {0x0c, VO::FPUnordGreaterThan32, [](float a, float b) { return !(a <= b); }},     // NLE
+      {0x0d, VO::FPUnordNotEqual32, [](float a, float b) { return !(a == b); }},        // NEQ
+      {0x0e, VO::FPUnordGreaterThanEqual32, [](float a, float b) { return !(a < b); }}, // NLT
+  };
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+  const float inf = std::numeric_limits<float>::infinity();
+  const float values[] = {nan, inf, -inf, 0.0f, 1.0f, -1.0f};
+  // IR semantics of the Unord* family: true when either operand is NaN, else the plain relation.
+  const auto eval = [](VO op, float a, float b) {
+    if (std::isnan(a) || std::isnan(b)) return true;
+    switch (op) {
+    case VO::FPUnordLessThan32: return a < b;
+    case VO::FPUnordEqual32: return a == b;
+    case VO::FPUnordLessThanEqual32: return a <= b;
+    case VO::FPUnordGreaterThan32: return a > b;
+    case VO::FPUnordNotEqual32: return a != b;
+    case VO::FPUnordGreaterThanEqual32: return a >= b;
+    default: Check(false, "unexpected IR opcode for an unordered V_CMP"); return false;
+    }
+  };
+  const auto translate = [](uint32_t word) {
+    const uint32_t shader[] = {word, EncodeSopp(0x01)};
+    Decoder::Program decoded;
+    Decoder::DecodeProgram(shader, decoded);
+    ShaderComputeInputInfo compute{};
+    compute.float_mode = 0xc0;
+    Frontend::TranslateOptions options{.stage = ShaderType::Compute};
+    options.input_info.compute = &compute;
+    return Frontend::TranslateProgram(decoded, CFG::BuildGraph(decoded), options);
+  };
+  for (const auto& c : cases) {
+    for (const uint32_t base : {c.opcode, c.opcode + 0x10u}) {
+      const auto program = translate(EncodeVopc(base, 256, 1));
+      uint32_t compares = 0;
+      for (const auto* block : program.blocks) {
+        for (const auto& inst : *block) {
+          if (inst.GetOpcode() != c.ir) continue;
+          compares++;
+        }
+      }
+      Check(compares == 1, "V_CMP/V_CMPX N* did not lower to its unordered IR compare");
+    }
+    for (const float a : values) {
+      for (const float b : values) {
+        Check(eval(c.ir, a, b) == c.gcn(a, b),
+              "unordered IR compare disagrees with GCN NaN/inf truth table");
+      }
+    }
+  }
+  // V_CMP_U_F32 / V_CMP_O_F32: NaN tests on both operands, O is the negation of U.
+  for (const uint32_t opcode : {0x07u, 0x08u}) {
+    const auto program = translate(EncodeVopc(opcode, 256, 1));
+    uint32_t nans = 0, nots = 0, ors = 0;
+    for (const auto* block : program.blocks) {
+      for (const auto& inst : *block) {
+        nans += inst.GetOpcode() == VO::FPIsNan32;
+        nots += inst.GetOpcode() == VO::LogicalNot;
+        ors += inst.GetOpcode() == VO::LogicalOr;
+      }
+    }
+    Check(nans == 2 && ors == 1 && nots == (opcode == 0x07u ? 1u : 0u),
+          "V_CMP_O/U_F32 did not lower to isnan(a)||isnan(b) (negated for O)");
+  }
+  // Float -> int conversions must not hand raw NaN/inf to OpConvertFTo*: the operand is a select.
+  for (const uint32_t opcode : {0x07u, 0x08u}) { // V_CVT_U32_F32, V_CVT_I32_F32
+    const auto program = translate(EncodeVop1(opcode, 1, 256));
+    uint32_t converts = 0;
+    for (const auto* block : program.blocks) {
+      for (const auto& inst : *block) {
+        const auto op = inst.GetOpcode();
+        if (op != VO::ConvertS32F32 && op != VO::ConvertU32F32) continue;
+        converts++;
+        const auto* source = inst.Arg(0).TryInstruction();
+        Check(source != nullptr && source->GetOpcode() == VO::SelectF32,
+              "V_CVT_I32/U32_F32 feeds raw NaN/inf into OpConvertFToS/U (no GCN clamp)");
+      }
+    }
+    Check(converts == 1, "V_CVT_I32/U32_F32 conversion count");
   }
 }
 
@@ -16872,6 +16970,7 @@ int main(int argc, char** argv) {
   TestNewShaderRecompilerIrLookupMissFailsExplicitly();
   TestNewShaderRecompilerInteger64CompareEncodings();
   TestFloatComparisonInputModes();
+  TestNanSemanticsOfFloatCompareAndConvert();
   TestPsInputCountRegisterDecode();
   TestPixelAncillaryLayerInput();
   TestNewShaderRecompilerUnbasedFlatUsesBda();
