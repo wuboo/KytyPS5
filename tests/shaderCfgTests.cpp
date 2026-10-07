@@ -1833,6 +1833,58 @@ void TestNewShaderRecompilerSMovB32() {
   CheckSpirvBinaryValidates(result.spirv);
 }
 
+// OpIEqual instructions that compare against the 32-bit all-ones constant (an all-lanes ballot test).
+uint32_t SpirvAllOnesEqualCount(const std::vector<uint32_t> &binary) {
+  std::unordered_set<uint32_t> all_ones;
+  uint32_t count = 0;
+  for (size_t i = 5; i < binary.size();) {
+    const uint32_t word = binary[i];
+    const uint32_t op = word & 0xffffu;
+    const uint32_t word_count = word >> 16u;
+    if (word_count == 0 || i + word_count > binary.size()) {
+      break;
+    }
+    if (op == 43u && word_count == 4u && binary[i + 3] == 0xffffffffu) {
+      all_ones.insert(binary[i + 2]); // OpConstant: type, id, value
+    } else if (op == 170u && word_count == 5u &&
+               (all_ones.contains(binary[i + 3]) ||
+                all_ones.contains(binary[i + 4]))) {
+      count++; // OpIEqual: type, id, lhs, rhs
+    }
+    i += word_count;
+  }
+  return count;
+}
+
+// A wave64 loop that exits through s_cbranch_execz, emulated as two 32-lane halves. The exit
+// has to be taken once no lane fails the condition; an all-ones ballot test never fires while a
+// lane without work (a vertex-capture wave past the vertex count) is masked out of the ballot,
+// so the loop ran to the loop watchdog.
+void TestWave64ExecZeroLoopIgnoresMaskedLanes() {
+  static ShaderComputeInputInfo compute{};
+  compute.threads_num[0] = 64;
+  compute.threads_num[1] = 1;
+  compute.threads_num[2] = 1;
+  compute.wave_size = 64;
+  compute.host_subgroup_size = 32;
+  const uint32_t shader[] = {
+      EncodeVopc(0xd4, 7 + 256, 5),      // v_cmpx_gt_u32 v7, v5
+      EncodeSopp(0x08, 2),               // s_cbranch_execz end
+      EncodeVop2(0x25, 7, 129, 7 + 256), // v_add_nc_u32 v7, 1, v7
+      EncodeSopp(0x02, 0xfffcu),         // s_branch loop
+      EncodeSopp(0x01, 0),               // end: s_endpgm
+  };
+  auto options = MakeCompileOptions(ShaderType::Compute);
+  options.wave_size = 64;
+  options.input_info.compute = &compute;
+  const auto result = RecompileForTest(shader, options);
+  CheckSpirvBinaryValidates(result.spirv);
+  Check(SpirvInstructionOpcodeCount(result.spirv, 339) >= 2,
+        "wave64 EXECZ loop lost its two-halves ballot");
+  Check(SpirvAllOnesEqualCount(result.spirv) == 0u,
+        "wave64 EXECZ branch tests an all-ones ballot, so a masked lane pins the loop");
+}
+
 void TestShaderStageBarriers() {
   const uint32_t shader[] = {
       EncodeSopp(0x0a, 0),    // s_barrier
@@ -16621,6 +16673,7 @@ int main(int argc, char** argv) {
   TestNewShaderRecompilerSpirvSizeBaselines();
   TestDemandDrivenSpirvDeclarations();
   TestNewShaderRecompilerSMovB32();
+  TestWave64ExecZeroLoopIgnoresMaskedLanes();
   TestShaderStageBarriers();
   TestVertexBufferGrouping();
   TestNggVertexEntryState();
