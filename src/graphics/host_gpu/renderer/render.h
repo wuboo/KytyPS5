@@ -215,6 +215,12 @@ private:
 	                                            const NullDesc::Hint* null_hint = nullptr);
 	void                         PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
 	                                                     std::span<RenderColorInfo>         colors);
+
+	// The description of a texture binding, kept for inputs seen before.
+	[[nodiscard]] const TextureDescription&
+	FindTextureDescription(const ShaderRecompiler::IR::ImageResource&   resource,
+	                       const ShaderRecompiler::IR::DescriptorValue& value);
+
 	void ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& target,
 	                              uint32_t render_target_slice_offset, uint32_t render_target_slot,
 	                              bool ignore_target_mask = false, bool exact_format = false);
@@ -334,6 +340,13 @@ private:
 		std::vector<PendingPrototypeReplayItem>     items;
 	};
 	PendingPrototypeBatch m_prototype_batch;
+	struct TextureDescriptionEntry {
+		ShaderRecompiler::IR::ImageResource   resource;
+		ShaderRecompiler::IR::DescriptorValue value;
+		TextureDescription                    description;
+	};
+	// Descriptions by input hash; an entry is used only when its inputs compare equal.
+	std::unordered_map<uint64_t, TextureDescriptionEntry> m_texture_descriptions;
 
 	friend class CommandProcessor;
 	friend struct RenderExecutorTestAccess;
