@@ -75,6 +75,8 @@ void Add(Counter counter, uint64_t value = 1);
 // Bench switches: KYTY_OPT_OFF is a comma-separated list of optimization names to disable, so a
 // single binary can be A/B tested. Returns true unless the name is listed.
 bool OptEnabled(const char* name);
+// KYTY_OPT_ON=<name>[,<name>...] switches an optimization that is off by default on.
+bool OptForcedOn(const char* name);
 
 // Number of frames presented since startup.
 uint64_t PresentedFrames();
