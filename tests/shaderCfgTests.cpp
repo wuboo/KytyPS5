@@ -1883,6 +1883,8 @@ void TestWave64ExecZeroLoopIgnoresMaskedLanes() {
   CheckSpirvBinaryValidates(result.spirv);
   Check(SpirvInstructionOpcodeCount(result.spirv, 339) >= 2,
         "wave64 EXECZ loop lost its two-halves ballot");
+  Check(SpirvInstructionOpcodeCount(result.spirv, 339) == 2u,
+        "wave64 EXECZ branch adds a reference all-lanes ballot instead of testing 'no lane fails'");
   Check(SpirvAllOnesEqualCount(result.spirv) == 0u,
         "wave64 EXECZ branch tests an all-ones ballot, so a masked lane pins the loop");
 }
