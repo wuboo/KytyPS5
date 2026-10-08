@@ -6961,7 +6961,7 @@ void TestPerspectiveCentroidInputs() {
     const auto single_sample = RecompileForTest(shader, options);
     const auto single_source = DisassembleSpirvBinary(single_sample.spirv);
     Check(!SpirvContainsCapability(single_sample.spirv, 52u) &&
-              !Common::ContainsStr(single_source, "InterpolateAtCentroid") &&
+              single_source.find("InterpolateAtCentroid") == std::string::npos &&
               SpirvHasDecorationValue(single_sample.spirv, 11u, 5286u),
           "single-sample centroid did not reuse the center barycentric builtin");
     CheckSpirvBinaryValidates(single_sample.spirv);
