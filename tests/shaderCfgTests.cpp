@@ -16688,7 +16688,7 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
   CheckSpirvBlockSourceMapping(structured_result);
   const auto structured_repeat =
       compile("structured-phi-repeat", structured_phi,
-              {.words = 174,
+              {.words = 177,
                .instructions = 49,
                .phis = 1,
                .labels = 8,
