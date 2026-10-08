@@ -745,7 +745,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 			const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(snapshot.buffers[resource]);
 			const auto address = descriptor.Base48();
 			auto size = descriptor.GetSize();
-			if (address == 0 || size == 0) {
+			if (address < BufferCache::CACHING_PAGESIZE || size == 0) {
 				source = {};
 				continue;
 			}
