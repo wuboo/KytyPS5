@@ -650,12 +650,6 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		item.extra_set       = extra_set;
 		item.count           = count;
 		item.vs               = vs;
-		// `vs.pixel_input`, if set, also points into the caller's stack-local DrawRenderState (see
-		// the `runtime` note below). Nothing reads it once a program is already compiled -- it
-		// only feeds shader specialization, which already happened for programs->graphics when
-		// GetPerVertexPrototypePrograms() first compiled it -- but null it out anyway so a latent
-		// read elsewhere fails loudly (null deref) instead of touching freed stack memory.
-		item.vs.pixel_input   = nullptr;
 		item.vertex_bindings  = std::move(vertex_bindings);
 		item.pixel_bindings   = std::move(pixel_bindings);
 		// `PreparedBindings::runtime` is a raw pointer that PrepareBindings() above set into
