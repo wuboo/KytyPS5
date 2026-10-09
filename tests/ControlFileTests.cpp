@@ -95,6 +95,47 @@ void TestDiagTex() {
 	Check(!a.SameSettings(b), "diag_tex ignored by SameSettings");
 }
 
+// S123: force_tex filter (@addr / @fmt=n,WxH) and diag_tex ...:all.
+void TestForceFilterAndDiagAll() {
+	const auto file = CF::Parse("force_tex=aa:30:ffff00ff@0x70d1770000,bb:5:ff000000@fmt=130,1x1,cc:7:ffffffff\n"
+	                            "diag_tex=aa:30:all,bb:4\n");
+	Check(file.errors.empty(), "filtered force_tex / diag_tex all rejected");
+	const auto snap = CF::Resolve(file, 1);
+	Check(snap.force_tex.size() == 3, "the comma of @fmt= split an item");
+	Check(snap.force_tex[0].filter.kind == CF::TexFilter::Kind::Addr && snap.force_tex[0].filter.addr == 0x70d1770000ull,
+	      "address filter fields");
+	Check(snap.force_tex[1].filter.kind == CF::TexFilter::Kind::Fmt && snap.force_tex[1].filter.fmt == 130 &&
+	          snap.force_tex[1].filter.width == 1 && snap.force_tex[1].filter.height == 1,
+	      "format filter fields");
+	Check(snap.force_tex[2].filter.kind == CF::TexFilter::Kind::None && snap.force_tex[2].slot == 7, "item after @fmt= parsed");
+	Check(snap.ForceTexHasFilter(), "filter not reported");
+
+	// A filtered entry binds only a T# that fits it; without the T# only unfiltered entries answer.
+	uint32_t           rgba = 0;
+	const CF::TexKey   hit {0x70d1770000ull, 181, 4, 4}, other_addr {0x1000, 181, 4, 4};
+	Check(snap.ForceTexFor(0xaa, 30, &rgba, &hit) && rgba == 0xffff00ffu, "address filter missed its T#");
+	Check(!snap.ForceTexFor(0xaa, 30, &rgba, &other_addr), "address filter matched another T#");
+	Check(!snap.ForceTexFor(0xaa, 30, &rgba), "filtered entry answered without a T#");
+	const CF::TexKey fmt_hit {0x5000, 130, 1, 1}, fmt_size {0x5000, 130, 4, 4}, fmt_fmt {0x5000, 131, 1, 1};
+	Check(snap.ForceTexFor(0xbb, 5, &rgba, &fmt_hit) && rgba == 0xff000000u, "format filter missed its T#");
+	Check(!snap.ForceTexFor(0xbb, 5, &rgba, &fmt_size), "format filter ignored the size");
+	Check(!snap.ForceTexFor(0xbb, 5, &rgba, &fmt_fmt), "format filter ignored the format");
+	Check(snap.ForceTexFor(0xcc, 7, &rgba) && snap.ForceTexFor(0xcc, 7, &rgba, &other_addr), "unfiltered entry lost");
+
+	Check(snap.diag_tex.size() == 2 && snap.diag_tex[0].all && !snap.diag_tex[1].all, "diag_tex all flag");
+	Check(snap.DiagTexAll(0xaa, 30) && !snap.DiagTexAll(0xaa, 31) && !snap.DiagTexAll(0xbb, 4), "DiagTexAll lookup");
+	Check(!snap.DiagTexListed(0xaa, 30) && snap.DiagTexListed(0xbb, 4), "all entries must not also be once-per-block");
+
+	Check(!CF::Parse("force_tex=aa:30:ffff00ff@\n").errors.empty() && !CF::Parse("force_tex=aa:30:ffff00ff@zz\n").errors.empty() &&
+	          !CF::Parse("force_tex=aa:30:ffff00ff@fmt=130\n").errors.empty() &&
+	          !CF::Parse("force_tex=aa:30:ffff00ff@fmt=130,0x1\n").errors.empty() && !CF::Parse("diag_tex=aa:30:some\n").errors.empty(),
+	      "bad filter / all accepted");
+	CF::Snapshot a, b;
+	a.force_tex.push_back({1, 2, 3, {CF::TexFilter::Kind::Addr, 0x10, 0, 0, 0}});
+	b.force_tex.push_back({1, 2, 3, {}});
+	Check(!a.SameSettings(b), "filter ignored by SameSettings");
+}
+
 void TestStrictParsing() {
 	const auto file = CF::Parse("skip_cs=12zz\n"        // junk in a hex list
 	                            "skip_cs=0\n"            // zero hash
@@ -153,6 +194,7 @@ void TestPublishAndPoll() {
 int main() {
 	TestParseAndResolve();
 	TestDiagTex();
+	TestForceFilterAndDiagAll();
 	TestStrictParsing();
 	TestPublishAndPoll();
 	return 0;

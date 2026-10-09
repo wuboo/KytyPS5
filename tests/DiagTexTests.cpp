@@ -67,6 +67,55 @@ void TestPath() {
 	Check(TexDumpPath("/tmp/d", "", 1, 0xabc, 2, "raw") == "/tmp/d/diag_tex-1-tex-0000000000000abc-s2.raw", "path without label");
 }
 
+// S123: the per-draw line carries seq, slot, address, format, size, mips and the draw's index count and target.
+void TestDrawLine() {
+	TexInfo t;
+	t.flip = 6760; t.ps = 0xb96c2898f05637dfull; t.slot = 30; t.addr = 0x70d1770000ull; t.guest_format = 181; t.width = 4; t.height = 4;
+	t.base_level = 0; t.last_level = 0; t.max_mip = 0; t.byte_size = 16;
+	const auto line = TexDrawDescribe(7, t, 3600, 0x40000000ull, nullptr);
+	Check(line.rfind("[diag-tex-d] flip=6760 seq=7 ps=b96c2898f05637df slot=30 addr=0x70d1770000 fmt=181 4x4 mips=0..0/0 size=16", 0) == 0,
+	      "draw line head");
+	Check(Has(line, "indices=3600 rt=0x40000000") && !Has(line, "bc7"), "draw line tail");
+	Bc7Summary bc7;
+	bc7.first_mode = 6; bc7.first_ok = true; bc7.first_texel[0] = 0x78; bc7.first_texel[3] = 0xc3; bc7.blocks = 1; bc7.decoded = 1;
+	bc7.mean[0] = 246.5; bc7.mean[3] = 130.0;
+	Check(Has(TexDrawDescribe(8, t, 1, 0, &bc7), " bc7 mode=6 first=780000c3 mean=246.5,0.0,0.0,130.0 blocks=1/1"), "draw line bc7 part");
+}
+
+// S123: histogram per (ps, slot, addr, fmt, size): draw count, index sum and share of the slot's draws.
+void TestHistogram() {
+	TexHist hist;
+	TexInfo a;
+	a.flip = 9; a.ps = 0xaa; a.slot = 30; a.addr = 0x70d1770000ull; a.guest_format = 181; a.width = 4; a.height = 4;
+	TexInfo b = a;
+	b.addr = 0x5000; b.guest_format = 10; b.width = 1; b.height = 1;
+	TexInfo c = a; // same address and size as `a`, other format: its own row
+	c.guest_format = 182;
+	for (int i = 0; i < 3; i++) TexHistAdd(hist, a, 100, nullptr);
+	TexHistAdd(hist, b, 7, nullptr);
+	TexHistAdd(hist, c, 1, nullptr);
+	TexInfo other = a; // another slot: separate total
+	other.slot = 4;
+	TexHistAdd(hist, other, 5, nullptr);
+	const auto lines = TexHistLines(hist, 9);
+	Check(lines.size() == 4, "histogram rows");
+	Check(lines[0].rfind("[diag-tex-h] flip=9 ps=00000000000000aa slot=30 addr=0x70d1770000 fmt=181 4x4 draws=3 (60.0% of 5) indices=300", 0) == 0,
+	      "histogram top row");
+	Check(Has(lines[1], "draws=1 (") && Has(lines[2], "draws=1 (") && Has(lines[3], "draws=1 ("), "histogram other rows");
+	bool seen_b = false, seen_c = false, seen_other = false;
+	for (const auto& l: lines) {
+		seen_b |= Has(l, "addr=0x5000 fmt=10 1x1 draws=1 (20.0% of 5) indices=7");
+		seen_c |= Has(l, "addr=0x70d1770000 fmt=182 4x4 draws=1 (20.0% of 5) indices=1");
+		seen_other |= Has(l, "slot=4 ") && Has(l, "(100.0% of 1) indices=5");
+	}
+	Check(seen_b && seen_c && seen_other, "histogram keys (format / slot / indices)");
+	Bc7Summary bc7;
+	bc7.first_mode = 6; bc7.blocks = bc7.decoded = 1; bc7.mean[0] = 10;
+	TexHist h2;
+	TexHistAdd(h2, a, 1, &bc7);
+	Check(Has(TexHistLines(h2, 1)[0], " bc7 mode=6 first=00000000 mean=10.0,0.0,0.0,0.0"), "histogram bc7 part");
+}
+
 } // namespace
 
 int main() {
@@ -74,5 +123,7 @@ int main() {
 	TestZeroFraction();
 	TestOnce();
 	TestPath();
+	TestDrawLine();
+	TestHistogram();
 	return 0;
 }

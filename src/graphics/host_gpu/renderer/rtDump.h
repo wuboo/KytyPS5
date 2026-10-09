@@ -265,6 +265,20 @@ inline std::string RtPpm(const std::vector<uint8_t>& rgb, uint32_t width, uint32
 	return out;
 }
 
+// " rt_addr=0x<guest address of the target image>" appended to the [dump-rt] header (Store keeps only the last draw's
+// copy per target, so the address says which draw it was); empty when unknown.
+inline std::string RtAddrText(uint64_t address) {
+#ifdef KYTY_RTDUMP_MUTANT_NO_ADDR
+	(void)address;
+	return {};
+#else
+	if (address == 0) return {};
+	char buf[40];
+	std::snprintf(buf, sizeof(buf), " rt_addr=0x%llx", static_cast<unsigned long long>(address));
+	return buf;
+#endif
+}
+
 // "[dump-rt] mrt=N fmt=... w×h min/max/mean per channel", plus the display range for mapped targets.
 inline std::string RtDescribe(const char* what, const RtLayout& layout, uint32_t width, uint32_t height, const RtStats& stats) {
 	char        buf[160];

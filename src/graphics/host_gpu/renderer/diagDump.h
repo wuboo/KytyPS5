@@ -18,6 +18,7 @@ struct Target {
 	int                  vk_format = 0; // numeric VkFormat of the copy
 	uint32_t             width     = 0;
 	uint32_t             height    = 0;
+	uint64_t             addr      = 0; // guest address of the target image (0 = unknown)
 	std::vector<uint8_t> data;
 };
 
@@ -33,6 +34,18 @@ bool                    WantsTex(uint64_t ps_hash, uint32_t slot); // true once 
 void                    AddTexRequest(TexRequest&& request);
 std::vector<TexRequest> TakeTexRequests();
 void                    StoreTex(const TexInfo& info, Target&& target); // empty data = could not be read back
+
+// diag_tex=<ps>:<slot>:all: ResolveTexture queues one TexDraw per sampled slot of a draw (WantsTexAll); the draw's end
+// (DiagTexDrawDone, with the index count and the first render target's address) logs [diag-tex-d] and feeds the
+// per-flip histogram that FlipReport prints as [diag-tex-h]. No readback.
+struct TexDraw {
+	TexInfo    info;
+	bool       has_bc7 = false;
+	Bc7Summary bc7;
+};
+bool WantsTexAll(uint64_t ps_hash, uint32_t slot);
+void AddTexDraw(TexDraw&& draw);
+void TexDrawsDone(uint64_t index_count, uint64_t rt_addr);
 
 bool Wants(uint64_t ps_hash);
 void Store(uint64_t ps_hash, Target&& target);
