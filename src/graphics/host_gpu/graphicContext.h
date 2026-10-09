@@ -31,6 +31,10 @@ struct GraphicContext {
 	bool                               compute_subgroup_size_control_enabled = false;
 	bool                               sample_rate_shading_enabled           = false;
 	bool                               shader_image_int64_atomics_enabled    = false;
+	// VK_EXT_image_view_min_lod enabled with its feature: the T# MinLod clamp goes to the image view natively.
+	bool                               has_view_min_lod                      = false;
+	// No native clamp: the T# MinLod is folded into the view base level (KYTY_TSHARP_MINLOD_APPLE=0 turns it off).
+	bool                               min_lod_remap                         = false;
 	// bool fp64_denorm_preserve = false; // Temporarily disabled.
 	bool                               device_address_destruction_waits_for_queue = false;
 	bool                               attachment_feedback_loop_enabled      = false;

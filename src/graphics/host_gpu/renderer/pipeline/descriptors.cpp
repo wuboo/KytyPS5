@@ -667,27 +667,30 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	desc.view_info = TextureViewInfo(resource, descriptor, view_format, surface_format, storage,
 	                                 view_levels, desc.info.resources.layers);
 	desc.view_info.base_level = view_base;
-#if defined(__APPLE__)
-	// S126: MoltenVK has no VK_EXT_image_view_min_lod, so the T# MinLod clamp never reaches the view.
-	// KYTY_TSHARP_MINLOD_APPLE=1 turns it into a higher view base level (sampled, non-Dynamic only).
+	// Without VK_EXT_image_view_min_lod (MoltenVK) the T# MinLod clamp cannot reach the view: fold it into a higher
+	// view base level (sampled, non-Dynamic only). KYTY_TSHARP_MINLOD_APPLE=0 turns that off for A/B.
 	if (desc.view_info.min_lod != 0 && !storage &&
 	    resource.mip_mode != ShaderRecompiler::IR::ImageMipMode::Dynamic) {
-		const char* env      = std::getenv("KYTY_TSHARP_MINLOD_APPLE");
-		const bool  remap    = env != nullptr && env[0] == '1';
+		const auto& graphics = m_context.GetGraphics();
 		const auto  original = desc.view_info.min_lod;
-		if (remap) {
+		if (MinLodIsFractional(original)) {
+			FrameTiming::Add(FrameTiming::Counter::MinLodFrac);
+		}
+		if (graphics.min_lod_remap) {
 			const auto mapped = MapMinLodToBaseLevel(desc.view_info.base_level,
 			                                         desc.view_info.level_count, original);
 			desc.view_info.base_level  = mapped.base_level;
 			desc.view_info.level_count = mapped.level_count;
 			desc.view_info.min_lod     = mapped.min_lod;
 			FrameTiming::Add(FrameTiming::Counter::MinLodRemapped);
+			if (resource.queries_size) {
+				FrameTiming::Add(FrameTiming::Counter::MinLodResinfo);
+			}
 		}
-		if (MinLodDropped(true, remap, false, false, original)) {
+		if (MinLodDropped(graphics.has_view_min_lod, graphics.min_lod_remap, false, false, original)) {
 			FrameTiming::Add(FrameTiming::Counter::MinLodDropped);
 		}
 	}
-#endif
 	desc.type = storage ? TextureCache::BindingType::Storage : TextureCache::BindingType::Texture;
 
 	auto       id                  = texture_cache.FindImage(desc, shader_conversion);
