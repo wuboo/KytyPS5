@@ -9,6 +9,7 @@
 #include "common/file.h"
 #include "common/hash.h"
 #include "common/logging/log.h"
+#include "common/memEvents.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "kernel/memory.h"
@@ -157,6 +158,15 @@ static std::vector<uint8_t> PackDirents(const std::vector<Common::File::DirEntry
 		*last_reclen += static_cast<uint16_t>(dirents.size() - offset);
 	}
 	return dirents;
+}
+
+// S125 watch_tex (DIAG): a read into guest memory is a possible writer of a watched range.
+static void RecordGuestRead(const void* buf, uint64_t nbytes, uint64_t file_offset, int64_t result, uint64_t got, const std::filesystem::path& path) {
+	if (!Common::MemEvents::Enabled()) return;
+	const auto text = Common::PathToString(path);
+	char       tag[56];
+	std::snprintf(tag, sizeof(tag), "read got=%llu ..%s", static_cast<unsigned long long>(got), text.size() > 30 ? text.c_str() + text.size() - 30 : text.c_str());
+	Common::MemEvents::Record(Common::MemEvents::Kind::FileRead, reinterpret_cast<uint64_t>(buf), nbytes, file_offset, result, tag);
 }
 
 static uint64_t ReadDirectory(File* file, void* buf, uint64_t count) {
@@ -671,6 +681,7 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 	uint32_t bytes_read = 0;
 	file->f.Read(buf, static_cast<uint32_t>(nbytes), &bytes_read);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::GuestFileReadBytes, bytes_read);
+	RecordGuestRead(buf, nbytes, pos, is_invalid ? KERNEL_ERROR_EIO : 0, bytes_read, file->real_name);
 
 	file->mutex.Unlock();
 
@@ -799,6 +810,7 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 	file->f.Seek(offset);
 	file->f.Read(buf, static_cast<uint32_t>(nbytes), &bytes_read);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::GuestFileReadBytes, bytes_read);
+	RecordGuestRead(buf, nbytes, static_cast<uint64_t>(offset), is_invalid ? KERNEL_ERROR_EIO : 0, bytes_read, file->real_name);
 	file->f.Seek(pos);
 
 	file->mutex.Unlock();
@@ -901,6 +913,7 @@ int64_t KYTY_SYSV_ABI KernelPreadv(int d, const KernelIovec* iov, int iovcnt, in
 		uint32_t bytes = 0;
 		file->f.Read(buffer.iov_base, count, &bytes);
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::GuestFileReadBytes, bytes);
+		RecordGuestRead(buffer.iov_base, count, static_cast<uint64_t>(offset) + static_cast<uint64_t>(bytes_read), 0, bytes, file->real_name);
 		bytes_read += bytes;
 		remaining -= bytes;
 		if (bytes < count) {

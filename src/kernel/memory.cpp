@@ -2,6 +2,7 @@
 
 #include "common/assert.h"
 #include "common/logging/log.h"
+#include "common/memEvents.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/virtualMemory.h"
@@ -256,6 +257,7 @@ public:
 		auto inserted = m_ranges.emplace_hint(position, start, r);
 		UpdatePageTableEntries(inserted->second, true);
 		MergeAroundUnlocked(inserted);
+		Common::MemEvents::Record(IsReservedRangeType(type) ? Common::MemEvents::Kind::Reserve : Common::MemEvents::Kind::Map, start, size, offset, static_cast<int64_t>(type), name);
 		return true;
 	}
 
@@ -264,9 +266,11 @@ public:
 
 		auto position = m_ranges.find(start);
 		if (position != m_ranges.end() && position->second.size == size) {
+			Common::MemEvents::Record(Common::MemEvents::Kind::Unmap, start, size, position->second.offset, static_cast<int64_t>(position->second.type), position->second.name);
 			EraseUnlocked(position);
 			return true;
 		}
+		Common::MemEvents::Record(Common::MemEvents::Kind::Unmap, start, size, 0, -1);
 		return RemoveUnlocked(start, size);
 	}
 
@@ -294,6 +298,7 @@ public:
 		auto position = m_ranges.find(start);
 		if (position != m_ranges.end() && position->second.size == size &&
 		    IsReservedRangeType(position->second.type)) {
+			Common::MemEvents::Record(Common::MemEvents::Kind::ReleaseReserved, start, size, 0, static_cast<int64_t>(position->second.type), position->second.name);
 			EraseUnlocked(position);
 		}
 		return true;
@@ -344,11 +349,13 @@ public:
 		first->second = replacement;
 		UpdatePageTableEntries(first->second, true);
 		MergeAroundUnlocked(first);
+		Common::MemEvents::Record(Common::MemEvents::Kind::Remap, start, size, offset, static_cast<int64_t>(type), name);
 		return true;
 	}
 
 	void Rename(uint64_t start, uint64_t size, const char* name) {
 		Common::LockGuard lock(m_mutex);
+		Common::MemEvents::Record(Common::MemEvents::Kind::Rename, start, size, 0, 0, name);
 
 		auto position = m_ranges.find(start);
 		if (position != m_ranges.end() && position->second.size == size) {
@@ -361,6 +368,7 @@ public:
 
 	void Protect(uint64_t start, uint64_t size, int protection) {
 		Common::LockGuard lock(m_mutex);
+		Common::MemEvents::Record(Common::MemEvents::Kind::Protect, start, size, static_cast<uint64_t>(protection));
 
 		EditUnlocked(start, size, [protection](Range* r) { r->protection = protection; });
 	}
@@ -4181,8 +4189,15 @@ int KYTY_SYSV_ABI KernelMemoryPoolReserve(void* addr_in, size_t len, size_t alig
 	return ret;
 }
 
+static int PoolCommitInner(void* addr, size_t len, int type, int prot, int flags);
 int KYTY_SYSV_ABI KernelMemoryPoolCommit(void* addr, size_t len, int type, int prot, int flags) {
 	PRINT_NAME();
+	const int ret = PoolCommitInner(addr, len, type, prot, flags);
+	Common::MemEvents::Record(Common::MemEvents::Kind::PoolCommit, reinterpret_cast<uint64_t>(addr), len, static_cast<uint64_t>(prot), ret);
+	return ret;
+}
+
+static int PoolCommitInner(void* addr, size_t len, int type, int prot, int flags) {
 
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
 
@@ -4312,8 +4327,15 @@ static int DecommitMemoryPoolRange(uint64_t vaddr, size_t len) {
 	return OK;
 }
 
+static int PoolDecommitInner(void* addr, size_t len, int flags);
 int KYTY_SYSV_ABI KernelMemoryPoolDecommit(void* addr, size_t len, int flags) {
 	PRINT_NAME();
+	const int ret = PoolDecommitInner(addr, len, flags);
+	Common::MemEvents::Record(Common::MemEvents::Kind::PoolDecommit, reinterpret_cast<uint64_t>(addr), len, static_cast<uint64_t>(flags), ret);
+	return ret;
+}
+
+static int PoolDecommitInner(void* addr, size_t len, int flags) {
 
 	std::lock_guard<std::recursive_mutex> memory_operation_lock(g_memory_operation_mutex);
 
@@ -4393,6 +4415,12 @@ int KYTY_SYSV_ABI KernelMemoryPoolBatch(const KernelMemoryPoolBatchEntry* entrie
 				                            entry.type_protect.type, entry.type_protect.prot);
 				break;
 			case POOL_OP_MOVE:
+				Common::MemEvents::Record(Common::MemEvents::Kind::PoolMoveEinval, reinterpret_cast<uint64_t>(entry.move.dst), entry.move.len,
+				         reinterpret_cast<uint64_t>(entry.move.src), KERNEL_ERROR_EINVAL, "dst");
+				Common::MemEvents::Record(Common::MemEvents::Kind::PoolMoveEinval, reinterpret_cast<uint64_t>(entry.move.src), entry.move.len,
+				         reinterpret_cast<uint64_t>(entry.move.dst), KERNEL_ERROR_EINVAL, "src");
+				result = KERNEL_ERROR_EINVAL;
+				break;
 			default: result = KERNEL_ERROR_EINVAL; break;
 		}
 

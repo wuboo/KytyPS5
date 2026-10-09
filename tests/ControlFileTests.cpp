@@ -215,6 +215,24 @@ void TestDumpTex() {
 	Check(!a.SameSettings(b), "dump_tex ignored by SameSettings");
 }
 
+// S125: watch_tex=<ps>:<slot>[@filter] parses like dump_tex but is its own key.
+void TestWatchTex() {
+	const auto file = CF::Parse("watch_tex=b96c2898f05637df:30@fmt=182,2048x2048\n@100\nwatch_tex=\n");
+	Check(file.errors.empty(), "watch_tex line rejected");
+	const auto snap = CF::Resolve(file, 1);
+	Check(snap.watch_tex.size() == 1 && snap.dump_tex.empty(), "watch_tex must not fill dump_tex");
+	const CF::TexKey terrain {0x70cd470000ull, 182, 2048, 2048}, other {0x70cd470000ull, 130, 64, 64};
+	Check(snap.WatchTexListed(0xb96c2898f05637dfull, 30, terrain), "watch_tex did not list the T#");
+	Check(!snap.WatchTexListed(0xb96c2898f05637dfull, 30, other), "watch_tex ignored its format filter");
+	Check(!snap.WatchTexListed(0xb96c2898f05637dfull, 31, terrain), "watch_tex matched another slot");
+	Check(!snap.DumpTexListed(0xb96c2898f05637dfull, 30, terrain), "dump_tex listed a watch_tex entry");
+	Check(CF::Resolve(file, 150).watch_tex.empty(), "empty value did not clear watch_tex");
+	Check(!CF::Parse("watch_tex=abc\n").errors.empty() && !CF::Parse("watch_tex=abc:128\n").errors.empty(), "bad watch_tex accepted");
+	CF::Snapshot a, b;
+	b.watch_tex.push_back({1, 2, {}});
+	Check(!a.SameSettings(b), "watch_tex ignored by SameSettings");
+}
+
 } // namespace
 
 int main() {
@@ -222,6 +240,7 @@ int main() {
 	TestDiagTex();
 	TestForceFilterAndDiagAll();
 	TestDumpTex();
+	TestWatchTex();
 	TestStrictParsing();
 	TestPublishAndPoll();
 	return 0;
