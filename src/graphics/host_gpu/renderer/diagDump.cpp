@@ -8,6 +8,7 @@
 
 #include <cinttypes>
 #include <cstdio>
+#include <algorithm>
 #include <cstdlib>
 #include <map>
 #include <mutex>
@@ -26,6 +27,8 @@ std::vector<TexRequest>                      g_tex_requests;
 std::vector<std::pair<TexInfo, Target>>      g_tex_done;
 std::vector<TexDraw>                         g_tex_draws; // queued by ResolveTexture, finished at the end of the draw
 TexHist                                      g_tex_hist;
+TexOnceState                                 g_dump_tex_once;
+std::vector<DumpTexRequest>                  g_dump_tex_requests;
 uint64_t                                     g_tex_seq = 0;
 
 } // namespace
@@ -35,6 +38,70 @@ bool WantsTex(uint64_t ps_hash, uint32_t slot) {
 	if (snapshot.diag_tex.empty() || ps_hash == 0 || !snapshot.DiagTexListed(ps_hash, slot)) return false;
 	std::lock_guard lock(g_mutex);
 	return TexFirst(g_tex_once, snapshot.gen, ps_hash, slot);
+}
+
+bool WantsDumpTex(uint64_t ps_hash, uint32_t slot, const Common::ControlFile::TexKey& key) {
+	const auto& snapshot = Common::ControlFile::Current();
+	if (snapshot.dump_tex.empty() || ps_hash == 0 || !snapshot.DumpTexListed(ps_hash, slot, key)) return false;
+	std::lock_guard lock(g_mutex);
+	return TexFirst(g_dump_tex_once, snapshot.gen, ps_hash, slot);
+}
+
+void AddDumpTexRequest(DumpTexRequest&& request) {
+	std::lock_guard lock(g_mutex);
+	g_dump_tex_requests.push_back(std::move(request));
+}
+
+std::vector<DumpTexRequest> TakeDumpTexRequests() {
+	std::lock_guard lock(g_mutex);
+	return std::exchange(g_dump_tex_requests, {});
+}
+
+// Writes `rgba` (w x h) as a PNG no larger than `limit` pixels on a side (box filter by an integer factor).
+static void WritePng(const std::string& path, const std::vector<uint8_t>& rgba, uint32_t w, uint32_t h, uint32_t limit) {
+	uint32_t   ow = 0, oh = 0;
+	const auto small = DownscaleRgba(rgba, w, h, FactorFor(w, h, limit), ow, oh);
+	const auto png   = PngEncodeRgba(small.data(), ow, oh);
+	if (FILE* file = std::fopen(path.c_str(), "wb"); file != nullptr) {
+		std::fwrite(png.data(), 1, png.size(), file);
+		std::fclose(file);
+		LOGF("[dump-tex] wrote %s (%ux%u from %ux%u)\n", path.c_str(), ow, oh, w, h);
+	} else {
+		LOGF("[dump-tex] cannot write %s\n", path.c_str());
+	}
+}
+
+void WriteDumpTex(const DumpTexResult& r) {
+	const auto&    t = r.info;
+	char           head[256];
+	std::snprintf(head, sizeof(head), "[dump-tex] flip=%" PRIu64 " ps=%016" PRIx64 " slot=%u addr=0x%" PRIx64 " fmt=%u %ux%u tile=%u blocks=%ux%u",
+	              t.flip, t.ps, t.slot, t.addr, t.guest_format, t.width, t.height, t.tile_mode, r.blocks_w, r.blocks_h);
+	LOGF("%s\n", head);
+	for (const auto& note: r.notes) LOGF("%s\n", note.c_str());
+	const uint32_t count = r.blocks_w * r.blocks_h;
+	const size_t   bytes = static_cast<size_t>(count) * 16;
+	const bool     have_guest = count != 0 && r.guest.size() >= bytes, have_host = count != 0 && r.host.size() >= bytes;
+	const char*    dir = std::getenv("KYTY_DIAG_DIR");
+	const bool     files = dir != nullptr && dir[0] != '\0';
+	const auto&    label = Common::ControlFile::Current().label;
+	constexpr uint32_t kLimit = 1024;
+	if (have_guest) {
+		LOGF("%s\n", Bc7StatsLine("guest", Bc7Analyze(r.guest.data(), count)).c_str());
+		if (files) WritePng(DumpTexPath(dir, label, t.flip, t.ps, t.slot, "guest"), Bc7ToRgba(r.guest.data(), r.blocks_w, r.blocks_h), r.blocks_w * 4, r.blocks_h * 4, kLimit);
+	}
+	if (have_host) {
+		LOGF("%s\n", Bc7StatsLine("host", Bc7Analyze(r.host.data(), count)).c_str());
+		if (files) WritePng(DumpTexPath(dir, label, t.flip, t.ps, t.slot, "host"), Bc7ToRgba(r.host.data(), r.blocks_w, r.blocks_h), r.blocks_w * 4, r.blocks_h * 4, kLimit);
+	}
+	if (have_guest && have_host) {
+		LOGF("%s\n", Bc7DiffLine(Bc7Compare(r.guest.data(), r.host.data(), r.blocks_w, r.blocks_h), r.blocks_w).c_str());
+		if (files) {
+			const uint32_t scale = std::max(1u, 512u / std::max(std::max(r.blocks_w, r.blocks_h), 1u));
+			WritePng(DumpTexPath(dir, label, t.flip, t.ps, t.slot, "diff"), Bc7DiffMap(r.guest.data(), r.host.data(), r.blocks_w, r.blocks_h, scale), r.blocks_w * scale, r.blocks_h * scale, kLimit);
+		}
+	} else {
+		LOGF("[dump-tex] diff unavailable (guest %s, host %s)\n", have_guest ? "ok" : "missing", have_host ? "ok" : "missing");
+	}
 }
 
 bool WantsTexAll(uint64_t ps_hash, uint32_t slot) {

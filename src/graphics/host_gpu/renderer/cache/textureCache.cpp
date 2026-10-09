@@ -1054,11 +1054,26 @@ void TextureCache::InitializeImage(ImageId id) {
 			EXIT("TextureCache: failed to obtain image upload source\n");
 		}
 		UploadImage(image, *source, source_offset);
+		image.NoteDiagUpload();
 		image.ClearBufferModified();
 	}
 	if (image.IsCpuDirty()) {
 		image.RefreshComplete();
 	}
+}
+
+bool TextureCache::DiagUploadTiles(ImageId id, std::vector<GpuTileInfo>& tiles) {
+	const auto& image = m_slot_images[id];
+	const auto  binding = UploadBinding(image);
+	if (binding == BindingType::DepthTarget || image.info.samples != 1 || image.depth_id) {
+		return false;
+	}
+	const auto transfer = BuildTextureTransfer(image, binding, TransferDirection::Upload);
+	if (!transfer.valid || transfer.tiles.empty()) {
+		return false;
+	}
+	tiles = transfer.tiles;
+	return true;
 }
 
 void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,

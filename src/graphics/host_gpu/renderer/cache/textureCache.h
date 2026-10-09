@@ -59,6 +59,9 @@ public:
 	[[nodiscard]] vk::ImageView FindDepthTarget(ImageId id, const ImageDesc& desc);
 	// force_tex (control file): a 1x1 RGBA8 image cleared to one colour (r in the low byte), one per colour.
 	[[nodiscard]] ImageId       GetForcedImage(uint32_t rgba);
+	// S124 dump_tex: the tile list the upload of `id` from guest memory uses (mip 0, layer 0 first); false when the image
+	// is untiled, multisampled or a depth target.
+	[[nodiscard]] bool          DiagUploadTiles(ImageId id, std::vector<GpuTileInfo>& tiles);
 	[[nodiscard]] Image&        GetImage(ImageId id) {
 		auto& image = m_slot_images[id];
 		TouchImage(image);

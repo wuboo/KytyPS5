@@ -1,7 +1,9 @@
 #ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_DIAGDUMP_H_
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_DIAGDUMP_H_
 
+#include "common/controlFile.h"
 #include "common/slotVector.h"
+#include "graphics/host_gpu/renderer/bcDump.h"
 #include "graphics/host_gpu/renderer/diagTex.h"
 
 #include <cstdint>
@@ -46,6 +48,24 @@ struct TexDraw {
 bool WantsTexAll(uint64_t ps_hash, uint32_t slot);
 void AddTexDraw(TexDraw&& draw);
 void TexDrawsDone(uint64_t index_count, uint64_t rt_addr);
+
+// dump_tex=<ps>:<slot>[@filter]: ResolveTexture queues one request per block (WantsDumpTex fires at the first draw whose T#
+// fits the filter); after that draw the renderer decodes mip 0 from guest memory and from the host image and hands both to
+// WriteDumpTex, which logs [dump-tex] lines and writes the PNGs to $KYTY_DIAG_DIR.
+struct DumpTexRequest {
+	Common::SlotId image;
+	TexInfo        info;
+};
+struct DumpTexResult {
+	TexInfo              info;
+	uint32_t             blocks_w = 0, blocks_h = 0; // BC blocks of mip 0
+	std::vector<uint8_t> guest, host;                // blocks_w * blocks_h * 16 bytes each, empty = not available
+	std::vector<std::string> notes;                  // one [dump-tex] line each: layout, host image, tracker state
+};
+bool                        WantsDumpTex(uint64_t ps_hash, uint32_t slot, const Common::ControlFile::TexKey& key);
+void                        AddDumpTexRequest(DumpTexRequest&& request);
+std::vector<DumpTexRequest> TakeDumpTexRequests();
+void                        WriteDumpTex(const DumpTexResult& result);
 
 bool Wants(uint64_t ps_hash);
 void Store(uint64_t ps_hash, Target&& target);
