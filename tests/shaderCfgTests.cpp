@@ -6916,6 +6916,30 @@ void TestCustomVintrpMovTranslation() {
   CheckSpirvBinaryValidates(mixed_linear_result.spirv);
 }
 
+void TestPerVertexPrototypeDrawGate() {
+  // A pixel shader with PerVertexKHR cannot run natively on the host, so a draw the prototype
+  // cannot execute must be skipped (counted), never reach EXIT_IF. Only a plain triangle list
+  // runs; a trailing partial triangle is dropped.
+  using T = vk::PrimitiveTopology;
+  auto run = ClassifyPerVertexPrototypeDraw(true, T::eTriangleList, false, 12);
+  Check(run.run && run.index_count == 12 && run.reason == nullptr, "plain triangle list must run");
+  auto partial = ClassifyPerVertexPrototypeDraw(true, T::eTriangleList, false, 14);
+  Check(partial.run && partial.index_count == 12 && partial.reason != nullptr,
+        "partial triangle must be dropped, not exit");
+  Check(!ClassifyPerVertexPrototypeDraw(true, T::eTriangleList, false, 2).run,
+        "less than one triangle must be skipped");
+  Check(!ClassifyPerVertexPrototypeDraw(true, T::eTriangleList, true, 12).run,
+        "primitive restart must be skipped");
+  Check(!ClassifyPerVertexPrototypeDraw(true, T::ePatchList, false, 12).run,
+        "rect list (patch list) must be skipped");
+  Check(!ClassifyPerVertexPrototypeDraw(true, T::eTriangleStrip, false, 12).run,
+        "triangle strip must be skipped");
+  Check(!ClassifyPerVertexPrototypeDraw(true, T::eTriangleFan, false, 12).run,
+        "triangle fan must be skipped");
+  Check(!ClassifyPerVertexPrototypeDraw(false, T::eTriangleList, false, 12).run,
+        "draw without pixel shader must be skipped");
+}
+
 void TestPerVertexPrototypeDetection() {
   // The live experiment activates on any pixel shader whose recompiled module
   // declares a per-vertex parameter input, so the scan must find the
@@ -16755,6 +16779,7 @@ int main(int argc, char** argv) {
   EnsureConfigInitialized();
   if (argc == 2 && std::string_view(argv[1]) == "--per-vertex") {
     TestPerVertexPrototypeDetection();
+    TestPerVertexPrototypeDrawGate();
     return 0;
   }
   TestRayTracingInstructions();
@@ -16937,6 +16962,7 @@ int main(int argc, char** argv) {
   TestNewShaderRecompilerStageInputInfo();
   TestCustomVintrpMovTranslation();
   TestPerVertexPrototypeDetection();
+  TestPerVertexPrototypeDrawGate();
   TestPerspectiveCentroidInputs();
   TestPerspectiveSampleInputs();
   TestGraphicsCreateInterpolantMapping();

@@ -70,6 +70,16 @@ bool PerVertexPrototypeEnabled() {
 	return std::getenv("KYTY_PER_VERTEX_PROTOTYPE") != nullptr;
 }
 
+PerVertexDrawVerdict ClassifyPerVertexPrototypeDraw(bool ps_active, vk::PrimitiveTopology topology,
+                                                    bool primitive_restart, uint32_t index_count) {
+	if (!ps_active) return {false, index_count, "no pixel shader"};
+	if (topology != vk::PrimitiveTopology::eTriangleList) return {false, index_count, "topology"};
+	if (primitive_restart) return {false, index_count, "primitive restart"};
+	const uint32_t whole = index_count - index_count % 3;
+	if (whole == 0) return {false, index_count, "less than one triangle"};
+	return {true, whole, whole != index_count ? "partial triangle dropped" : nullptr};
+}
+
 bool HasPerVertexPrototypeInput(std::span<const uint32_t> words) {
 	if (words.size() < 5 || words[0] != spv::MagicNumber) return false;
 	bool found = false;
