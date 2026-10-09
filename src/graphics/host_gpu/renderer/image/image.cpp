@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/renderer/image/tiler.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
+#include "graphics/presentation/frameTiming.h"
 #include "kernel/memory.h"
 
 #include <algorithm>
@@ -237,6 +238,22 @@ void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destina
 	dependency.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());
 	dependency.pImageMemoryBarriers    = barriers.data();
 	command_buffer.pipelineBarrier2(dependency);
+}
+
+void Image::NoteDiagUpload() {
+	diag.upload_flip = FrameTiming::GuestFlips() + 1;
+	diag.uploads++;
+}
+
+void Image::NoteDiagWrite(bool definite) {
+	const auto flip = FrameTiming::GuestFlips() + 1;
+	if (definite) {
+		diag.write_flip = flip;
+		diag.writes++;
+	} else {
+		diag.page_flip = flip;
+		diag.page_writes++;
+	}
 }
 
 void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,

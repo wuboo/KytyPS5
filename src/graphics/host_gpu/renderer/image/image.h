@@ -73,6 +73,16 @@ public:
 		m_maybe_cpu_dirty = false;
 	}
 
+	// S124 dump_tex: when (guest flip) the host copy was last uploaded from guest memory and when the CPU-write tracker last
+	// saw a write into the image range (`write`) or only into one of its pages (`page`). Read only by dump_tex.
+	struct DiagStamps {
+		uint64_t upload_flip = 0, uploads = 0;
+		uint64_t write_flip = 0, writes = 0;
+		uint64_t page_flip = 0, page_writes = 0;
+	};
+	DiagStamps diag;
+	void       NoteDiagUpload();
+
 	[[nodiscard]] bool IsCpuDirty() const { return m_cpu_dirty || m_maybe_cpu_dirty; }
 	[[nodiscard]] bool IsDefinitelyCpuDirty() const { return m_cpu_dirty; }
 	[[nodiscard]] bool IsMaybeCpuDirty() const { return m_maybe_cpu_dirty; }
@@ -140,6 +150,8 @@ public:
 
 private:
 	friend struct ImageTestAccess;
+
+	void NoteDiagWrite(bool definite);
 
 	[[nodiscard]] static vk::ImageAspectFlags FullAspectMask(vk::Format format) noexcept;
 	[[nodiscard]] static uint32_t             CopyRows(uint64_t row_size, uint32_t rows,

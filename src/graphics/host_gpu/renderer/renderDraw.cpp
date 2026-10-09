@@ -1186,8 +1186,128 @@ static void DumpRenderTargets(RenderContext& context, uint64_t ps, const RenderC
 	}
 }
 
+// dump_tex: decodes mip 0 / layer 0 of a BC7 texture from guest memory (detiled with the tile list the texture cache uploads
+// with) and from the host image the draw sampled, and hands both to DiagDump::WriteDumpTex.
+static void DumpTexOne(RenderContext& context, const DiagDump::DumpTexRequest& request) {
+	DiagDump::DumpTexResult result;
+	result.info = request.info;
+	char note[640];
+	auto& cache = context.GetTextureCache();
+	auto& image = cache.GetImage(request.image);
+	const auto& info = image.info;
+	if (info.guest_format != Prospero::BufferFormat::kBc7UNorm && info.guest_format != Prospero::BufferFormat::kBc7Srgb) {
+		std::snprintf(note, sizeof(note), "[dump-tex] not a BC7 texture (guest format %u): nothing to compare",
+		              static_cast<uint32_t>(info.guest_format));
+		result.notes.push_back(note);
+		DiagDump::WriteDumpTex(result);
+		return;
+	}
+
+	// (a) guest memory
+	std::vector<GpuTileInfo> tiles;
+	if (!cache.DiagUploadTiles(request.image, tiles)) {
+		result.notes.push_back("[dump-tex] guest side unavailable: the image has no tiled upload (linear, depth or multisampled)");
+	} else {
+		const auto&     tile = tiles[0];
+		TileBlockLayout block {};
+		if (!TileGetBlockLayout(tile.family, tile.bytes_per_element, block) || tile.bytes_per_element != 16 ||
+		    (tile.family != TileBlockFamily::Standard256B && tile.family != TileBlockFamily::Standard4KB &&
+		     tile.family != TileBlockFamily::Standard64KB && tile.family != TileBlockFamily::Prt64KB)) {
+			std::snprintf(note, sizeof(note), "[dump-tex] guest side unavailable: block family %u elem %u B not handled",
+			              static_cast<uint32_t>(tile.family), tile.bytes_per_element);
+			result.notes.push_back(note);
+		} else {
+			DiagDump::BcTileSpec spec;
+			spec.block_width  = block.block_width;
+			spec.block_height = block.block_height;
+			spec.block_bytes  = block.block_size;
+			spec.elem_bytes   = tile.bytes_per_element;
+			spec.tiled_offset = tile.tiled_offset;
+			spec.tiled_size   = tile.tiled_size;
+			spec.width        = tile.width;
+			spec.height       = tile.height;
+			spec.tiled_width  = tile.tiled_width != 0 ? tile.tiled_width : tile.pitch;
+			spec.tiled_height = tile.tiled_height != 0 ? tile.tiled_height : tile.height;
+			spec.tail         = tile.tail;
+			spec.tail_x       = tile.tail_x;
+			spec.tail_y       = tile.tail_y;
+			const auto offset = [&](uint32_t x, uint32_t y, uint32_t& within) { return TileGetBlockOffset(block, x, y, 0, within); };
+			const auto* guest = reinterpret_cast<const uint8_t*>(info.data.address);
+			const auto  missing = DiagDump::BcDetile(guest, info.data.size, spec, offset, result.guest);
+			result.blocks_w = tile.width;
+			result.blocks_h = tile.height;
+			std::snprintf(note, sizeof(note),
+			              "[dump-tex] guest layout family=%u block=%ux%u elements (%u B) mip0 offset=%" PRIu64 " size=%" PRIu64
+			              " elements=%ux%u padded=%ux%u tail=%d image_size=%" PRIu64 " unreadable_elements=%" PRIu64,
+			              static_cast<uint32_t>(tile.family), block.block_width, block.block_height, block.block_size, tile.tiled_offset,
+			              tile.tiled_size, tile.width, tile.height, spec.tiled_width, spec.tiled_height, tile.tail ? 1 : 0, info.data.size,
+			              missing);
+			result.notes.push_back(note);
+		}
+	}
+
+	// (b) host image: the BC blocks of mip 0
+	const auto host_format = image.backing.format;
+	if (image.backing.image == nullptr || image.info.samples != 1 ||
+	    (host_format != vk::Format::eBc7UnormBlock && host_format != vk::Format::eBc7SrgbBlock)) {
+		std::snprintf(note, sizeof(note), "[dump-tex] host side unavailable: backing format %d (image %s)", static_cast<int>(host_format),
+		              image.backing.image == nullptr ? "not backed" : "backed");
+		result.notes.push_back(note);
+	} else {
+		const uint32_t bw = (info.extent.width + 3u) / 4u, bh = (info.extent.height + 3u) / 4u;
+		if (result.blocks_w != 0 && (bw != result.blocks_w || bh != result.blocks_h)) {
+			std::snprintf(note, sizeof(note), "[dump-tex] host blocks %ux%u differ from the guest layout %ux%u: host side skipped", bw, bh,
+			              result.blocks_w, result.blocks_h);
+			result.notes.push_back(note);
+		} else {
+			const uint64_t size = static_cast<uint64_t>(bw) * bh * 16;
+			Buffer         buffer(context.GetGraphics(), context.GetCommandScheduler(), MemoryUsage::Download, 0,
+			                      vk::BufferUsageFlagBits::eTransferDst, size);
+			vk::BufferImageCopy region {};
+			region.imageSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
+			region.imageSubresource.mipLevel       = 0;
+			region.imageSubresource.baseArrayLayer = 0;
+			region.imageSubresource.layerCount     = 1;
+			region.imageExtent                     = vk::Extent3D {info.extent.width, info.extent.height, 1};
+			image.Download(std::span {&region, 1}, buffer.Handle(), 0, size);
+			context.GetCommandScheduler().FlushAndWait();
+			buffer.Invalidate(0, buffer.Size());
+			if (buffer.Mapped().size() >= size) {
+				result.host.assign(buffer.Mapped().data(), buffer.Mapped().data() + size);
+				result.blocks_w = bw;
+				result.blocks_h = bh;
+			}
+			std::snprintf(note, sizeof(note), "[dump-tex] host image=0x%" PRIx64 " backing_format=%d extent=%ux%u levels=%u read=%" PRIu64 " B",
+			              reinterpret_cast<uint64_t>(static_cast<VkImage>(image.backing.image)), static_cast<int>(host_format),
+			              info.extent.width, info.extent.height, info.resources.levels, result.host.size());
+			result.notes.push_back(note);
+		}
+	}
+
+	// (d) when the host copy was uploaded and what the CPU-write tracker knows since
+	const char* uma = std::getenv("KYTY_UMA");
+	std::snprintf(note, sizeof(note),
+	              "[dump-tex] state cur_flip=%" PRIu64 " host_upload_flip=%" PRIu64 " uploads=%" PRIu64 " cpu_dirty=%d maybe_dirty=%d gpu_modified=%d "
+	              "buffer_modified=%d tracked=%d write_flip=%" PRIu64 " writes=%" PRIu64 " page_write_flip=%" PRIu64 " page_writes=%" PRIu64
+	              " uma=%s%s",
+	              FrameTiming::GuestFlips() + 1, image.diag.upload_flip, image.diag.uploads, image.IsDefinitelyCpuDirty() ? 1 : 0,
+	              image.IsMaybeCpuDirty() ? 1 : 0, image.IsGpuModified() ? 1 : 0, image.IsBufferModified() ? 1 : 0, image.IsTracked() ? 1 : 0,
+	              image.diag.write_flip, image.diag.writes, image.diag.page_flip, image.diag.page_writes, uma != nullptr ? uma : "0",
+	              image.diag.uploads == 0 ? " (no upload recorded for this host image: created or refreshed by another path)" : "");
+	result.notes.push_back(note);
+	DiagDump::WriteDumpTex(result);
+}
+
+static void DumpTexAfterDraw(RenderContext& context) {
+	auto requests = DiagDump::TakeDumpTexRequests();
+	if (requests.empty()) return;
+	context.GetCommandScheduler().EndRendering();
+	for (const auto& request: requests) DumpTexOne(context, request);
+}
+
 // diag_tex: reads back mip 0 / layer 0 of every image queued by ResolveTexture (the host image the shader sampled).
 static void DiagTexAfterDraw(RenderContext& context) {
+	DumpTexAfterDraw(context);
 	auto requests = DiagDump::TakeTexRequests();
 	if (requests.empty()) return;
 	context.GetCommandScheduler().EndRendering();
