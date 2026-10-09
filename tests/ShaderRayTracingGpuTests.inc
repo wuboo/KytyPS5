@@ -83,12 +83,15 @@ TestCase FlatStackApertures(u32 wave_size) {
   return test;
 }
 
-TestCase BvhIntersections(bool barycentrics, bool sorted, u32 grow = 0, bool wide = false) {
+TestCase BvhIntersections(bool barycentrics, bool sorted, u32 grow = 0, bool wide = false,
+                          bool rt_miss = false) {
   TestCase test;
   test.name = barycentrics ? (sorted ? "BvhBarycentricSorted" : "BvhBarycentricUnsorted")
                           : (sorted ? "BvhTriangleIdSorted" : "BvhTriangleIdUnsorted");
   if (grow != 0) test.name = "BvhBoxExitGrowth";
   if (wide) test.name = "Bvh64HighNodePointers";
+  if (rt_miss) test.name = "BvhRtMissAnswersNoHit";
+  test.rt_miss = rt_miss;
   constexpr u32 NodeStart = 1024, OutputStart = 512, LaneCount = 32;
   constexpr uint64_t GuestBase = 0x10000;
   const u32 node_base = wide ? 1u << 29 : 0;
@@ -199,10 +202,20 @@ TestCase BvhIntersections(bool barycentrics, bool sorted, u32 grow = 0, bool wid
       }
     }
   }
+  if (rt_miss) {
+    // KYTY_RT_MISS=1: the answer depends only on the kind of the node pointer (a triangle kind
+    // answers "no triangle", a box kind "no child"), never on the structure or the ray.
+    for (u32 lane = 0; lane < LaneCount; ++lane) {
+      const bool triangle_kind = (data[lane * 16] & 7u) < 4u;
+      expected[lane] = triangle_kind ? std::array<u32, 4>{Infinity, bits(1), Invalid, 0}
+                                     : std::array<u32, 4>{Invalid, Invalid, Invalid, Invalid};
+    }
+  }
   test.expected = test.initial;
   for (u32 lane = 0; lane < LaneCount; ++lane) {
     std::copy(expected[lane].begin(), expected[lane].end(),
               test.expected.begin() + OutputStart + lane * 4);
+    if (rt_miss) continue; // the program stops after its first intersection
     auto bounded = expected[lane];
     if (lane % 8 == 5) bounded = {Invalid, Invalid, Invalid, Invalid};
     if (lane >= 20) bounded = {0x12345678, 0x12345679, 0x1234567a, 0x1234567b};
@@ -224,16 +237,18 @@ TestCase BvhIntersections(bool barycentrics, bool sorted, u32 grow = 0, bool wid
                            EncodeMimg1(20, 4, 2)});
   code.push_back(EncodeVop2(0x1a, 2, InlineU32(2), 0));
   for (u32 i = 0; i < 4; ++i) AppendStoreVgprAtLaneDwordOffset(&code, 20 + i, 2, OutputStart + i);
-  // NSA addressing, the FP32 second-block bound, and inactive destination lanes.
-  AppendSMovLiteral(&code, 10, node_base + 2);
-  for (u32 i = 0; i < 4; ++i) AppendVMovLiteral(&code, 24 + i, 0x12345678 + i);
-  AppendSMovLiteral(&code, 126, 0x000fffff);
-  code.insert(code.end(), {EncodeMimg0(wide ? 0xe7 : 0xe6, 15, 3, false, 0, true),
-                           EncodeMimg1(24, 4, 2), 0x08070605, 0x0c0b0a09,
-                           wide ? 0x000f0e0du : 0x00000e0du});
-  code.push_back(EncodeSop1(0x04, 126, 193));
-  for (u32 i = 0; i < 4; ++i)
-    AppendStoreVgprAtLaneDwordOffset(&code, 24 + i, 2, OutputStart + LaneCount * 4 + i);
+  if (!rt_miss) {  // KYTY_RT_MISS: the program stops after its first intersection.
+    // NSA addressing, the FP32 second-block bound, and inactive destination lanes.
+    AppendSMovLiteral(&code, 10, node_base + 2);
+    for (u32 i = 0; i < 4; ++i) AppendVMovLiteral(&code, 24 + i, 0x12345678 + i);
+    AppendSMovLiteral(&code, 126, 0x000fffff);
+    code.insert(code.end(), {EncodeMimg0(wide ? 0xe7 : 0xe6, 15, 3, false, 0, true),
+                             EncodeMimg1(24, 4, 2), 0x08070605, 0x0c0b0a09,
+                             wide ? 0x000f0e0du : 0x00000e0du});
+    code.push_back(EncodeSop1(0x04, 126, 193));
+    for (u32 i = 0; i < 4; ++i)
+      AppendStoreVgprAtLaneDwordOffset(&code, 24 + i, 2, OutputStart + LaneCount * 4 + i);
+  }
   AppendEnd(&code);
   const auto nodes_address = GuestBase + (uint64_t{node_base} << 6);
   test.bda_mappings = {{nodes_address, NodeStart * sizeof(u32)},

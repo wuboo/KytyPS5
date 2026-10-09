@@ -17,8 +17,10 @@
 #include "graphics/host_gpu/renderer/perVertexPrototype.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/tlasDiag.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
+#include "graphics/shader/recompiler/rtMiss.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
 #include "loader/systemContent.h"
@@ -358,6 +360,10 @@ struct PipelineCache::ProgramCache {
 		lookup_key.user_data_count = params.user_data_count;
 		lookup_key.code_size       = static_cast<uint32_t>(params.code.size());
 		BuildStageStaticKey(input_info, lookup_key.static_state);
+		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+			// Only when on, so the keys of runs without KYTY_RT_MISS stay as they were.
+			if (ShaderRecompiler::RtMissEnabled()) lookup_key.static_state.push_back(0x52544d53u);
+		}
 		auto                                         entry = programs.find(lookup_key);
 		ShaderRecompiler::IR::SrtRuntime             runtime {
 		    .user_data                  = user_data,
@@ -857,7 +863,11 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
 	input_info.lds_storage = input_info.lds_size_dwords * 4u >
 	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
 	uint32_t          push_data_cursor = 0;
-	return m_program_cache->Get(params, input_info, push_data_cursor);
+	auto              program = m_program_cache->Get(params, input_info, push_data_cursor);
+	if (input_info.stage.program != nullptr && input_info.stage.program->info.uses_bvh) {
+		TlasDiag::Report(params.hash, std::span(params.user_data).first(params.user_data_count));
+	}
+	return program;
 }
 
 bool PipelineStaticParameters::operator==(const PipelineStaticParameters& other) const noexcept {
