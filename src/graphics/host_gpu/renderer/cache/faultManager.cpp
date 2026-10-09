@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/frameTiming.h"
 
 #include <bit>
 #include <cinttypes>
@@ -124,6 +125,7 @@ void FaultManager::ProcessFaultBuffer() {
 	const auto num_threads    = BufferCache::CACHING_NUMPAGES / 32;
 	const auto num_workgroups = (num_threads + 63) / 64;
 	command.dispatch(static_cast<uint32_t>(num_workgroups), 1, 1);
+	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Fault);
 	dependency.pBufferMemoryBarriers = &post_barrier;
 	command.pipelineBarrier2(dependency);
 

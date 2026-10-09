@@ -637,6 +637,16 @@ foreach(mutant IN ITEMS INVERT_CLIP ALWAYS_BOUNDS NATIVE_COUNTS BIAS_ABS)
 	target_compile_definitions(apple_drop_mutant_${mutant_lower}_tests PRIVATE KYTY_APPLEDROP_MUTANT_${mutant}=1)
 endforeach()
 
+add_executable(cp_counters_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpCountersTests.cpp")
+target_include_directories(cp_counters_tests PRIVATE ${inc_headers})
+# Mutants (each must be caught, WILL_FAIL): native/non-native capture swapped; clock step back not clamped; any KYTY_DIAG_PROTO_SKIP value turns it on; the switch is ignored.
+foreach(mutant IN ITEMS NATIVE_SWAP NO_CLAMP FLAG_ANY SKIP_IGNORED)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(cp_counters_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpCountersTests.cpp")
+	target_include_directories(cp_counters_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_counters_mutant_${mutant_lower}_tests PRIVATE KYTY_CPCOUNTERS_MUTANT_${mutant}=1)
+endforeach()
+
 add_executable(frame_dump_flips_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/FrameDumpFlipsTests.cpp")
 target_include_directories(frame_dump_flips_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): zero kept as a flip; match off by one.
@@ -868,6 +878,7 @@ if(BUILD_TESTING)
 	add_test(NAME diag_tex COMMAND $<TARGET_FILE:diag_tex_tests>)
 	add_test(NAME min_lod_view COMMAND $<TARGET_FILE:min_lod_view_tests>)
 	add_test(NAME apple_drop COMMAND $<TARGET_FILE:apple_drop_tests>)
+	add_test(NAME cp_counters COMMAND $<TARGET_FILE:cp_counters_tests>)
 	add_test(NAME frame_dump_flips COMMAND $<TARGET_FILE:frame_dump_flips_tests>)
 	add_test(NAME bc7 COMMAND $<TARGET_FILE:bc7_tests>)
 	add_test(NAME bc_dump COMMAND $<TARGET_FILE:bc_dump_tests>)
@@ -891,6 +902,7 @@ if(BUILD_TESTING)
 			mem_events_mutant_inclusive_end mem_events_mutant_merge_any_addr
 			min_lod_view_mutant_floor min_lod_view_mutant_no_cap min_lod_view_mutant_resinfo
 			apple_drop_mutant_invert_clip apple_drop_mutant_always_bounds apple_drop_mutant_native_counts apple_drop_mutant_bias_abs
+			cp_counters_mutant_native_swap cp_counters_mutant_no_clamp cp_counters_mutant_flag_any cp_counters_mutant_skip_ignored
 			frame_dump_flips_mutant_keep_zero frame_dump_flips_mutant_off_by_one)
 		add_test(NAME ${mutant_test} COMMAND $<TARGET_FILE:${mutant_test}_tests>)
 		set_tests_properties(${mutant_test} PROPERTIES WILL_FAIL TRUE)
@@ -1012,6 +1024,11 @@ if(BUILD_TESTING)
 		apple_drop_mutant_always_bounds_tests
 		apple_drop_mutant_native_counts_tests
 		apple_drop_mutant_bias_abs_tests
+		cp_counters_tests
+		cp_counters_mutant_native_swap_tests
+		cp_counters_mutant_no_clamp_tests
+		cp_counters_mutant_flag_any_tests
+		cp_counters_mutant_skip_ignored_tests
 		frame_dump_flips_tests
 		frame_dump_flips_mutant_keep_zero_tests
 		frame_dump_flips_mutant_off_by_one_tests

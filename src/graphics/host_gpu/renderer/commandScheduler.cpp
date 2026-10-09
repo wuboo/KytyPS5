@@ -434,6 +434,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		submit.AddSignal(m_master.Handle(), tick);
 		job.submit = submit;
 		job.tick   = tick;
+		job.queued_ns = FrameTiming::SteadyNowNs();
 		m_submit_jobs.push_back(job);
 		m_submit_cv.notify_one();
 	} else {
@@ -469,7 +470,11 @@ void CommandScheduler::QueueSubmitNow(SubmitJob& job) {
 	submit_info.signalSemaphoreCount = job.submit.num_signal_semaphores;
 	submit_info.pSignalSemaphores    = job.submit.signal_semaphores.data();
 
-	const auto result = m_graphics.queue.submit(1, &submit_info, nullptr);
+	vk::Result result;
+	{
+		FrameTiming::ScopedCounterNs encode(FrameTiming::Counter::SubmitEncodeNs);
+		result = m_graphics.queue.submit(1, &submit_info, nullptr);
+	}
 	if (result != vk::Result::eSuccess) {
 		ReportVulkanFatal("vkQueueSubmit", result, job.tick, job.debug_op, job.debug_submit_id,
 		                  job.debug_args[0], job.debug_args[1], job.debug_args[2],
@@ -497,6 +502,8 @@ void CommandScheduler::SubmitThread(std::stop_token stop) {
 			}
 			job = m_submit_jobs.front();
 			m_submit_jobs.pop_front();
+			FrameTiming::Add(FrameTiming::Counter::SubmitQueueWaitNs,
+			                 FrameTiming::ElapsedNs(job.queued_ns, FrameTiming::SteadyNowNs()));
 			m_submit_busy = true;
 		}
 		{

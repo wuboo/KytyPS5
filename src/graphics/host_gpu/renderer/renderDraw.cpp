@@ -43,6 +43,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -1410,11 +1411,24 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 					     static_cast<unsigned long long>(state.programs.pixel.id));
 				}
 			}
-			if (!verdict.run) return;
+			// S132: KYTY_DIAG_PROTO_SKIP=1 drops supported prototype draws (tempo ablation only, the image is incomplete).
+			static const bool diag_skip = FrameTiming::DiagFlagOn(std::getenv("KYTY_DIAG_PROTO_SKIP"));
+			const auto action = FrameTiming::ProtoDrawDecision(verdict.run, diag_skip);
+			if (action == FrameTiming::ProtoDrawAction::Skip) return;
+			if (action == FrameTiming::ProtoDrawAction::DiagSkipped) {
+				FrameTiming::Add(FrameTiming::Counter::ProtoSkippedDraws);
+				return;
+			}
 			DrawCallInfo adjusted = draw;
 			adjusted.index_count  = verdict.index_count;
-			ExecutePerVertexPrototype(submit_id, buffer, adjusted, state, topology, emit,
-			                          index_source, primitive_restart_enable);
+			FrameTiming::Add(FrameTiming::Counter::PrototypeDraws);
+			FrameTiming::Add(FrameTiming::Counter::PrototypeVertices,
+			                 uint64_t {adjusted.index_count} * adjusted.instance_count);
+			{
+				FrameTiming::ScopedCounterNs proto_time(FrameTiming::Counter::CpProtoNs);
+				ExecutePerVertexPrototype(submit_id, buffer, adjusted, state, topology, emit,
+				                          index_source, primitive_restart_enable);
+			}
 			return;
 		}
 	}

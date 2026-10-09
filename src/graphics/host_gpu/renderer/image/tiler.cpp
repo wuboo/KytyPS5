@@ -18,6 +18,7 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "graphics/presentation/frameTiming.h"
 
 #include <algorithm>
 #include <array>
@@ -333,6 +334,7 @@ void TileManager::Record(vk::Buffer source, uint64_t source_offset, uint64_t sou
 	const uint32_t groups_x = static_cast<uint32_t>((groups + groups_y - 1u) / groups_y);
 	EXIT_NOT_IMPLEMENTED(groups_y > limits.maxComputeWorkGroupCount[1]);
 	command.dispatch(groups_x, groups_y, 1);
+	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Tiler);
 
 	barriers[1].srcAccessMask = vk::AccessFlagBits::eShaderWrite;
 	barriers[1].dstAccessMask = vk::AccessFlagBits::eTransferRead | vk::AccessFlagBits::eMemoryRead;
@@ -576,6 +578,7 @@ void TileManager::ConvertD16(Result source, Result target, D16Direction directio
 			command.pushConstants(m_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
 			                      sizeof(push), &push);
 			command.dispatch(static_cast<uint32_t>(groups_x), rows, 1);
+			FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Tiler);
 			row += rows;
 		}
 	}
@@ -656,6 +659,7 @@ void TileManager::TransformColor(Result input, Result output, ColorTransform tra
 	command.pushConstants(m_pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0, sizeof(push),
 	                      &push);
 	command.dispatch((pixels + 63u) / 64u, 1, 1);
+	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Tiler);
 	barriers[1].srcAccessMask = vk::AccessFlagBits::eShaderWrite;
 	barriers[1].dstAccessMask = vk::AccessFlagBits::eTransferRead;
 	command.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader,

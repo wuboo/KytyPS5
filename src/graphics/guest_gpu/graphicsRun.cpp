@@ -500,6 +500,7 @@ void GuestGpu::ThreadRun(void* data) {
 			while (gpu->m_commands.empty() && gpu->m_submission_count == 0 && !gpu->m_stopping) {
 				gpu->m_processing = false;
 				gpu->m_idle.Signal();
+				FrameTiming::ScopedCounterNs wait(FrameTiming::Counter::CpWaitGuestNs);
 				gpu->m_work_available.Wait(&gpu->m_queue_mutex);
 			}
 			if (gpu->m_stopping && gpu->m_commands.empty() && gpu->m_submission_count == 0) {
@@ -522,7 +523,10 @@ void GuestGpu::ThreadRun(void* data) {
 				}
 				if (selected_queue < 0) {
 					gpu->m_processing = false;
-					gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+					{
+						FrameTiming::ScopedCounterNs wait(FrameTiming::Counter::CpWaitGuestNs);
+						gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
+					}
 					for (auto& queue: gpu->m_queues) {
 						if (!queue.empty()) {
 							queue.front().blocked = false;
@@ -550,10 +554,12 @@ void GuestGpu::ThreadRun(void* data) {
 			EXIT_IF(g_current_processor != nullptr);
 			const auto busy_begin = std::chrono::steady_clock::now();
 			command();
-			FrameTiming::AddGpuBusy(static_cast<uint64_t>(
+			const auto busy_ns = static_cast<uint64_t>(
 			    std::chrono::duration_cast<std::chrono::nanoseconds>(
 			        std::chrono::steady_clock::now() - busy_begin)
-			        .count()));
+			        .count());
+			FrameTiming::AddGpuBusy(busy_ns);
+			FrameTiming::Add(FrameTiming::Counter::CpBusyNs, busy_ns);
 
 			Common::LockGuard lock(gpu->m_queue_mutex);
 			gpu->m_processing = false;
@@ -566,10 +572,12 @@ void GuestGpu::ThreadRun(void* data) {
 		EXIT_IF(!has_submission);
 		const auto busy_begin = std::chrono::steady_clock::now();
 		const bool complete   = gpu->Process(submission);
-		FrameTiming::AddGpuBusy(static_cast<uint64_t>(
-		    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
-		                                                         busy_begin)
-		        .count()));
+		const auto busy_ns    = static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+                                                                 busy_begin)
+                .count());
+		FrameTiming::AddGpuBusy(busy_ns);
+		FrameTiming::Add(FrameTiming::Counter::CpBusyNs, busy_ns);
 
 		Common::LockGuard lock(gpu->m_queue_mutex);
 		if (!complete) {
