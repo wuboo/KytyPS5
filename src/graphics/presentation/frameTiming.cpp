@@ -66,6 +66,8 @@ constexpr const char* kCounterNames[] = {
     "prototype_range_memo_hits",
     "prototype_range_memo_misses",
     "proto_unsupported_draws",
+    "minlod_dropped",
+    "minlod_remapped",
 };
 static_assert(std::size(kCounterNames) == static_cast<size_t>(Counter::Count));
 

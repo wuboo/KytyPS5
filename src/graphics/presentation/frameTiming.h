@@ -68,6 +68,8 @@ enum class Counter : uint32_t {
 	PrototypeRangeMemoHits, // record ranges of indexed prototype draws taken from the memo
 	PrototypeRangeMemoMisses, // ... and the ones that had to scan the index buffer
 	ProtoUnsupportedDraws, // per-vertex-prototype draws skipped: topology/restart/index count it cannot run
+	MinLodDropped,         // sampled T# with MinLod above its base level bound on Apple with no clamp at all
+	MinLodRemapped,        // ... and the ones whose MinLod became a view base level (KYTY_TSHARP_MINLOD_APPLE=1)
 	Count,
 };
 

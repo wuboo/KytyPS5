@@ -24,6 +24,7 @@ struct TexInfo {
 	uint32_t guest_format = 0, numeric_class = 0, vk_format = 0;
 	uint32_t width = 0, height = 0, depth = 0, base_level = 0, last_level = 0, max_mip = 0;
 	uint32_t tile_mode = 0, pitch = 0, type = 0, dimension = 0, dst_sel = 0; // dst_sel: x | y<<3 | z<<6 | w<<9
+	uint32_t min_lod = 0; // T# MinLod, U4.8 absolute
 	uint32_t image_levels = 0, image_layers = 0;
 	uint64_t byte_size = 0;
 	uint64_t host_image = 0; // address of the host VkImage, 0 = not backed
@@ -36,10 +37,10 @@ inline std::string TexDescribe(const TexInfo& t) {
 	char buf[640];
 	std::snprintf(buf, sizeof(buf),
 	              "[diag-tex] flip=%" PRIu64 " ps=%016" PRIx64 " slot=%u addr=0x%" PRIx64 " fmt=%u numeric=%u vkfmt=%u %ux%ux%u "
-	              "mips=%u..%u/%u tile=%u pitch=%u type=%u dim=%u dst_sel=0x%03x size=%" PRIu64 " texcache=%d host_image=0x%" PRIx64
+	              "mips=%u..%u/%u tile=%u pitch=%u type=%u dim=%u dst_sel=0x%03x minlod=%u size=%" PRIu64 " texcache=%d host_image=0x%" PRIx64
 	              " writer=%s uma=%s dwords=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x",
 	              t.flip, t.ps, t.slot, t.addr, t.guest_format, t.numeric_class, t.vk_format, t.width, t.height, t.depth,
-	              t.base_level, t.last_level, t.max_mip, t.tile_mode, t.pitch, t.type, t.dimension, t.dst_sel, t.byte_size,
+	              t.base_level, t.last_level, t.max_mip, t.tile_mode, t.pitch, t.type, t.dimension, t.dst_sel, t.min_lod, t.byte_size,
 	              t.from_cache ? 1 : 0, t.host_image,
 	              // The tracker knows only "a GPU pass wrote it since the last upload" / "the CPU wrote it"; the writing
 	              // pass (seq/hash) is not recorded.
@@ -104,8 +105,8 @@ inline std::string TexDrawDescribe(uint64_t seq, const TexInfo& t, uint64_t inde
 	char buf[512];
 	std::snprintf(buf, sizeof(buf),
 	              "[diag-tex-d] flip=%" PRIu64 " seq=%" PRIu64 " ps=%016" PRIx64 " slot=%u addr=0x%" PRIx64
-	              " fmt=%u %ux%u mips=%u..%u/%u size=%" PRIu64 " indices=%" PRIu64 " rt=0x%" PRIx64,
-	              t.flip, seq, t.ps, t.slot, t.addr, t.guest_format, t.width, t.height, t.base_level, t.last_level, t.max_mip,
+	              " fmt=%u %ux%u mips=%u..%u/%u minlod=%u size=%" PRIu64 " indices=%" PRIu64 " rt=0x%" PRIx64,
+	              t.flip, seq, t.ps, t.slot, t.addr, t.guest_format, t.width, t.height, t.base_level, t.last_level, t.max_mip, t.min_lod,
 	              t.byte_size, index_count, rt_addr);
 	std::string line = buf;
 	if (bc7 != nullptr) {
