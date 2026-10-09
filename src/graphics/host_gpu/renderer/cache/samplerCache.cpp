@@ -3,7 +3,9 @@
 #include "common/assert.h"
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/gpu_defs.h"
+#include "graphics/host_gpu/renderer/appleDrop.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/presentation/frameTiming.h"
 
 namespace Libs::Graphics {
 
@@ -106,6 +108,7 @@ vk::Sampler SamplerCache::GetSampler(const ShaderSamplerResource& r, bool intege
 			                        : vk::BorderColor::eFloatOpaqueWhite;
 			break;
 		case Prospero::SamplerBorderColor::kFromTable:
+			FrameTiming::Add(FrameTiming::Counter::DropSamplerBorderTable);
 			LOGF(
 			    "temporary: approximating table border color as transparent black, index = %" PRIu16
 			    "\n",
@@ -124,10 +127,11 @@ vk::Sampler SamplerCache::GetSampler(const ShaderSamplerResource& r, bool intege
 	sampler_info.addressModeV = to_vk_address_mode(r.ClampY());
 	sampler_info.addressModeW = to_vk_address_mode(r.ClampZ());
     const auto max_lod_bias = m_graphics.GetPhysicalDeviceProperties().limits.maxSamplerLodBias;
-    sampler_info.mipLodBias = std::clamp(
-        static_cast<float>(static_cast<int16_t>((r.LodBias() ^ 0x2000u) - 0x2000u)) / 256.0f,
-        -max_lod_bias, max_lod_bias
-    );
+    const float guest_lod_bias = static_cast<float>(static_cast<int16_t>((r.LodBias() ^ 0x2000u) - 0x2000u)) / 256.0f;
+    if (SamplerLodBiasClamped(guest_lod_bias, max_lod_bias)) {
+        FrameTiming::Add(FrameTiming::Counter::DropSamplerLodBias);
+    }
+    sampler_info.mipLodBias = std::clamp(guest_lod_bias, -max_lod_bias, max_lod_bias);
 	sampler_info.anisotropyEnable        = (aniso ? VK_TRUE : VK_FALSE);
 	sampler_info.maxAnisotropy           = aniso_ratio;
 	sampler_info.compareEnable           = (r.DepthCompareFunc() != 0 ? VK_TRUE : VK_FALSE);

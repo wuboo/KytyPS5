@@ -70,6 +70,11 @@ constexpr const char* kCounterNames[] = {
     "minlod_remapped",
     "minlod_frac",
     "minlod_resinfo",
+    "drop_depth_clamp",
+    "drop_depth_bounds",
+    "drop_color_write_dyn",
+    "drop_sampler_border_table",
+    "drop_sampler_lod_bias",
 };
 static_assert(std::size(kCounterNames) == static_cast<size_t>(Counter::Count));
 

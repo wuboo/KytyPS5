@@ -14,6 +14,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/appleDrop.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/diagDump.h"
@@ -421,6 +422,25 @@ static void UpdateGraphicsDynamicState(const CommandBuffer& buffer, DynamicState
 		dynamic_state.SetStencilCompareMasks(front.compareMask, back.compareMask);
 		dynamic_state.SetStencilWriteMasks(front.writeMask, back.writeMask);
 		dynamic_state.SetStencilReferences(front.reference, back.reference);
+	}
+
+	{
+#if defined(__APPLE__)
+		constexpr AppleDropHost host {.depth_clamp = false, .depth_bounds = false, .color_write_enable = false};
+#else
+		constexpr AppleDropHost host {};
+#endif
+		AppleDropDraw draw {};
+		draw.z_clip_enabled    = ctx.GetClipControl().IsZClipEnabled();
+		draw.depth_bounds_test = depth.depth_bounds_test_enable;
+		draw.color_attachments = rendering.num_color_attachments;
+		for (uint32_t slot = 0; slot < rendering.num_color_attachments; slot++) {
+			draw.color_attachments_bound += rendering.color_attachments[slot].image_view != nullptr ? 1u : 0u;
+		}
+		const uint32_t mask = AppleDropMask(draw, host);
+		if ((mask & AppleDropDepthClamp) != 0u) FrameTiming::Add(FrameTiming::Counter::DropDepthClamp);
+		if ((mask & AppleDropDepthBounds) != 0u) FrameTiming::Add(FrameTiming::Counter::DropDepthBounds);
+		if ((mask & AppleDropColorWrite) != 0u) FrameTiming::Add(FrameTiming::Counter::DropColorWriteDyn);
 	}
 
 #if defined(__APPLE__)
