@@ -539,6 +539,16 @@ foreach(mutant IN ITEMS LAX_NUMBERS NO_UNTIL FORCE_ANY_SLOT DIAG_ANY_SLOT FILTER
 	target_compile_definitions(control_file_mutant_${mutant_lower}_tests PRIVATE KYTY_CONTROL_MUTANT_${mutant}=1)
 endforeach()
 
+add_executable(mem_events_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/MemEventsTests.cpp")
+target_include_directories(mem_events_tests PRIVATE ${inc_headers})
+# Mutants (each must be caught, WILL_FAIL): an inclusive range end; repeats merge whatever the address.
+foreach(mutant IN ITEMS INCLUSIVE_END MERGE_ANY_ADDR)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(mem_events_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/MemEventsTests.cpp")
+	target_include_directories(mem_events_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(mem_events_mutant_${mutant_lower}_tests PRIVATE KYTY_MEVENTS_MUTANT_${mutant}=1)
+endforeach()
+
 add_executable(rt_dump_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RtDumpTests.cpp")
 target_include_directories(rt_dump_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): dump_rt matches every flip / every pixel shader.
@@ -825,6 +835,7 @@ if(BUILD_TESTING)
 	add_test(NAME control_file COMMAND $<TARGET_FILE:control_file_tests>)
 	add_test(NAME cs_trace COMMAND $<TARGET_FILE:cs_trace_tests>)
 	add_test(NAME rt_dump COMMAND $<TARGET_FILE:rt_dump_tests>)
+	add_test(NAME mem_events COMMAND $<TARGET_FILE:mem_events_tests>)
 	add_test(NAME diag_tex COMMAND $<TARGET_FILE:diag_tex_tests>)
 	add_test(NAME min_lod_view COMMAND $<TARGET_FILE:min_lod_view_tests>)
 	add_test(NAME bc7 COMMAND $<TARGET_FILE:bc7_tests>)
@@ -847,6 +858,8 @@ if(BUILD_TESTING)
 			rt_dump_mutant_ignore_flip rt_dump_mutant_ignore_ps
 			bvh_node_parser_mutant_base_shift bvh_node_parser_mutant_keep_empty
 			min_lod_view_mutant_floor min_lod_view_mutant_no_cap)
+			bvh_node_parser_mutant_base_shift bvh_node_parser_mutant_keep_empty
+			mem_events_mutant_inclusive_end mem_events_mutant_merge_any_addr)
 		add_test(NAME ${mutant_test} COMMAND $<TARGET_FILE:${mutant_test}_tests>)
 		set_tests_properties(${mutant_test} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
@@ -961,6 +974,9 @@ if(BUILD_TESTING)
 		min_lod_view_mutant_no_cap_tests
 		diag_tex_mutant_nonzero_tests
 		diag_tex_mutant_no_once_tests
+		mem_events_tests
+		mem_events_mutant_inclusive_end_tests
+		mem_events_mutant_merge_any_addr_tests
 		rt_dump_tests
 		rt_dump_mutant_ignore_flip_tests
 		rt_dump_mutant_ignore_ps_tests
