@@ -1,5 +1,7 @@
 #include "graphics/presentation/frameTiming.h"
 
+#include "common/controlFile.h"
+#include "common/logging/log.h"
 #include "common/profiler.h"
 
 #include <array>
@@ -115,8 +117,30 @@ void OnFramePresented() {
 	}
 }
 
+namespace {
+
+// KYTY_CONTROL_FILE: re-read when it changed, resolve the lines for this flip, publish on change.
+void PollControlFile(uint64_t flip) {
+	static const char* path = std::getenv("KYTY_CONTROL_FILE");
+	if (path == nullptr || path[0] == '\0') return;
+	static Common::ControlFile::Poller poller {.path = path};
+	for (const auto& error: poller.Refresh()) {
+		LOGF("[control] %s: %s\n", path, error.c_str());
+	}
+	if (!poller.loaded) return;
+	if (!Common::ControlFile::Publish(Common::ControlFile::Resolve(poller.file, flip))) return;
+	const auto& now = Common::ControlFile::Current();
+	LOGF("[control] gen=%llu flip=%llu block=%s label=%s skip_cs=%zu dump_rt=%zu force_tex=%zu\n",
+	     static_cast<unsigned long long>(now.gen), static_cast<unsigned long long>(flip),
+	     now.block.empty() ? "base" : now.block.c_str(), now.label.c_str(), now.skip_cs.size(),
+	     now.dump_rt.size(), now.force_tex.size());
+}
+
+} // namespace
+
 void OnGuestFlip() {
-	g_guest_flips.fetch_add(1, std::memory_order_relaxed);
+	const auto flip = g_guest_flips.fetch_add(1, std::memory_order_relaxed) + 1;
+	PollControlFile(flip);
 }
 
 void AddGpuBusy(uint64_t ns) {
