@@ -532,7 +532,7 @@ target_include_directories(env_audit_tests PRIVATE ${inc_headers})
 add_executable(control_file_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ControlFileTests.cpp")
 target_include_directories(control_file_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): numbers are read leniently; `until` is ignored.
-foreach(mutant IN ITEMS LAX_NUMBERS NO_UNTIL FORCE_ANY_SLOT DIAG_ANY_SLOT FILTER_IGNORED DIAG_ALL_IGNORED)
+foreach(mutant IN ITEMS LAX_NUMBERS NO_UNTIL FORCE_ANY_SLOT DIAG_ANY_SLOT FILTER_IGNORED DIAG_ALL_IGNORED DUMP_ANY_SLOT)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(control_file_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ControlFileTests.cpp")
 	target_include_directories(control_file_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
@@ -551,10 +551,24 @@ endforeach()
 
 add_executable(bc7_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/Bc7Tests.cpp")
 target_include_directories(bc7_tests PRIVATE ${inc_headers})
-# Mutant (must be caught, WILL_FAIL): the mode 6 endpoints lose their p-bit.
-add_executable(bc7_mutant_no_pbit_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/Bc7Tests.cpp")
-target_include_directories(bc7_mutant_no_pbit_tests PRIVATE ${inc_headers})
-target_compile_definitions(bc7_mutant_no_pbit_tests PRIVATE KYTY_BC7_MUTANT_NO_PBIT=1)
+# Mutants (each must be caught, WILL_FAIL): the mode 6 endpoints lose their p-bit; every pixel of a partitioned block is in
+# subset 0; the anchor index keeps its top bit; mode 1 loses the shared p-bit of the second endpoint.
+foreach(mutant IN ITEMS NO_PBIT SUBSET ANCHOR SHARED_PBIT)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(bc7_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/Bc7Tests.cpp")
+	target_include_directories(bc7_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(bc7_mutant_${mutant_lower}_tests PRIVATE KYTY_BC7_MUTANT_${mutant}=1)
+endforeach()
+
+add_executable(bc_dump_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BcDumpTests.cpp")
+target_include_directories(bc_dump_tests PRIVATE ${inc_headers})
+# Mutants (each must be caught, WILL_FAIL): the block index swaps row and column; the diff looks at the first byte only.
+foreach(mutant IN ITEMS BLOCK_ROW DIFF_FIRST_BYTE)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(bc_dump_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BcDumpTests.cpp")
+	target_include_directories(bc_dump_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(bc_dump_mutant_${mutant_lower}_tests PRIVATE KYTY_BCDUMP_MUTANT_${mutant}=1)
+endforeach()
 
 add_executable(diag_tex_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/DiagTexTests.cpp")
 target_include_directories(diag_tex_tests PRIVATE ${inc_headers})
@@ -796,6 +810,7 @@ if(BUILD_TESTING)
 	add_test(NAME diag_tex COMMAND $<TARGET_FILE:diag_tex_tests>)
 	add_test(NAME min_lod_view COMMAND $<TARGET_FILE:min_lod_view_tests>)
 	add_test(NAME bc7 COMMAND $<TARGET_FILE:bc7_tests>)
+	add_test(NAME bc_dump COMMAND $<TARGET_FILE:bc_dump_tests>)
 	add_test(NAME bvh_node_parser COMMAND $<TARGET_FILE:bvh_node_parser_tests>)
 	add_test(NAME rt_miss_switch COMMAND $<TARGET_FILE:rt_miss_switch_tests>)
 	add_test(NAME rt_miss_switch_mutant COMMAND $<TARGET_FILE:rt_miss_switch_mutant_tests>)
@@ -804,7 +819,9 @@ if(BUILD_TESTING)
 	set_tests_properties(resource_tracking_mutant_bvh_flag PROPERTIES WILL_FAIL TRUE)
 	foreach(mutant_test control_file_mutant_lax_numbers control_file_mutant_no_until
 			control_file_mutant_force_any_slot control_file_mutant_diag_any_slot
-			control_file_mutant_filter_ignored control_file_mutant_diag_all_ignored bc7_mutant_no_pbit
+			control_file_mutant_filter_ignored control_file_mutant_diag_all_ignored control_file_mutant_dump_any_slot
+			bc7_mutant_no_pbit bc7_mutant_subset bc7_mutant_anchor bc7_mutant_shared_pbit
+			bc_dump_mutant_block_row bc_dump_mutant_diff_first_byte
 			diag_tex_mutant_hist_no_fmt diag_tex_mutant_hist_no_indices rt_dump_mutant_no_addr
 			diag_tex_mutant_nonzero diag_tex_mutant_no_once
 			cs_trace_mutant_drop_reads cs_trace_mutant_off_by_one
@@ -907,6 +924,13 @@ if(BUILD_TESTING)
 		control_file_mutant_diag_all_ignored_tests
 		bc7_tests
 		bc7_mutant_no_pbit_tests
+		bc7_mutant_subset_tests
+		bc7_mutant_anchor_tests
+		bc7_mutant_shared_pbit_tests
+		bc_dump_tests
+		bc_dump_mutant_block_row_tests
+		bc_dump_mutant_diff_first_byte_tests
+		control_file_mutant_dump_any_slot_tests
 		diag_tex_mutant_hist_no_fmt_tests
 		diag_tex_mutant_hist_no_indices_tests
 		rt_dump_mutant_no_addr_tests
