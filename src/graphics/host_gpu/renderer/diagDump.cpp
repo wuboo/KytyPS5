@@ -81,8 +81,10 @@ void NoteSampledTex(uint64_t ps_hash, uint32_t slot, uint64_t addr, uint32_t fmt
 }
 
 void WatchTexTrigger(const TexInfo& info, uint64_t range_size) {
-	LOGF("[watch-tex] flip=%" PRIu64 " ps=%016" PRIx64 " slot=%u T# addr=0x%" PRIx64 " fmt=%u %ux%u tile=%u image_size=0x%" PRIx64 " (%" PRIu64 " tiles of 64 KB)\n",
-	     info.flip, info.ps, info.slot, info.addr, info.guest_format, info.width, info.height, info.tile_mode, range_size, (range_size + 0xffffu) / 0x10000u);
+	LOGF("[watch-tex] flip=%" PRIu64 " ps=%016" PRIx64 " slot=%u T# addr=0x%" PRIx64 " fmt=%u %ux%u tile=%u mips=%u..%u/%u minlod=%u dwords=%08x,%08x,%08x,%08x,%08x,%08x,%08x,%08x image_size=0x%" PRIx64 " (%" PRIu64 " tiles of 64 KB)\n",
+	     info.flip, info.ps, info.slot, info.addr, info.guest_format, info.width, info.height, info.tile_mode, info.base_level, info.last_level,
+	     info.max_mip, info.min_lod, info.dwords[0], info.dwords[1], info.dwords[2], info.dwords[3], info.dwords[4], info.dwords[5], info.dwords[6],
+	     info.dwords[7], range_size, (range_size + 0xffffu) / 0x10000u);
 	if (!Common::MemEvents::Enabled()) {
 		LOGF("[watch-tex] the memory event ring is off (KYTY_CONTROL_FILE was not set at start): no history\n");
 		return;

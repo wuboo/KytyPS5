@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/diagDump.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
+#include "graphics/host_gpu/renderer/image/minLodView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
@@ -666,6 +667,27 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	desc.view_info = TextureViewInfo(resource, descriptor, view_format, surface_format, storage,
 	                                 view_levels, desc.info.resources.layers);
 	desc.view_info.base_level = view_base;
+#if defined(__APPLE__)
+	// S126: MoltenVK has no VK_EXT_image_view_min_lod, so the T# MinLod clamp never reaches the view.
+	// KYTY_TSHARP_MINLOD_APPLE=1 turns it into a higher view base level (sampled, non-Dynamic only).
+	if (desc.view_info.min_lod != 0 && !storage &&
+	    resource.mip_mode != ShaderRecompiler::IR::ImageMipMode::Dynamic) {
+		const char* env      = std::getenv("KYTY_TSHARP_MINLOD_APPLE");
+		const bool  remap    = env != nullptr && env[0] == '1';
+		const auto  original = desc.view_info.min_lod;
+		if (remap) {
+			const auto mapped = MapMinLodToBaseLevel(desc.view_info.base_level,
+			                                         desc.view_info.level_count, original);
+			desc.view_info.base_level  = mapped.base_level;
+			desc.view_info.level_count = mapped.level_count;
+			desc.view_info.min_lod     = mapped.min_lod;
+			FrameTiming::Add(FrameTiming::Counter::MinLodRemapped);
+		}
+		if (MinLodDropped(true, remap, false, false, original)) {
+			FrameTiming::Add(FrameTiming::Counter::MinLodDropped);
+		}
+	}
+#endif
 	desc.type = storage ? TextureCache::BindingType::Storage : TextureCache::BindingType::Texture;
 
 	auto       id                  = texture_cache.FindImage(desc, shader_conversion);
@@ -710,6 +732,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		info.base_level    = base_level;
 		info.last_level    = last_level;
 		info.max_mip       = max_mip;
+		info.min_lod       = descriptor.MinLod();
 		info.tile_mode     = static_cast<uint32_t>(tile);
 		info.pitch         = pitch;
 		info.type          = static_cast<uint32_t>(type);

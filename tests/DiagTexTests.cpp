@@ -28,11 +28,13 @@ void TestDescribe() {
 	t.base_level = 0; t.last_level = 9; t.max_mip = 9; t.tile_mode = 13; t.pitch = 512; t.type = 9; t.dimension = 1;
 	t.dst_sel = 0x688; t.byte_size = 699050; t.host_image = 0xdead0000ull; t.from_cache = true; t.gpu_modified = true;
 	t.uma = "3";
+	t.min_lod = 1100;
 	for (uint32_t i = 0; i < 8; i++) t.dwords[i] = 0x11111111u * (i + 1);
 	const auto line = TexDescribe(t);
 	Check(line.rfind("[diag-tex] flip=6620 ps=b96c2898f05637df slot=30 addr=0x7f0000100000 ", 0) == 0, "head wrong");
 	Check(Has(line, "fmt=10 numeric=1 vkfmt=37 512x256x1 mips=0..9/9 tile=13 pitch=512 type=9 dim=1 dst_sel=0x688"), "format part wrong");
 	Check(Has(line, "size=699050 texcache=1 host_image=0xdead0000 writer=gpu uma=3"), "cache part wrong");
+	Check(Has(line, "dst_sel=0x688 minlod=1100 size=699050"), "minlod wrong");
 	Check(Has(line, "dwords=11111111,22222222,33333333,44444444,55555555,66666666,77777777,88888888"), "dwords wrong");
 	t.gpu_modified = false;
 	t.cpu_dirty    = true;
@@ -73,7 +75,7 @@ void TestDrawLine() {
 	t.flip = 6760; t.ps = 0xb96c2898f05637dfull; t.slot = 30; t.addr = 0x70d1770000ull; t.guest_format = 181; t.width = 4; t.height = 4;
 	t.base_level = 0; t.last_level = 0; t.max_mip = 0; t.byte_size = 16;
 	const auto line = TexDrawDescribe(7, t, 3600, 0x40000000ull, nullptr);
-	Check(line.rfind("[diag-tex-d] flip=6760 seq=7 ps=b96c2898f05637df slot=30 addr=0x70d1770000 fmt=181 4x4 mips=0..0/0 size=16", 0) == 0,
+	Check(line.rfind("[diag-tex-d] flip=6760 seq=7 ps=b96c2898f05637df slot=30 addr=0x70d1770000 fmt=181 4x4 mips=0..0/0 minlod=0 size=16", 0) == 0,
 	      "draw line head");
 	Check(Has(line, "indices=3600 rt=0x40000000") && !Has(line, "bc7"), "draw line tail");
 	Bc7Summary bc7;
