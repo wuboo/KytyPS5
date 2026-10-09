@@ -9,7 +9,7 @@ namespace {
 void Check(bool value, const char* text) {
 	if (!value) {
 		std::fprintf(stderr, "EnvAuditTests: failed: %s\n", text);
-		std::abort();
+		std::exit(1); // not abort: ctest WILL_FAIL does not invert a crash
 	}
 }
 
