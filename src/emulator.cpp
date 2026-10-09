@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "common/emulatorConfig.h"
 #include "common/envAudit.h"
+#include "common/knownEnv.h"
 #include "common/file.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -30,6 +31,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <span>
 #include <string_view>
 #if defined(__APPLE__)
 #include <crt_externs.h>
@@ -97,17 +99,8 @@ static void MountSandboxDirs() {
 	MountOrCreateDir("_TempData/" + title_id, "/temp");
 }
 
-// Every KYTY_* variable this build reads (grep of getenv). Keep in sync when adding a switch.
 static void LogKytyEnvironment() {
-	static constexpr std::string_view known[] = {
-	    "KYTY_AUDIO_GAIN", "KYTY_BENCH_DROP_DIVERGENT_BARRIERS", "KYTY_BENCH_FOREGROUND",
-	    "KYTY_BORDERLESS", "KYTY_ENV_STRICT", "KYTY_FRAME_DUMP_DIR",
-	    "KYTY_FRAME_DUMP_EVERY_S", "KYTY_FRAME_LOG", "KYTY_LAZY_FLUSH_MAX", "KYTY_OPT_OFF",
-	    "KYTY_OPT_ON", "KYTY_PAD_FRAME_HOLD", "KYTY_PAD_HOLD", "KYTY_PAD_SCRIPT",
-	    "KYTY_PAD_SCRIPT_LOG", "KYTY_PER_VERTEX_PROTOTYPE", "KYTY_PV_SKIP_VALIDATE",
-	    "KYTY_ROSETTA_RELEASE_AHEAD_MB", "KYTY_RT_SKIP", "KYTY_SHADER_LOOP_LIMIT",
-	    "KYTY_SPLIT_WIDE_STORES", "KYTY_VS_LANE_FROM_INDEX", "KYTY_WIDE_STORE_HOT",
-	    "KYTY_WIDE_STORE_MOVE"};
+	const std::span<const std::string_view> known {Common::kKnownKytyEnv};
 #if defined(__APPLE__)
 	const char* const* env = *_NSGetEnviron();
 #elif defined(_WIN32)

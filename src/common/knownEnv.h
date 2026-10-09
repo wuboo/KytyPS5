@@ -1,0 +1,30 @@
+#ifndef KYTY_COMMON_KNOWNENV_H_
+#define KYTY_COMMON_KNOWNENV_H_
+
+#include <string_view>
+
+namespace Common {
+
+// Every KYTY_* variable this build reads (grep of getenv), sorted. Keep in sync when adding a switch:
+// KYTY_ENV_STRICT=1 aborts on a name that is not listed here.
+inline constexpr std::string_view kKnownKytyEnv[] = {
+    "KYTY_AUDIO_GAIN", "KYTY_BENCH_DROP_DIVERGENT_BARRIERS", "KYTY_BENCH_FOREGROUND",
+    "KYTY_BORDERLESS",
+#ifndef KYTY_KNOWNENV_MUTANT_NO_DIAG
+    "KYTY_CONTROL_FILE", "KYTY_DIAG_CS_TRACE_FLIP", "KYTY_DIAG_TLAS",
+#endif
+    "KYTY_ENV_STRICT", "KYTY_FRAME_DUMP_DIR",
+    "KYTY_FRAME_DUMP_EVERY_S", "KYTY_FRAME_LOG", "KYTY_LAZY_FLUSH_MAX", "KYTY_OPT_OFF",
+    "KYTY_OPT_ON", "KYTY_PAD_FRAME_HOLD", "KYTY_PAD_HOLD", "KYTY_PAD_SCRIPT",
+    "KYTY_PAD_SCRIPT_LOG", "KYTY_PER_VERTEX_PROTOTYPE", "KYTY_PV_SKIP_VALIDATE",
+    "KYTY_ROSETTA_RELEASE_AHEAD_MB",
+#ifndef KYTY_KNOWNENV_MUTANT_NO_DIAG
+    "KYTY_RT_MISS",
+#endif
+    "KYTY_RT_SKIP", "KYTY_SHADER_LOOP_LIMIT",
+    "KYTY_SPLIT_WIDE_STORES", "KYTY_UMA", "KYTY_UMA_CHUNK_MB", "KYTY_VS_LANE_FROM_INDEX",
+    "KYTY_WIDE_STORE_HOT", "KYTY_WIDE_STORE_MOVE"};
+
+} // namespace Common
+
+#endif /* KYTY_COMMON_KNOWNENV_H_ */
