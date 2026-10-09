@@ -1,6 +1,7 @@
 #pragma once
 
 #include "graphics/host_gpu/renderer/perVertexTransform.h"
+#include "graphics/host_gpu/renderer/perVertexUnique.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 
 #include <cstddef>
@@ -14,6 +15,8 @@ struct CompileResult;
 struct CompileOptions;
 } // namespace ShaderRecompiler
 bool PerVertexPrototypeEnabled();
+// S134: KYTY_PV_UNIQUE=1 (value "1" only) captures once per unique vertex; default OFF.
+bool PerVertexUniqueEnabled();
 bool HasPerVertexPrototypeInput(std::span<const uint32_t> words);
 bool DecodePerVertexPrototypeAttribute(Prospero::BufferFormat   format,
                                        std::span<const uint8_t> bytes,
@@ -39,6 +42,9 @@ struct PerVertexPrototypePrograms {
 	bool                            native_capture = false;
 	vk::ShaderModule                capture;
 	PipelineCache::GraphicsPrograms graphics;
+	// S134 (KYTY_PV_UNIQUE=1 only): replay shaders reading captured[map[corner]]; empty otherwise.
+	bool                            unique_available = false;
+	PipelineCache::GraphicsPrograms graphics_unique;
 	vk::DescriptorSetLayout         extra_layout;
 	PipelineCache::Pipeline         capture_pipeline;
 	PerVertexLayout                 layout;
@@ -70,11 +76,15 @@ struct UnpackPushConstants {
 		uint32_t meta;       // [15:0] byte offset, [19:17] component count, [22:20] format kind
 		uint32_t bit_counts; // [cnt0, cnt1, cnt2, cnt3]
 	} attrs[kPerVertexPrototypeMaxAttributes];
+	uint32_t unique_first; // S134 map mode ([24] of packed_flags): first unique vertex
+	uint32_t unique_count; // ... and unique vertices per instance
 };
+constexpr uint32_t kUnpackMapModeFlag = 1u << 24u;
 static_assert(sizeof(UnpackPushConstants::Attr) == 8);
 static_assert(offsetof(UnpackPushConstants, attrs) == 32);
 static_assert(offsetof(UnpackPushConstants::Attr, bit_counts) == 4);
-static_assert(sizeof(UnpackPushConstants) == 160);
+static_assert(offsetof(UnpackPushConstants, unique_first) == 160);
+static_assert(sizeof(UnpackPushConstants) == 168);
 
 const PerVertexPrototypePrograms*
 GetPerVertexPrototypePrograms(GraphicContext&                        graphics,

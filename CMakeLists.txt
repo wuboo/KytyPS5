@@ -419,6 +419,24 @@ add_executable(per_vertex_transform_tests EXCLUDE_FROM_ALL
 target_include_directories(per_vertex_transform_tests PRIVATE ${inc_headers})
 target_link_libraries(per_vertex_transform_tests common fmt::fmt xxhash)
 
+# S134: KYTY_PV_UNIQUE planner, record model and range flag (CPU). Mutants (each must be caught, WILL_FAIL): the instance term and the "- first" of the record dropped; the 0.7 share, the writes fallback and the dropped fallback removed; the range never reports dropped corners.
+add_executable(per_vertex_unique_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PerVertexUniqueTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/perVertexTransform.cpp"
+)
+target_include_directories(per_vertex_unique_tests PRIVATE ${inc_headers})
+target_link_libraries(per_vertex_unique_tests common fmt::fmt xxhash)
+foreach(mutant IN ITEMS NO_INSTANCE NO_FIRST NO_RATIO WRITES_OK DROPPED_OK NO_DROPPED)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(per_vertex_unique_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/PerVertexUniqueTests.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/perVertexTransform.cpp"
+	)
+	target_include_directories(per_vertex_unique_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_link_libraries(per_vertex_unique_mutant_${mutant_lower}_tests common fmt::fmt xxhash)
+	target_compile_definitions(per_vertex_unique_mutant_${mutant_lower}_tests PRIVATE KYTY_PVU_MUTANT_${mutant}=1)
+endforeach()
+
 add_kyty_full_emulator_test(per_vertex_gpu_execution_tests "${KYTY_TESTS_DIR}/PerVertexGpuExecutionTests.cpp")
 # Keeps device-address buffers alive until queued MoltenVK work completes (the game lost the device
 # otherwise). Needs a real Vulkan driver through SDL_VULKAN_LIBRARY, so it stays opt-in.
@@ -854,6 +872,7 @@ if(BUILD_TESTING)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
 	add_test(NAME per_vertex_transform COMMAND $<TARGET_FILE:per_vertex_transform_tests>)
+	add_test(NAME per_vertex_unique COMMAND $<TARGET_FILE:per_vertex_unique_tests>)
 	add_test(NAME push_descriptor_policy COMMAND $<TARGET_FILE:push_descriptor_policy_tests>)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
@@ -903,7 +922,9 @@ if(BUILD_TESTING)
 			min_lod_view_mutant_floor min_lod_view_mutant_no_cap min_lod_view_mutant_resinfo
 			apple_drop_mutant_invert_clip apple_drop_mutant_always_bounds apple_drop_mutant_native_counts apple_drop_mutant_bias_abs
 			cp_counters_mutant_native_swap cp_counters_mutant_no_clamp cp_counters_mutant_flag_any cp_counters_mutant_skip_ignored
-			frame_dump_flips_mutant_keep_zero frame_dump_flips_mutant_off_by_one)
+			frame_dump_flips_mutant_keep_zero frame_dump_flips_mutant_off_by_one
+			per_vertex_unique_mutant_no_instance per_vertex_unique_mutant_no_first per_vertex_unique_mutant_no_ratio
+			per_vertex_unique_mutant_writes_ok per_vertex_unique_mutant_dropped_ok per_vertex_unique_mutant_no_dropped)
 		add_test(NAME ${mutant_test} COMMAND $<TARGET_FILE:${mutant_test}_tests>)
 		set_tests_properties(${mutant_test} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
@@ -1024,6 +1045,13 @@ if(BUILD_TESTING)
 		apple_drop_mutant_always_bounds_tests
 		apple_drop_mutant_native_counts_tests
 		apple_drop_mutant_bias_abs_tests
+		per_vertex_unique_tests
+		per_vertex_unique_mutant_no_instance_tests
+		per_vertex_unique_mutant_no_first_tests
+		per_vertex_unique_mutant_no_ratio_tests
+		per_vertex_unique_mutant_writes_ok_tests
+		per_vertex_unique_mutant_dropped_ok_tests
+		per_vertex_unique_mutant_no_dropped_tests
 		cp_counters_tests
 		cp_counters_mutant_native_swap_tests
 		cp_counters_mutant_no_clamp_tests
