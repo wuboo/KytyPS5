@@ -90,6 +90,10 @@ enum class Counter : uint32_t {
 	SubmitQueueWaitNs,     // async_submit: from push of a job to its pop by the SubmitThread
 	DispGuest, DispProtoUnpack, DispProtoCapture, DispProtoCaptureNonNative, DispTiler, DispFault, DispOther,
 	ProtoSkippedDraws,     // KYTY_DIAG_PROTO_SKIP=1: supported prototype draws not drawn
+	// S134 (KYTY_PV_UNIQUE=1): capture per unique vertex.
+	PrototypeUniqueDraws,    // prototype draws that took the unique path
+	PrototypeUniqueVertices, // ... capture invocations of those draws (unique vertices * instances)
+	PrototypeUniqueFallback, // prototype draws that stayed on the per-corner path with the switch on
 	Count,
 };
 
