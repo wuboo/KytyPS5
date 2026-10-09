@@ -72,6 +72,12 @@ enum class Counter : uint32_t {
 	MinLodRemapped,        // ... and the ones whose MinLod became a view base level (no VK_EXT_image_view_min_lod)
 	MinLodFrac,            // sampled T# binds with a fractional MinLod (MinLod % 256 != 0), which the remap rounds up
 	MinLodResinfo,         // binds of an image with MinLod != 0 into a program that queries its size (RESINFO)
+	// S129: guest state the host cannot honor (counting only, nothing recorded differently), see appleDrop.h.
+	DropDepthClamp,        // draws with Z clip disabled by the guest (DB clamps) while the host has no depth clamp/clip control
+	DropDepthBounds,       // draws with the depth bounds test enabled while the host skips it
+	DropColorWriteDyn,     // draws with an attachment slot without a view while the host has no dynamic color write enable
+	DropSamplerBorderTable, // samplers created with a border color from the table (approximated as transparent black)
+	DropSamplerLodBias,    // samplers whose LOD bias was clamped to the device limit
 	Count,
 };
 

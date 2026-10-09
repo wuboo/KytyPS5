@@ -627,6 +627,26 @@ foreach(mutant IN ITEMS FLOOR NO_CAP RESINFO)
 	target_compile_definitions(min_lod_view_mutant_${mutant_lower}_tests PRIVATE KYTY_MINLOD_MUTANT_${mutant}=1)
 endforeach()
 
+add_executable(apple_drop_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/AppleDropTests.cpp")
+target_include_directories(apple_drop_tests PRIVATE ${inc_headers})
+# Mutants (each must be caught, WILL_FAIL): Z clip inverted; depth bounds counted without the guest enabling it; color write counted on a host that has it; LOD bias clamp only on the positive side.
+foreach(mutant IN ITEMS INVERT_CLIP ALWAYS_BOUNDS NATIVE_COUNTS BIAS_ABS)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(apple_drop_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/AppleDropTests.cpp")
+	target_include_directories(apple_drop_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(apple_drop_mutant_${mutant_lower}_tests PRIVATE KYTY_APPLEDROP_MUTANT_${mutant}=1)
+endforeach()
+
+add_executable(frame_dump_flips_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/FrameDumpFlipsTests.cpp")
+target_include_directories(frame_dump_flips_tests PRIVATE ${inc_headers})
+# Mutants (each must be caught, WILL_FAIL): zero kept as a flip; match off by one.
+foreach(mutant IN ITEMS KEEP_ZERO OFF_BY_ONE)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(frame_dump_flips_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/FrameDumpFlipsTests.cpp")
+	target_include_directories(frame_dump_flips_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(frame_dump_flips_mutant_${mutant_lower}_tests PRIVATE KYTY_FRAMEDUMP_MUTANT_${mutant}=1)
+endforeach()
+
 add_executable(cs_trace_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CsTraceTests.cpp")
 target_include_directories(cs_trace_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): read resources dropped from the trace; traced flip off by one.
@@ -847,6 +867,8 @@ if(BUILD_TESTING)
 	add_test(NAME mem_events COMMAND $<TARGET_FILE:mem_events_tests>)
 	add_test(NAME diag_tex COMMAND $<TARGET_FILE:diag_tex_tests>)
 	add_test(NAME min_lod_view COMMAND $<TARGET_FILE:min_lod_view_tests>)
+	add_test(NAME apple_drop COMMAND $<TARGET_FILE:apple_drop_tests>)
+	add_test(NAME frame_dump_flips COMMAND $<TARGET_FILE:frame_dump_flips_tests>)
 	add_test(NAME bc7 COMMAND $<TARGET_FILE:bc7_tests>)
 	add_test(NAME bc_dump COMMAND $<TARGET_FILE:bc_dump_tests>)
 	add_test(NAME bc_dump_tile COMMAND $<TARGET_FILE:bc_dump_tile_tests>)
@@ -867,7 +889,9 @@ if(BUILD_TESTING)
 			rt_dump_mutant_ignore_flip rt_dump_mutant_ignore_ps
 			bvh_node_parser_mutant_base_shift bvh_node_parser_mutant_keep_empty
 			mem_events_mutant_inclusive_end mem_events_mutant_merge_any_addr
-			min_lod_view_mutant_floor min_lod_view_mutant_no_cap min_lod_view_mutant_resinfo)
+			min_lod_view_mutant_floor min_lod_view_mutant_no_cap min_lod_view_mutant_resinfo
+			apple_drop_mutant_invert_clip apple_drop_mutant_always_bounds apple_drop_mutant_native_counts apple_drop_mutant_bias_abs
+			frame_dump_flips_mutant_keep_zero frame_dump_flips_mutant_off_by_one)
 		add_test(NAME ${mutant_test} COMMAND $<TARGET_FILE:${mutant_test}_tests>)
 		set_tests_properties(${mutant_test} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
@@ -983,6 +1007,14 @@ if(BUILD_TESTING)
 		min_lod_view_mutant_floor_tests
 		min_lod_view_mutant_no_cap_tests
 		min_lod_view_mutant_resinfo_tests
+		apple_drop_tests
+		apple_drop_mutant_invert_clip_tests
+		apple_drop_mutant_always_bounds_tests
+		apple_drop_mutant_native_counts_tests
+		apple_drop_mutant_bias_abs_tests
+		frame_dump_flips_tests
+		frame_dump_flips_mutant_keep_zero_tests
+		frame_dump_flips_mutant_off_by_one_tests
 		diag_tex_mutant_nonzero_tests
 		diag_tex_mutant_no_once_tests
 		mem_events_tests

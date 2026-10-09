@@ -16,6 +16,7 @@
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
+#include "graphics/presentation/window/frameDumpFlips.h"
 #include "graphics/presentation/window/windowInternal.h"
 
 #include <algorithm>
@@ -1032,8 +1033,11 @@ namespace {
 // seconds (default 15) as frame_<seconds>.ppm, independent of whether the host window is visible
 // (a window capture of an occluded window only returns its thumbnail).
 struct FrameDumpConfig {
-	std::string dir;
-	uint64_t    every_us = 15000000;
+	std::string           dir;
+	uint64_t              every_us = 15000000;
+	// KYTY_FRAME_DUMP_FLIPS=5000,5800 writes frame_flip_<n>.ppm when the 1-based
+	// frames.csv index matches, so two runs can be compared at the same present.
+	std::vector<uint64_t> flips;
 };
 
 const FrameDumpConfig& GetFrameDumpConfig() {
@@ -1045,6 +1049,7 @@ const FrameDumpConfig& GetFrameDumpConfig() {
 		if (const char* every = std::getenv("KYTY_FRAME_DUMP_EVERY_S"); every != nullptr) {
 			c.every_us = std::max<uint64_t>(1, std::strtoull(every, nullptr, 10)) * 1000000;
 		}
+		c.flips = ParseFrameDumpFlips(std::getenv("KYTY_FRAME_DUMP_FLIPS"));
 		return c;
 	}();
 	return config;
@@ -1069,9 +1074,19 @@ bool FrameDumpDue(uint64_t* stamp_s) {
 	return true;
 }
 
+bool FrameDumpFlip(uint64_t flip, uint64_t* stamp) {
+	const auto& config = GetFrameDumpConfig();
+	if (config.dir.empty() || !FrameDumpFlipWanted(config.flips, flip)) {
+		return false;
+	}
+	*stamp = flip;
+	return true;
+}
+
 void WriteFrameDump(const uint8_t* pixels, uint32_t width, uint32_t height, vk::Format format,
-                    uint64_t stamp_s) {
-	const auto path = GetFrameDumpConfig().dir + "/frame_" + std::to_string(stamp_s) + ".ppm";
+                    uint64_t stamp_s, bool flip_index = false) {
+	const auto path = GetFrameDumpConfig().dir + (flip_index ? "/frame_flip_" : "/frame_") +
+	                  std::to_string(stamp_s) + ".ppm";
 	FILE*      file = std::fopen(path.c_str(), "wb");
 	if (file == nullptr) {
 		return;
@@ -1127,6 +1142,7 @@ void Presenter::Impl::Present() {
 	vk::Extent3D            dump_extent {};
 	vk::Format              dump_format = vk::Format::eUndefined;
 	uint64_t                dump_stamp  = 0;
+	bool                    dump_flip   = false;
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {
 		auto status = swapchain.AcquireNextImage(present_scheduler);
 		if (status != Swapchain::Status::Success) {
@@ -1140,8 +1156,11 @@ void Presenter::Impl::Present() {
 		                                 swapchain.PrepareSystemOverlay();
 		swapchain.RecordPresentCommands(command, layers[0].frame, layers[1],
 		                                draw_system_overlay);
-		uint64_t stamp_s = 0;
-		if (dump == nullptr && layers[0].frame != nullptr && FrameDumpDue(&stamp_s) &&
+		uint64_t       stamp_s   = 0;
+		const uint64_t next_flip = FrameTiming::PresentedFrames() + 1;
+		bool           flip_hit  = false;
+		if (dump == nullptr && layers[0].frame != nullptr &&
+		    (FrameDumpDue(&stamp_s) || (flip_hit = FrameDumpFlip(next_flip, &stamp_s))) &&
 		    layers[0].frame->image.extent.width * layers[0].frame->image.extent.height != 0) {
 			const auto& src  = layers[0].frame->image;
 			const auto  size = static_cast<uint64_t>(src.extent.width) * src.extent.height * 4;
@@ -1151,6 +1170,7 @@ void Presenter::Impl::Present() {
 			dump_extent = src.extent;
 			dump_format = src.format;
 			dump_stamp  = stamp_s;
+			dump_flip   = flip_hit;
 			vk::BufferImageCopy region {};
 			region.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
 			region.imageSubresource.layerCount = 1;
@@ -1188,7 +1208,7 @@ void Presenter::Impl::Present() {
 			dump->Invalidate(0, dump->Size());
 			if (!dump->Mapped().empty()) {
 				WriteFrameDump(dump->Mapped().data(), dump_extent.width, dump_extent.height,
-				               dump_format, dump_stamp);
+				               dump_format, dump_stamp, dump_flip);
 			}
 		}
 		return;
