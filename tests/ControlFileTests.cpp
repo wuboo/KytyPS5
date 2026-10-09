@@ -66,6 +66,12 @@ void TestParseAndResolve() {
 	Check(late.force_tex.size() == 1 && late.force_tex[0].slot == 3 && late.force_tex[0].rgba == 0xffff00ffu,
 	      "force_tex fields wrong");
 	Check(late.block == "at=6620", "open block name wrong");
+
+	uint32_t rgba = 0;
+	Check(late.ForceTexFor(0x2f46fd22b1de1575ull, 3, &rgba) && rgba == 0xffff00ffu, "force_tex lookup failed");
+	Check(!late.ForceTexFor(0x2f46fd22b1de1575ull, 4, &rgba), "force_tex matched another slot");
+	Check(!late.ForceTexFor(0x1234, 3, &rgba), "force_tex matched another pixel shader");
+	Check(!base.ForceTexFor(0x2f46fd22b1de1575ull, 3, &rgba), "force_tex active outside its block");
 }
 
 void TestStrictParsing() {

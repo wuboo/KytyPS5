@@ -532,7 +532,7 @@ target_include_directories(env_audit_tests PRIVATE ${inc_headers})
 add_executable(control_file_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ControlFileTests.cpp")
 target_include_directories(control_file_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): numbers are read leniently; `until` is ignored.
-foreach(mutant IN ITEMS LAX_NUMBERS NO_UNTIL)
+foreach(mutant IN ITEMS LAX_NUMBERS NO_UNTIL FORCE_ANY_SLOT)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(control_file_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ControlFileTests.cpp")
 	target_include_directories(control_file_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
@@ -773,6 +773,7 @@ if(BUILD_TESTING)
 	add_test(NAME resource_tracking_mutant_bvh_flag COMMAND $<TARGET_FILE:resource_tracking_mutant_bvh_flag_tests>)
 	set_tests_properties(resource_tracking_mutant_bvh_flag PROPERTIES WILL_FAIL TRUE)
 	foreach(mutant_test control_file_mutant_lax_numbers control_file_mutant_no_until
+			control_file_mutant_force_any_slot
 			cs_trace_mutant_drop_reads cs_trace_mutant_off_by_one
 			rt_dump_mutant_ignore_flip rt_dump_mutant_ignore_ps
 			bvh_node_parser_mutant_base_shift bvh_node_parser_mutant_keep_empty)
@@ -866,6 +867,7 @@ if(BUILD_TESTING)
 		control_file_tests
 		control_file_mutant_lax_numbers_tests
 		control_file_mutant_no_until_tests
+		control_file_mutant_force_any_slot_tests
 		rt_dump_tests
 		rt_dump_mutant_ignore_flip_tests
 		rt_dump_mutant_ignore_ps_tests

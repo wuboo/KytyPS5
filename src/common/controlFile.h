@@ -60,6 +60,20 @@ struct Snapshot {
 	[[nodiscard]] bool SkipCs(uint64_t hash) const {
 		return std::find(skip_cs.begin(), skip_cs.end(), hash) != skip_cs.end();
 	}
+	// force_tex colour for slot `slot` of pixel shader `ps` (0xAABBGGRR), false when not listed.
+	[[nodiscard]] bool ForceTexFor(uint64_t ps, uint32_t slot, uint32_t* rgba) const {
+		for (const auto& entry: force_tex) {
+#ifdef KYTY_CONTROL_MUTANT_FORCE_ANY_SLOT
+			if (entry.ps == ps) {
+#else
+			if (entry.ps == ps && entry.slot == slot) {
+#endif
+				*rgba = entry.rgba;
+				return true;
+			}
+		}
+		return false;
+	}
 	// Same settings (the generation and the block name do not count).
 	[[nodiscard]] bool SameSettings(const Snapshot& o) const {
 		return skip_cs == o.skip_cs && dump_rt == o.dump_rt && force_tex == o.force_tex && label == o.label;
