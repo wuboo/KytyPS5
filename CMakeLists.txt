@@ -560,6 +560,24 @@ foreach(mutant IN ITEMS NO_PBIT SUBSET ANCHOR SHARED_PBIT)
 	target_compile_definitions(bc7_mutant_${mutant_lower}_tests PRIVATE KYTY_BC7_MUTANT_${mutant}=1)
 endforeach()
 
+# BcDetile against the real Standard64KB layout (tile.cpp), forward-tiled with TileGetBlockOffset.
+add_executable(bc_dump_tile_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/BcDumpTileTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/tile.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
+)
+target_include_directories(bc_dump_tile_tests PRIVATE ${inc_headers})
+target_link_libraries(bc_dump_tile_tests common fmt::fmt)
+# Mutant (must be caught, WILL_FAIL): the block index swaps row and column.
+add_executable(bc_dump_tile_mutant_block_row_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/BcDumpTileTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/tile.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
+)
+target_include_directories(bc_dump_tile_mutant_block_row_tests PRIVATE ${inc_headers})
+target_link_libraries(bc_dump_tile_mutant_block_row_tests common fmt::fmt)
+target_compile_definitions(bc_dump_tile_mutant_block_row_tests PRIVATE KYTY_BCDUMP_MUTANT_BLOCK_ROW=1)
+
 add_executable(bc_dump_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BcDumpTests.cpp")
 target_include_directories(bc_dump_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): the block index swaps row and column; the diff looks at the first byte only.
@@ -811,6 +829,7 @@ if(BUILD_TESTING)
 	add_test(NAME min_lod_view COMMAND $<TARGET_FILE:min_lod_view_tests>)
 	add_test(NAME bc7 COMMAND $<TARGET_FILE:bc7_tests>)
 	add_test(NAME bc_dump COMMAND $<TARGET_FILE:bc_dump_tests>)
+	add_test(NAME bc_dump_tile COMMAND $<TARGET_FILE:bc_dump_tile_tests>)
 	add_test(NAME bvh_node_parser COMMAND $<TARGET_FILE:bvh_node_parser_tests>)
 	add_test(NAME rt_miss_switch COMMAND $<TARGET_FILE:rt_miss_switch_tests>)
 	add_test(NAME rt_miss_switch_mutant COMMAND $<TARGET_FILE:rt_miss_switch_mutant_tests>)
@@ -821,7 +840,7 @@ if(BUILD_TESTING)
 			control_file_mutant_force_any_slot control_file_mutant_diag_any_slot
 			control_file_mutant_filter_ignored control_file_mutant_diag_all_ignored control_file_mutant_dump_any_slot
 			bc7_mutant_no_pbit bc7_mutant_subset bc7_mutant_anchor bc7_mutant_shared_pbit
-			bc_dump_mutant_block_row bc_dump_mutant_diff_first_byte
+			bc_dump_mutant_block_row bc_dump_mutant_diff_first_byte bc_dump_tile_mutant_block_row
 			diag_tex_mutant_hist_no_fmt diag_tex_mutant_hist_no_indices rt_dump_mutant_no_addr
 			diag_tex_mutant_nonzero diag_tex_mutant_no_once
 			cs_trace_mutant_drop_reads cs_trace_mutant_off_by_one
@@ -928,6 +947,8 @@ if(BUILD_TESTING)
 		bc7_mutant_anchor_tests
 		bc7_mutant_shared_pbit_tests
 		bc_dump_tests
+		bc_dump_tile_tests
+		bc_dump_tile_mutant_block_row_tests
 		bc_dump_mutant_block_row_tests
 		bc_dump_mutant_diff_first_byte_tests
 		control_file_mutant_dump_any_slot_tests
