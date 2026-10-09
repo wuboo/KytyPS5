@@ -10,6 +10,8 @@
 //   dump_rt=<ps hex>[:<flip dec>][,...]        colour targets + depth after the last draw of that PS
 //   force_tex=<ps hex>:<slot dec>:<rgba8 hex>  the T# in that slot reads as a 1x1 image of one colour,
 //                                              0xAABBGGRR (r in the low byte)
+//   diag_tex=<ps hex>:<slot dec>[,...]         once per block: log the full T# of that slot of the pixel shader
+//                                              and dump the host image it samples ([diag-tex], KYTY_DIAG_DIR)
 //   label=<name>                               arm name used in the file names of dumps
 //   # starts a comment
 //
@@ -49,11 +51,18 @@ struct DumpRt {
 	bool     operator==(const DumpRt& o) const { return ps == o.ps && flip == o.flip; }
 };
 
+struct DiagTex {
+	uint64_t ps   = 0;
+	uint32_t slot = 0;
+	bool     operator==(const DiagTex& o) const { return ps == o.ps && slot == o.slot; }
+};
+
 struct Snapshot {
 	uint64_t              gen = 0;
 	std::vector<uint64_t> skip_cs;
 	std::vector<DumpRt>   dump_rt;
 	std::vector<ForceTex> force_tex;
+	std::vector<DiagTex>  diag_tex;
 	std::string           label;
 	std::string           block; // blocks in force ("at=6600-6700+at=6800"), empty = base only
 
@@ -74,9 +83,20 @@ struct Snapshot {
 		}
 		return false;
 	}
+	// diag_tex lists slot `slot` of pixel shader `ps`.
+	[[nodiscard]] bool DiagTexListed(uint64_t ps, uint32_t slot) const {
+		for (const auto& entry: diag_tex) {
+#ifdef KYTY_CONTROL_MUTANT_DIAG_ANY_SLOT
+			if (entry.ps == ps) return true;
+#else
+			if (entry.ps == ps && entry.slot == slot) return true;
+#endif
+		}
+		return false;
+	}
 	// Same settings (the generation and the block name do not count).
 	[[nodiscard]] bool SameSettings(const Snapshot& o) const {
-		return skip_cs == o.skip_cs && dump_rt == o.dump_rt && force_tex == o.force_tex && label == o.label;
+		return skip_cs == o.skip_cs && dump_rt == o.dump_rt && force_tex == o.force_tex && diag_tex == o.diag_tex && label == o.label;
 	}
 };
 
@@ -157,6 +177,19 @@ inline bool ParseForceTex(std::string_view text, std::vector<ForceTex>& out) {
 	});
 }
 
+inline bool ParseDiagTex(std::string_view text, std::vector<DiagTex>& out) {
+	out.clear();
+	return ForEachItem(text, [&](std::string_view item) {
+		const auto colon = item.find(':');
+		uint64_t   ps = 0, slot = 0;
+		if (colon == std::string_view::npos || !ParseNumber(item.substr(0, colon), 16, ps) || ps == 0 ||
+		    !ParseNumber(item.substr(colon + 1), 10, slot) || slot > 127)
+			return false;
+		out.push_back({ps, static_cast<uint32_t>(slot)});
+		return true;
+	});
+}
+
 inline bool ValidLabel(std::string_view label) {
 	if (label.size() > 48) return false;
 	for (const char c: label) {
@@ -188,6 +221,7 @@ inline bool ValidateItem(const Item& item, std::string& why) {
 	std::vector<uint64_t> hashes;
 	std::vector<DumpRt>   dumps;
 	std::vector<ForceTex> forces;
+	std::vector<DiagTex>  diags;
 	if (item.key == "skip_cs") {
 		if (ParseHexList(item.value, hashes)) return true;
 		why = "skip_cs is a list of hex hashes";
@@ -197,6 +231,9 @@ inline bool ValidateItem(const Item& item, std::string& why) {
 	} else if (item.key == "force_tex") {
 		if (ParseForceTex(item.value, forces)) return true;
 		why = "force_tex is <ps hex>:<slot 0..127>:<rgba8 hex>";
+	} else if (item.key == "diag_tex") {
+		if (ParseDiagTex(item.value, diags)) return true;
+		why = "diag_tex is <ps hex>:<slot 0..127>";
 	} else if (item.key == "label") {
 		if (ValidLabel(item.value)) return true;
 		why = "label is up to 48 characters of [A-Za-z0-9_.-]";
@@ -279,6 +316,8 @@ inline void Apply(Snapshot& out, const Item& item) {
 		ParseDumpRt(item.value, out.dump_rt);
 	} else if (item.key == "force_tex") {
 		ParseForceTex(item.value, out.force_tex);
+	} else if (item.key == "diag_tex") {
+		ParseDiagTex(item.value, out.diag_tex);
 	} else if (item.key == "label") {
 		out.label = item.value;
 	}

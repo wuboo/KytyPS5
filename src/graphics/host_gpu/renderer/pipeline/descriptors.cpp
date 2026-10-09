@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
+#include "graphics/host_gpu/renderer/diagDump.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
@@ -676,6 +677,38 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	} else {
 		(void)SelectSampledColorView(image->info.pixel_format, pixel_format,
 		                             descriptor.DstSelXYZW());
+	}
+	if (ps_hash != 0 && DiagDump::WantsTex(ps_hash, slot)) {
+		DiagDump::TexInfo info;
+		info.flip          = FrameTiming::GuestFlips() + 1;
+		info.ps            = ps_hash;
+		info.slot          = slot;
+		info.addr          = address;
+		info.guest_format  = static_cast<uint32_t>(format);
+		info.numeric_class = static_cast<uint32_t>(resource.numeric_class);
+		info.vk_format     = static_cast<uint32_t>(image->info.pixel_format);
+		info.width         = width;
+		info.height        = height;
+		info.depth         = depth;
+		info.base_level    = base_level;
+		info.last_level    = last_level;
+		info.max_mip       = max_mip;
+		info.tile_mode     = static_cast<uint32_t>(tile);
+		info.pitch         = pitch;
+		info.type          = static_cast<uint32_t>(type);
+		info.dimension     = static_cast<uint32_t>(resource.dimension);
+		info.dst_sel       = descriptor.DstSelXYZW();
+		info.image_levels  = image->info.resources.levels;
+		info.image_layers  = image->info.resources.layers;
+		info.byte_size     = size.size;
+		info.from_cache    = image->backing.image != nullptr;
+		info.host_image    = reinterpret_cast<uint64_t>(static_cast<VkImage>(image->backing.image));
+		info.gpu_modified  = image->IsGpuModified();
+		info.cpu_dirty     = image->IsCpuDirty();
+		info.uma           = std::getenv("KYTY_UMA") != nullptr ? std::getenv("KYTY_UMA") : "0";
+		std::copy(std::begin(descriptor.fields), std::begin(descriptor.fields) + 8, info.dwords);
+		LOGF("%s\n", DiagDump::TexDescribe(info).c_str());
+		DiagDump::AddTexRequest({id, info});
 	}
 	return {id, nullptr, std::move(desc)};
 }

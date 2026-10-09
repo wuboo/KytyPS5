@@ -532,7 +532,7 @@ target_include_directories(env_audit_tests PRIVATE ${inc_headers})
 add_executable(control_file_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ControlFileTests.cpp")
 target_include_directories(control_file_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): numbers are read leniently; `until` is ignored.
-foreach(mutant IN ITEMS LAX_NUMBERS NO_UNTIL FORCE_ANY_SLOT)
+foreach(mutant IN ITEMS LAX_NUMBERS NO_UNTIL FORCE_ANY_SLOT DIAG_ANY_SLOT)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(control_file_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ControlFileTests.cpp")
 	target_include_directories(control_file_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
@@ -547,6 +547,16 @@ foreach(mutant IN ITEMS IGNORE_FLIP IGNORE_PS)
 	add_executable(rt_dump_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RtDumpTests.cpp")
 	target_include_directories(rt_dump_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(rt_dump_mutant_${mutant_lower}_tests PRIVATE KYTY_RTDUMP_MUTANT_${mutant}=1)
+endforeach()
+
+add_executable(diag_tex_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/DiagTexTests.cpp")
+target_include_directories(diag_tex_tests PRIVATE ${inc_headers})
+# Mutants (each must be caught, WILL_FAIL): zero fraction counts the non-zero texels / the once-per-block guard is gone.
+foreach(mutant IN ITEMS NONZERO NO_ONCE)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(diag_tex_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/DiagTexTests.cpp")
+	target_include_directories(diag_tex_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(diag_tex_mutant_${mutant_lower}_tests PRIVATE KYTY_DIAGTEX_MUTANT_${mutant}=1)
 endforeach()
 
 add_executable(cs_trace_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CsTraceTests.cpp")
@@ -766,6 +776,7 @@ if(BUILD_TESTING)
 	add_test(NAME control_file COMMAND $<TARGET_FILE:control_file_tests>)
 	add_test(NAME cs_trace COMMAND $<TARGET_FILE:cs_trace_tests>)
 	add_test(NAME rt_dump COMMAND $<TARGET_FILE:rt_dump_tests>)
+	add_test(NAME diag_tex COMMAND $<TARGET_FILE:diag_tex_tests>)
 	add_test(NAME bvh_node_parser COMMAND $<TARGET_FILE:bvh_node_parser_tests>)
 	add_test(NAME rt_miss_switch COMMAND $<TARGET_FILE:rt_miss_switch_tests>)
 	add_test(NAME rt_miss_switch_mutant COMMAND $<TARGET_FILE:rt_miss_switch_mutant_tests>)
@@ -773,7 +784,8 @@ if(BUILD_TESTING)
 	add_test(NAME resource_tracking_mutant_bvh_flag COMMAND $<TARGET_FILE:resource_tracking_mutant_bvh_flag_tests>)
 	set_tests_properties(resource_tracking_mutant_bvh_flag PROPERTIES WILL_FAIL TRUE)
 	foreach(mutant_test control_file_mutant_lax_numbers control_file_mutant_no_until
-			control_file_mutant_force_any_slot
+			control_file_mutant_force_any_slot control_file_mutant_diag_any_slot
+			diag_tex_mutant_nonzero diag_tex_mutant_no_once
 			cs_trace_mutant_drop_reads cs_trace_mutant_off_by_one
 			rt_dump_mutant_ignore_flip rt_dump_mutant_ignore_ps
 			bvh_node_parser_mutant_base_shift bvh_node_parser_mutant_keep_empty)
@@ -868,6 +880,10 @@ if(BUILD_TESTING)
 		control_file_mutant_lax_numbers_tests
 		control_file_mutant_no_until_tests
 		control_file_mutant_force_any_slot_tests
+		control_file_mutant_diag_any_slot_tests
+		diag_tex_tests
+		diag_tex_mutant_nonzero_tests
+		diag_tex_mutant_no_once_tests
 		rt_dump_tests
 		rt_dump_mutant_ignore_flip_tests
 		rt_dump_mutant_ignore_ps_tests

@@ -131,10 +131,10 @@ void PollControlFile(uint64_t flip) {
 	if (!poller.loaded) return;
 	if (!Common::ControlFile::Publish(Common::ControlFile::Resolve(poller.file, flip + 1))) return;
 	const auto& now = Common::ControlFile::Current();
-	LOGF("[control] gen=%llu from_flip=%llu block=%s label=%s skip_cs=%zu dump_rt=%zu force_tex=%zu\n",
+	LOGF("[control] gen=%llu from_flip=%llu block=%s label=%s skip_cs=%zu dump_rt=%zu force_tex=%zu diag_tex=%zu\n",
 	     static_cast<unsigned long long>(now.gen), static_cast<unsigned long long>(flip + 1),
 	     now.block.empty() ? "base" : now.block.c_str(), now.label.c_str(), now.skip_cs.size(),
-	     now.dump_rt.size(), now.force_tex.size());
+	     now.dump_rt.size(), now.force_tex.size(), now.diag_tex.size());
 }
 
 } // namespace

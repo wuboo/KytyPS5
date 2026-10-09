@@ -1185,6 +1185,38 @@ static void DumpRenderTargets(RenderContext& context, uint64_t ps, const RenderC
 	}
 }
 
+// diag_tex: reads back mip 0 / layer 0 of every image queued by ResolveTexture (the host image the shader sampled).
+static void DiagTexAfterDraw(RenderContext& context) {
+	auto requests = DiagDump::TakeTexRequests();
+	if (requests.empty()) return;
+	context.GetCommandScheduler().EndRendering();
+	std::vector<std::unique_ptr<Buffer>> buffers;
+	std::vector<DiagDump::Target>        targets;
+	std::vector<size_t>                  which;
+	for (size_t i = 0; i < requests.size(); i++) {
+		// The draw that resolved the image has just been recorded, so the slot is still alive.
+		const auto& image  = context.GetTextureCache().GetImage(requests[i].image);
+		const auto  extent = image.info.extent;
+		const auto  before = targets.size();
+		DumpRtCopy(context, requests[i].image, 0, 0, {std::max(extent.width, 1u), std::max(extent.height, 1u)},
+		           image.info.IsDepth(), -3, buffers, targets);
+		if (targets.size() != before) which.push_back(i);
+	}
+	if (!targets.empty()) context.GetCommandScheduler().FlushAndWait();
+	std::vector<bool> stored(requests.size(), false);
+	for (size_t i = 0; i < targets.size(); i++) {
+		buffers[i]->Invalidate(0, buffers[i]->Size());
+		if (buffers[i]->Mapped().size() >= targets[i].data.size()) {
+			std::memcpy(targets[i].data.data(), buffers[i]->Mapped().data(), targets[i].data.size());
+			DiagDump::StoreTex(requests[which[i]].info, std::move(targets[i]));
+			stored[which[i]] = true;
+		}
+	}
+	for (size_t i = 0; i < requests.size(); i++) {
+		if (!stored[i]) DiagDump::StoreTex(requests[i].info, {});
+	}
+}
+
 // Called after a draw (or a batch of prototype draws) of `ps_hash`: dumps when the control file asks.
 static void DiagDumpAfterDraw(RenderContext& context, bool ps_active, uint64_t ps_hash, const RenderColorInfo* colors,
                               uint32_t color_count, const RenderDepthInfo& depth) {
@@ -1388,6 +1420,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	DiagDumpAfterDraw(m_context, state.ps_active,
 	                  state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0, state.color_info,
 	                  state.color_count, state.depth_info);
+	DiagTexAfterDraw(m_context);
 	LogDrawPhase(draw.Name(), "DrawComplete");
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);

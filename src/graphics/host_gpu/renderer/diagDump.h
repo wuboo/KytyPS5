@@ -1,6 +1,9 @@
 #ifndef EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_DIAGDUMP_H_
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_DIAGDUMP_H_
 
+#include "common/slotVector.h"
+#include "graphics/host_gpu/renderer/diagTex.h"
+
 #include <cstdint>
 #include <vector>
 
@@ -17,6 +20,19 @@ struct Target {
 	uint32_t             height    = 0;
 	std::vector<uint8_t> data;
 };
+
+// Control file key diag_tex=<ps>:<slot>: the first resolve of that slot in a block logs the T# ([diag-tex]) and
+// queues a request; the renderer reads the host image back after the draw (StoreTex) and FlipReport writes
+// $KYTY_DIAG_DIR/<label>-<flip>-tex-<ps>-s<slot>.{ppm,raw} (mip 0, layer 0) with min/max/mean and the zero fraction.
+struct TexRequest {
+	Common::SlotId image;
+	TexInfo        info;
+};
+
+bool                    WantsTex(uint64_t ps_hash, uint32_t slot); // true once per (block, ps, slot)
+void                    AddTexRequest(TexRequest&& request);
+std::vector<TexRequest> TakeTexRequests();
+void                    StoreTex(const TexInfo& info, Target&& target); // empty data = could not be read back
 
 bool Wants(uint64_t ps_hash);
 void Store(uint64_t ps_hash, Target&& target);
