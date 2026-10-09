@@ -84,6 +84,7 @@
 #include <cstring>
 #include <initializer_list>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <numeric>
@@ -1352,6 +1353,8 @@ struct TestCase {
   bool has_user_data = false;
   u32 image_descriptor_swizzle = DstSel(4, 5, 6, 7);
   bool compile_only = false;
+  // KYTY_RT_MISS=1 while this case is compiled: every BvhIntersect answers "no hit".
+  bool rt_miss = false;
   size_t storage_buffer_range_bytes = 0;
   std::vector<u32> storage_buffer_offsets;
   std::vector<std::pair<u32, u32>> storage_buffer_ranges;
@@ -1651,7 +1654,31 @@ void CheckSpirvEmission(const TestCase &test, const std::vector<u32> &spirv) {
   }
 }
 
+// Sets KYTY_RT_MISS for the lifetime of the object when asked to and restores the old value.
+struct RtMissScope {
+  explicit RtMissScope(bool on) : on_(on) {
+    if (!on_) return;
+    const char *old = std::getenv("KYTY_RT_MISS");
+    had_ = old != nullptr;
+    if (had_) old_ = old;
+    setenv("KYTY_RT_MISS", "1", 1);
+  }
+  ~RtMissScope() {
+    if (!on_) return;
+    if (had_) setenv("KYTY_RT_MISS", old_.c_str(), 1);
+    else unsetenv("KYTY_RT_MISS");
+  }
+  RtMissScope(const RtMissScope &) = delete;
+  RtMissScope &operator=(const RtMissScope &) = delete;
+
+private:
+  bool on_;
+  bool had_ = false;
+  std::string old_;
+};
+
 CompiledShader CompileCase(const TestCase &test, u32 host_subgroup_size = 64) {
+  const RtMissScope rt_miss_scope(test.rt_miss);
   auto user_data =
       MakeNativeUserData(test.has_user_data ? &test.user_data : nullptr);
   const auto uses_image =
@@ -42698,6 +42725,7 @@ std::vector<TestCase> MakeCases() {
       cases.push_back(BvhIntersections(barycentrics, sorted));
     }
   }
+  cases.push_back(BvhIntersections(false, false, 0, false, true));
   AddCase(DsReadWriteVariants);
   for (u32 wave_size : {32u, 64u})
     for (bool gds : {false, true})
@@ -48561,6 +48589,63 @@ int main(int argc, char **argv) {
       for (bool sorted : {false, true}) {
         RunCase(&vulkan, BvhIntersections(barycentrics, sorted));
       }
+    }
+    RunCase(&vulkan, BvhIntersections(false, false, 0, false, true));
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--bvh-spirv-hash-only") == 0) {
+    // CPU only. Without KYTY_RT_MISS the SPIR-V of the S120 ray tracing cases must stay byte for byte
+    // what main4 (1c623249) emitted: FNV-1a 64 over the words, compared with the values recorded there.
+    Require("BvhSpirvHash", "environment", std::getenv("KYTY_RT_MISS") == nullptr,
+            "run this mode without KYTY_RT_MISS");
+    std::vector<TestCase> hash_cases;
+    hash_cases.push_back(FlatStackApertures(32));
+    hash_cases.push_back(FlatStackApertures(64));
+    hash_cases.push_back(BvhIntersections(true, true, 1));
+    hash_cases.push_back(BvhIntersections(true, true, 0, true));
+    for (bool barycentrics : {false, true}) {
+      for (bool sorted : {false, true}) {
+        hash_cases.push_back(BvhIntersections(barycentrics, sorted));
+      }
+    }
+    const auto fnv = [](const std::vector<u32> &words) {
+      uint64_t hash = 0xcbf29ce484222325ull;
+      for (const u32 word : words) {
+        for (u32 shift = 0; shift < 32; shift += 8) {
+          hash = (hash ^ ((word >> shift) & 0xffu)) * 0x100000001b3ull;
+        }
+      }
+      return hash;
+    };
+    std::map<std::string, uint64_t> golden = {
+        {"FlatStackApertures32", 0xf85cb74ac08bbf1bull},
+        {"FlatStackApertures64", 0x27c37ba093527439ull},
+        {"BvhBoxExitGrowth", 0xe0513a616b41a8bbull},
+        {"Bvh64HighNodePointers", 0xd1a806bc36baec83ull},
+        {"BvhTriangleIdUnsorted", 0xfe1ef374883f8165ull},
+        {"BvhTriangleIdSorted", 0x719a774ea4a1368dull},
+        {"BvhBarycentricUnsorted", 0x89f27c4074630ef4ull},
+        {"BvhBarycentricSorted", 0xb78752b6630ce4ccull},
+    };
+    u32 compared = 0;
+    for (const auto &test : hash_cases) {
+      const auto hash = fnv(CompileCase(test, 32).spirv);
+      std::printf("bvh-spirv-hash %s %016llx\n", test.name, static_cast<unsigned long long>(hash));
+      if (const auto it = golden.find(test.name); it != golden.end()) {
+        Require(test.name, "SPIR-V bytes", it->second == hash,
+                "SPIR-V changed without any switch set");
+        ++compared;
+      }
+    }
+    std::printf("bvh-spirv-hash compared=%u of %zu\n", compared, hash_cases.size());
+    Require("BvhSpirvHash", "coverage", compared == hash_cases.size(), "a case has no recorded hash");
+    // The switch must change the code (otherwise the previous check proves nothing): KYTY_RT_MISS=1 gives
+    // different SPIR-V for every case that contains BvhIntersect.
+    for (auto test : hash_cases) {
+      if (std::strncmp(test.name, "Bvh", 3) != 0) continue;
+      test.rt_miss = true;
+      Require(test.name, "RT_MISS SPIR-V", fnv(CompileCase(test, 32).spirv) != golden.at(test.name),
+              "KYTY_RT_MISS=1 left the SPIR-V unchanged");
     }
     return 0;
   }

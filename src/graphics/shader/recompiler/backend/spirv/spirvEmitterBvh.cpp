@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
+#include "graphics/shader/recompiler/rtMiss.h"
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 namespace {
@@ -284,6 +285,8 @@ void DefineBvhIntersect(EmitterState& s) {
 			require(Unary(s, spv::OpLogicalNot, b, Unary(s, spv::OpIsNan, b, value)));
 		require(Unary(s, spv::OpLogicalNot, b, Unary(s, spv::OpIsInf, b, origin[i])));
 	}
+	// KYTY_RT_MISS=1: answer "no hit" for every node, whatever the structure holds.
+	if (RtMissEnabled()) valid = ConstantBool(s, false);
 	const std::array triangle_invalid {ConstantU32(s, 0x7f800000), ConstantU32(s, 0x3f800000),
 	                                  ConstantU32(s, ~0u), ConstantU32(s, 0)};
 	const std::array box_invalid {ConstantU32(s, ~0u), ConstantU32(s, ~0u),
