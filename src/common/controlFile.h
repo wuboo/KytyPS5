@@ -16,6 +16,10 @@
 //                                              and dump the host image it samples ([diag-tex], KYTY_DIAG_DIR)
 //   diag_tex=<ps hex>:<slot dec>:all           every draw of the shader: one [diag-tex-d] line per draw plus a
 //                                              histogram per (addr, fmt, size) at the end of the flip (no readback)
+//   dump_tex=<ps hex>:<slot dec>[@<addr hex>|@fmt=<n>,<w>x<h>][,...]
+//                                              once per block, at the first draw whose T# fits the optional filter: decode
+//                                              mip 0 from guest memory (detiled as the texture cache does) and from the
+//                                              host image, write both as PNG with stats and a block diff ([dump-tex])
 //   label=<name>                               arm name used in the file names of dumps
 //   # starts a comment
 //
@@ -95,12 +99,20 @@ struct DiagTex {
 	bool     operator==(const DiagTex& o) const { return ps == o.ps && slot == o.slot && all == o.all; }
 };
 
+struct DumpTex {
+	uint64_t  ps   = 0;
+	uint32_t  slot = 0;
+	TexFilter filter;
+	bool      operator==(const DumpTex& o) const { return ps == o.ps && slot == o.slot && filter == o.filter; }
+};
+
 struct Snapshot {
 	uint64_t              gen = 0;
 	std::vector<uint64_t> skip_cs;
 	std::vector<DumpRt>   dump_rt;
 	std::vector<ForceTex> force_tex;
 	std::vector<DiagTex>  diag_tex;
+	std::vector<DumpTex>  dump_tex;
 	std::string           label;
 	std::string           block; // blocks in force ("at=6600-6700+at=6800"), empty = base only
 
@@ -153,9 +165,20 @@ struct Snapshot {
 		}
 		return false;
 	}
+	// dump_tex lists slot `slot` of pixel shader `ps` and its filter (if any) fits the T# `key`.
+	[[nodiscard]] bool DumpTexListed(uint64_t ps, uint32_t slot, const TexKey& key) const {
+		for (const auto& entry: dump_tex) {
+#ifdef KYTY_CONTROL_MUTANT_DUMP_ANY_SLOT
+			if (entry.ps == ps && entry.filter.Matches(key)) return true;
+#else
+			if (entry.ps == ps && entry.slot == slot && entry.filter.Matches(key)) return true;
+#endif
+		}
+		return false;
+	}
 	// Same settings (the generation and the block name do not count).
 	[[nodiscard]] bool SameSettings(const Snapshot& o) const {
-		return skip_cs == o.skip_cs && dump_rt == o.dump_rt && force_tex == o.force_tex && diag_tex == o.diag_tex && label == o.label;
+		return skip_cs == o.skip_cs && dump_rt == o.dump_rt && force_tex == o.force_tex && diag_tex == o.diag_tex && dump_tex == o.dump_tex && label == o.label;
 	}
 };
 
@@ -303,6 +326,23 @@ inline bool ParseDiagTex(std::string_view text, std::vector<DiagTex>& out) {
 	});
 }
 
+inline bool ParseDumpTex(std::string_view text, std::vector<DumpTex>& out) {
+	out.clear();
+	return ForEachForceItem(text, [&](std::string_view full) {
+		const auto at   = full.find('@');
+		const auto item = Trim(full.substr(0, at));
+		TexFilter  filter;
+		if (at != std::string_view::npos && !ParseTexFilter(Trim(full.substr(at + 1)), filter)) return false;
+		const auto colon = item.find(':');
+		uint64_t   ps = 0, slot = 0;
+		if (colon == std::string_view::npos || !ParseNumber(item.substr(0, colon), 16, ps) || ps == 0 ||
+		    !ParseNumber(item.substr(colon + 1), 10, slot) || slot > 127)
+			return false;
+		out.push_back({ps, static_cast<uint32_t>(slot), filter});
+		return true;
+	});
+}
+
 inline bool ValidLabel(std::string_view label) {
 	if (label.size() > 48) return false;
 	for (const char c: label) {
@@ -335,6 +375,7 @@ inline bool ValidateItem(const Item& item, std::string& why) {
 	std::vector<DumpRt>   dumps;
 	std::vector<ForceTex> forces;
 	std::vector<DiagTex>  diags;
+	std::vector<DumpTex>  dumptex;
 	if (item.key == "skip_cs") {
 		if (ParseHexList(item.value, hashes)) return true;
 		why = "skip_cs is a list of hex hashes";
@@ -347,6 +388,9 @@ inline bool ValidateItem(const Item& item, std::string& why) {
 	} else if (item.key == "diag_tex") {
 		if (ParseDiagTex(item.value, diags)) return true;
 		why = "diag_tex is <ps hex>:<slot 0..127>[:all]";
+	} else if (item.key == "dump_tex") {
+		if (ParseDumpTex(item.value, dumptex)) return true;
+		why = "dump_tex is <ps hex>:<slot 0..127>[@<addr hex>|@fmt=<n>,<w>x<h>]";
 	} else if (item.key == "label") {
 		if (ValidLabel(item.value)) return true;
 		why = "label is up to 48 characters of [A-Za-z0-9_.-]";
@@ -431,6 +475,8 @@ inline void Apply(Snapshot& out, const Item& item) {
 		ParseForceTex(item.value, out.force_tex);
 	} else if (item.key == "diag_tex") {
 		ParseDiagTex(item.value, out.diag_tex);
+	} else if (item.key == "dump_tex") {
+		ParseDumpTex(item.value, out.dump_tex);
 	} else if (item.key == "label") {
 		out.label = item.value;
 	}
