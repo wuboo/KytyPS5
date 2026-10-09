@@ -446,6 +446,41 @@ TextureCache::ImageIds TextureCache::FindImagesInRegion(uint64_t address, uint64
 	return result;
 }
 
+ImageId TextureCache::GetForcedImage(uint32_t rgba) {
+	std::scoped_lock lock {m_lock};
+	if (const auto found = m_forced_images.find(rgba); found != m_forced_images.end()) {
+		return found->second;
+	}
+	auto& command = m_scheduler.Current();
+	if (command.IsInvalid()) {
+		EXIT("TextureCache: forced image requires a valid command buffer\n");
+	}
+	ImageInfo info {};
+	info.pixel_format    = vk::Format::eR8G8B8A8Unorm;
+	info.guest_format    = Prospero::BufferFormat::k8_8_8_8UNorm;
+	info.type            = Prospero::ImageType::kColor2D;
+	info.extent          = {1, 1, 1};
+	info.resources       = {1, 1};
+	info.pitch           = 1;
+	info.bytes_per_block = 4;
+	info.samples         = 1;
+	info.tile_mode       = Prospero::TileMode::kLinear;
+	info.mip_layout[0]   = {0, 4, 1, 1};
+	const auto id        = InsertImage(info);
+	auto&      image     = m_slot_images[id];
+	vk::ClearColorValue clear {};
+	for (uint32_t c = 0; c < 4; c++) {
+		clear.float32[c] = static_cast<float>((rgba >> (8u * c)) & 0xffu) / 255.0f;
+	}
+	const vk::ImageSubresourceRange range {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+	command.EndRendering();
+	image.Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {},
+	              command.Handle());
+	command.Handle().clearColorImage(image.backing.image, vk::ImageLayout::eTransferDstOptimal, &clear, 1, &range);
+	m_forced_images.emplace(rgba, id);
+	return id;
+}
+
 void TextureCache::ValidateImageDesc(const ImageDesc& desc) const {
 	ImageOps::Validate(desc.info);
 	if (desc.view_info.format == vk::Format::eUndefined || desc.view_info.level_count == 0 ||

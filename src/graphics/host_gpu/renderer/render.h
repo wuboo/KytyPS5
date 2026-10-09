@@ -190,8 +190,10 @@ private:
 		std::optional<PreparedBindings> pixel;
 	};
 
+	// ps_hash/slot (pixel stage only, 0 = none) let the control file's force_tex replace the T#.
 	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource& resource,
-	                                            const ShaderRecompiler::IR::DescriptorValue& value);
+	                                            const ShaderRecompiler::IR::DescriptorValue& value,
+	                                            uint64_t ps_hash = 0, uint32_t slot = 0);
 	void                         PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
 	                                                     std::span<RenderColorInfo>         colors);
 	void ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& target,

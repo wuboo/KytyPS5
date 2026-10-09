@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "common/controlFile.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -475,8 +476,51 @@ static bool ResolveTextureMipView(ImageInfo& info, uint32_t physical_levels, boo
 	return false;
 }
 
+// force_tex (control file): a sampled 2D T# of a listed pixel shader slot reads as a 1x1 image of one colour.
+static bool ForcedTextureBinding(TextureCache& texture_cache, const ShaderRecompiler::IR::ImageResource& resource,
+                                 uint64_t ps_hash, uint32_t slot, TextureBinding& out) {
+	uint32_t rgba = 0;
+	if (ps_hash == 0 || resource.written ||
+	    resource.resource_class != ShaderRecompiler::IR::ImageResourceClass::Sampled ||
+	    resource.numeric_class != Prospero::TextureNumericClass::Float ||
+	    (resource.dimension != ShaderRecompiler::Decoder::ImageDimension::Dim2D &&
+	     resource.dimension != ShaderRecompiler::Decoder::ImageDimension::Dim2DArray) ||
+	    !Common::ControlFile::Current().ForceTexFor(ps_hash, slot, &rgba)) {
+		return false;
+	}
+	TextureCache::ImageDesc desc {};
+	desc.info.pixel_format    = vk::Format::eR8G8B8A8Unorm;
+	desc.info.guest_format    = Prospero::BufferFormat::k8_8_8_8UNorm;
+	desc.info.type            = Prospero::ImageType::kColor2D;
+	desc.info.extent          = {1, 1, 1};
+	desc.info.resources       = {1, 1};
+	desc.info.bytes_per_block = 4;
+	desc.info.samples         = 1;
+	desc.info.mip_layout[0]   = {0, 0, 1, 1};
+	desc.view_info.format      = vk::Format::eR8G8B8A8Unorm;
+	desc.view_info.type        = resource.dimension == ShaderRecompiler::Decoder::ImageDimension::Dim2D
+	                                 ? vk::ImageViewType::e2D
+	                                 : vk::ImageViewType::e2DArray;
+	desc.view_info.aspect      = vk::ImageAspectFlagBits::eColor;
+	desc.view_info.level_count = 1;
+	desc.view_info.layer_count = 1;
+	desc.view_info.usage       = vk::ImageUsageFlagBits::eSampled;
+	desc.type                  = TextureCache::BindingType::Texture;
+	const auto id              = texture_cache.GetForcedImage(rgba);
+	static std::atomic<uint64_t> binds {0};
+	if (const auto n = binds.fetch_add(1, std::memory_order_relaxed) + 1; n <= 16 || (n & (n - 1)) == 0) {
+		LOGF("[force-tex] ps=0x%016" PRIx64 " slot=%u rgba=0x%08x binds=%" PRIu64 "\n", ps_hash, slot, rgba, n);
+	}
+	out = {id, nullptr, std::move(desc)};
+	return true;
+}
+
 TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
-                                              const ShaderRecompiler::IR::DescriptorValue& value) {
+                                              const ShaderRecompiler::IR::DescriptorValue& value,
+                                              uint64_t ps_hash, uint32_t slot) {
+	if (TextureBinding forced; ForcedTextureBinding(m_context.GetTextureCache(), resource, ps_hash, slot, forced)) {
+		return forced;
+	}
 	if (resource.atomic64 && !m_context.GetGraphics().shader_image_int64_atomics_enabled) {
 		EXIT("64-bit image atomics require shaderImageInt64Atomics\n");
 	}
@@ -700,7 +744,8 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	prepared.samplers.clear();
 	prepared.shader_data.clear();
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
-		auto binding = ResolveTexture(program.info.images[i], snapshot.images[i]);
+		auto binding = ResolveTexture(program.info.images[i], snapshot.images[i],
+		                              program.stage == ShaderType::Pixel ? program.shader_hash : 0, i);
 		BindImage(binding.image_id, binding.desc.type == TextureCache::BindingType::Storage);
 		binding.mip_views.swap(prepared.images[i].mip_views);
 		binding.mip_views.clear();
@@ -824,7 +869,8 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 			if (old_image != nullptr) {
 				old_image->binding = {};
 			}
-			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i]);
+			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i],
+			                           program.stage == ShaderType::Pixel ? program.shader_hash : 0, i);
 			BindImage(images[i].image_id,
 			          images[i].desc.type == TextureCache::BindingType::Storage);
 		}
