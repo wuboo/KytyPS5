@@ -1,4 +1,5 @@
 #include "common/envAudit.h"
+#include "common/knownEnv.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -30,5 +31,12 @@ int main() {
 	Check(Common::FormatKytyEnvironment(nullptr, known).empty(), "null environment not empty");
 	Check(Common::CountUnknownKytyEnvironment(env, known) == 2, "unknown count wrong");
 	Check(Common::CountUnknownKytyEnvironment(nullptr, known) == 0, "null environment counted");
+	// The diagnostic switches of this build are known: a run with KYTY_ENV_STRICT=1 must not abort on them.
+	const char* const diag[] = {"KYTY_CONTROL_FILE=/tmp/c.txt", "KYTY_DIAG_CS_TRACE_FLIP=6580",
+	                            "KYTY_DIAG_TLAS=30", "KYTY_RT_MISS=1", nullptr};
+	Check(Common::CountUnknownKytyEnvironment(diag, Common::kKnownKytyEnv) == 0,
+	      "a diagnostic switch of this build is unknown to the env audit");
+	const char* const typo[] = {"KYTY_RT_MISSS=1", "KYTY_DIAG_CS_TRACE=1", nullptr};
+	Check(Common::CountUnknownKytyEnvironment(typo, Common::kKnownKytyEnv) == 2, "misspelled switch accepted");
 	return 0;
 }
