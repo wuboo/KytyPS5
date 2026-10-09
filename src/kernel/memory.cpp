@@ -4437,6 +4437,52 @@ int KYTY_SYSV_ABI KernelMemoryPoolBatch(const KernelMemoryPoolBatchEntry* entrie
 	return result;
 }
 
+// S125 watch_tex (DIAG): what the kernel knows about [addr, addr+len): virtual ranges (type, protection, name) and, for pooled ones, the
+// physical pool mappings. Metadata only.
+std::vector<std::string> DiagDescribeRange(uint64_t addr, uint64_t len) {
+	std::vector<std::string> lines;
+	if (g_virtual_ranges == nullptr || len == 0 || len > UINT64_MAX - addr) {
+		return lines;
+	}
+	const auto end     = addr + len;
+	auto       current = addr;
+	char       buf[320];
+	while (current < end && lines.size() < 40) {
+		VirtualRanges::Range range {};
+		if (!g_virtual_ranges->Query(current, 1, &range) || range.start >= end) {
+			std::snprintf(buf, sizeof(buf), "vrange: nothing mapped in [0x%llx, 0x%llx)", static_cast<unsigned long long>(current),
+			              static_cast<unsigned long long>(end));
+			lines.emplace_back(buf);
+			break;
+		}
+		if (range.start > current) {
+			std::snprintf(buf, sizeof(buf), "vrange: gap [0x%llx, 0x%llx)", static_cast<unsigned long long>(current),
+			              static_cast<unsigned long long>(range.start));
+			lines.emplace_back(buf);
+		}
+		const auto from = std::max(current, range.start);
+		const auto to   = std::min(end, range.start + range.size);
+		std::snprintf(buf, sizeof(buf), "vrange: [0x%llx, 0x%llx) of [0x%llx, 0x%llx) type=%s prot=0x%x mtype=%d dmem_off=0x%llx name='%s'",
+		              static_cast<unsigned long long>(from), static_cast<unsigned long long>(to), static_cast<unsigned long long>(range.start),
+		              static_cast<unsigned long long>(range.start + range.size), std::string(magic_enum::enum_name(range.type)).c_str(),
+		              static_cast<unsigned>(range.protection), range.memory_type, static_cast<unsigned long long>(range.offset), range.name);
+		lines.emplace_back(buf);
+		if (IsPooledRangeType(range.type) && g_pooled_memory != nullptr) {
+			std::vector<PooledMemory::Mapping> mappings;
+			if (g_pooled_memory->Query(from, to - from, &mappings)) {
+				for (const auto& m: mappings) {
+					if (lines.size() >= 40) break;
+					std::snprintf(buf, sizeof(buf), "pool-map: vaddr=0x%llx size=0x%llx phys=0x%llx", static_cast<unsigned long long>(m.vaddr),
+					              static_cast<unsigned long long>(m.size), static_cast<unsigned long long>(m.phys_addr));
+					lines.emplace_back(buf);
+				}
+			}
+		}
+		current = to;
+	}
+	return lines;
+}
+
 int KYTY_SYSV_ABI KernelMemoryPoolGetBlockStats(KernelMemoryPoolBlockStats* output,
                                                 size_t                      output_size) {
 	PRINT_NAME();

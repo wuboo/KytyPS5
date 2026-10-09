@@ -66,6 +66,22 @@ inline uint64_t BcDetile(const uint8_t* base, uint64_t base_size, const BcTileSp
 	return missing;
 }
 
+// S125: the spec that detiles tile `index` (counted in tiled blocks from the start of the surface) alone: one tiled block of
+// block_width x block_height elements, no tail, no padding.
+inline BcTileSpec SingleTileSpec(const BcTileSpec& surface, uint64_t index) {
+	BcTileSpec each   = surface;
+	each.width        = each.tiled_width  = surface.block_width;
+	each.height       = each.tiled_height = surface.block_height;
+	each.tiled_size   = surface.block_bytes;
+	each.tail         = false;
+#ifdef KYTY_BCDUMP_MUTANT_TILE0
+	each.tiled_offset = 0;
+#else
+	each.tiled_offset = index * surface.block_bytes;
+#endif
+	return each;
+}
+
 // ---- analysis ---------------------------------------------------------------------------------------------------------
 
 struct Bc7Stats {

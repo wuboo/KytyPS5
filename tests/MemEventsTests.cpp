@@ -52,6 +52,30 @@ void TestRing() {
 	Check(ring.Total(Kind::CpuWrite) == 6, "merged events still count");
 }
 
+// S125: the [watch-tex] history: MOVE->EINVAL counted globally and in range, first / last per kind, newest events in range.
+void TestWatchLines() {
+	Ring ring(64);
+	ring.Record(Kind::Map, 3, 0x100000, 0x200000, 0x7000, 0, "pool");
+	ring.Record(Kind::PoolMoveEinval, 5, 0x140000, 0x10000, 0x900000, -22, "dst");
+	ring.Record(Kind::PoolMoveEinval, 5, 0x900000, 0x10000, 0x140000, -22, "src");
+	ring.Record(Kind::PoolMoveEinval, 6, 0x800000, 0x10000, 0xa00000, -22, "dst"); // outside
+	ring.Record(Kind::CpuWrite, 7, 0x150000, 0x1000);
+	ring.Record(Kind::CpuWrite, 9, 0x150000, 0x2000);
+	Event first, last;
+	Check(ring.FirstLast(Kind::CpuWrite, 0x100000, 0x200000, &first, &last) && first.flip == 7 && last.flip == 9, "first/last CPU write flips");
+	Check(!ring.FirstLast(Kind::FileRead, 0x100000, 0x200000, &first, &last), "no file read in range");
+	const auto lines = WatchLines(ring, 0x100000, 0x200000, 3);
+	bool       moves = false, events = false;
+	size_t     event_lines = 0;
+	for (const auto& line : lines) {
+		if (line.find("MOVE->EINVAL global=3 in_range=1") != std::string::npos) moves = true;
+		if (line.rfind("event ", 0) == 0) event_lines++;
+		if (line.find("cpu-write") != std::string::npos && line.rfind("event ", 0) == 0 && line.find("flip=9") != std::string::npos) events = true;
+	}
+	Check(moves, "MOVE->EINVAL counters (global 3, in range 1)");
+	Check(event_lines == 3 && events, "the newest 3 events in range, including the last CPU write");
+}
+
 void TestWrap() {
 	Ring ring(4);
 	for (uint64_t i = 0; i < 10; i++) ring.Record(Kind::Map, i, 0x1000 * (i + 1), 0x1000);
@@ -66,6 +90,7 @@ void TestWrap() {
 int main() {
 	TestIntersects();
 	TestRing();
+	TestWatchLines();
 	TestWrap();
 	std::puts("MemEventsTests: ok");
 	return 0;

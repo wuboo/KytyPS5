@@ -109,9 +109,51 @@ void TestSurface(uint32_t width, uint32_t height, uint32_t levels) {
 	}
 }
 
+// S125 tile mosaic: every 64 KB tile of a surface detiled alone (SingleTileSpec) is the 64 x 64-element region of the mip at that tile.
+void TestWholeTiles() {
+	const uint32_t width = 1024, height = 512; // 256 x 128 elements: 4 x 2 tiled blocks
+	TileSurfaceLayout surface {};
+	const TileSurfaceDescription description {Prospero::BufferFormat::kBc7UNorm, Prospero::TileMode::kStandard64KB, TileSurfaceDimension::Dim2D,
+	                                          width, height, 1, 1, 1};
+	Check(TileGetTiledTextureLayout(description, surface), "tiles: surface layout");
+	const auto& block = surface.texture.block;
+	const auto& mip   = surface.mips[0];
+	std::vector<uint8_t> memory(surface.total_size, 0);
+	const auto columns = (mip.padded_width + block.block_width - 1) / block.block_width;
+	for (uint32_t y = 0; y < mip.height; y++) {
+		for (uint32_t x = 0; x < mip.width; x++) {
+			uint32_t within = 0;
+			Check(TileGetBlockOffset(block, x % block.block_width, y % block.block_height, 0, within), "tiles: address");
+			Element(memory.data() + (static_cast<uint64_t>(y / block.block_height) * columns + x / block.block_width) * block.block_size + within, 0, x, y);
+		}
+	}
+	BcTileSpec surface_spec;
+	surface_spec.block_width  = block.block_width;
+	surface_spec.block_height = block.block_height;
+	surface_spec.block_bytes  = block.block_size;
+	const auto tiles = surface.total_size / block.block_size;
+	Check(tiles == 8, "tiles: 8 tiled blocks");
+	for (uint64_t k = 0; k < tiles; k++) {
+		std::vector<uint8_t> out;
+		const auto missing = BcDetile(memory.data(), memory.size(), SingleTileSpec(surface_spec, k), [&](uint32_t x, uint32_t y, uint32_t& within) {
+			return TileGetBlockOffset(block, x, y, 0, within);
+		}, out);
+		Check(missing == 0, "tiles: elements missing");
+		const uint32_t ox = static_cast<uint32_t>(k % columns) * block.block_width, oy = static_cast<uint32_t>(k / columns) * block.block_height;
+		for (uint32_t y = 0; y < block.block_height; y++) {
+			for (uint32_t x = 0; x < block.block_width; x++) {
+				uint8_t want[16];
+				Element(want, 0, ox + x, oy + y);
+				Check(std::memcmp(out.data() + (static_cast<size_t>(y) * block.block_width + x) * 16, want, 16) == 0, "tiles: tile content is not the region of the mip");
+			}
+		}
+	}
+}
+
 } // namespace
 
 int main() {
+	TestWholeTiles();
 	TestBlockPermutation();
 	TestSurface(1024, 512, 1);  // whole blocks, row-major block order (4 x 2 tiled blocks)
 	TestSurface(2048, 2048, 1); // the terrain mask of the game: 512 x 512 elements = 8 x 8 tiled blocks

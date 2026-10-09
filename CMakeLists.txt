@@ -587,6 +587,15 @@ add_executable(bc_dump_tile_mutant_block_row_tests EXCLUDE_FROM_ALL
 target_include_directories(bc_dump_tile_mutant_block_row_tests PRIVATE ${inc_headers})
 target_link_libraries(bc_dump_tile_mutant_block_row_tests common fmt::fmt)
 target_compile_definitions(bc_dump_tile_mutant_block_row_tests PRIVATE KYTY_BCDUMP_MUTANT_BLOCK_ROW=1)
+# Mutant (must be caught, WILL_FAIL): every single-tile spec starts at tile 0.
+add_executable(bc_dump_tile_mutant_tile0_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/BcDumpTileTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/tile.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
+)
+target_include_directories(bc_dump_tile_mutant_tile0_tests PRIVATE ${inc_headers})
+target_link_libraries(bc_dump_tile_mutant_tile0_tests common fmt::fmt)
+target_compile_definitions(bc_dump_tile_mutant_tile0_tests PRIVATE KYTY_BCDUMP_MUTANT_TILE0=1)
 
 add_executable(bc_dump_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BcDumpTests.cpp")
 target_include_directories(bc_dump_tests PRIVATE ${inc_headers})
@@ -851,7 +860,7 @@ if(BUILD_TESTING)
 			control_file_mutant_force_any_slot control_file_mutant_diag_any_slot
 			control_file_mutant_filter_ignored control_file_mutant_diag_all_ignored control_file_mutant_dump_any_slot control_file_mutant_watch_any_slot
 			bc7_mutant_no_pbit bc7_mutant_subset bc7_mutant_anchor bc7_mutant_shared_pbit
-			bc_dump_mutant_block_row bc_dump_mutant_diff_first_byte bc_dump_tile_mutant_block_row
+			bc_dump_mutant_block_row bc_dump_mutant_diff_first_byte bc_dump_tile_mutant_block_row bc_dump_tile_mutant_tile0
 			diag_tex_mutant_hist_no_fmt diag_tex_mutant_hist_no_indices rt_dump_mutant_no_addr
 			diag_tex_mutant_nonzero diag_tex_mutant_no_once
 			cs_trace_mutant_drop_reads cs_trace_mutant_off_by_one
@@ -962,6 +971,7 @@ if(BUILD_TESTING)
 		bc_dump_tests
 		bc_dump_tile_tests
 		bc_dump_tile_mutant_block_row_tests
+		bc_dump_tile_mutant_tile0_tests
 		bc_dump_mutant_block_row_tests
 		bc_dump_mutant_diff_first_byte_tests
 		control_file_mutant_dump_any_slot_tests
