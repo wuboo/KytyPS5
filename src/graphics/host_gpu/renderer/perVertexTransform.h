@@ -13,7 +13,8 @@ namespace Libs::Graphics {
 constexpr const char* kPerVertexCacheMagic       = "KYTYPV02";
 constexpr uint32_t    kPerVertexTransformVersion = 2;
 
-std::string GetPerVertexTransformSignature();
+// `unique`: the signature of the KYTY_PV_UNIQUE replay shaders (S134), kept in separate cache files.
+std::string GetPerVertexTransformSignature(bool unique = false);
 
 // Records [first, end) of the vertex buffer that per_vertex_unpack.comp can read for a draw
 // (VertexIndex(): first_vertex + local for non-indexed draws, index + vertex_offset for indexed
@@ -23,6 +24,7 @@ std::string GetPerVertexTransformSignature();
 struct PerVertexRecordRange {
 	uint64_t first = 0;
 	uint64_t end   = 0; // first == end: the draw reads no vertex data
+	bool dropped = false; // some index (or first_vertex + local) fell outside [0, num_records)
 };
 bool ComputePerVertexRecordRange(bool indexed, const void* index_data, uint64_t index_bytes,
                                  uint32_t index_element_size, uint32_t index_count,
@@ -81,33 +83,36 @@ bool DerivePerVertexLayout(const std::string& vs_source, const std::string& ps_s
                            PerVertexLayout& layout, std::map<uint32_t, std::string>& vs_param_vars);
 bool DerivePerVertexVertexLayout(const std::string& vs_source, PerVertexLayout& layout,
                                  std::map<uint32_t, std::string>& vs_param_vars);
-std::string GenerateReplayVertexSpvasm(const PerVertexLayout& layout);
+// `unique` (S134): the replay reads captured[map[vertex index].x] instead of captured[vertex index];
+// the map is binding 2 of the extra set (one 8-byte entry per corner).
+std::string GenerateReplayVertexSpvasm(const PerVertexLayout& layout, bool unique = false);
 std::string LowerVertexToCompute(const std::string& source, const PerVertexLayout& layout,
                                  const std::map<uint32_t, std::string>& vs_param_vars);
-std::string LowerFragmentToBufferReplay(const std::string& source, const PerVertexLayout& layout);
+std::string LowerFragmentToBufferReplay(const std::string& source, const PerVertexLayout& layout,
+                                        bool unique = false);
 
 bool TryLoadTransformedShadersFromDisk(const std::filesystem::path& cache_dir, uint64_t vs_hash,
                                        uint64_t ps_hash, PerVertexLayout& layout,
                                        std::vector<uint32_t>& cap_words,
                                        std::vector<uint32_t>& frag_words,
-                                       std::vector<uint32_t>& replay_words);
+                                       std::vector<uint32_t>& replay_words, bool unique = false);
 
 bool TryLoadTransformedShadersFromDisk(const std::string& title_id, uint64_t vs_hash,
                                        uint64_t ps_hash, PerVertexLayout& layout,
                                        std::vector<uint32_t>& cap_words,
                                        std::vector<uint32_t>& frag_words,
-                                       std::vector<uint32_t>& replay_words);
+                                       std::vector<uint32_t>& replay_words, bool unique = false);
 
 bool SaveTransformedShadersToDisk(const std::filesystem::path& cache_dir, uint64_t vs_hash,
                                   uint64_t ps_hash, const PerVertexLayout& layout,
                                   std::span<const uint32_t> cap_words,
                                   std::span<const uint32_t> frag_words,
-                                  std::span<const uint32_t> replay_words);
+                                  std::span<const uint32_t> replay_words, bool unique = false);
 
 bool SaveTransformedShadersToDisk(const std::string& title_id, uint64_t vs_hash, uint64_t ps_hash,
                                   const PerVertexLayout&    layout,
                                   std::span<const uint32_t> cap_words,
                                   std::span<const uint32_t> frag_words,
-                                  std::span<const uint32_t> replay_words);
+                                  std::span<const uint32_t> replay_words, bool unique = false);
 
 } // namespace Libs::Graphics

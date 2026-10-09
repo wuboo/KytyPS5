@@ -16,6 +16,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <vector>
+#include <map>
+#include <initializer_list>
 #include <array>
 #include <span>
 #include <chrono>
@@ -26,6 +28,7 @@
 
 #include "graphics/host_gpu/renderer/perVertexEmbeddedSpv.h"
 #include "graphics/host_gpu/renderer/perVertexTransform.h"
+#include "graphics/host_gpu/renderer/perVertexUnique.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/ir/IREmitter.h"
@@ -370,19 +373,597 @@ struct PushConstants {
         uint32_t meta;
         uint32_t bit_counts;
     } attrs[16];
+    uint32_t unique_first;
+    uint32_t unique_count;
 };
 static_assert(sizeof(PushConstants::Attr) == 8);
 static_assert(offsetof(PushConstants, attrs) == 32);
 static_assert(offsetof(PushConstants::Attr, bit_counts) == 4);
-static_assert(sizeof(PushConstants) == 160);
+static_assert(offsetof(PushConstants, unique_first) == 160);
+static_assert(sizeof(PushConstants) == 168);
+
+// ============================================================================
+// S134: KYTY_PV_UNIQUE proof. The same indexed mesh is captured and replayed twice with the real
+// unpack shader, the real capture/replay/fragment lowering: once per corner (classic) and once per
+// unique vertex (map pass + unique unpack + capture + replay through the corner -> record map).
+// The rendered images must match bit for bit; the GPU map must equal PerVertexUniqueRecord().
+// PVU_HARNESS_MUTANT=no_first|no_instance feeds the map pass wrong constants (must fail).
+// ============================================================================
+struct UniqueCase {
+    const char* name;
+    bool indexed;
+    uint32_t index_size;       // 2 or 4
+    std::vector<uint32_t> indices;
+    int32_t vertex_offset;
+    uint32_t first_vertex;     // non-indexed
+    uint32_t index_count;
+    uint32_t instance_count;
+    uint32_t first_instance;
+    double max_ratio;          // planner threshold
+    bool expect_unique;
+};
+
+int RunUniqueVertexTests(const Device& dev) {
+    using namespace Libs::Graphics;
+    std::printf("\n=== S134: unique-vertex capture proof (classic vs KYTY_PV_UNIQUE image equality) ===\n");
+    const char* mutant_env = std::getenv("PVU_HARNESS_MUTANT");
+    const std::string mutant = mutant_env != nullptr ? mutant_env : "";
+
+    // ---- shaders (own test shaders, no game code) ----
+    const std::string vs_source = R"(
+OpCapability Shader
+OpMemoryModel Logical GLSL450
+OpEntryPoint Vertex %main "main" %in_attr_0 %in_attr_1 %outPerVertex %out_param_0 %gl_VertexIndex %gl_InstanceIndex
+OpDecorate %gl_VertexIndex BuiltIn VertexIndex
+OpDecorate %gl_InstanceIndex BuiltIn InstanceIndex
+OpDecorate %in_attr_0 Location 0
+OpDecorate %in_attr_1 Location 1
+OpMemberDecorate %gl_PerVertex 0 BuiltIn Position
+OpDecorate %gl_PerVertex Block
+OpDecorate %out_param_0 Location 0
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%uint = OpTypeInt 32 0
+%int = OpTypeInt 32 1
+%v3float = OpTypeVector %float 3
+%v4float = OpTypeVector %float 4
+%gl_PerVertex = OpTypeStruct %v4float
+%_ptr_Output_gl_PerVertex = OpTypePointer Output %gl_PerVertex
+%outPerVertex = OpVariable %_ptr_Output_gl_PerVertex Output
+%_ptr_Input_int = OpTypePointer Input %int
+%gl_VertexIndex = OpVariable %_ptr_Input_int Input
+%gl_InstanceIndex = OpVariable %_ptr_Input_int Input
+%_ptr_Input_v3float = OpTypePointer Input %v3float
+%_ptr_Input_v4float = OpTypePointer Input %v4float
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+%in_attr_0 = OpVariable %_ptr_Input_v3float Input
+%in_attr_1 = OpVariable %_ptr_Input_v4float Input
+%out_param_0 = OpVariable %_ptr_Output_v4float Output
+%int_0 = OpConstant %int 0
+%int_1 = OpConstant %int 1
+%float_1 = OpConstant %float 1.0
+%main = OpFunction %void None %fn
+%label = OpLabel
+%pos3 = OpLoad %v3float %in_attr_0
+%col = OpLoad %v4float %in_attr_1
+%inst = OpLoad %int %gl_InstanceIndex
+%inst_bit = OpBitwiseAnd %int %inst %int_1
+%instf = OpConvertSToF %float %inst_bit
+%px = OpCompositeExtract %float %pos3 0
+%py = OpCompositeExtract %float %pos3 1
+%pz = OpCompositeExtract %float %pos3 2
+%px2 = OpFAdd %float %px %instf
+%pos4 = OpCompositeConstruct %v4float %px2 %py %pz %float_1
+%pos_dst = OpAccessChain %_ptr_Output_v4float %outPerVertex %int_0
+OpStore %pos_dst %pos4
+OpStore %out_param_0 %col
+OpReturn
+OpFunctionEnd
+)";
+    // out = corner0 + 2 * corner1 + 4 * corner2 (xyz), alpha 1: a wrong record shows in every pixel.
+    std::string ps_source = R"(
+OpCapability Shader
+OpCapability FragmentBarycentricKHR
+OpExtension "SPV_KHR_fragment_shader_barycentric"
+OpMemoryModel Logical GLSL450
+OpEntryPoint Fragment %main "main" %in_param_0 %out_color
+OpExecutionMode %main OriginUpperLeft
+OpDecorate %in_param_0 Location 0
+OpDecorate %in_param_0 PerVertexKHR
+OpDecorate %out_color Location 0
+%void = OpTypeVoid
+%fn = OpTypeFunction %void
+%float = OpTypeFloat 32
+%uint = OpTypeInt 32 0
+%v4float = OpTypeVector %float 4
+%uint_0 = OpConstant %uint 0
+%uint_1 = OpConstant %uint 1
+%uint_2 = OpConstant %uint 2
+%uint_3 = OpConstant %uint 3
+%float_1 = OpConstant %float 1.0
+%float_2 = OpConstant %float 2.0
+%float_4 = OpConstant %float 4.0
+%_arr_v4float_3 = OpTypeArray %v4float %uint_3
+%_ptr_Input_arr_v4float_3 = OpTypePointer Input %_arr_v4float_3
+%_ptr_Input_float = OpTypePointer Input %float
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+%in_param_0 = OpVariable %_ptr_Input_arr_v4float_3 Input
+%out_color = OpVariable %_ptr_Output_v4float Output
+%main = OpFunction %void None %fn
+%label = OpLabel
+)";
+    {
+        const char* comps[3] = {"%uint_0", "%uint_1", "%uint_2"};
+        for (int k = 0; k < 3; ++k) {
+            for (int c = 0; c < 3; ++c) {
+                ps_source += fmt::format("%p{}{}_ptr = OpAccessChain %_ptr_Input_float %in_param_0 {} {}\n", k, c, comps[k], comps[c]);
+                ps_source += fmt::format("%p{}{} = OpLoad %float %p{}{}_ptr\n", k, c, k, c);
+            }
+        }
+        for (int c = 0; c < 3; ++c) {
+            ps_source += fmt::format("%s{}a = OpFMul %float %p1{} %float_2\n", c, c);
+            ps_source += fmt::format("%s{}b = OpFMul %float %p2{} %float_4\n", c, c);
+            ps_source += fmt::format("%s{}c = OpFAdd %float %p0{} %s{}a\n", c, c, c);
+            ps_source += fmt::format("%s{} = OpFAdd %float %s{}c %s{}b\n", c, c, c);
+        }
+        ps_source += "%out_vec = OpCompositeConstruct %v4float %s0 %s1 %s2 %float_1\nOpStore %out_color %out_vec\nOpReturn\nOpFunctionEnd\n";
+    }
+
+    PerVertexLayout layout {};
+    std::map<uint32_t, std::string> vs_param_vars;
+    if (!DerivePerVertexLayout(vs_source, ps_source, layout, vs_param_vars)) Fail("unique: DerivePerVertexLayout");
+    if (layout.has_clip || layout.record_stride_vec4 != 2) Fail("unique: unexpected layout (no clip, stride 2)");
+
+    spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+    tools.SetMessageConsumer([](spv_message_level_t, const char*, const spv_position_t& position, const char* message) { std::fprintf(stderr, "SPIR-V line %zu: %s\n", position.index, message); });
+    auto assemble = [&](const std::string& text, const char* what) {
+        std::vector<uint32_t> words;
+        if (text.empty() || !tools.Assemble(text, &words, SPV_TEXT_TO_BINARY_OPTION_PRESERVE_NUMERIC_IDS)) Fail(what);
+        if (!tools.Validate(words)) Fail(what);
+        return words;
+    };
+    const auto cap_spv = assemble(LowerVertexToCompute(vs_source, layout, vs_param_vars), "unique: capture SPIR-V");
+    const auto replay_spv = assemble(GenerateReplayVertexSpvasm(layout, false), "unique: classic replay SPIR-V");
+    const auto frag_spv = assemble(LowerFragmentToBufferReplay(ps_source, layout, false), "unique: classic fragment SPIR-V");
+    const auto replay_u_spv = assemble(GenerateReplayVertexSpvasm(layout, true), "unique: unique replay SPIR-V");
+    const auto frag_u_spv = assemble(LowerFragmentToBufferReplay(ps_source, layout, true), "unique: unique fragment SPIR-V");
+    std::printf("PASS: unique replay VS/FS lowering assembles and validates (classic and unique)\n");
+
+    auto make_module = [&](std::span<const uint32_t> words, const char* what) {
+        VkShaderModuleCreateInfo info {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
+        info.codeSize = words.size() * sizeof(uint32_t);
+        info.pCode = words.data();
+        VkShaderModule module = VK_NULL_HANDLE;
+        Check(vk_create_shader_module(dev.device, &info, nullptr, &module), what);
+        return module;
+    };
+    const VkShaderModule unpack_module = make_module({PERVERTEX_UNPACK_SPV, sizeof(PERVERTEX_UNPACK_SPV) / 4}, "unique: unpack module");
+    const VkShaderModule cap_module = make_module(cap_spv, "unique: capture module");
+
+    // ---- layouts ----
+    VkDescriptorSetLayoutBinding unpack_bindings[4] {};
+    for (uint32_t i = 0; i < 4; ++i) unpack_bindings[i] = {i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+    VkDescriptorSetLayoutCreateInfo unpack_dsl_info {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    unpack_dsl_info.bindingCount = 4;
+    unpack_dsl_info.pBindings = unpack_bindings;
+    VkDescriptorSetLayout unpack_dsl = VK_NULL_HANDLE;
+    Check(vk_create_descriptor_set_layout(dev.device, &unpack_dsl_info, nullptr, &unpack_dsl), "unique: unpack dsl");
+    const VkPushConstantRange unpack_range {VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(PushConstants)};
+    VkPipelineLayoutCreateInfo unpack_pl_info {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    unpack_pl_info.setLayoutCount = 1;
+    unpack_pl_info.pSetLayouts = &unpack_dsl;
+    unpack_pl_info.pushConstantRangeCount = 1;
+    unpack_pl_info.pPushConstantRanges = &unpack_range;
+    VkPipelineLayout unpack_pl = VK_NULL_HANDLE;
+    Check(vk_create_pipeline_layout(dev.device, &unpack_pl_info, nullptr, &unpack_pl), "unique: unpack layout");
+    VkComputePipelineCreateInfo unpack_pipe_info {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    unpack_pipe_info.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, unpack_module, "main", nullptr};
+    unpack_pipe_info.layout = unpack_pl;
+    VkPipeline unpack_pipeline = VK_NULL_HANDLE;
+    Check(vk_create_compute_pipelines(dev.device, VK_NULL_HANDLE, 1, &unpack_pipe_info, nullptr, &unpack_pipeline), "unique: unpack pipeline");
+
+    const VkShaderStageFlags all_stages = VK_SHADER_STAGE_COMPUTE_BIT | VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutBinding extra_bindings[3] {
+        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, all_stages, nullptr},
+        {2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, all_stages, nullptr}};
+    VkDescriptorSetLayoutCreateInfo extra_dsl_info {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    extra_dsl_info.bindingCount = 3;
+    extra_dsl_info.pBindings = extra_bindings;
+    VkDescriptorSetLayout extra_dsl = VK_NULL_HANDLE;
+    Check(vk_create_descriptor_set_layout(dev.device, &extra_dsl_info, nullptr, &extra_dsl), "unique: extra dsl");
+    VkDescriptorSetLayoutCreateInfo empty_dsl_info {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    VkDescriptorSetLayout empty_dsl = VK_NULL_HANDLE;
+    Check(vk_create_descriptor_set_layout(dev.device, &empty_dsl_info, nullptr, &empty_dsl), "unique: empty dsl");
+    const VkDescriptorSetLayout set_layouts[2] = {empty_dsl, extra_dsl};
+    VkPipelineLayoutCreateInfo cap_pl_info {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    cap_pl_info.setLayoutCount = 2;
+    cap_pl_info.pSetLayouts = set_layouts;
+    VkPipelineLayout cap_pl = VK_NULL_HANDLE;
+    Check(vk_create_pipeline_layout(dev.device, &cap_pl_info, nullptr, &cap_pl), "unique: capture layout");
+    VkComputePipelineCreateInfo cap_pipe_info {VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
+    cap_pipe_info.stage = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_COMPUTE_BIT, cap_module, "main", nullptr};
+    cap_pipe_info.layout = cap_pl;
+    VkPipeline cap_pipeline = VK_NULL_HANDLE;
+    Check(vk_create_compute_pipelines(dev.device, VK_NULL_HANDLE, 1, &cap_pipe_info, nullptr, &cap_pipeline), "unique: capture pipeline");
+
+    // ---- render target ----
+    constexpr uint32_t kDim = 16;
+    VkAttachmentDescription color_att {};
+    color_att.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    color_att.samples = VK_SAMPLE_COUNT_1_BIT;
+    color_att.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    color_att.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    color_att.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    color_att.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference color_ref {0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass {};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1;
+    subpass.pColorAttachments = &color_ref;
+    VkRenderPassCreateInfo rp_info {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+    rp_info.attachmentCount = 1;
+    rp_info.pAttachments = &color_att;
+    rp_info.subpassCount = 1;
+    rp_info.pSubpasses = &subpass;
+    VkRenderPass render_pass = VK_NULL_HANDLE;
+    Check(vk_create_render_pass(dev.device, &rp_info, nullptr, &render_pass), "unique: render pass");
+    VkImageCreateInfo img_info {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    img_info.imageType = VK_IMAGE_TYPE_2D;
+    img_info.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    img_info.extent = {kDim, kDim, 1};
+    img_info.mipLevels = 1;
+    img_info.arrayLayers = 1;
+    img_info.samples = VK_SAMPLE_COUNT_1_BIT;
+    img_info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    img_info.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    img_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImage color_image = VK_NULL_HANDLE;
+    Check(vk_create_image(dev.device, &img_info, nullptr, &color_image), "unique: image");
+    VkMemoryRequirements img_req;
+    vk_get_image_memory_requirements(dev.device, color_image, &img_req);
+    VkMemoryAllocateInfo img_alloc {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    img_alloc.allocationSize = img_req.size;
+    img_alloc.memoryTypeIndex = FindMemoryType(dev.memory_properties, img_req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    VkDeviceMemory img_mem = VK_NULL_HANDLE;
+    Check(vk_allocate_memory(dev.device, &img_alloc, nullptr, &img_mem), "unique: image memory");
+    Check(vk_bind_image_memory(dev.device, color_image, img_mem, 0), "unique: bind image");
+    VkImageViewCreateInfo view_info {VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    view_info.image = color_image;
+    view_info.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    view_info.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+    view_info.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    VkImageView color_view = VK_NULL_HANDLE;
+    Check(vk_create_image_view(dev.device, &view_info, nullptr, &color_view), "unique: view");
+    VkFramebufferCreateInfo fb_info {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+    fb_info.renderPass = render_pass;
+    fb_info.attachmentCount = 1;
+    fb_info.pAttachments = &color_view;
+    fb_info.width = kDim;
+    fb_info.height = kDim;
+    fb_info.layers = 1;
+    VkFramebuffer framebuffer = VK_NULL_HANDLE;
+    Check(vk_create_framebuffer(dev.device, &fb_info, nullptr, &framebuffer), "unique: framebuffer");
+    GpuBuffer staging = CreateBuffer(dev, kDim * kDim * sizeof(float) * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+
+    VkPipelineLayoutCreateInfo gfx_pl_info {VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    gfx_pl_info.setLayoutCount = 2;
+    gfx_pl_info.pSetLayouts = set_layouts;
+    VkPipelineLayout gfx_pl = VK_NULL_HANDLE;
+    Check(vk_create_pipeline_layout(dev.device, &gfx_pl_info, nullptr, &gfx_pl), "unique: graphics layout");
+    auto make_graphics = [&](std::span<const uint32_t> vs_words, std::span<const uint32_t> fs_words) {
+        VkPipelineShaderStageCreateInfo stages[2] {};
+        stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, make_module(vs_words, "unique: replay vs"), "main", nullptr};
+        stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, make_module(fs_words, "unique: replay fs"), "main", nullptr};
+        VkPipelineVertexInputStateCreateInfo vi {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        VkPipelineInputAssemblyStateCreateInfo ia {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+        ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+        VkViewport viewport {0.0f, 0.0f, float(kDim), float(kDim), 0.0f, 1.0f};
+        VkRect2D scissor {{0, 0}, {kDim, kDim}};
+        VkPipelineViewportStateCreateInfo vp {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+        vp.viewportCount = 1;
+        vp.pViewports = &viewport;
+        vp.scissorCount = 1;
+        vp.pScissors = &scissor;
+        VkPipelineRasterizationStateCreateInfo rs {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+        rs.polygonMode = VK_POLYGON_MODE_FILL;
+        rs.cullMode = VK_CULL_MODE_NONE;
+        rs.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+        rs.lineWidth = 1.0f;
+        VkPipelineMultisampleStateCreateInfo ms {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+        ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+        VkPipelineColorBlendAttachmentState cba {};
+        cba.colorWriteMask = 0xf;
+        VkPipelineColorBlendStateCreateInfo cb {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+        cb.attachmentCount = 1;
+        cb.pAttachments = &cba;
+        VkGraphicsPipelineCreateInfo gi {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+        gi.stageCount = 2;
+        gi.pStages = stages;
+        gi.pVertexInputState = &vi;
+        gi.pInputAssemblyState = &ia;
+        gi.pViewportState = &vp;
+        gi.pRasterizationState = &rs;
+        gi.pMultisampleState = &ms;
+        gi.pColorBlendState = &cb;
+        gi.layout = gfx_pl;
+        gi.renderPass = render_pass;
+        VkPipeline pipeline = VK_NULL_HANDLE;
+        Check(vk_create_graphics_pipelines(dev.device, VK_NULL_HANDLE, 1, &gi, nullptr, &pipeline), "unique: graphics pipeline");
+        return pipeline;
+    };
+    const VkPipeline gfx_classic = make_graphics(replay_spv, frag_spv);
+    const VkPipeline gfx_unique = make_graphics(replay_u_spv, frag_u_spv);
+
+    VkCommandPoolCreateInfo cp_info {VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    cp_info.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    cp_info.queueFamilyIndex = dev.queue_family;
+    VkCommandPool cmd_pool = VK_NULL_HANDLE;
+    Check(vk_create_command_pool(dev.device, &cp_info, nullptr, &cmd_pool), "unique: command pool");
+    VkCommandBufferAllocateInfo cb_alloc {VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cb_alloc.commandPool = cmd_pool;
+    cb_alloc.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    cb_alloc.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    Check(vk_allocate_command_buffers(dev.device, &cb_alloc, &cmd), "unique: command buffer");
+    VkDescriptorPoolSize pool_size {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1024};
+    VkDescriptorPoolCreateInfo dp_info {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dp_info.maxSets = 128;
+    dp_info.poolSizeCount = 1;
+    dp_info.pPoolSizes = &pool_size;
+    VkDescriptorPool pool = VK_NULL_HANDLE;
+    Check(vk_create_descriptor_pool(dev.device, &dp_info, nullptr, &pool), "unique: descriptor pool");
+
+    // ---- mesh: a 3x3 grid (9 vertices, 8 triangles, 24 corners) shared by all cases ----
+    constexpr uint32_t kStrideBytes = 32; // pos float3 @0, color float4 @12 (unorm8 would hide record mix-ups)
+    constexpr uint32_t kVertexCount = 16;
+    const std::vector<uint32_t> grid = {0, 1, 4, 0, 4, 3, 1, 2, 5, 1, 5, 4, 3, 4, 7, 3, 7, 6, 4, 5, 8, 4, 8, 7};
+    auto offset_grid = [&](uint32_t add) {
+        std::vector<uint32_t> out = grid;
+        for (auto& v: out) v += add;
+        return out;
+    };
+    const std::vector<UniqueCase> cases = {
+        {"16-bit indices, vertex_offset=+3, 2 instances", true, 2, grid, 3, 0, 24, 2, 0, 0.7, true},
+        {"32-bit indices 2..10, first=2, 2 instances, first_instance=1", true, 4, offset_grid(2), 0, 0, 24, 2, 1, 0.7, true},
+        {"32-bit indices 5..13, vertex_offset=-2, 1 instance", true, 4, offset_grid(5), -2, 0, 24, 1, 0, 0.7, true},
+        {"non-indexed first_vertex=2 (forced unique), 2 instances", false, 0, {}, 0, 2, 6, 2, 0, 1.0, true},
+        {"non-indexed first_vertex=2 (planner fallback), 2 instances", false, 0, {}, 0, 2, 6, 2, 0, 0.7, false},
+    };
+
+    GpuBuffer vtx_buf = CreateBuffer(dev, kVertexCount * kStrideBytes, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+    for (uint32_t v = 0; v < kVertexCount; ++v) {
+        // Grid positions for the vertices that the cases use (v-?); distinct, non-degenerate colors.
+        const uint32_t g = v % 9u;
+        const float x = -0.95f + 0.45f * float(g % 3u);
+        const float y = -0.9f + 0.9f * float(g / 3u);
+        const float pos[3] = {x, y, 0.5f};
+        const float col[4] = {0.05f + 0.1f * float(v), 0.9f - 0.05f * float(v), 0.125f * float(v % 5u), 1.0f};
+        std::memcpy(static_cast<uint8_t*>(vtx_buf.mapped) + v * kStrideBytes, pos, sizeof(pos));
+        std::memcpy(static_cast<uint8_t*>(vtx_buf.mapped) + v * kStrideBytes + 12, col, sizeof(col));
+    }
+    constexpr uint32_t kNumAttrs = 2;
+    PushConstants base_push {};
+    base_push.vertex_stride = kStrideBytes;
+    base_push.num_records = kVertexCount;
+    base_push.attrs[0].meta = (0u) | (3u << 17u) | (1u << 20u);
+    base_push.attrs[0].bit_counts = 0x00202020u;
+    base_push.attrs[1].meta = (12u) | (4u << 17u) | (1u << 20u);
+    base_push.attrs[1].bit_counts = 0x20202020u;
+
+    auto set_buffers = [&](VkDescriptorSet set, std::initializer_list<const GpuBuffer*> buffers) {
+        std::array<VkDescriptorBufferInfo, 4> infos {};
+        std::array<VkWriteDescriptorSet, 4> writes {};
+        uint32_t i = 0;
+        for (const GpuBuffer* b: buffers) {
+            infos[i] = {b->buffer, 0, VK_WHOLE_SIZE};
+            writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            writes[i].dstSet = set;
+            writes[i].dstBinding = i;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].pBufferInfo = &infos[i];
+            ++i;
+        }
+        vk_update_descriptor_sets(dev.device, i, writes.data(), 0, nullptr);
+    };
+    auto alloc_set = [&](VkDescriptorSetLayout layout_handle) {
+        VkDescriptorSetAllocateInfo info {VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        info.descriptorPool = pool;
+        info.descriptorSetCount = 1;
+        info.pSetLayouts = &layout_handle;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        Check(vk_allocate_descriptor_sets(dev.device, &info, &set), "unique: allocate set");
+        return set;
+    };
+    auto barrier = [&](VkPipelineStageFlags dst) {
+        VkMemoryBarrier mb {VK_STRUCTURE_TYPE_MEMORY_BARRIER};
+        mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+        mb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+        vk_cmd_pipeline_barrier(cmd, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, dst, 0, 1, &mb, 0, nullptr, 0, nullptr);
+    };
+    auto unpack_dispatch = [&](VkDescriptorSet set, const PushConstants& push, uint32_t invocations) {
+        vk_cmd_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, unpack_pipeline);
+        vk_cmd_bind_descriptor_sets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, unpack_pl, 0, 1, &set, 0, nullptr);
+        vk_cmd_push_constants(cmd, unpack_pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(push), &push);
+        vk_cmd_dispatch(cmd, (invocations + 63u) / 64u, 1, 1);
+    };
+
+    // Renders one capture (classic or unique) and returns the image; `map_out` receives the GPU map.
+    auto run = [&](const UniqueCase& c, bool unique, const PerVertexUniquePlan& plan,
+                   std::vector<float>& image, std::vector<uint32_t>& map_out) {
+        const uint32_t corners = c.index_count * c.instance_count;
+        const uint32_t records = unique ? static_cast<uint32_t>(plan.records) : corners;
+        GpuBuffer idx_buf = CreateBuffer(dev, std::max<size_t>(16, c.indices.size() * 4 + 16), VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        if (c.indexed) {
+            for (size_t i = 0; i < c.indices.size(); ++i) {
+                if (c.index_size == 2) static_cast<uint16_t*>(idx_buf.mapped)[i] = static_cast<uint16_t>(c.indices[i]);
+                else static_cast<uint32_t*>(idx_buf.mapped)[i] = c.indices[i];
+            }
+        }
+        GpuBuffer id_buf = CreateBuffer(dev, records * 8u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        GpuBuffer attr_buf = CreateBuffer(dev, records * kNumAttrs * 16u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        GpuBuffer captured = CreateBuffer(dev, records * layout.record_stride_vec4 * 16u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        GpuBuffer map_buf = CreateBuffer(dev, corners * 8u, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
+        std::memset(id_buf.mapped, 0xcd, id_buf.size);
+        std::memset(attr_buf.mapped, 0xcd, attr_buf.size);
+        std::memset(captured.mapped, 0xcd, captured.size);
+        std::memset(map_buf.mapped, 0xcd, map_buf.size);
+
+        PushConstants push = base_push;
+        push.first_instance = c.first_instance;
+        push.index_count = c.index_count;
+        push.first_vertex = c.first_vertex;
+        push.vertex_offset = c.vertex_offset;
+        uint32_t flags = (kNumAttrs & 0x1fu) << 19u;
+        if (c.indexed) flags |= (1u << 16u) | ((c.index_size == 2 ? 1u : 2u) << 17u);
+        push.packed_flags = flags;
+        push.total_invocations = corners;
+
+        VkCommandBufferBeginInfo begin {VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        Check(vk_begin_command_buffer(cmd, &begin), "unique: begin");
+        const GpuBuffer& index_or_vertex = c.indexed ? idx_buf : vtx_buf;
+        if (!unique) {
+            VkDescriptorSet set = alloc_set(unpack_dsl);
+            set_buffers(set, {&index_or_vertex, &vtx_buf, &id_buf, &attr_buf});
+            unpack_dispatch(set, push, corners);
+        } else {
+            PushConstants map_push = push;
+            map_push.packed_flags = (flags & ~(0x1fu << 19u)) | (1u << 24u);
+            map_push.unique_first = mutant == "no_first" ? 0u : plan.first;
+            map_push.unique_count = mutant == "no_instance" ? 0u : plan.count;
+            VkDescriptorSet map_set = alloc_set(unpack_dsl);
+            set_buffers(map_set, {&index_or_vertex, &vtx_buf, &map_buf, &map_buf});
+            unpack_dispatch(map_set, map_push, corners);
+            PushConstants unique_push = push;
+            unique_push.total_invocations = records;
+            unique_push.index_count = plan.count;
+            unique_push.first_vertex = plan.first;
+            unique_push.vertex_offset = 0;
+            unique_push.packed_flags = (kNumAttrs & 0x1fu) << 19u;
+            VkDescriptorSet unique_set = alloc_set(unpack_dsl);
+            set_buffers(unique_set, {&vtx_buf, &vtx_buf, &id_buf, &attr_buf});
+            unpack_dispatch(unique_set, unique_push, records);
+        }
+        barrier(VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT);
+        VkDescriptorSet capture_set = alloc_set(extra_dsl);
+        set_buffers(capture_set, {&attr_buf, &captured, &id_buf});
+        vk_cmd_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cap_pipeline);
+        vk_cmd_bind_descriptor_sets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, cap_pl, 1, 1, &capture_set, 0, nullptr);
+        vk_cmd_dispatch(cmd, records, 1, 1); // LocalSize 1: one group per record
+        barrier(VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        VkDescriptorSet replay_set = alloc_set(extra_dsl);
+        set_buffers(replay_set, {&captured, &captured, unique ? &map_buf : &captured});
+
+        VkClearValue clear {{{0.0f, 0.0f, 0.0f, 0.0f}}};
+        VkRenderPassBeginInfo rp_begin {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        rp_begin.renderPass = render_pass;
+        rp_begin.framebuffer = framebuffer;
+        rp_begin.renderArea.extent = {kDim, kDim};
+        rp_begin.clearValueCount = 1;
+        rp_begin.pClearValues = &clear;
+        vk_cmd_begin_render_pass(cmd, &rp_begin, VK_SUBPASS_CONTENTS_INLINE);
+        vk_cmd_bind_pipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, unique ? gfx_unique : gfx_classic);
+        vk_cmd_bind_descriptor_sets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, gfx_pl, 1, 1, &replay_set, 0, nullptr);
+        vk_cmd_draw(cmd, corners, 1, 0, 0);
+        vk_cmd_end_render_pass(cmd);
+        VkImageMemoryBarrier ib {VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        ib.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        ib.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        ib.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        ib.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        ib.image = color_image;
+        ib.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        vk_cmd_pipeline_barrier(cmd, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &ib);
+        VkBufferImageCopy copy {};
+        copy.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.imageExtent = {kDim, kDim, 1};
+        vk_cmd_copy_image_to_buffer(cmd, color_image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.buffer, 1, &copy);
+        Check(vk_end_command_buffer(cmd), "unique: end");
+        VkSubmitInfo submit {VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &cmd;
+        Check(vk_queue_submit(dev.queue, 1, &submit, VK_NULL_HANDLE), "unique: submit");
+        Check(vk_queue_wait_idle(dev.queue), "unique: wait");
+        image.assign(static_cast<const float*>(staging.mapped), static_cast<const float*>(staging.mapped) + kDim * kDim * 4);
+        map_out.clear();
+        if (unique) {
+            for (uint32_t i = 0; i < corners; ++i) map_out.push_back(static_cast<const uint32_t*>(map_buf.mapped)[i * 2]);
+        }
+    };
+
+    for (const auto& c: cases) {
+        std::printf("--- unique case: %s ---\n", c.name);
+        // Plan exactly as the renderer does.
+        PerVertexRecordRange range;
+        const bool known = ComputePerVertexRecordRange(c.indexed, c.indices.empty() ? nullptr : [&] {
+            static thread_local std::vector<uint8_t> bytes;
+            bytes.assign(c.indices.size() * c.index_size, 0);
+            for (size_t i = 0; i < c.indices.size(); ++i) {
+                if (c.index_size == 2) reinterpret_cast<uint16_t*>(bytes.data())[i] = static_cast<uint16_t>(c.indices[i]);
+                else reinterpret_cast<uint32_t*>(bytes.data())[i] = c.indices[i];
+            }
+            return static_cast<const void*>(bytes.data());
+        }(), c.indices.size() * c.index_size, c.index_size, c.index_count, c.first_vertex, c.vertex_offset, kVertexCount, range);
+        const auto plan = PlanPerVertexUnique({true, false, known, range.dropped, range.first, range.end, c.index_count, c.instance_count}, c.max_ratio);
+        if (plan.Use() != c.expect_unique) {
+            std::fprintf(stderr, "plan verdict %u first=%u count=%u records=%llu\n", static_cast<uint32_t>(plan.verdict), plan.first, plan.count, static_cast<unsigned long long>(plan.records));
+            Fail("unique: planner verdict differs from the case expectation");
+        }
+        std::vector<float> classic_image, unique_image;
+        std::vector<uint32_t> unused, gpu_map;
+        run(c, false, plan, classic_image, unused);
+        uint32_t lit = 0, lit_left = 0, lit_right = 0;
+        for (uint32_t p = 0; p < kDim * kDim; ++p) {
+            if (classic_image[p * 4 + 3] != 0.0f) {
+                ++lit;
+                (p % kDim < kDim / 2 ? lit_left : lit_right)++;
+            }
+        }
+        if (lit < 8) Fail("unique: the classic render covers no pixels (the comparison would prove nothing)");
+        if (!plan.Use()) {
+            std::printf("PASS: planner falls back (verdict %u), classic render covers %u pixels\n", static_cast<uint32_t>(plan.verdict), lit);
+            continue;
+        }
+        run(c, true, plan, unique_image, gpu_map);
+
+        // The GPU map must equal the shared record model for every corner, and the image must equal
+        // the classic one bit for bit; both are checked (and reported) before failing.
+        uint32_t map_bad = 0;
+        for (uint32_t i = 0; i < c.index_count * c.instance_count; ++i) {
+            const uint32_t local = i % c.index_count;
+            const uint32_t inst_rel = i / c.index_count;
+            const uint32_t vertex = c.indexed ? static_cast<uint32_t>(static_cast<int64_t>(c.indices[local]) + c.vertex_offset) : c.first_vertex + local;
+            const uint32_t expected = PerVertexUniqueRecord(c.first_instance + inst_rel, c.first_instance, vertex, plan.first, plan.count);
+            if (gpu_map[i] != expected) {
+                if (map_bad++ == 0) std::fprintf(stderr, "corner %u: GPU map %u, model %u (vertex %u instance %u first %u count %u)\n", i, gpu_map[i], expected, vertex, inst_rel, plan.first, plan.count);
+            }
+        }
+        uint32_t image_bad = 0;
+        for (size_t i = 0; i < classic_image.size(); ++i) image_bad += std::bit_cast<uint32_t>(classic_image[i]) != std::bit_cast<uint32_t>(unique_image[i]);
+        if (map_bad != 0 || image_bad != 0) {
+            std::fprintf(stderr, "unique mismatches: %u map entries, %u of %zu image floats\n", map_bad, image_bad, classic_image.size());
+            Fail("unique: GPU corner map or image differs from the classic per-corner capture");
+        }
+        std::printf("PASS: %s: N=%u first=%u records=%llu of %u corners (%.0f%%), map == model, image == classic bit for bit (%u px; left %u right %u)\n",
+                    c.name, plan.count, plan.first, static_cast<unsigned long long>(plan.records), c.index_count * c.instance_count,
+                    100.0 * double(plan.records) / double(c.index_count * c.instance_count), lit, lit_left, lit_right);
+        if (c.instance_count == 2 && (lit_left == 0 || lit_right == 0)) Fail("unique: both instances must be visible");
+    }
+    std::printf("PASS: unique-vertex capture matches the per-corner capture for all cases\n");
+    return 0;
+}
 
 } // namespace
 
 int main(int argc, char** argv) {
     const bool wave64_capture_only = argc == 2 && std::strcmp(argv[1], "--wave64-capture-only") == 0;
+    const bool unique_only = argc == 2 && std::strcmp(argv[1], "--unique-only") == 0;
     std::printf("=== Starting Rigorous PerVertex GPU Execution Proof ===\n");
     Device dev = InitDevice();
     std::printf("per-vertex-gpu-tests: Initialized Vulkan device on Apple Silicon GPU\n");
+    if (unique_only) return RunUniqueVertexTests(dev);
 
     // 1. Create buffers for unpack tests
     GpuBuffer vtx_buf = CreateBuffer(dev, kNumVertices * kStride, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT);
@@ -1585,6 +2166,8 @@ OpFunctionEnd
 
     std::printf("PASS: Full Chain Graphics Execution proven on Apple Silicon GPU:\n");
     std::printf("      Rendered pixel matches bit-for-bit with PerVertexKHR multi-corner triangle read!\n");
+
+    if (RunUniqueVertexTests(dev) != 0) return 1;
 
     // =========================================================================
     // PART 4: PROVING PIPELINE CACHE ACCELERATION & BYTECODE DISK CACHE (Étape 3)

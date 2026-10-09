@@ -183,8 +183,9 @@ bool DerivePerVertexLayout(const std::string& vs_source, const std::string& ps_s
 	return true;
 }
 
-std::string GenerateReplayVertexSpvasm(const PerVertexLayout& layout) {
+std::string GenerateReplayVertexSpvasm(const PerVertexLayout& layout, bool unique) {
 	std::vector<std::string> entry_interfaces = {"%gl_VertexIndex", "%_", "%capture_output"};
+	if (unique) entry_interfaces.push_back("%vertex_map");
 	for (const auto& [loc, _]: layout.param_locations_and_slots) {
 		entry_interfaces.push_back("%out_param_" + std::to_string(loc));
 	}
@@ -217,6 +218,16 @@ std::string GenerateReplayVertexSpvasm(const PerVertexLayout& layout) {
 	ss << "OpDecorate %capture_output NonWritable\n";
 	ss << "OpDecorate %capture_output Binding 1\n";
 	ss << "OpDecorate %capture_output DescriptorSet 1\n";
+	if (unique) {
+		// S134: corner -> unique record map (8 bytes per corner, record in the first word).
+		ss << "OpDecorate %_runtimearr_uint ArrayStride 4\n";
+		ss << "OpDecorate %VertexMapBlock Block\n";
+		ss << "OpMemberDecorate %VertexMapBlock 0 NonWritable\n";
+		ss << "OpMemberDecorate %VertexMapBlock 0 Offset 0\n";
+		ss << "OpDecorate %vertex_map NonWritable\n";
+		ss << "OpDecorate %vertex_map Binding 2\n";
+		ss << "OpDecorate %vertex_map DescriptorSet 1\n";
+	}
 	for (const auto& [loc, _]: layout.param_locations_and_slots) {
 		ss << "OpDecorate %out_param_" << loc << " Location " << loc << "\n";
 	}
@@ -258,6 +269,14 @@ std::string GenerateReplayVertexSpvasm(const PerVertexLayout& layout) {
 	ss << "%_ptr_Output_v4float = OpTypePointer Output %v4float\n";
 	ss << "%_ptr_Output_uint = OpTypePointer Output %uint\n";
 	ss << "%out_primitive_id = OpVariable %_ptr_Output_uint Output\n";
+	if (unique) {
+		ss << "%uint_2 = OpConstant %uint 2\n";
+		ss << "%_runtimearr_uint = OpTypeRuntimeArray %uint\n";
+		ss << "%VertexMapBlock = OpTypeStruct %_runtimearr_uint\n";
+		ss << "%_ptr_StorageBuffer_VertexMapBlock = OpTypePointer StorageBuffer %VertexMapBlock\n";
+		ss << "%vertex_map = OpVariable %_ptr_StorageBuffer_VertexMapBlock StorageBuffer\n";
+		ss << "%_ptr_StorageBuffer_uint = OpTypePointer StorageBuffer %uint\n";
+	}
 	for (const auto& [loc, _]: layout.param_locations_and_slots) {
 		ss << "%out_param_" << loc << " = OpVariable %_ptr_Output_v4float Output\n";
 	}
@@ -266,7 +285,14 @@ std::string GenerateReplayVertexSpvasm(const PerVertexLayout& layout) {
 	ss << "%label = OpLabel\n";
 	ss << "%vidx_i = OpLoad %int %gl_VertexIndex\n";
 	ss << "%vidx = OpBitcast %uint %vidx_i\n";
-	ss << "%base = OpIMul %uint %vidx %stride_const\n";
+	if (unique) {
+		ss << "%map_idx = OpIMul %uint %vidx %uint_2\n";
+		ss << "%map_ptr = OpAccessChain %_ptr_StorageBuffer_uint %vertex_map %int_0 %map_idx\n";
+		ss << "%map_rec = OpLoad %uint %map_ptr\n";
+		ss << "%base = OpIMul %uint %map_rec %stride_const\n";
+	} else {
+		ss << "%base = OpIMul %uint %vidx %stride_const\n";
+	}
 	ss << "%pos_ptr = OpAccessChain %_ptr_StorageBuffer_v4float %capture_output %int_0 %base\n";
 	ss << "%pos_val = OpLoad %v4float %pos_ptr\n";
 	ss << "%out_pos_ptr = OpAccessChain %_ptr_Output_v4float %_ %int_0\n";
@@ -593,7 +619,8 @@ std::string LowerVertexToCompute(const std::string& source, const PerVertexLayou
 	return CompleteEntryPointInterface(res);
 }
 
-std::string LowerFragmentToBufferReplay(const std::string& source, const PerVertexLayout& layout) {
+std::string LowerFragmentToBufferReplay(const std::string& source, const PerVertexLayout& layout,
+                                        bool unique) {
 	std::regex pv_re(R"(^\s*OpDecorate\s+(%\S+)\s+PerVertexKHR\s*$)", kMultilineRegex);
 	std::vector<std::string> pv_vars;
 	for (auto it = std::sregex_iterator(source.begin(), source.end(), pv_re);
@@ -669,6 +696,26 @@ std::string LowerFragmentToBufferReplay(const std::string& source, const PerVert
 	    "OpDecorate %capture_buffer NonWritable",
 	    "OpDecorate %capture_primitive Flat",
 	    "OpDecorate %capture_primitive Location 31"};
+	if (unique) {
+		// S134: one record per unique vertex (no triangle level) plus the corner -> record map.
+		annotations = {"OpDecorate %capture_vertex ArrayStride 16",
+		               "OpDecorate %capture_array ArrayStride " + std::to_string(vertex_bytes),
+		               "OpMemberDecorate %capture_block 0 Offset 0",
+		               "OpDecorate %capture_block Block",
+		               "OpDecorate %capture_buffer DescriptorSet 1",
+		               "OpDecorate %capture_buffer Binding 1",
+		               "OpDecorate %capture_buffer NonWritable",
+		               "OpDecorate %capture_map_array ArrayStride 4",
+		               "OpMemberDecorate %capture_map_block 0 Offset 0",
+		               "OpMemberDecorate %capture_map_block 0 NonWritable",
+		               "OpDecorate %capture_map_block Block",
+		               "OpDecorate %capture_map DescriptorSet 1",
+		               "OpDecorate %capture_map Binding 2",
+		               "OpDecorate %capture_map NonWritable",
+		               "OpDecorate %capture_primitive Flat",
+		               "OpDecorate %capture_primitive Location 31"};
+		(void)triangle_bytes;
+	}
 
 	std::vector<std::string> declarations = {
 	    "%capture_vertex_count = OpConstant " + first.uint_type + " " +
@@ -685,12 +732,35 @@ std::string LowerFragmentToBufferReplay(const std::string& source, const PerVert
 		declarations.push_back("%capture_parameter_slot = OpConstant " + first.uint_type + " " +
 		                       std::to_string(*distinct_slots.begin()));
 	}
+	std::string map_element_pointer = "%capture_map_element_pointer";
+	if (unique) {
+		std::regex  ptr_re("^\\s*(%\\S+)\\s*=\\s*OpTypePointer\\s+StorageBuffer\\s+" + first.uint_type +
+		                   "\\s*$",
+		                   kMultilineRegex);
+		std::smatch m_ptr;
+		const bool  has_pointer = std::regex_search(source, m_ptr, ptr_re);
+		if (has_pointer) map_element_pointer = m_ptr[1];
+		declarations.insert(
+		    declarations.end(),
+		    {"%capture_zero = OpConstant " + first.uint_type + " 0",
+		     "%capture_array = OpTypeRuntimeArray %capture_vertex",
+		     "%capture_map_array = OpTypeRuntimeArray " + first.uint_type,
+		     "%capture_map_block = OpTypeStruct %capture_map_array",
+		     "%capture_map_pointer = OpTypePointer StorageBuffer %capture_map_block",
+		     "%capture_map = OpVariable %capture_map_pointer StorageBuffer"});
+		if (!has_pointer) {
+			declarations.push_back(map_element_pointer + " = OpTypePointer StorageBuffer " +
+			                       first.uint_type);
+		}
+	} else {
+		declarations.insert(declarations.end(),
+		                    {"%capture_zero = OpConstant " + first.uint_type + " 0",
+		                     "%capture_triangle = OpTypeArray %capture_vertex " + first.size_const,
+		                     "%capture_array = OpTypeRuntimeArray %capture_triangle"});
+	}
 	declarations.insert(
 	    declarations.end(),
-	    {"%capture_zero = OpConstant " + first.uint_type + " 0",
-	     "%capture_triangle = OpTypeArray %capture_vertex " + first.size_const,
-	     "%capture_array = OpTypeRuntimeArray %capture_triangle",
-	     "%capture_block = OpTypeStruct %capture_array",
+	    {"%capture_block = OpTypeStruct %capture_array",
 	     "%capture_buffer_pointer = OpTypePointer StorageBuffer %capture_block",
 	     "%capture_buffer = OpVariable %capture_buffer_pointer StorageBuffer",
 	     "%capture_float_pointer = OpTypePointer StorageBuffer " + first.scalar_type,
@@ -723,7 +793,8 @@ std::string LowerFragmentToBufferReplay(const std::string& source, const PerVert
 					iface.erase(pos, v.size() + 1);
 				}
 			}
-			iface += " %capture_primitive %capture_buffer";
+			iface += unique ? " %capture_primitive %capture_buffer %capture_map"
+			                : " %capture_primitive %capture_buffer";
 			out_lines.push_back(iface);
 			continue;
 		}
@@ -753,6 +824,26 @@ std::string LowerFragmentToBufferReplay(const std::string& source, const PerVert
 				                    " %capture_primitive");
 				int         slot       = var_map[matched_var].slot;
 				std::string slot_const = "%capture_parameter_slot_" + std::to_string(slot);
+				if (unique) {
+					// record = map[(primitive * 3 + corner) * 2], two words per corner
+					const std::string n = std::to_string(accesses);
+					out_lines.push_back("%capture_corner_base_" + n + " = OpIMul " + first.uint_type +
+					                    " " + prim_id + " " + first.size_const);
+					out_lines.push_back("%capture_corner_" + n + " = OpIAdd " + first.uint_type +
+					                    " %capture_corner_base_" + n + " " + corner);
+					out_lines.push_back("%capture_map_index_" + n + " = OpIAdd " + first.uint_type +
+					                    " %capture_corner_" + n + " %capture_corner_" + n);
+					out_lines.push_back("%capture_map_ptr_" + n + " = OpAccessChain " +
+					                    map_element_pointer + " %capture_map %capture_zero " +
+					                    "%capture_map_index_" + n);
+					out_lines.push_back("%capture_record_" + n + " = OpLoad " + first.uint_type +
+					                    " %capture_map_ptr_" + n);
+					out_lines.push_back(result_id +
+					                    " = OpAccessChain %capture_float_pointer %capture_buffer "
+					                    "%capture_zero %capture_record_" + n + " " + slot_const +
+					                    " " + component);
+					continue;
+				}
 				out_lines.push_back(
 				    result_id +
 				    " = OpAccessChain %capture_float_pointer %capture_buffer %capture_zero " +
@@ -771,29 +862,30 @@ std::string LowerFragmentToBufferReplay(const std::string& source, const PerVert
 
 static std::atomic<uint64_t> s_pv_temp_counter = 0;
 
-std::string GetPerVertexTransformSignature() {
+std::string GetPerVertexTransformSignature(bool unique) {
 #ifndef KYTY_PER_VERTEX_TRANSFORM_SIGNATURE
 #define KYTY_PER_VERTEX_TRANSFORM_SIGNATURE "none"
 #endif
 #ifndef KYTY_GIT_REVISION
 #define KYTY_GIT_REVISION "unknown"
 #endif
-	return fmt::format("v2:{}:{}:env=vk1.2:num_ids", KYTY_GIT_REVISION,
-	                   KYTY_PER_VERTEX_TRANSFORM_SIGNATURE);
+	// S134: the unique-vertex replay shaders are a different transformation (separate files too).
+	return fmt::format("v2:{}:{}:env=vk1.2:num_ids{}", KYTY_GIT_REVISION,
+	                   KYTY_PER_VERTEX_TRANSFORM_SIGNATURE, unique ? ":pvu1" : "");
 }
 
 bool SaveTransformedShadersToDisk(const std::filesystem::path& cache_dir, uint64_t vs_hash,
                                   uint64_t ps_hash, const PerVertexLayout& layout,
                                   std::span<const uint32_t> cap_words,
                                   std::span<const uint32_t> frag_words,
-                                  std::span<const uint32_t> replay_words) {
+                                  std::span<const uint32_t> replay_words, bool unique) {
 	if (cache_dir.empty()) return false;
 
 	if (!Common::File::CreateDirectories(cache_dir)) {
 		return false;
 	}
 
-	const auto filename   = fmt::format("pv_{:016x}_{:016x}.bin", vs_hash, ps_hash);
+	const auto filename   = fmt::format("{}_{:016x}_{:016x}.bin", unique ? "pvu" : "pv", vs_hash, ps_hash);
 	const auto final_path = cache_dir / filename;
 	const auto temp_path =
 	    cache_dir /
@@ -811,7 +903,7 @@ bool SaveTransformedShadersToDisk(const std::filesystem::path& cache_dir, uint64
 	// 2. Format version & transformation signature
 	const uint32_t version = kPerVertexTransformVersion;
 	write_bytes(&version, sizeof(version));
-	const std::string sig     = GetPerVertexTransformSignature();
+	const std::string sig     = GetPerVertexTransformSignature(unique);
 	const uint32_t    sig_len = static_cast<uint32_t>(sig.size());
 	write_bytes(&sig_len, sizeof(sig_len));
 	write_bytes(sig.data(), sig.size());
@@ -881,10 +973,10 @@ bool TryLoadTransformedShadersFromDisk(const std::filesystem::path& cache_dir, u
                                        uint64_t ps_hash, PerVertexLayout& layout,
                                        std::vector<uint32_t>& cap_words,
                                        std::vector<uint32_t>& frag_words,
-                                       std::vector<uint32_t>& replay_words) {
+                                       std::vector<uint32_t>& replay_words, bool unique) {
 	if (cache_dir.empty()) return false;
 
-	const auto filename = fmt::format("pv_{:016x}_{:016x}.bin", vs_hash, ps_hash);
+	const auto filename = fmt::format("{}_{:016x}_{:016x}.bin", unique ? "pvu" : "pv", vs_hash, ps_hash);
 	const auto path     = cache_dir / filename;
 
 	if (!Common::File::IsFileExisting(path)) return false;
@@ -928,7 +1020,7 @@ bool TryLoadTransformedShadersFromDisk(const std::filesystem::path& cache_dir, u
 	if (!read_bytes(&sig_len, sizeof(sig_len)) || sig_len > 1024) return false;
 	std::string file_sig(sig_len, '\0');
 	if (!read_bytes(file_sig.data(), sig_len)) return false;
-	const std::string expected_sig = GetPerVertexTransformSignature();
+	const std::string expected_sig = GetPerVertexTransformSignature(unique);
 	if (file_sig != expected_sig) {
 		return false;
 	}
@@ -1028,21 +1120,22 @@ bool TryLoadTransformedShadersFromDisk(const std::string& title_id, uint64_t vs_
                                        uint64_t ps_hash, PerVertexLayout& layout,
                                        std::vector<uint32_t>& cap_words,
                                        std::vector<uint32_t>& frag_words,
-                                       std::vector<uint32_t>& replay_words) {
+                                       std::vector<uint32_t>& replay_words, bool unique) {
 	if (title_id.empty()) return false;
 	return TryLoadTransformedShadersFromDisk(std::filesystem::path("_ShaderCache") / title_id,
 	                                         vs_hash, ps_hash, layout, cap_words, frag_words,
-	                                         replay_words);
+	                                         replay_words, unique);
 }
 
 bool SaveTransformedShadersToDisk(const std::string& title_id, uint64_t vs_hash, uint64_t ps_hash,
                                   const PerVertexLayout&    layout,
                                   std::span<const uint32_t> cap_words,
                                   std::span<const uint32_t> frag_words,
-                                  std::span<const uint32_t> replay_words) {
+                                  std::span<const uint32_t> replay_words, bool unique) {
 	if (title_id.empty()) return false;
 	return SaveTransformedShadersToDisk(std::filesystem::path("_ShaderCache") / title_id, vs_hash,
-	                                    ps_hash, layout, cap_words, frag_words, replay_words);
+	                                    ps_hash, layout, cap_words, frag_words, replay_words,
+	                                    unique);
 }
 
 namespace {
@@ -1053,22 +1146,29 @@ bool ScanIndexRange(const void* data, uint32_t count, int32_t vertex_offset, uin
 	const auto* bytes = static_cast<const uint8_t*>(data);
 	// The shader adds vertex_offset in 32-bit signed math; 64-bit here only differs where that
 	// would wrap, which is rejected below so the caller falls back to the whole buffer.
-	int64_t lo = INT64_MAX;
-	int64_t hi = INT64_MIN;
+	int64_t lo      = INT64_MAX;
+	int64_t hi      = INT64_MIN;
+	bool    dropped = false;
 	for (uint32_t i = 0; i < count; ++i) {
 		T raw;
 		std::memcpy(&raw, bytes + static_cast<size_t>(i) * sizeof(T), sizeof(T));
 		const int64_t adjusted = static_cast<int64_t>(raw) + vertex_offset;
 		if (adjusted < INT32_MIN || adjusted > INT32_MAX) return false;
-		if (adjusted < 0 || adjusted >= static_cast<int64_t>(num_records)) continue;
+		if (adjusted < 0 || adjusted >= static_cast<int64_t>(num_records)) {
+#if !defined(KYTY_PVU_MUTANT_NO_DROPPED)
+			dropped = true;
+#endif
+			continue;
+		}
 		lo = std::min(lo, adjusted);
 		hi = std::max(hi, adjusted);
 	}
 	if (lo > hi) {
-		range = {};
+		range         = {};
+		range.dropped = dropped;
 		return true;
 	}
-	range = {static_cast<uint64_t>(lo), static_cast<uint64_t>(hi) + 1};
+	range = {static_cast<uint64_t>(lo), static_cast<uint64_t>(hi) + 1, dropped};
 	return true;
 }
 
@@ -1085,6 +1185,7 @@ bool ComputePerVertexRecordRange(bool indexed, const void* index_data, uint64_t 
 		const uint64_t first = first_vertex;
 		const uint64_t end   = std::min<uint64_t>(first + index_count, num_records);
 		range                = first < end ? PerVertexRecordRange {first, end} : PerVertexRecordRange {};
+		range.dropped        = first + index_count > num_records;
 		return true;
 	}
 	if (index_data == nullptr || (index_element_size != 1 && index_element_size != 2 &&
