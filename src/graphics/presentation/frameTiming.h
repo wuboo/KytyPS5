@@ -67,6 +67,7 @@ enum class Counter : uint32_t {
 	ReadbackEagerDownloads, // page downloads queued right after a GPU write (eager_readback)
 	PrototypeRangeMemoHits, // record ranges of indexed prototype draws taken from the memo
 	PrototypeRangeMemoMisses, // ... and the ones that had to scan the index buffer
+	ProtoUnsupportedDraws, // per-vertex-prototype draws skipped: topology/restart/index count it cannot run
 	Count,
 };
 

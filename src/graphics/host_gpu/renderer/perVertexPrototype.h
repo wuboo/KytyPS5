@@ -23,6 +23,18 @@ void RememberPerVertexPrototypeShader(const ShaderProgram&                    pr
                                       const ShaderRecompiler::CompileOptions& options,
                                       uint32_t                                host_subgroup_size);
 
+// What the prototype path does with a draw whose pixel shader needs PerVertexKHR (the host cannot
+// run those natively, so the draw either goes through the prototype or is skipped, never exits).
+// Only a triangle list without primitive restart is supported; a trailing partial triangle is
+// dropped like the hardware does.
+struct PerVertexDrawVerdict {
+	bool        run         = false;
+	uint32_t    index_count = 0; // count to draw when run
+	const char* reason      = nullptr; // why it is skipped (or truncated), for the log
+};
+PerVertexDrawVerdict ClassifyPerVertexPrototypeDraw(bool ps_active, vk::PrimitiveTopology topology,
+                                                    bool primitive_restart, uint32_t index_count);
+
 struct PerVertexPrototypePrograms {
 	bool                            native_capture = false;
 	vk::ShaderModule                capture;

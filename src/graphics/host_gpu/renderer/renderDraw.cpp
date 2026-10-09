@@ -1134,8 +1134,26 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		if (const auto* prototype = GetPerVertexPrototypePrograms(
 		        m_context.GetGraphics(), state.programs, state.vertex_info[0],
 		        m_context.GetPipelineCache().DriverCache())) {
-			ExecutePerVertexPrototype(submit_id, buffer, draw, state, topology, emit, index_source,
-			                          primitive_restart_enable);
+			const auto verdict = ClassifyPerVertexPrototypeDraw(
+			    state.ps_active, topology, primitive_restart_enable, draw.index_count);
+			if (verdict.reason != nullptr) {
+				static std::atomic<uint32_t> logged {0};
+				if (!verdict.run) FrameTiming::Add(FrameTiming::Counter::ProtoUnsupportedDraws);
+				if (logged.fetch_add(1, std::memory_order_relaxed) < 20) {
+					LOGF("PerVertexPrototype: %s draw (%s): topology=%u restart=%d indices=%u "
+					     "VS=0x%016llx PS=0x%016llx\n",
+					     verdict.run ? "adjusting" : "skipping", verdict.reason,
+					     static_cast<uint32_t>(topology), primitive_restart_enable ? 1 : 0,
+					     draw.index_count,
+					     static_cast<unsigned long long>(state.programs.vertex[0].id),
+					     static_cast<unsigned long long>(state.programs.pixel.id));
+				}
+			}
+			if (!verdict.run) return;
+			DrawCallInfo adjusted = draw;
+			adjusted.index_count  = verdict.index_count;
+			ExecutePerVertexPrototype(submit_id, buffer, adjusted, state, topology, emit,
+			                          index_source, primitive_restart_enable);
 			return;
 		}
 	}
