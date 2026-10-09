@@ -619,8 +619,8 @@ endforeach()
 
 add_executable(min_lod_view_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/MinLodViewTests.cpp")
 target_include_directories(min_lod_view_tests PRIVATE ${inc_headers})
-# Mutants (each must be caught, WILL_FAIL): MinLod floors instead of rounding up; the shift is not capped at the last level.
-foreach(mutant IN ITEMS FLOOR NO_CAP)
+# Mutants (each must be caught, WILL_FAIL): MinLod floors instead of rounding up; the shift is not capped at the last level; RESINFO reports the shifted view.
+foreach(mutant IN ITEMS FLOOR NO_CAP RESINFO)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(min_lod_view_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/MinLodViewTests.cpp")
 	target_include_directories(min_lod_view_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
@@ -866,9 +866,8 @@ if(BUILD_TESTING)
 			cs_trace_mutant_drop_reads cs_trace_mutant_off_by_one
 			rt_dump_mutant_ignore_flip rt_dump_mutant_ignore_ps
 			bvh_node_parser_mutant_base_shift bvh_node_parser_mutant_keep_empty
-			min_lod_view_mutant_floor min_lod_view_mutant_no_cap)
-			bvh_node_parser_mutant_base_shift bvh_node_parser_mutant_keep_empty
-			mem_events_mutant_inclusive_end mem_events_mutant_merge_any_addr)
+			mem_events_mutant_inclusive_end mem_events_mutant_merge_any_addr
+			min_lod_view_mutant_floor min_lod_view_mutant_no_cap min_lod_view_mutant_resinfo)
 		add_test(NAME ${mutant_test} COMMAND $<TARGET_FILE:${mutant_test}_tests>)
 		set_tests_properties(${mutant_test} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
@@ -983,6 +982,7 @@ if(BUILD_TESTING)
 		min_lod_view_tests
 		min_lod_view_mutant_floor_tests
 		min_lod_view_mutant_no_cap_tests
+		min_lod_view_mutant_resinfo_tests
 		diag_tex_mutant_nonzero_tests
 		diag_tex_mutant_no_once_tests
 		mem_events_tests

@@ -6,6 +6,8 @@
 #include <algorithm>
 #include <cstdint>
 
+#include "graphics/shader/minLodShift.h"
+
 namespace Libs::Graphics {
 
 struct MinLodViewRange {
@@ -15,28 +17,20 @@ struct MinLodViewRange {
 };
 
 // `min_lod` is the T# clamp relative to `base_level` in 1/256 level units. Without a native view clamp the
-// view starts at ceil(min_lod / 256) levels higher, never past its last level. The sampler (and the shader,
-// for Dynamic mip mode) keeps working relative to the new base.
+// view starts at MinLodShift() levels higher (shared with the recompiler's RESINFO correction). The sampler
+// (and the shader, for Dynamic mip mode) keeps working relative to the new base.
 constexpr MinLodViewRange MapMinLodToBaseLevel(uint32_t base_level, uint32_t level_count, uint32_t min_lod) {
 	if (min_lod == 0 || level_count == 0) {
 		return {base_level, level_count, min_lod};
 	}
-#ifdef KYTY_MINLOD_MUTANT_FLOOR
-	const uint32_t shift = std::min(min_lod / 256u, level_count - 1u);
-#else
-#ifdef KYTY_MINLOD_MUTANT_NO_CAP
-	const uint32_t shift = (min_lod + 255u) / 256u;
-#else
-	const uint32_t shift = std::min((min_lod + 255u) / 256u, level_count - 1u);
-#endif
-#endif
+	const uint32_t shift = MinLodShift(level_count, min_lod);
 	return {base_level + shift, level_count - shift, 0};
 }
 
-// True when a T# MinLod above its base level is bound without any clamp: Apple host, no native extension,
-// remap not applied. Dynamic mip mode applies the clamp in the shader and storage views have none.
-constexpr bool MinLodDropped(bool apple, bool remapped, bool dynamic_mips, bool storage, uint32_t min_lod) {
-	return apple && !remapped && !dynamic_mips && !storage && min_lod != 0;
+// True when a T# MinLod above its base level is bound without any clamp: no native view clamp, remap not
+// applied. Dynamic mip mode applies the clamp in the shader and storage views have none.
+constexpr bool MinLodDropped(bool has_view_min_lod, bool remapped, bool dynamic_mips, bool storage, uint32_t min_lod) {
+	return !has_view_min_lod && !remapped && !dynamic_mips && !storage && min_lod != 0;
 }
 
 } // namespace Libs::Graphics
