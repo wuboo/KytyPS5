@@ -529,6 +529,48 @@ add_executable(env_audit_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(env_audit_tests PRIVATE ${inc_headers})
 
+add_executable(control_file_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ControlFileTests.cpp")
+target_include_directories(control_file_tests PRIVATE ${inc_headers})
+# Mutants (each must be caught, WILL_FAIL): numbers are read leniently; `until` is ignored.
+foreach(mutant IN ITEMS LAX_NUMBERS NO_UNTIL)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(control_file_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ControlFileTests.cpp")
+	target_include_directories(control_file_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(control_file_mutant_${mutant_lower}_tests PRIVATE KYTY_CONTROL_MUTANT_${mutant}=1)
+endforeach()
+
+add_executable(cs_trace_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CsTraceTests.cpp")
+target_include_directories(cs_trace_tests PRIVATE ${inc_headers})
+# Mutants (each must be caught, WILL_FAIL): read resources dropped from the trace; traced flip off by one.
+foreach(mutant IN ITEMS DROP_READS OFF_BY_ONE)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(cs_trace_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CsTraceTests.cpp")
+	target_include_directories(cs_trace_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cs_trace_mutant_${mutant_lower}_tests PRIVATE KYTY_CSTRACE_MUTANT_${mutant}=1)
+endforeach()
+
+add_executable(bvh_node_parser_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BvhNodeParserTests.cpp")
+target_include_directories(bvh_node_parser_tests PRIVATE ${inc_headers})
+# Mutants (each must be caught, WILL_FAIL): T# base shifted by 6 instead of 8; empty child slots listed.
+foreach(mutant IN ITEMS BASE_SHIFT KEEP_EMPTY)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(bvh_node_parser_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BvhNodeParserTests.cpp")
+	target_include_directories(bvh_node_parser_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(bvh_node_parser_mutant_${mutant_lower}_tests PRIVATE KYTY_BVHPARSER_MUTANT_${mutant}=1)
+endforeach()
+
+add_executable(rt_miss_switch_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RtMissSwitchTests.cpp")
+target_include_directories(rt_miss_switch_tests PRIVATE ${inc_headers})
+# Mutant (must be caught, WILL_FAIL): the switch is never seen.
+add_executable(rt_miss_switch_mutant_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RtMissSwitchTests.cpp")
+target_include_directories(rt_miss_switch_mutant_tests PRIVATE ${inc_headers})
+target_compile_definitions(rt_miss_switch_mutant_tests PRIVATE KYTY_RTMISS_MUTANT_IGNORED=1)
+
+# Mutant (must be caught, WILL_FAIL): the diagnostic switches are missing from the known list.
+add_executable(env_audit_mutant_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/EnvAuditTests.cpp")
+target_include_directories(env_audit_mutant_tests PRIVATE ${inc_headers})
+target_compile_definitions(env_audit_mutant_tests PRIVATE KYTY_KNOWNENV_MUTANT_NO_DIAG=1)
+
 add_executable(resource_tracking_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ResourceTrackingTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
@@ -541,6 +583,22 @@ add_executable(resource_tracking_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(resource_tracking_tests fmt::fmt xbyak::xbyak)
 target_include_directories(resource_tracking_tests PRIVATE ${inc_headers})
+
+# Mutant (must be caught, WILL_FAIL): BvhIntersect no longer sets ShaderInfo::uses_bvh.
+add_executable(resource_tracking_mutant_bvh_flag_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/ResourceTrackingTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/shaderPixelParameter.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ShaderInfoCollection.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/BindingLayout.cpp"
+)
+target_link_libraries(resource_tracking_mutant_bvh_flag_tests fmt::fmt)
+target_include_directories(resource_tracking_mutant_bvh_flag_tests PRIVATE ${inc_headers})
+target_compile_definitions(resource_tracking_mutant_bvh_flag_tests PRIVATE KYTY_BVHFLAG_MUTANT_NOT_SET=1)
 
 add_executable(audio_out2_port_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/AudioOut2PortTests.cpp"
@@ -658,6 +716,7 @@ target_compile_definitions(virtual_memory_allocation_tests PRIVATE
 # These tests use exceptions.
 if(NOT KYTY_CLANG_CL)
 	foreach(kyty_exception_test scalar_provenance_tests resource_tracking_tests
+			resource_tracking_mutant_bvh_flag_tests
 			virtual_memory_allocation_tests)
 		target_compile_options(${kyty_exception_test} PRIVATE -fexceptions)
 	endforeach()
@@ -692,6 +751,22 @@ if(BUILD_TESTING)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
 	add_test(NAME env_audit COMMAND $<TARGET_FILE:env_audit_tests>)
+	add_test(NAME env_audit_mutant COMMAND $<TARGET_FILE:env_audit_mutant_tests>)
+	set_tests_properties(env_audit_mutant PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME control_file COMMAND $<TARGET_FILE:control_file_tests>)
+	add_test(NAME cs_trace COMMAND $<TARGET_FILE:cs_trace_tests>)
+	add_test(NAME bvh_node_parser COMMAND $<TARGET_FILE:bvh_node_parser_tests>)
+	add_test(NAME rt_miss_switch COMMAND $<TARGET_FILE:rt_miss_switch_tests>)
+	add_test(NAME rt_miss_switch_mutant COMMAND $<TARGET_FILE:rt_miss_switch_mutant_tests>)
+	set_tests_properties(rt_miss_switch_mutant PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME resource_tracking_mutant_bvh_flag COMMAND $<TARGET_FILE:resource_tracking_mutant_bvh_flag_tests>)
+	set_tests_properties(resource_tracking_mutant_bvh_flag PROPERTIES WILL_FAIL TRUE)
+	foreach(mutant_test control_file_mutant_lax_numbers control_file_mutant_no_until
+			cs_trace_mutant_drop_reads cs_trace_mutant_off_by_one
+			bvh_node_parser_mutant_base_shift bvh_node_parser_mutant_keep_empty)
+		add_test(NAME ${mutant_test} COMMAND $<TARGET_FILE:${mutant_test}_tests>)
+		set_tests_properties(${mutant_test} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
 	add_test(NAME event_queue_lifetime COMMAND $<TARGET_FILE:event_queue_lifetime_tests>)
 	add_test(NAME kernel_file_system COMMAND $<TARGET_FILE:kernel_file_system_tests>)
@@ -708,6 +783,8 @@ if(BUILD_TESTING)
 	add_test(NAME save_data_dialog COMMAND $<TARGET_FILE:save_data_dialog_tests>)
 	add_test(NAME http_uri_parse COMMAND $<TARGET_FILE:http_uri_parse_tests>)
 	add_test(NAME shader_recompiler_compute COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
+	add_test(NAME shader_recompiler_bvh_spirv_unchanged
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --bvh-spirv-hash-only)
 	add_test(NAME shader_recompiler_alignbyte
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --alignbyte-only)
 	add_test(NAME graphics_pipeline_rasterization
@@ -773,6 +850,19 @@ if(BUILD_TESTING)
 		shader_vertex_metadata_tests
 		resource_materialization_tests
 		env_audit_tests
+		env_audit_mutant_tests
+		control_file_tests
+		control_file_mutant_lax_numbers_tests
+		control_file_mutant_no_until_tests
+		cs_trace_tests
+		cs_trace_mutant_drop_reads_tests
+		cs_trace_mutant_off_by_one_tests
+		bvh_node_parser_tests
+		bvh_node_parser_mutant_base_shift_tests
+		bvh_node_parser_mutant_keep_empty_tests
+		rt_miss_switch_tests
+		rt_miss_switch_mutant_tests
+		resource_tracking_mutant_bvh_flag_tests
 		resource_tracking_tests
 		event_queue_lifetime_tests
 		kernel_file_system_tests
