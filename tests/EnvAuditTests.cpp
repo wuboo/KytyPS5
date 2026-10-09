@@ -32,7 +32,7 @@ int main() {
 	Check(Common::CountUnknownKytyEnvironment(env, known) == 2, "unknown count wrong");
 	Check(Common::CountUnknownKytyEnvironment(nullptr, known) == 0, "null environment counted");
 	// The diagnostic switches of this build are known: a run with KYTY_ENV_STRICT=1 must not abort on them.
-	const char* const diag[] = {"KYTY_CONTROL_FILE=/tmp/c.txt", "KYTY_DIAG_CS_TRACE_FLIP=6580",
+	const char* const diag[] = {"KYTY_CONTROL_FILE=/tmp/c.txt", "KYTY_DIAG_CS_TRACE_FLIP=6580", "KYTY_DIAG_DIR=/tmp/d",
 	                            "KYTY_DIAG_TLAS=30", "KYTY_RT_MISS=1", nullptr};
 	Check(Common::CountUnknownKytyEnvironment(diag, Common::kKnownKytyEnv) == 0,
 	      "a diagnostic switch of this build is unknown to the env audit");

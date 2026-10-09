@@ -74,6 +74,27 @@ void TestParseAndResolve() {
 	Check(!base.ForceTexFor(0x2f46fd22b1de1575ull, 3, &rgba), "force_tex active outside its block");
 }
 
+// S122: diag_tex=<ps>:<slot>[,...] lists (ps, slot) pairs and is bound to its block.
+void TestDiagTex() {
+	const auto file = CF::Parse("diag_tex=b96c2898f05637df:30,abc:4\n@100\ndiag_tex=\n@200\nuntil=210\ndiag_tex=ff:0\n");
+	Check(file.errors.empty(), "diag_tex lines rejected");
+	const auto base = CF::Resolve(file, 50);
+	Check(base.diag_tex.size() == 2 && base.diag_tex[0].ps == 0xb96c2898f05637dfull && base.diag_tex[0].slot == 30 &&
+	          base.diag_tex[1].slot == 4,
+	      "diag_tex fields wrong");
+	Check(base.DiagTexListed(0xb96c2898f05637dfull, 30) && base.DiagTexListed(0xabc, 4), "listed pair not found");
+	Check(!base.DiagTexListed(0xb96c2898f05637dfull, 31), "diag_tex matched another slot");
+	Check(!base.DiagTexListed(0x1234, 30), "diag_tex matched another pixel shader");
+	Check(CF::Resolve(file, 150).diag_tex.empty(), "empty value did not clear diag_tex");
+	Check(CF::Resolve(file, 205).DiagTexListed(0xff, 0) && CF::Resolve(file, 211).diag_tex.empty(), "diag_tex block window wrong");
+	Check(!CF::Parse("diag_tex=abc\n").errors.empty() && !CF::Parse("diag_tex=abc:128\n").errors.empty() &&
+	          !CF::Parse("diag_tex=0:1\n").errors.empty() && !CF::Parse("diag_tex=abc:x\n").errors.empty(),
+	      "bad diag_tex accepted");
+	CF::Snapshot a, b;
+	b.diag_tex.push_back({1, 2});
+	Check(!a.SameSettings(b), "diag_tex ignored by SameSettings");
+}
+
 void TestStrictParsing() {
 	const auto file = CF::Parse("skip_cs=12zz\n"        // junk in a hex list
 	                            "skip_cs=0\n"            // zero hash
@@ -131,6 +152,7 @@ void TestPublishAndPoll() {
 
 int main() {
 	TestParseAndResolve();
+	TestDiagTex();
 	TestStrictParsing();
 	TestPublishAndPoll();
 	return 0;
