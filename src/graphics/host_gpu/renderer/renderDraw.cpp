@@ -16,6 +16,8 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
+#include "graphics/host_gpu/renderer/diagDump.h"
+#include "graphics/host_gpu/renderer/rtDump.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/perVertexPrototype.h"
@@ -1123,6 +1125,74 @@ bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo&
 	}
 	return true;
 }
+// dump_rt (control file): copies one image (mip/layer of a render target, or the depth aspect) into a
+// host buffer; returns false when it cannot be copied (multisampled, no image, unsupported size).
+static bool DumpRtCopy(RenderContext& context, ImageId id, uint32_t mip, uint32_t layer, vk::Extent2D extent,
+                       bool depth, int mrt, std::vector<std::unique_ptr<Buffer>>& buffers,
+                       std::vector<DiagDump::Target>& targets) {
+	if (!id) return false;
+	auto&      image = context.GetTextureCache().GetImage(id);
+	const auto fmt   = depth ? DepthAspectTransferFormat(image.info.pixel_format) : image.info.pixel_format;
+	const auto bytes = depth ? DepthAspectTransferBytes(image.info.pixel_format)
+	                         : DiagDump::RtLayoutFor(static_cast<int>(fmt)).bytes;
+	if (image.backing.image == nullptr || image.info.samples != 1 || bytes == 0 || extent.width == 0 || extent.height == 0) {
+		return false;
+	}
+	const uint64_t size = static_cast<uint64_t>(extent.width) * extent.height * bytes;
+	buffers.push_back(std::make_unique<Buffer>(context.GetGraphics(), context.GetCommandScheduler(), MemoryUsage::Download, 0,
+	                                           vk::BufferUsageFlagBits::eTransferDst, size));
+	vk::BufferImageCopy region {};
+	region.imageSubresource.aspectMask     = depth ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor;
+	region.imageSubresource.mipLevel       = mip;
+	region.imageSubresource.baseArrayLayer = layer;
+	region.imageSubresource.layerCount     = 1;
+	region.imageExtent                     = vk::Extent3D {extent.width, extent.height, 1};
+	image.Download(std::span {&region, 1}, buffers.back()->Handle(), 0, size);
+	DiagDump::Target target;
+	target.mrt       = mrt;
+	target.vk_format = static_cast<int>(fmt);
+	target.width     = extent.width;
+	target.height    = extent.height;
+	target.data.resize(size);
+	targets.push_back(std::move(target));
+	return true;
+}
+
+// dump_rt: after a draw of a listed pixel shader reads every colour target and the depth target back
+// (one flush + wait per call, diagnostics only) and hands the copies to DiagDump. Needs no open render pass.
+static void DumpRenderTargets(RenderContext& context, uint64_t ps, const RenderColorInfo* colors, uint32_t color_count,
+                              const RenderDepthInfo& depth) {
+	std::vector<std::unique_ptr<Buffer>> buffers;
+	std::vector<DiagDump::Target>        targets;
+	for (uint32_t i = 0; i < color_count; i++) {
+		const auto& color = colors[i];
+		DumpRtCopy(context, color.image_id, color.guest_mip_level, color.guest_array_layer, color.Extent(), false,
+		           static_cast<int>(color.target_slot), buffers, targets);
+	}
+	if (depth.image_id) {
+		DumpRtCopy(context, depth.image_id, 0, 0,
+		           {std::max(depth.desc.info.extent.width, 1u), std::max(depth.desc.info.extent.height, 1u)}, true, -1, buffers,
+		           targets);
+	}
+	if (targets.empty()) return;
+	context.GetCommandScheduler().FlushAndWait();
+	for (size_t i = 0; i < targets.size(); i++) {
+		buffers[i]->Invalidate(0, buffers[i]->Size());
+		if (buffers[i]->Mapped().size() >= targets[i].data.size()) {
+			std::memcpy(targets[i].data.data(), buffers[i]->Mapped().data(), targets[i].data.size());
+			DiagDump::Store(ps, std::move(targets[i]));
+		}
+	}
+}
+
+// Called after a draw (or a batch of prototype draws) of `ps_hash`: dumps when the control file asks.
+static void DiagDumpAfterDraw(RenderContext& context, bool ps_active, uint64_t ps_hash, const RenderColorInfo* colors,
+                              uint32_t color_count, const RenderDepthInfo& depth) {
+	if (!ps_active || !DiagDump::Wants(ps_hash)) return;
+	context.GetCommandScheduler().EndRendering();
+	DumpRenderTargets(context, ps_hash, colors, color_count, depth);
+}
+
 #include "graphics/host_gpu/renderer/perVertexPrototypeDraw.inc"
 
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
@@ -1315,6 +1385,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		m_context.GetCommandScheduler().EndRendering();
 		ShaderWriteBarrier(vk_buffer, shader_write_stages);
 	}
+	DiagDumpAfterDraw(m_context, state.ps_active,
+	                  state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0, state.color_info,
+	                  state.color_count, state.depth_info);
 	LogDrawPhase(draw.Name(), "DrawComplete");
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);

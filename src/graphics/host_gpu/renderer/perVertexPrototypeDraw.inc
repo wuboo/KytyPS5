@@ -691,6 +691,8 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	scheduler.EndRendering();
 	if (HasShaderBufferWrites(state.ps_input_info.stage))
 		ShaderWriteBarrier(cmd, vk::PipelineStageFlagBits::eFragmentShader);
+	DiagDumpAfterDraw(m_context, state.ps_active, state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0,
+	                  state.color_info, state.color_count, state.depth_info);
 
 	if (!store_in_cache) {
 		// Diagnostic (capture has side-effecting writes) or `KYTY_OPT_OFF=capture_cache`:
@@ -769,6 +771,9 @@ void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 			ShaderWriteBarrier(cmd, vk::PipelineStageFlagBits::eFragmentShader);
 	}
 	scheduler.EndRendering();
+	// Draws of one batch share their targets: dump_rt is asked once, after the whole batch.
+	DiagDumpAfterDraw(m_context, batch.ps_active, batch.ps_hash, batch.color_info.data(), batch.color_count,
+	                  batch.depth_info);
 
 	for (auto& item: batch.items) {
 		if (item.owned_captured != nullptr) {

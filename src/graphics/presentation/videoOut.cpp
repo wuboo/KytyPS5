@@ -1,4 +1,5 @@
 #include "graphics/presentation/videoOut.h"
+#include "graphics/host_gpu/renderer/diagDump.h"
 #include "graphics/presentation/frameTiming.h"
 
 #include "common/abi.h"
@@ -1268,6 +1269,9 @@ bool FlipQueue::Flip(uint32_t micros) {
 		}
 		auto& r = *it;
 		r.cfg->flip_status.count++;
+		// dump_rt files of the flip that ends here are written under that flip's label, before the control
+		// file may switch to the next arm.
+		Graphics::DiagDump::FlipReport(Graphics::FrameTiming::GuestFlips() + 1);
 		Graphics::FrameTiming::OnGuestFlip();
 		r.cfg->flip_status.processTime              = LibKernel::KernelGetProcessTime();
 		r.cfg->flip_status.processTimeCounter       = LibKernel::KernelGetProcessTimeCounter();
