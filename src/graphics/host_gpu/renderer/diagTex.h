@@ -3,9 +3,12 @@
 
 // S122 diag_tex: pure helpers (no Vulkan) for describing a sampled T# and dumping the host image it reads.
 
+#include "graphics/host_gpu/renderer/bc7.h"
 #include "graphics/host_gpu/renderer/rtDump.h"
 
+#include <algorithm>
 #include <cinttypes>
+#include <map>
 #include <set>
 #include <string>
 #include <tuple>
@@ -92,6 +95,81 @@ inline std::string TexDumpPath(const std::string& dir, const std::string& label,
 	char buf[64];
 	std::snprintf(buf, sizeof(buf), "-%" PRIu64 "-tex-%016" PRIx64 "-s%u.", flip, ps, slot);
 	return dir + "/" + (label.empty() ? std::string("diag_tex") : label) + buf + ext;
+}
+
+// ---- S123: diag_tex=<ps>:<slot>:all ----------------------------------------------------------------------------------
+
+// One line per draw: the T# of the slot, how many indices the draw has and the address of its first render target.
+inline std::string TexDrawDescribe(uint64_t seq, const TexInfo& t, uint64_t index_count, uint64_t rt_addr, const Bc7Summary* bc7) {
+	char buf[512];
+	std::snprintf(buf, sizeof(buf),
+	              "[diag-tex-d] flip=%" PRIu64 " seq=%" PRIu64 " ps=%016" PRIx64 " slot=%u addr=0x%" PRIx64
+	              " fmt=%u %ux%u mips=%u..%u/%u size=%" PRIu64 " indices=%" PRIu64 " rt=0x%" PRIx64,
+	              t.flip, seq, t.ps, t.slot, t.addr, t.guest_format, t.width, t.height, t.base_level, t.last_level, t.max_mip,
+	              t.byte_size, index_count, rt_addr);
+	std::string line = buf;
+	if (bc7 != nullptr) {
+		std::snprintf(buf, sizeof(buf), " bc7 mode=%d first=%02x%02x%02x%02x mean=%.1f,%.1f,%.1f,%.1f blocks=%u/%u", bc7->first_mode,
+		              bc7->first_texel[0], bc7->first_texel[1], bc7->first_texel[2], bc7->first_texel[3], bc7->mean[0], bc7->mean[1],
+		              bc7->mean[2], bc7->mean[3], bc7->decoded, bc7->blocks);
+		line += buf;
+	}
+	return line;
+}
+
+// Draws and index sums per (ps, slot, address, format, size) over one flip.
+struct TexHist {
+	struct Entry {
+		uint64_t   draws = 0, indices = 0;
+		Bc7Summary bc7;
+		bool       has_bc7 = false;
+	};
+	using Key = std::tuple<uint64_t, uint32_t, uint64_t, uint32_t, uint32_t, uint32_t>;
+	std::map<Key, Entry> entries;
+};
+
+inline void TexHistAdd(TexHist& hist, const TexInfo& t, uint64_t index_count, const Bc7Summary* bc7) {
+#ifdef KYTY_DIAGTEX_MUTANT_HIST_NO_FMT
+	const uint32_t fmt = 0;
+#else
+	const uint32_t fmt = t.guest_format;
+#endif
+	auto& e = hist.entries[{t.ps, t.slot, t.addr, fmt, t.width, t.height}];
+	e.draws++;
+#ifndef KYTY_DIAGTEX_MUTANT_HIST_NO_INDICES
+	e.indices += index_count;
+#endif
+	if (bc7 != nullptr && !e.has_bc7) {
+		e.bc7     = *bc7;
+		e.has_bc7 = true;
+	}
+}
+
+// "[diag-tex-h] ..." lines, most draws first; the percentage is of all draws of the same (ps, slot).
+inline std::vector<std::string> TexHistLines(const TexHist& hist, uint64_t flip) {
+	std::map<std::pair<uint64_t, uint32_t>, uint64_t> totals;
+	for (const auto& [key, e]: hist.entries) totals[{std::get<0>(key), std::get<1>(key)}] += e.draws;
+	std::vector<std::pair<TexHist::Key, TexHist::Entry>> rows(hist.entries.begin(), hist.entries.end());
+	std::stable_sort(rows.begin(), rows.end(), [](const auto& a, const auto& b) { return a.second.draws > b.second.draws; });
+	std::vector<std::string> lines;
+	for (const auto& [key, e]: rows) {
+		const auto total = totals[{std::get<0>(key), std::get<1>(key)}];
+		char       buf[400];
+		std::snprintf(buf, sizeof(buf),
+		              "[diag-tex-h] flip=%" PRIu64 " ps=%016" PRIx64 " slot=%u addr=0x%" PRIx64 " fmt=%u %ux%u draws=%" PRIu64
+		              " (%.1f%% of %" PRIu64 ") indices=%" PRIu64,
+		              flip, std::get<0>(key), std::get<1>(key), std::get<2>(key), std::get<3>(key), std::get<4>(key),
+		              std::get<5>(key), e.draws, 100.0 * static_cast<double>(e.draws) / static_cast<double>(total), total, e.indices);
+		std::string line = buf;
+		if (e.has_bc7) {
+			std::snprintf(buf, sizeof(buf), " bc7 mode=%d first=%02x%02x%02x%02x mean=%.1f,%.1f,%.1f,%.1f", e.bc7.first_mode,
+			              e.bc7.first_texel[0], e.bc7.first_texel[1], e.bc7.first_texel[2], e.bc7.first_texel[3], e.bc7.mean[0],
+			              e.bc7.mean[1], e.bc7.mean[2], e.bc7.mean[3]);
+			line += buf;
+		}
+		lines.push_back(line);
+	}
+	return lines;
 }
 
 } // namespace Libs::Graphics::DiagDump

@@ -694,6 +694,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	DiagDumpAfterDraw(m_context, state.ps_active, state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0,
 	                  state.color_info, state.color_count, state.depth_info);
 	DiagTexAfterDraw(m_context);
+	DiagTexDrawsDone(count, state.color_info, state.color_count, state.depth_info);
 
 	if (!store_in_cache) {
 		// Diagnostic (capture has side-effecting writes) or `KYTY_OPT_OFF=capture_cache`:
@@ -776,6 +777,11 @@ void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 	DiagDumpAfterDraw(m_context, batch.ps_active, batch.ps_hash, batch.color_info.data(), batch.color_count,
 	                  batch.depth_info);
 	DiagTexAfterDraw(m_context);
+	{
+		uint64_t batch_vertices = 0;
+		for (const auto& item: batch.items) batch_vertices += item.count;
+		DiagTexDrawsDone(batch_vertices, batch.color_info.data(), batch.color_count, batch.depth_info);
+	}
 
 	for (auto& item: batch.items) {
 		if (item.owned_captured != nullptr) {

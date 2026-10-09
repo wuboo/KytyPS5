@@ -169,6 +169,7 @@ int main() {
 	TestPpmAndDescribe();
 	TestMatch();
 	TestPath();
+	Check(RtAddrText(0x70d1770000ull) == " rt_addr=0x70d1770000" && RtAddrText(0).empty(), "rt address text");
 	std::printf("RtDumpTests: ok\n");
 	return 0;
 }

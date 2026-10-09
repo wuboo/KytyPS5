@@ -478,15 +478,17 @@ static bool ResolveTextureMipView(ImageInfo& info, uint32_t physical_levels, boo
 }
 
 // force_tex (control file): a sampled 2D T# of a listed pixel shader slot reads as a 1x1 image of one colour.
+// Without `key` only entries without a filter apply; with the decoded T# an entry with a filter applies when it fits.
 static bool ForcedTextureBinding(TextureCache& texture_cache, const ShaderRecompiler::IR::ImageResource& resource,
-                                 uint64_t ps_hash, uint32_t slot, TextureBinding& out) {
+                                 uint64_t ps_hash, uint32_t slot, const Common::ControlFile::TexKey* key,
+                                 TextureBinding& out) {
 	uint32_t rgba = 0;
 	if (ps_hash == 0 || resource.written ||
 	    resource.resource_class != ShaderRecompiler::IR::ImageResourceClass::Sampled ||
 	    resource.numeric_class != Prospero::TextureNumericClass::Float ||
 	    (resource.dimension != ShaderRecompiler::Decoder::ImageDimension::Dim2D &&
 	     resource.dimension != ShaderRecompiler::Decoder::ImageDimension::Dim2DArray) ||
-	    !Common::ControlFile::Current().ForceTexFor(ps_hash, slot, &rgba)) {
+	    !Common::ControlFile::Current().ForceTexFor(ps_hash, slot, &rgba, key)) {
 		return false;
 	}
 	TextureCache::ImageDesc desc {};
@@ -519,7 +521,7 @@ static bool ForcedTextureBinding(TextureCache& texture_cache, const ShaderRecomp
 TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
                                               const ShaderRecompiler::IR::DescriptorValue& value,
                                               uint64_t ps_hash, uint32_t slot) {
-	if (TextureBinding forced; ForcedTextureBinding(m_context.GetTextureCache(), resource, ps_hash, slot, forced)) {
+	if (TextureBinding forced; ForcedTextureBinding(m_context.GetTextureCache(), resource, ps_hash, slot, nullptr, forced)) {
 		return forced;
 	}
 	if (resource.atomic64 && !m_context.GetGraphics().shader_image_int64_atomics_enabled) {
@@ -577,6 +579,12 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	const auto samples = multisampled ? 1u << last_level : 1u;
 	const auto depth          = static_cast<uint32_t>(descriptor.Depth()) + 1u;
 	const auto format         = descriptor.Format();
+	if (ps_hash != 0 && Common::ControlFile::Current().ForceTexHasFilter()) {
+		const Common::ControlFile::TexKey key {address, static_cast<uint32_t>(format), width, height};
+		if (TextureBinding forced; ForcedTextureBinding(texture_cache, resource, ps_hash, slot, &key, forced)) {
+			return forced;
+		}
+	}
 	const auto surface_format = TextureGetSurfaceFormatInfo(format);
 	const bool shader_conversion =
 	    surface_format.conversion_format != Prospero::BufferFormat::kInvalid;
@@ -674,7 +682,9 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		(void)SelectSampledColorView(image->info.pixel_format, pixel_format,
 		                             descriptor.DstSelXYZW());
 	}
-	if (ps_hash != 0 && DiagDump::WantsTex(ps_hash, slot)) {
+	const bool diag_once = ps_hash != 0 && DiagDump::WantsTex(ps_hash, slot);
+	const bool diag_all  = ps_hash != 0 && DiagDump::WantsTexAll(ps_hash, slot);
+	if (diag_once || diag_all) {
 		DiagDump::TexInfo info;
 		info.flip          = FrameTiming::GuestFlips() + 1;
 		info.ps            = ps_hash;
@@ -703,8 +713,20 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		info.cpu_dirty     = image->IsCpuDirty();
 		info.uma           = std::getenv("KYTY_UMA") != nullptr ? std::getenv("KYTY_UMA") : "0";
 		std::copy(std::begin(descriptor.fields), std::begin(descriptor.fields) + 8, info.dwords);
-		LOGF("%s\n", DiagDump::TexDescribe(info).c_str());
-		DiagDump::AddTexRequest({id, info});
+		if (diag_all) {
+			DiagDump::TexDraw draw;
+			draw.info = info;
+			// BC7 T#: decode the first blocks of mip 0 straight from guest memory (no readback, no host image).
+			if (format == Prospero::BufferFormat::kBc7UNorm || format == Prospero::BufferFormat::kBc7Srgb) {
+				draw.bc7     = DiagDump::Bc7Summarize(reinterpret_cast<const uint8_t*>(address), size.size, 256);
+				draw.has_bc7 = true;
+			}
+			DiagDump::AddTexDraw(std::move(draw));
+		}
+		if (diag_once) {
+			LOGF("%s\n", DiagDump::TexDescribe(info).c_str());
+			DiagDump::AddTexRequest({id, info});
+		}
 	}
 	return {id, nullptr, std::move(desc)};
 }

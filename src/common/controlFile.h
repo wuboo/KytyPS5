@@ -9,9 +9,13 @@
 //   skip_cs=<hex hash>[,...]                   compute dispatches of these guest CS hashes are not run
 //   dump_rt=<ps hex>[:<flip dec>][,...]        colour targets + depth after the last draw of that PS
 //   force_tex=<ps hex>:<slot dec>:<rgba8 hex>  the T# in that slot reads as a 1x1 image of one colour,
-//                                              0xAABBGGRR (r in the low byte)
+//                                              0xAABBGGRR (r in the low byte); an optional filter
+//                                              `@<addr hex>` or `@fmt=<n>,<w>x<h>` limits it to draws whose T#
+//                                              has that base address / format and size (others sample normally)
 //   diag_tex=<ps hex>:<slot dec>[,...]         once per block: log the full T# of that slot of the pixel shader
 //                                              and dump the host image it samples ([diag-tex], KYTY_DIAG_DIR)
+//   diag_tex=<ps hex>:<slot dec>:all           every draw of the shader: one [diag-tex-d] line per draw plus a
+//                                              histogram per (addr, fmt, size) at the end of the flip (no readback)
 //   label=<name>                               arm name used in the file names of dumps
 //   # starts a comment
 //
@@ -38,11 +42,44 @@
 
 namespace Common::ControlFile {
 
+// The T# fields a force_tex filter can look at.
+struct TexKey {
+	uint64_t addr = 0;
+	uint32_t fmt = 0, width = 0, height = 0;
+};
+
+// force_tex filter: none, the T# base address, or the guest format + size.
+struct TexFilter {
+	enum class Kind : uint8_t { None, Addr, Fmt };
+	Kind     kind = Kind::None;
+	uint64_t addr = 0;
+	uint32_t fmt = 0, width = 0, height = 0;
+	bool     operator==(const TexFilter& o) const {
+		return kind == o.kind && addr == o.addr && fmt == o.fmt && width == o.width && height == o.height;
+	}
+	[[nodiscard]] bool Matches(const TexKey& key) const {
+#ifdef KYTY_CONTROL_MUTANT_FILTER_IGNORED
+		(void)key;
+		return true;
+#else
+		switch (kind) {
+			case Kind::None: return true;
+			case Kind::Addr: return key.addr == addr;
+			case Kind::Fmt: return key.fmt == fmt && key.width == width && key.height == height;
+		}
+		return false;
+#endif
+	}
+};
+
 struct ForceTex {
-	uint64_t ps   = 0;
-	uint32_t slot = 0;
-	uint32_t rgba = 0;
-	bool     operator==(const ForceTex& o) const { return ps == o.ps && slot == o.slot && rgba == o.rgba; }
+	uint64_t  ps   = 0;
+	uint32_t  slot = 0;
+	uint32_t  rgba = 0;
+	TexFilter filter;
+	bool      operator==(const ForceTex& o) const {
+		return ps == o.ps && slot == o.slot && rgba == o.rgba && filter == o.filter;
+	}
 };
 
 struct DumpRt {
@@ -54,7 +91,8 @@ struct DumpRt {
 struct DiagTex {
 	uint64_t ps   = 0;
 	uint32_t slot = 0;
-	bool     operator==(const DiagTex& o) const { return ps == o.ps && slot == o.slot; }
+	bool     all  = false; // every draw (log + histogram) instead of once per block with a readback
+	bool     operator==(const DiagTex& o) const { return ps == o.ps && slot == o.slot && all == o.all; }
 };
 
 struct Snapshot {
@@ -69,27 +107,48 @@ struct Snapshot {
 	[[nodiscard]] bool SkipCs(uint64_t hash) const {
 		return std::find(skip_cs.begin(), skip_cs.end(), hash) != skip_cs.end();
 	}
-	// force_tex colour for slot `slot` of pixel shader `ps` (0xAABBGGRR), false when not listed.
-	[[nodiscard]] bool ForceTexFor(uint64_t ps, uint32_t slot, uint32_t* rgba) const {
+	// force_tex colour for slot `slot` of pixel shader `ps` (0xAABBGGRR), false when not listed. Without a key only
+	// entries without a filter match; with a key an entry with a filter matches when the T# fits it.
+	[[nodiscard]] bool ForceTexFor(uint64_t ps, uint32_t slot, uint32_t* rgba, const TexKey* key = nullptr) const {
 		for (const auto& entry: force_tex) {
 #ifdef KYTY_CONTROL_MUTANT_FORCE_ANY_SLOT
 			if (entry.ps == ps) {
 #else
 			if (entry.ps == ps && entry.slot == slot) {
 #endif
+				if (entry.filter.kind != TexFilter::Kind::None && (key == nullptr || !entry.filter.Matches(*key))) continue;
 				*rgba = entry.rgba;
 				return true;
 			}
 		}
 		return false;
 	}
-	// diag_tex lists slot `slot` of pixel shader `ps`.
+	// Some force_tex entry has a filter (its T# must be decoded before the lookup can answer).
+	[[nodiscard]] bool ForceTexHasFilter() const {
+		for (const auto& entry: force_tex) {
+			if (entry.filter.kind != TexFilter::Kind::None) return true;
+		}
+		return false;
+	}
+	// diag_tex lists slot `slot` of pixel shader `ps` as a once-per-block readback.
 	[[nodiscard]] bool DiagTexListed(uint64_t ps, uint32_t slot) const {
 		for (const auto& entry: diag_tex) {
 #ifdef KYTY_CONTROL_MUTANT_DIAG_ANY_SLOT
-			if (entry.ps == ps) return true;
+			if (entry.ps == ps && !entry.all) return true;
 #else
-			if (entry.ps == ps && entry.slot == slot) return true;
+			if (entry.ps == ps && entry.slot == slot && !entry.all) return true;
+#endif
+		}
+		return false;
+	}
+	// diag_tex lists slot `slot` of pixel shader `ps` in `all` mode (every draw).
+	[[nodiscard]] bool DiagTexAll(uint64_t ps, uint32_t slot) const {
+		for (const auto& entry: diag_tex) {
+#ifdef KYTY_CONTROL_MUTANT_DIAG_ALL_IGNORED
+			(void)ps; (void)slot;
+			return false;
+#else
+			if (entry.ps == ps && entry.slot == slot && entry.all) return true;
 #endif
 		}
 		return false;
@@ -160,9 +219,59 @@ inline bool ParseDumpRt(std::string_view text, std::vector<DumpRt>& out) {
 	});
 }
 
+// Like ForEachItem, but the comma of a `@fmt=<n>,<w>x<h>` filter belongs to its item.
+template <typename Fn>
+inline bool ForEachForceItem(std::string_view text, Fn fn) {
+	size_t pos = 0, start = 0;
+	auto   flush = [&](size_t end) {
+		const auto item = Trim(text.substr(start, end - start));
+		return item.empty() || fn(item);
+	};
+	for (; pos < text.size(); pos++) {
+		if (text[pos] != ',') continue;
+		const auto head = text.substr(start, pos - start);
+		const auto at   = head.rfind("@fmt=");
+		if (at != std::string_view::npos && head.find(',', at) == std::string_view::npos && head.size() > at + 5 &&
+		    head.find_first_not_of("0123456789", at + 5) == std::string_view::npos) {
+			continue; // "@fmt=130" so far: the next part is the size
+		}
+		if (!flush(pos)) return false;
+		start = pos + 1;
+	}
+	return flush(text.size());
+}
+
+inline bool ParseTexFilter(std::string_view text, TexFilter& out) {
+	out = {};
+	if (text.rfind("fmt=", 0) == 0) {
+		text.remove_prefix(4);
+		const auto comma = text.find(',');
+		const auto x     = comma == std::string_view::npos ? comma : text.find('x', comma + 1);
+		uint64_t   fmt = 0, w = 0, h = 0;
+		if (x == std::string_view::npos || !ParseNumber(text.substr(0, comma), 10, fmt) ||
+		    !ParseNumber(text.substr(comma + 1, x - comma - 1), 10, w) || w == 0 || !ParseNumber(text.substr(x + 1), 10, h) || h == 0)
+			return false;
+		out.kind = TexFilter::Kind::Fmt;
+		out.fmt = static_cast<uint32_t>(fmt);
+		out.width = static_cast<uint32_t>(w);
+		out.height = static_cast<uint32_t>(h);
+		return true;
+	}
+	if (text.rfind("0x", 0) == 0 || text.rfind("0X", 0) == 0) text.remove_prefix(2);
+	uint64_t addr = 0;
+	if (!ParseNumber(text, 16, addr) || addr == 0) return false;
+	out.kind = TexFilter::Kind::Addr;
+	out.addr = addr;
+	return true;
+}
+
 inline bool ParseForceTex(std::string_view text, std::vector<ForceTex>& out) {
 	out.clear();
-	return ForEachItem(text, [&](std::string_view item) {
+	return ForEachForceItem(text, [&](std::string_view full) {
+		const auto at   = full.find('@');
+		const auto item = Trim(full.substr(0, at));
+		TexFilter  filter;
+		if (at != std::string_view::npos && !ParseTexFilter(Trim(full.substr(at + 1)), filter)) return false;
 		const auto c1 = item.find(':');
 		const auto c2 = c1 == std::string_view::npos ? c1 : item.find(':', c1 + 1);
 		if (c2 == std::string_view::npos) return false;
@@ -172,7 +281,7 @@ inline bool ParseForceTex(std::string_view text, std::vector<ForceTex>& out) {
 		    !ParseNumber(item.substr(c1 + 1, c2 - c1 - 1), 10, slot) || slot > 127 ||
 		    rgba_text.size() != 8 || !ParseNumber(rgba_text, 16, rgba))
 			return false;
-		out.push_back({ps, static_cast<uint32_t>(slot), static_cast<uint32_t>(rgba)});
+		out.push_back({ps, static_cast<uint32_t>(slot), static_cast<uint32_t>(rgba), filter});
 		return true;
 	});
 }
@@ -180,12 +289,16 @@ inline bool ParseForceTex(std::string_view text, std::vector<ForceTex>& out) {
 inline bool ParseDiagTex(std::string_view text, std::vector<DiagTex>& out) {
 	out.clear();
 	return ForEachItem(text, [&](std::string_view item) {
-		const auto colon = item.find(':');
+		const auto c1 = item.find(':');
+		if (c1 == std::string_view::npos) return false;
+		const auto c2   = item.find(':', c1 + 1);
+		const bool all  = c2 != std::string_view::npos;
 		uint64_t   ps = 0, slot = 0;
-		if (colon == std::string_view::npos || !ParseNumber(item.substr(0, colon), 16, ps) || ps == 0 ||
-		    !ParseNumber(item.substr(colon + 1), 10, slot) || slot > 127)
+		if (all && Trim(item.substr(c2 + 1)) != "all") return false;
+		if (!ParseNumber(item.substr(0, c1), 16, ps) || ps == 0 ||
+		    !ParseNumber(item.substr(c1 + 1, all ? c2 - c1 - 1 : std::string_view::npos), 10, slot) || slot > 127)
 			return false;
-		out.push_back({ps, static_cast<uint32_t>(slot)});
+		out.push_back({ps, static_cast<uint32_t>(slot), all});
 		return true;
 	});
 }
@@ -230,10 +343,10 @@ inline bool ValidateItem(const Item& item, std::string& why) {
 		why = "dump_rt is <ps hex>[:<flip decimal>]";
 	} else if (item.key == "force_tex") {
 		if (ParseForceTex(item.value, forces)) return true;
-		why = "force_tex is <ps hex>:<slot 0..127>:<rgba8 hex>";
+		why = "force_tex is <ps hex>:<slot 0..127>:<rgba8 hex>[@<addr hex>|@fmt=<n>,<w>x<h>]";
 	} else if (item.key == "diag_tex") {
 		if (ParseDiagTex(item.value, diags)) return true;
-		why = "diag_tex is <ps hex>:<slot 0..127>";
+		why = "diag_tex is <ps hex>:<slot 0..127>[:all]";
 	} else if (item.key == "label") {
 		if (ValidLabel(item.value)) return true;
 		why = "label is up to 48 characters of [A-Za-z0-9_.-]";

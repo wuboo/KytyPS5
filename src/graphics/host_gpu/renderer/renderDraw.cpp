@@ -1149,6 +1149,7 @@ static bool DumpRtCopy(RenderContext& context, ImageId id, uint32_t mip, uint32_
 	region.imageExtent                     = vk::Extent3D {extent.width, extent.height, 1};
 	image.Download(std::span {&region, 1}, buffers.back()->Handle(), 0, size);
 	DiagDump::Target target;
+	target.addr      = image.info.data.address;
 	target.mrt       = mrt;
 	target.vk_format = static_cast<int>(fmt);
 	target.width     = extent.width;
@@ -1215,6 +1216,14 @@ static void DiagTexAfterDraw(RenderContext& context) {
 	for (size_t i = 0; i < requests.size(); i++) {
 		if (!stored[i]) DiagDump::StoreTex(requests[i].info, {});
 	}
+}
+
+// diag_tex ...:all: closes the draw (or batch) for the slots ResolveTexture queued; the first colour target's address
+// (else the depth target's) tells which pass the draw belongs to.
+static void DiagTexDrawsDone(uint64_t index_count, const RenderColorInfo* colors, uint32_t color_count,
+                             const RenderDepthInfo& depth) {
+	const uint64_t rt = color_count != 0 ? colors[0].desc.info.data.address : depth.desc.info.data.address;
+	DiagDump::TexDrawsDone(index_count, rt);
 }
 
 // Called after a draw (or a batch of prototype draws) of `ps_hash`: dumps when the control file asks.
@@ -1421,6 +1430,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	                  state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0, state.color_info,
 	                  state.color_count, state.depth_info);
 	DiagTexAfterDraw(m_context);
+	DiagTexDrawsDone(draw.index_count, state.color_info, state.color_count, state.depth_info);
 	LogDrawPhase(draw.Name(), "DrawComplete");
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);
