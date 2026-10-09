@@ -104,6 +104,75 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	const uint64_t vs_hash_for_cache = vs.stage.program->shader_hash;
 	const uint64_t ps_hash_for_cache =
 	    state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0;
+	// The record range [first, end) the draw reads: the capture cache hashes only those vertex
+	// bytes, and KYTY_PV_UNIQUE (S134) captures exactly those vertices.
+	static const bool unique_enabled     = PerVertexUniqueEnabled();
+	static const bool hash_range_enabled = FrameTiming::OptEnabled("pv_hash_range");
+	static const bool range_memo_enabled = FrameTiming::OptEnabled("pv_range_memo");
+	uint64_t             index_hash = 0;
+	const void*          idx_bytes  = nullptr;
+	PerVertexRecordRange record_range;
+	bool                 range_known = false;
+	if (cache_eligible || unique_enabled) {
+		if (draw.IsIndexed()) {
+			idx_bytes = index_source.host_data != nullptr
+			                ? index_source.host_data
+			                : reinterpret_cast<const void*>(index_source.address);
+			index_hash = XXH3_64bits(idx_bytes, index_source.size);
+		}
+		// The unpack pass reads only the records the draw references, so only those bytes can
+		// change the capture; hashing the whole V# range (often a shared mesh pool) was ~35-60% of
+		// the GPU thread in the chase/level samples. Both the record range and the bytes below it
+		// are functions of {index bytes, draw params}, which are hashed too.
+		// KYTY_OPT_OFF=pv_hash_range hashes the whole range again.
+		// The scan of the index buffer for that range was a third of this function in the chase
+		// samples; indexed meshes recur with identical indices, so the range is memoized by the
+		// index hash above. KYTY_OPT_OFF=pv_range_memo scans every time.
+		if (hash_range_enabled || unique_enabled) {
+			const auto compute = [&] {
+				return ComputePerVertexRecordRange(draw.IsIndexed(), idx_bytes, index_source.size,
+				                                   index_element_size, draw.index_count,
+				                                   emit.first_vertex, emit.vertex_offset,
+				                                   input.num_records, record_range);
+			};
+			if (range_memo_enabled && draw.IsIndexed() && idx_bytes != nullptr) {
+				const PerVertexRangeMemo::Key memo_key {index_hash,
+				                                        index_source.size,
+				                                        index_element_size,
+				                                        draw.index_count,
+				                                        emit.vertex_offset,
+				                                        input.num_records};
+				const auto memoized = m_prototype_range_memo.Find(memo_key);
+				if (memoized.found) {
+					FrameTiming::Add(FrameTiming::Counter::PrototypeRangeMemoHits);
+					record_range = memoized.range;
+					range_known  = memoized.derivable;
+				} else {
+					FrameTiming::Add(FrameTiming::Counter::PrototypeRangeMemoMisses);
+					range_known = compute();
+					m_prototype_range_memo.Insert(memo_key, range_known, record_range);
+				}
+			} else {
+				range_known = compute();
+			}
+		}
+	}
+
+	// S134: capture per unique vertex when the draw allows it (default OFF: the plan stays Disabled).
+	PerVertexUniquePlan unique_plan;
+	if (unique_enabled) {
+		unique_plan = PlanPerVertexUnique({true, capture_has_writes, range_known, record_range.dropped,
+		                                   record_range.first, record_range.end, draw.index_count,
+		                                   draw.instance_count});
+		if (unique_plan.Use() && !programs->unique_available) unique_plan = {};
+		if (unique_plan.Use()) {
+			FrameTiming::Add(FrameTiming::Counter::PrototypeUniqueDraws);
+			FrameTiming::Add(FrameTiming::Counter::PrototypeUniqueVertices, unique_plan.records);
+		} else {
+			FrameTiming::Add(FrameTiming::Counter::PrototypeUniqueFallback);
+		}
+	}
+	const bool unique_mode = unique_plan.Use();
 	CachedPrototypeCapture* hit = nullptr;
 	if (cache_eligible) {
 		struct CaptureKeyMeta {
@@ -132,57 +201,9 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		                          draw.IsIndexed() ? index_element_size : 0u};
 		const uint64_t meta_hash  = XXH3_64bits(&meta, sizeof(meta));
 		const uint64_t attrs_hash = XXH3_64bits(vs.resources, sizeof(vs.resources[0]) * num_attrs);
-		uint64_t    index_hash = 0;
-		const void* idx_bytes  = nullptr;
-		if (draw.IsIndexed()) {
-			idx_bytes = index_source.host_data != nullptr
-			                ? index_source.host_data
-			                : reinterpret_cast<const void*>(index_source.address);
-			index_hash = XXH3_64bits(idx_bytes, index_source.size);
-		}
-		// The unpack pass reads only the records the draw references, so only those bytes can
-		// change the capture; hashing the whole V# range (often a shared mesh pool) was ~35-60% of
-		// the GPU thread in the chase/level samples. Both the record range and the bytes below it
-		// are functions of {index bytes, draw params}, which are hashed too.
-		// KYTY_OPT_OFF=pv_hash_range hashes the whole range again.
-		// The scan of the index buffer for that range was a third of this function in the chase
-		// samples; indexed meshes recur with identical indices, so the range is memoized by the
-		// index hash above. KYTY_OPT_OFF=pv_range_memo scans every time.
-		static const bool hash_range_enabled = FrameTiming::OptEnabled("pv_hash_range");
-		static const bool range_memo_enabled = FrameTiming::OptEnabled("pv_range_memo");
 		const uint8_t*    vertex_bytes       = reinterpret_cast<const uint8_t*>(input.addr);
 		uint64_t          vertex_hash_size   = vtx_total_bytes;
-		PerVertexRecordRange record_range;
-		bool range_known = false;
-		if (hash_range_enabled) {
-			const auto compute = [&] {
-				return ComputePerVertexRecordRange(draw.IsIndexed(), idx_bytes, index_source.size,
-				                                   index_element_size, draw.index_count,
-				                                   emit.first_vertex, emit.vertex_offset,
-				                                   input.num_records, record_range);
-			};
-			if (range_memo_enabled && draw.IsIndexed() && idx_bytes != nullptr) {
-				const PerVertexRangeMemo::Key memo_key {index_hash,
-				                                        index_source.size,
-				                                        index_element_size,
-				                                        draw.index_count,
-				                                        emit.vertex_offset,
-				                                        input.num_records};
-				const auto memoized = m_prototype_range_memo.Find(memo_key);
-				if (memoized.found) {
-					FrameTiming::Add(FrameTiming::Counter::PrototypeRangeMemoHits);
-					record_range = memoized.range;
-					range_known  = memoized.derivable;
-				} else {
-					FrameTiming::Add(FrameTiming::Counter::PrototypeRangeMemoMisses);
-					range_known = compute();
-					m_prototype_range_memo.Insert(memo_key, range_known, record_range);
-				}
-			} else {
-				range_known = compute();
-			}
-		}
-		if (range_known) {
+		if (range_known && hash_range_enabled) {
 			vertex_bytes += record_range.first * input.stride;
 			vertex_hash_size = (record_range.end - record_range.first) * input.stride;
 		}
@@ -227,7 +248,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		if (it != m_prototype_capture_cache.end() && it->second.captured != nullptr &&
 		    it->second.content_hash == content_hash && it->second.addr == input.addr &&
 		    it->second.vs_hash == vs_hash_for_cache && it->second.ps_hash == ps_hash_for_cache &&
-		    it->second.count64 == count64 &&
+		    it->second.count64 == count64 && it->second.unique == unique_mode &&
 		    it->second.record_stride_vec4 == programs->layout.record_stride_vec4) {
 			hit                 = &it->second;
 			hit->last_used_tick = scheduler.CurrentTick();
@@ -243,6 +264,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	PrepareGraphicsBindings(stages, {state.color_info, state.color_count});
 
 	std::unique_ptr<Buffer> captured;
+	std::unique_ptr<Buffer> map_buffer; // S134: corner -> unique record (8 bytes/corner), replay binding 2
 	vk::DescriptorPool      capture_pool;
 	vk::DescriptorSet       extra_set;
 	uint64_t                captured_size_for_log = 0;
@@ -290,12 +312,18 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	}
 
 	// GPU-side intermediate buffers for unpack and capture
-	auto id_buffer =
-	    std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags, count * 8);
+	// S134: with the unique plan the capture runs on `capture_count` records instead of `count` corners.
+	const uint64_t capture_count = unique_mode ? unique_plan.records : count64;
+	auto id_buffer = std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags,
+	                                          capture_count * 8);
 	auto attribute_buffer = std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Stream, 0,
-	                                                 AllFlags, count * num_attrs * 16);
+	                                                 AllFlags, capture_count * num_attrs * 16);
 	captured = std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags,
-	                                    count64 * programs->layout.record_stride_vec4 * 16);
+	                                    capture_count * programs->layout.record_stride_vec4 * 16);
+	if (unique_mode) {
+		map_buffer = std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags,
+		                                      count64 * 8);
+	}
 	captured_size_for_log = captured->Size();
 
 	const auto* unpack_pipeline =
@@ -305,9 +333,10 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	// storage buffers, real bindings to attribute_buffer/captured/id_buffer); both are per-draw
 	// only, read solely by steps 1-2, and never cached.
 	vk::DescriptorPool           unpack_pool;
-	const vk::DescriptorPoolSize unpack_pool_size(vk::DescriptorType::eStorageBuffer, 7);
+	const vk::DescriptorPoolSize unpack_pool_size(vk::DescriptorType::eStorageBuffer,
+	                                              unique_mode ? 11 : 7);
 	vk::DescriptorPoolCreateInfo unpack_pool_info {};
-	unpack_pool_info.maxSets       = 2;
+	unpack_pool_info.maxSets       = unique_mode ? 3 : 2;
 	unpack_pool_info.poolSizeCount = 1;
 	unpack_pool_info.pPoolSizes    = &unpack_pool_size;
 	EXIT_IF(graphics.device.createDescriptorPool(&unpack_pool_info, nullptr, &unpack_pool) !=
@@ -395,9 +424,12 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	EXIT_IF(graphics.device.allocateDescriptorSets(&extra_alloc, &extra_set) !=
 	        vk::Result::eSuccess);
 
-	const vk::DescriptorBufferInfo replay_extra_data[] {{captured->Handle(), 0, captured->Size()},
-	                                                     {captured->Handle(), 0, captured->Size()},
-	                                                     {captured->Handle(), 0, captured->Size()}};
+	// Binding 2 is read by the replay only in the unique mode (the corner -> record map).
+	const vk::DescriptorBufferInfo replay_extra_data[] {
+	    {captured->Handle(), 0, captured->Size()},
+	    {captured->Handle(), 0, captured->Size()},
+	    unique_mode ? vk::DescriptorBufferInfo {map_buffer->Handle(), 0, map_buffer->Size()}
+	                : vk::DescriptorBufferInfo {captured->Handle(), 0, captured->Size()}};
 	std::array<vk::WriteDescriptorSet, 3> replay_extra_writes;
 	for (uint32_t i = 0; i < 3; ++i) {
 		replay_extra_writes[i].dstSet          = extra_set;
@@ -461,12 +493,80 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 
 	// Step 1: GPU unpack compute pass
 	cmd.bindPipeline(vk::PipelineBindPoint::eCompute, unpack_pipeline->pipeline);
-	cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, unpack_pipeline->pipeline_layout, 0, 1,
-	                       &unpack_set, 0, nullptr);
-	cmd.pushConstants(unpack_pipeline->pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
-	                  sizeof(unpack_push), &unpack_push);
-	cmd.dispatch((count + 63) / 64, 1, 1);
-	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::ProtoUnpack);
+	if (!unique_mode) {
+		cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, unpack_pipeline->pipeline_layout, 0,
+		                       1, &unpack_set, 0, nullptr);
+		cmd.pushConstants(unpack_pipeline->pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
+		                  sizeof(unpack_push), &unpack_push);
+		cmd.dispatch((count + 63) / 64, 1, 1);
+		FrameTiming::NoteDispatch(FrameTiming::DispatchClass::ProtoUnpack);
+	} else {
+		// S134 1a: corner -> record map. `unpack_set` (index buffer, vertices, map, map) is the
+		// indexed unpack of the corners with no attributes; the shader's map mode writes
+		// PerVertexUniqueRecord() instead of the vertex/instance pair.
+		const vk::DescriptorBufferInfo map_data[] {
+		    {idx_vk_buf, idx_aligned_offset, idx_size_bounded},
+		    {vtx_buf_ptr->Handle(), vtx_aligned_offset, vtx_size_bounded},
+		    {map_buffer->Handle(), 0, map_buffer->Size()},
+		    {map_buffer->Handle(), 0, map_buffer->Size()}};
+		std::array<vk::WriteDescriptorSet, 4> map_writes;
+		for (uint32_t i = 0; i < 4; ++i) {
+			map_writes[i].dstSet          = unpack_set;
+			map_writes[i].dstBinding      = i;
+			map_writes[i].descriptorCount = 1;
+			map_writes[i].descriptorType  = vk::DescriptorType::eStorageBuffer;
+			map_writes[i].pBufferInfo     = &map_data[i];
+		}
+		graphics.device.updateDescriptorSets(4, map_writes.data(), 0, nullptr);
+		UnpackPushConstants map_push = unpack_push;
+		map_push.packed_flags =
+		    (unpack_push.packed_flags & ~(0x1fu << 19u)) | kUnpackMapModeFlag;
+		map_push.unique_first = unique_plan.first;
+		map_push.unique_count = unique_plan.count;
+		cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, unpack_pipeline->pipeline_layout, 0,
+		                       1, &unpack_set, 0, nullptr);
+		cmd.pushConstants(unpack_pipeline->pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
+		                  sizeof(map_push), &map_push);
+		cmd.dispatch((count + 63) / 64, 1, 1);
+		FrameTiming::NoteDispatch(FrameTiming::DispatchClass::ProtoUnpack);
+
+		// S134 1b: unpack of the unique records only: non-indexed from the first unique vertex,
+		// N * instances invocations, with the attributes (the capture reads ids and attributes).
+		vk::DescriptorSet             unique_set;
+		vk::DescriptorSetAllocateInfo unique_alloc {};
+		unique_alloc.descriptorPool     = unpack_pool;
+		unique_alloc.descriptorSetCount = 1;
+		unique_alloc.pSetLayouts        = &unpack_pipeline->set_layout;
+		EXIT_IF(graphics.device.allocateDescriptorSets(&unique_alloc, &unique_set) !=
+		        vk::Result::eSuccess);
+		const uint64_t        vtx_as_index_size = std::min(Common::AlignUp(vtx_bytes_raw, 4), vtx_buf_available);
+		const vk::DescriptorBufferInfo unique_data[] {
+		    {vtx_buf_ptr->Handle(), vtx_aligned_offset, vtx_as_index_size},
+		    {vtx_buf_ptr->Handle(), vtx_aligned_offset, vtx_size_bounded},
+		    {id_buffer->Handle(), 0, id_buffer->Size()},
+		    {attribute_buffer->Handle(), 0, attribute_buffer->Size()}};
+		std::array<vk::WriteDescriptorSet, 4> unique_writes;
+		for (uint32_t i = 0; i < 4; ++i) {
+			unique_writes[i].dstSet          = unique_set;
+			unique_writes[i].dstBinding      = i;
+			unique_writes[i].descriptorCount = 1;
+			unique_writes[i].descriptorType  = vk::DescriptorType::eStorageBuffer;
+			unique_writes[i].pBufferInfo     = &unique_data[i];
+		}
+		graphics.device.updateDescriptorSets(4, unique_writes.data(), 0, nullptr);
+		UnpackPushConstants unique_push = unpack_push;
+		unique_push.total_invocations = static_cast<uint32_t>(unique_plan.records);
+		unique_push.index_count       = unique_plan.count;
+		unique_push.first_vertex      = unique_plan.first;
+		unique_push.vertex_offset     = 0;
+		unique_push.packed_flags      = (num_attrs & 0x1fu) << 19u; // non-indexed, no index offset
+		cmd.bindDescriptorSets(vk::PipelineBindPoint::eCompute, unpack_pipeline->pipeline_layout, 0,
+		                       1, &unique_set, 0, nullptr);
+		cmd.pushConstants(unpack_pipeline->pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
+		                  sizeof(unique_push), &unique_push);
+		cmd.dispatch((static_cast<uint32_t>(unique_plan.records) + 63) / 64, 1, 1);
+		FrameTiming::NoteDispatch(FrameTiming::DispatchClass::ProtoUnpack);
+	}
 
 	// Barrier: Unpack -> Capture compute
 	vk::MemoryBarrier unpack_barrier {};
@@ -485,7 +585,9 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	                       programs->capture_pipeline.pipeline_layout, 1, 1, &capture_extra_set, 0,
 	                       nullptr);
 	cmd.bindPipeline(vk::PipelineBindPoint::eCompute, programs->capture_pipeline.pipeline);
-	cmd.dispatch(programs->native_capture ? (count + 63u) / 64u : count, 1, 1);
+	const uint32_t capture_invocations = static_cast<uint32_t>(capture_count);
+	cmd.dispatch(programs->native_capture ? (capture_invocations + 63u) / 64u : capture_invocations,
+	             1, 1);
 	FrameTiming::NoteDispatch(FrameTiming::ProtoCaptureClass(programs->native_capture));
 	if (capture_has_writes) ShaderWriteBarrier(cmd, vk::PipelineStageFlagBits::eComputeShader);
 
@@ -512,15 +614,17 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	static uint64_t draw_counter = 0;
 	draw_counter++;
 	LOGF("PerVertexPrototype: recorded draw submission=%llu vertices=%u instances=%u "
-	     "capture_bytes=%llu layout_stride=%u cache_hit=%d\n",
+	     "capture_bytes=%llu layout_stride=%u cache_hit=%d unique=%d\n",
 	     static_cast<unsigned long long>(draw_counter), count, draw.instance_count,
 	     static_cast<unsigned long long>(captured_size_for_log),
-	     programs->layout.record_stride_vec4, hit != nullptr ? 1 : 0);
+	     programs->layout.record_stride_vec4, hit != nullptr ? 1 : 0, unique_mode ? 1 : 0);
 
 	// `extra_set` is fully decided from here on (either from the cache, or freshly captured
 	// above); settle its ownership before choosing whether to replay now or batch it, so both
 	// paths below only ever read it.
 	const bool store_in_cache = hit == nullptr && cache_eligible;
+	// S134: the unique mode replays through the shaders that read the corner -> record map.
+	const auto& replay_programs = unique_mode ? programs->graphics_unique : programs->graphics;
 	if (store_in_cache) {
 		// Cache takes ownership of `captured`/`capture_pool`/`extra_set`. Whatever previously
 		// occupied this slot, and the globally least-recently-used entry when the cache is at
@@ -540,8 +644,10 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		}
 		if (slot.captured != nullptr) {
 			scheduler.DeferOperation([old_captured = std::move(slot.captured),
+			                          old_map = std::move(slot.map),
 			                          old_pool = slot.pool, dev = graphics.device]() mutable {
 				old_captured.reset();
+				old_map.reset();
 				dev.destroyDescriptorPool(old_pool);
 			});
 		} else if (m_prototype_capture_cache.size() > kPrototypeCaptureCacheCap) {
@@ -556,9 +662,11 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 			}
 			if (oldest != m_prototype_capture_cache.end()) {
 				scheduler.DeferOperation([old_captured = std::move(oldest->second.captured),
+				                          old_map = std::move(oldest->second.map),
 				                          old_pool = oldest->second.pool,
 				                          dev = graphics.device]() mutable {
 					old_captured.reset();
+					old_map.reset();
 					dev.destroyDescriptorPool(old_pool);
 				});
 				m_prototype_capture_cache.erase(oldest);
@@ -572,6 +680,8 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		slot.record_stride_vec4 = programs->layout.record_stride_vec4;
 		slot.last_used_tick     = scheduler.CurrentTick();
 		slot.captured           = std::move(captured);
+		slot.map                = std::move(map_buffer);
+		slot.unique             = unique_mode;
 		slot.pool               = capture_pool;
 		slot.extra_set          = extra_set;
 	}
@@ -647,7 +757,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		// time the batch is flushed. No render pass is open here -- the capture dispatch above ended it.
 		item.pipeline = &m_context.GetPipelineCache().GetGraphicsPipeline(
 		    {state.color_info, state.color_count}, state.depth_info, {state.vertex_info.data(), 1},
-		    buffer, &state.ps_input_info, topology, false, programs->graphics);
+		    buffer, &state.ps_input_info, topology, false, replay_programs);
 		item.registers = std::make_shared<HW::Context>(buffer.GetRegisters());
 		item.extra_set       = extra_set;
 		item.count           = count;
@@ -665,6 +775,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		// final (no more items will be appended once flushing starts).
 		if (!store_in_cache && hit == nullptr) {
 			item.owned_captured = std::move(captured);
+			item.owned_map      = std::move(map_buffer);
 			item.owned_pool     = capture_pool;
 		}
 		m_prototype_batch.items.push_back(std::move(item));
@@ -675,7 +786,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	// this batching existed.
 	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
 	    {state.color_info, state.color_count}, state.depth_info, {state.vertex_info.data(), 1},
-	    buffer, &state.ps_input_info, topology, false, programs->graphics);
+	    buffer, &state.ps_input_info, topology, false, replay_programs);
 	vk::ImageAspectFlags feedback_aspects;
 	const auto           rendering =
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
@@ -701,9 +812,10 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	if (!store_in_cache) {
 		// Diagnostic (capture has side-effecting writes) or `KYTY_OPT_OFF=capture_cache`:
 		// keep the original per-draw lifetime, same as before this cache existed.
-		scheduler.DeferOperation([cap = std::move(captured), cp = capture_pool,
-		                          dev = graphics.device]() mutable {
+		scheduler.DeferOperation([cap = std::move(captured), map = std::move(map_buffer),
+		                          cp = capture_pool, dev = graphics.device]() mutable {
 			cap.reset();
+			map.reset();
 			dev.destroyDescriptorPool(cp);
 		});
 	}
@@ -787,9 +899,11 @@ void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 
 	for (auto& item: batch.items) {
 		if (item.owned_captured != nullptr) {
-			scheduler.DeferOperation([cap = std::move(item.owned_captured), cp = item.owned_pool,
+			scheduler.DeferOperation([cap = std::move(item.owned_captured),
+			                          map = std::move(item.owned_map), cp = item.owned_pool,
 			                          dev = graphics.device]() mutable {
 				cap.reset();
+				map.reset();
 				dev.destroyDescriptorPool(cp);
 			});
 		}

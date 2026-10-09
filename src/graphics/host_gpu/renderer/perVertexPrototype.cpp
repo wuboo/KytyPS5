@@ -70,6 +70,14 @@ bool PerVertexPrototypeEnabled() {
 	return std::getenv("KYTY_PER_VERTEX_PROTOTYPE") != nullptr;
 }
 
+bool PerVertexUniqueEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_PV_UNIQUE");
+		return value != nullptr && value[0] == '1' && value[1] == '\0';
+	}();
+	return enabled;
+}
+
 PerVertexDrawVerdict ClassifyPerVertexPrototypeDraw(bool ps_active, vk::PrimitiveTopology topology,
                                                     bool primitive_restart, uint32_t index_count) {
 	if (!ps_active) return {false, index_count, "no pixel shader"};
@@ -281,6 +289,7 @@ const PerVertexPrototypePrograms* GetPerVertexPrototypePrograms(
 
 	PerVertexLayout       layout {};
 	std::vector<uint32_t> cap_words, frag_words, replay_words;
+	std::string           vs_dis, ps_dis; // filled on a bytecode cache miss; the unique variant disassembles ps_dis itself if empty
 	const auto            t0               = std::chrono::steady_clock::now();
 	bool                  loaded_from_disk = TryLoadTransformedShadersFromDisk(
 	    effective_title_id, vs_hash, ps_hash, layout, cap_words, frag_words, replay_words);
@@ -299,7 +308,6 @@ const PerVertexPrototypePrograms* GetPerVertexPrototypePrograms(
 		                            const spv_position_t& position, const char* message) {
 			LOGF("PerVertexPrototype SPIR-V word %zu: %s\n", position.index, message);
 		});
-		std::string vs_dis, ps_dis;
 		EXIT_IF(!tools.Disassemble(vs->second.words.data(), vs->second.words.size(), &vs_dis,
 		                           SPV_BINARY_TO_TEXT_OPTION_INDENT |
 		                               SPV_BINARY_TO_TEXT_OPTION_FRIENDLY_NAMES));
@@ -344,6 +352,35 @@ const PerVertexPrototypePrograms* GetPerVertexPrototypePrograms(
 		     static_cast<long long>(comp_ms));
 	}
 
+	// S134: the unique-vertex replay shaders (the classic ones stay for the draws that fall back).
+	std::vector<uint32_t> unique_frag_words, unique_replay_words;
+	if (PerVertexUniqueEnabled()) {
+		PerVertexLayout       unique_layout {};
+		std::vector<uint32_t> unique_cap_words;
+		const bool            unique_loaded = TryLoadTransformedShadersFromDisk(
+            effective_title_id, vs_hash, ps_hash, unique_layout, unique_cap_words,
+            unique_frag_words, unique_replay_words, true);
+		if (!unique_loaded) {
+			spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+			if (ps_dis.empty()) {
+				EXIT_IF(!tools.Disassemble(ps->second.words.data(), ps->second.words.size(),
+				                           &ps_dis,
+				                           SPV_BINARY_TO_TEXT_OPTION_INDENT |
+				                               SPV_BINARY_TO_TEXT_OPTION_FRIENDLY_NAMES));
+			}
+			const std::string unique_frag_dis   = LowerFragmentToBufferReplay(ps_dis, layout, true);
+			const std::string unique_replay_dis = GenerateReplayVertexSpvasm(layout, true);
+			EXIT_IF(!tools.Assemble(unique_frag_dis, &unique_frag_words,
+			                        SPV_TEXT_TO_BINARY_OPTION_PRESERVE_NUMERIC_IDS));
+			EXIT_IF(!tools.Assemble(unique_replay_dis, &unique_replay_words,
+			                        SPV_TEXT_TO_BINARY_OPTION_PRESERVE_NUMERIC_IDS));
+			EXIT_IF(!tools.Validate(unique_frag_words));
+			EXIT_IF(!tools.Validate(unique_replay_words));
+			SaveTransformedShadersToDisk(effective_title_id, vs_hash, ps_hash, layout, cap_words,
+			                             unique_frag_words, unique_replay_words, true);
+		}
+	}
+
 	PerVertexPrototypePrograms value {};
 	value.native_capture            = !vs->second.capture_words.empty();
 	value.graphics                  = programs;
@@ -353,19 +390,31 @@ const PerVertexPrototypePrograms* GetPerVertexPrototypePrograms(
 	value.graphics.pixel.module     = CompileSPV(frag_words, graphics.device);
 	value.graphics.vertex[0].id |= 1ull << 63;
 	value.graphics.pixel.id |= 1ull << 63;
+	if (!unique_replay_words.empty()) {
+		value.unique_available                 = true;
+		value.graphics_unique                  = programs;
+		value.graphics_unique.vertex[0].module = CompileSPV(unique_replay_words, graphics.device);
+		value.graphics_unique.pixel.module     = CompileSPV(unique_frag_words, graphics.device);
+		value.graphics_unique.vertex[0].id |= 1ull << 62;
+		value.graphics_unique.pixel.id |= 1ull << 62;
+	}
 
 	const vk::DescriptorSetLayoutBinding bindings[] {
 	    {0, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute},
 	    {1, vk::DescriptorType::eStorageBuffer, 1,
 	     vk::ShaderStageFlagBits::eCompute | vk::ShaderStageFlagBits::eVertex |
 	         vk::ShaderStageFlagBits::eFragment},
-	    {2, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute}};
+	    {2, vk::DescriptorType::eStorageBuffer, 1,
+	     vk::ShaderStageFlagBits::eCompute |
+	         (PerVertexUniqueEnabled() ? vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment
+	                                   : vk::ShaderStageFlags {})}};
 	vk::DescriptorSetLayoutCreateInfo create {};
 	create.bindingCount = 3;
 	create.pBindings    = bindings;
 	EXIT_IF(graphics.device.createDescriptorSetLayout(&create, nullptr, &value.extra_layout) !=
 	        vk::Result::eSuccess);
 	value.graphics.prototype_extra_layout = value.extra_layout;
+	value.graphics_unique.prototype_extra_layout = value.extra_layout;
 
 	// Build capture compute pipeline once for this pair
 	value.capture_pipeline.prototype_vertex_capture = true;

@@ -261,7 +261,9 @@ private:
 		uint64_t                 count64            = 0;
 		uint32_t                 record_stride_vec4 = 0;
 		uint64_t                 last_used_tick     = 0;
+		bool                     unique             = false; // S134: captured per unique vertex (+ map)
 		std::unique_ptr<Buffer>  captured;
+		std::unique_ptr<Buffer>  map;               // S134: corner -> record map of the unique mode
 		vk::DescriptorPool       pool               = nullptr;
 		vk::DescriptorSet        extra_set          = nullptr;
 	};
@@ -284,6 +286,7 @@ private:
 		// batch flush records the replay draw, then is freed the same deferred way a non-batched
 		// draw would free them.
 		std::unique_ptr<Buffer> owned_captured;
+		std::unique_ptr<Buffer> owned_map; // S134
 		vk::DescriptorPool      owned_pool = nullptr;
 		// Resolved when the draw is issued, from the registers current then: the guest may set
 		// registers for later draws before this batch is flushed (see ProcessPm4's flush hook).
