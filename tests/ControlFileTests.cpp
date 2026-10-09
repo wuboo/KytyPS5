@@ -189,12 +189,39 @@ void TestPublishAndPoll() {
 	Check(missing.Refresh().empty() && !missing.loaded, "missing file counted as loaded");
 }
 
+// S124: dump_tex=<ps>:<slot>[@addr|@fmt=n,WxH][,...] with the force_tex filters.
+void TestDumpTex() {
+	const auto file = CF::Parse("dump_tex=b96c2898f05637df:30@0x70cd470000,aa:4,bb:5@fmt=130,2048x2048\n"
+	                            "@100\ndump_tex=\n");
+	Check(file.errors.empty(), "dump_tex lines rejected");
+	const auto snap = CF::Resolve(file, 1);
+	Check(snap.dump_tex.size() == 3, "dump_tex item count (the comma of @fmt= split an item?)");
+	Check(snap.dump_tex[0].ps == 0xb96c2898f05637dfull && snap.dump_tex[0].slot == 30 &&
+	          snap.dump_tex[0].filter.kind == CF::TexFilter::Kind::Addr && snap.dump_tex[0].filter.addr == 0x70cd470000ull,
+	      "dump_tex address filter fields");
+	const CF::TexKey terrain {0x70cd470000ull, 134, 2048, 2048}, placeholder {0x70d1770000ull, 134, 4, 4};
+	Check(snap.DumpTexListed(0xb96c2898f05637dfull, 30, terrain), "dump_tex did not list the filtered T#");
+	Check(!snap.DumpTexListed(0xb96c2898f05637dfull, 30, placeholder), "dump_tex ignored its address filter");
+	Check(!snap.DumpTexListed(0xb96c2898f05637dfull, 31, terrain), "dump_tex matched another slot");
+	Check(!snap.DumpTexListed(0x1234, 30, terrain), "dump_tex matched another pixel shader");
+	Check(snap.DumpTexListed(0xaa, 4, placeholder) && snap.DumpTexListed(0xaa, 4, terrain), "unfiltered dump_tex must match any T#");
+	Check(snap.dump_tex[2].filter.kind == CF::TexFilter::Kind::Fmt && snap.dump_tex[2].filter.width == 2048, "dump_tex format filter");
+	Check(CF::Resolve(file, 150).dump_tex.empty(), "empty value did not clear dump_tex");
+	Check(!CF::Parse("dump_tex=abc\n").errors.empty() && !CF::Parse("dump_tex=abc:128\n").errors.empty() &&
+	          !CF::Parse("dump_tex=0:1\n").errors.empty() && !CF::Parse("dump_tex=abc:1@zz\n").errors.empty(),
+	      "bad dump_tex accepted");
+	CF::Snapshot a, b;
+	b.dump_tex.push_back({1, 2, {}});
+	Check(!a.SameSettings(b), "dump_tex ignored by SameSettings");
+}
+
 } // namespace
 
 int main() {
 	TestParseAndResolve();
 	TestDiagTex();
 	TestForceFilterAndDiagAll();
+	TestDumpTex();
 	TestStrictParsing();
 	TestPublishAndPoll();
 	return 0;
