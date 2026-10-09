@@ -539,6 +539,16 @@ foreach(mutant IN ITEMS LAX_NUMBERS NO_UNTIL)
 	target_compile_definitions(control_file_mutant_${mutant_lower}_tests PRIVATE KYTY_CONTROL_MUTANT_${mutant}=1)
 endforeach()
 
+add_executable(rt_dump_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RtDumpTests.cpp")
+target_include_directories(rt_dump_tests PRIVATE ${inc_headers})
+# Mutants (each must be caught, WILL_FAIL): dump_rt matches every flip / every pixel shader.
+foreach(mutant IN ITEMS IGNORE_FLIP IGNORE_PS)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(rt_dump_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RtDumpTests.cpp")
+	target_include_directories(rt_dump_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(rt_dump_mutant_${mutant_lower}_tests PRIVATE KYTY_RTDUMP_MUTANT_${mutant}=1)
+endforeach()
+
 add_executable(cs_trace_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CsTraceTests.cpp")
 target_include_directories(cs_trace_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): read resources dropped from the trace; traced flip off by one.
@@ -755,6 +765,7 @@ if(BUILD_TESTING)
 	set_tests_properties(env_audit_mutant PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME control_file COMMAND $<TARGET_FILE:control_file_tests>)
 	add_test(NAME cs_trace COMMAND $<TARGET_FILE:cs_trace_tests>)
+	add_test(NAME rt_dump COMMAND $<TARGET_FILE:rt_dump_tests>)
 	add_test(NAME bvh_node_parser COMMAND $<TARGET_FILE:bvh_node_parser_tests>)
 	add_test(NAME rt_miss_switch COMMAND $<TARGET_FILE:rt_miss_switch_tests>)
 	add_test(NAME rt_miss_switch_mutant COMMAND $<TARGET_FILE:rt_miss_switch_mutant_tests>)
@@ -763,6 +774,7 @@ if(BUILD_TESTING)
 	set_tests_properties(resource_tracking_mutant_bvh_flag PROPERTIES WILL_FAIL TRUE)
 	foreach(mutant_test control_file_mutant_lax_numbers control_file_mutant_no_until
 			cs_trace_mutant_drop_reads cs_trace_mutant_off_by_one
+			rt_dump_mutant_ignore_flip rt_dump_mutant_ignore_ps
 			bvh_node_parser_mutant_base_shift bvh_node_parser_mutant_keep_empty)
 		add_test(NAME ${mutant_test} COMMAND $<TARGET_FILE:${mutant_test}_tests>)
 		set_tests_properties(${mutant_test} PROPERTIES WILL_FAIL TRUE)
@@ -854,6 +866,9 @@ if(BUILD_TESTING)
 		control_file_tests
 		control_file_mutant_lax_numbers_tests
 		control_file_mutant_no_until_tests
+		rt_dump_tests
+		rt_dump_mutant_ignore_flip_tests
+		rt_dump_mutant_ignore_ps_tests
 		cs_trace_tests
 		cs_trace_mutant_drop_reads_tests
 		cs_trace_mutant_off_by_one_tests
