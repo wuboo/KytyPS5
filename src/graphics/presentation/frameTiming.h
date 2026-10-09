@@ -1,6 +1,9 @@
 #ifndef KYTY_GRAPHICS_PRESENTATION_FRAMETIMING_H_
 #define KYTY_GRAPHICS_PRESENTATION_FRAMETIMING_H_
 
+#include "graphics/presentation/cpCounters.h"
+
+#include <chrono>
 #include <cstdint>
 
 namespace Libs::Graphics::FrameTiming {
@@ -78,10 +81,50 @@ enum class Counter : uint32_t {
 	DropColorWriteDyn,     // draws with an attachment slot without a view while the host has no dynamic color write enable
 	DropSamplerBorderTable, // samplers created with a border color from the table (approximated as transparent black)
 	DropSamplerLodBias,    // samplers whose LOD bias was clamped to the device limit
+	// S132: CP thread and submit time (ns, cumulative; divide by the flip delta) and dispatch classes.
+	CpWaitGuestNs,         // GPU thread waiting on its condition variable for guest work (idle or blocked submission)
+	CpBusyNs,              // GPU thread processing a submission or command (same span as gpu_busy_ns)
+	CpProtoNs,             // ... of which inside ExecutePerVertexPrototype
+	CpWaitGpuNs,           // GPU thread blocked in MasterSemaphore::Wait (nested waits inside readbacks count again there)
+	SubmitEncodeNs,        // time inside vkQueueSubmit (either thread)
+	SubmitQueueWaitNs,     // async_submit: from push of a job to its pop by the SubmitThread
+	DispGuest, DispProtoUnpack, DispProtoCapture, DispProtoCaptureNonNative, DispTiler, DispFault, DispOther,
+	ProtoSkippedDraws,     // KYTY_DIAG_PROTO_SKIP=1: supported prototype draws not drawn
 	Count,
 };
 
 void Add(Counter counter, uint64_t value = 1);
+
+// Counter of a dispatch class (the DispGuest..DispOther columns are in DispatchClass order).
+constexpr Counter DispatchCounter(DispatchClass cls) {
+	return static_cast<Counter>(static_cast<uint32_t>(Counter::DispGuest) + static_cast<uint32_t>(cls));
+}
+inline void NoteDispatch(DispatchClass cls) { Add(DispatchCounter(cls)); }
+
+inline int64_t SteadyNowNs() {
+	return std::chrono::duration_cast<std::chrono::nanoseconds>(
+	           std::chrono::steady_clock::now().time_since_epoch())
+	    .count();
+}
+
+// Adds the lifetime of the scope, in nanoseconds, to a *Ns counter.
+class ScopedCounterNs {
+public:
+	explicit ScopedCounterNs(Counter counter): m_counter(counter), m_begin(SteadyNowNs()) {}
+	~ScopedCounterNs() { Add(m_counter, ElapsedNs(m_begin, SteadyNowNs())); }
+	ScopedCounterNs(const ScopedCounterNs&)            = delete;
+	ScopedCounterNs& operator=(const ScopedCounterNs&) = delete;
+
+private:
+	Counter m_counter;
+	int64_t m_begin;
+};
+// Gauge / running maximum for counters that are not sums (EopPending, EopLabelLatencyMaxUs).
+void Set(Counter counter, uint64_t value);
+void Max(Counter counter, uint64_t value);
+uint64_t Get(Counter counter);
+// vkQueueSubmits so far (the `submits` column of KYTY_FRAME_LOG).
+uint64_t QueueSubmits();
 
 // Bench switches: KYTY_OPT_OFF is a comma-separated list of optimization names to disable, so a
 // single binary can be A/B tested. Returns true unless the name is listed.

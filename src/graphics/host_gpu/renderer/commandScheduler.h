@@ -85,6 +85,7 @@ private:
 		uint64_t          debug_submit_id = 0;
 		uint32_t          debug_args[4]   = {};
 		uint64_t          debug_arg4      = 0;
+		int64_t           queued_ns       = 0; // S132: steady clock at push (async_submit queue wait)
 	};
 	void SubmitThread(std::stop_token stop);
 	void DrainAsyncSubmits();

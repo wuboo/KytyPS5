@@ -466,6 +466,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	cmd.pushConstants(unpack_pipeline->pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
 	                  sizeof(unpack_push), &unpack_push);
 	cmd.dispatch((count + 63) / 64, 1, 1);
+	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::ProtoUnpack);
 
 	// Barrier: Unpack -> Capture compute
 	vk::MemoryBarrier unpack_barrier {};
@@ -485,6 +486,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	                       nullptr);
 	cmd.bindPipeline(vk::PipelineBindPoint::eCompute, programs->capture_pipeline.pipeline);
 	cmd.dispatch(programs->native_capture ? (count + 63u) / 64u : count, 1, 1);
+	FrameTiming::NoteDispatch(FrameTiming::ProtoCaptureClass(programs->native_capture));
 	if (capture_has_writes) ShaderWriteBarrier(cmd, vk::PipelineStageFlagBits::eComputeShader);
 
 	// Barrier: Capture compute -> Graphics replay

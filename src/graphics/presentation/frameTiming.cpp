@@ -75,8 +75,24 @@ constexpr const char* kCounterNames[] = {
     "drop_color_write_dyn",
     "drop_sampler_border_table",
     "drop_sampler_lod_bias",
+    "cp_wait_guest_ns",
+    "cp_busy_ns",
+    "cp_proto_ns",
+    "cp_wait_gpu_ns",
+    "submit_encode_ns",
+    "submit_queue_wait_ns",
+    "disp_guest",
+    "disp_proto_unpack",
+    "disp_proto_capture",
+    "disp_proto_capture_nonnative",
+    "disp_tiler",
+    "disp_fault",
+    "disp_other",
+    "proto_skipped_draws",
 };
 static_assert(std::size(kCounterNames) == static_cast<size_t>(Counter::Count));
+static_assert(static_cast<uint32_t>(Counter::DispOther) - static_cast<uint32_t>(Counter::DispGuest) ==
+              static_cast<uint32_t>(DispatchClass::Other));
 
 std::array<std::atomic<uint64_t>, static_cast<size_t>(Counter::Count)> g_counters {};
 
