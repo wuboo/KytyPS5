@@ -1243,6 +1243,16 @@ static void DumpTexOne(RenderContext& context, const DiagDump::DumpTexRequest& r
 			              tile.tiled_size, tile.width, tile.height, spec.tiled_width, spec.tiled_height, tile.tail ? 1 : 0, info.data.size,
 			              missing);
 			result.notes.push_back(note);
+
+			// S125: every 64 KB tile of the image_size (mip tail + mips + mip 0) detiled alone, for the mosaic.
+			if (!spec.tail && block.block_size != 0 && block.block_width * block.block_height * tile.bytes_per_element == block.block_size) {
+				std::vector<std::vector<uint8_t>> pieces;
+				for (uint64_t k = 0; (k + 1) * block.block_size <= info.data.size; k++) {
+					pieces.emplace_back();
+					DiagDump::BcDetile(guest, info.data.size, DiagDump::SingleTileSpec(spec, k), offset, pieces.back());
+				}
+				DiagDump::WriteTileMosaic(request.info, pieces, block.block_width, block.block_height);
+			}
 		}
 	}
 

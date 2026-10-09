@@ -687,7 +687,11 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	const bool diag_dump = ps_hash != 0 &&
 	                       DiagDump::WantsDumpTex(ps_hash, slot,
 	                                              Common::ControlFile::TexKey {address, static_cast<uint32_t>(format), width, height});
-	if (diag_once || diag_all || diag_dump) {
+	DiagDump::NoteSampledTex(ps_hash, slot, address, static_cast<uint32_t>(format), width, height);
+	const bool diag_watch = ps_hash != 0 &&
+	                        DiagDump::WantsWatchTex(ps_hash, slot,
+	                                                Common::ControlFile::TexKey {address, static_cast<uint32_t>(format), width, height});
+	if (diag_once || diag_all || diag_dump || diag_watch) {
 		DiagDump::TexInfo info;
 		info.flip          = FrameTiming::GuestFlips() + 1;
 		info.ps            = ps_hash;
@@ -728,6 +732,9 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		}
 		if (diag_dump) {
 			DiagDump::AddDumpTexRequest({id, info});
+		}
+		if (diag_watch) {
+			DiagDump::WatchTexTrigger(info, size.size);
 		}
 		if (diag_once) {
 			LOGF("%s\n", DiagDump::TexDescribe(info).c_str());

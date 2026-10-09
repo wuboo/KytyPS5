@@ -62,10 +62,19 @@ struct DumpTexResult {
 	std::vector<uint8_t> guest, host;                // blocks_w * blocks_h * 16 bytes each, empty = not available
 	std::vector<std::string> notes;                  // one [dump-tex] line each: layout, host image, tracker state
 };
+// S125: the whole image_size of a BC7 T# as 64 KB tiles (each detiled alone, bw x bh BC7 blocks), one mosaic PNG + a line per tile.
+void                        WriteTileMosaic(const TexInfo& info, const std::vector<std::vector<uint8_t>>& tiles, uint32_t bw, uint32_t bh);
 bool                        WantsDumpTex(uint64_t ps_hash, uint32_t slot, const Common::ControlFile::TexKey& key);
 void                        AddDumpTexRequest(DumpTexRequest&& request);
 std::vector<DumpTexRequest> TakeDumpTexRequests();
 void                        WriteDumpTex(const DumpTexResult& result);
+
+// watch_tex=<ps>:<slot>[@filter] (S125): WantsWatchTex fires once per block at the first draw whose T# fits; WatchTexTrigger then logs the
+// history of the T#'s guest range from the memory event ring ([watch-tex]) and arms the end-of-flip list of the other T#s sampled in that
+// flip whose base lies inside the range. NoteSampledTex records every resolved T# of the flip (only while the event ring is on).
+bool WantsWatchTex(uint64_t ps_hash, uint32_t slot, const Common::ControlFile::TexKey& key);
+void NoteSampledTex(uint64_t ps_hash, uint32_t slot, uint64_t addr, uint32_t fmt, uint32_t width, uint32_t height);
+void WatchTexTrigger(const TexInfo& info, uint64_t range_size);
 
 bool Wants(uint64_t ps_hash);
 void Store(uint64_t ps_hash, Target&& target);

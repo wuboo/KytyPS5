@@ -129,6 +129,21 @@ public:
 		return n;
 	}
 
+	// Oldest and newest event of `kind` still in the ring that intersects the range; false when there is none.
+	bool FirstLast(Kind kind, uint64_t addr, uint64_t len, Event* first, Event* last) const {
+		std::lock_guard lock(m_mutex);
+		bool            found = false;
+		const uint64_t  have  = std::min<uint64_t>(m_next, m_events.size());
+		for (uint64_t i = 0; i < have; i++) { // newest first
+			const Event& e = m_events[(m_next - 1 - i) % m_events.size()];
+			if (e.kind != kind || !Intersects(addr, len, e.addr, e.len == 0 ? 1 : e.len)) continue;
+			if (!found) *last = e;
+			*first = e;
+			found  = true;
+		}
+		return found;
+	}
+
 	// Lifetime counters (not limited by the ring size).
 	uint64_t Total(Kind kind) const {
 		std::lock_guard lock(m_mutex);
@@ -185,6 +200,36 @@ inline std::string Format(const Event& e) {
 	              KindName(e.kind), static_cast<unsigned long long>(e.addr), static_cast<unsigned long long>(e.len),
 	              static_cast<unsigned long long>(e.aux), static_cast<long long>(e.result), e.count, e.tag);
 	return buf;
+}
+
+// The [watch-tex] history of [addr, addr+len): ring state, per-kind totals / in-range counts / first and last event, then the newest
+// `max_events` events in the range (oldest first).
+inline std::vector<std::string> WatchLines(const Ring& ring, uint64_t addr, uint64_t len, size_t max_events) {
+	std::vector<std::string> lines;
+	char                     buf[400];
+	std::snprintf(buf, sizeof(buf), "history range=[0x%llx, 0x%llx) ring: recorded=%llu capacity=%zu wrapped=%d (events older than the ring are lost)",
+	              static_cast<unsigned long long>(addr), static_cast<unsigned long long>(addr + len), static_cast<unsigned long long>(ring.Recorded()),
+	              ring.Capacity(), ring.Wrapped() ? 1 : 0);
+	lines.emplace_back(buf);
+	std::snprintf(buf, sizeof(buf), "counters: MOVE->EINVAL global=%llu in_range=%llu", static_cast<unsigned long long>(ring.Total(Kind::PoolMoveEinval)),
+	              static_cast<unsigned long long>(ring.CountInRange(Kind::PoolMoveEinval, addr, len)));
+	lines.emplace_back(buf);
+	for (uint8_t k = 0; k < static_cast<uint8_t>(Kind::Count); k++) {
+		const auto kind = static_cast<Kind>(k);
+		Event      first, last;
+		const auto in_range = ring.CountInRange(kind, addr, len);
+		std::snprintf(buf, sizeof(buf), "kind %-16s total=%llu in_range=%llu", KindName(kind), static_cast<unsigned long long>(ring.Total(kind)),
+		              static_cast<unsigned long long>(in_range));
+		std::string line = buf;
+		if (ring.FirstLast(kind, addr, len, &first, &last)) {
+			std::snprintf(buf, sizeof(buf), " first_flip=%llu last_flip=%llu", static_cast<unsigned long long>(first.flip),
+			              static_cast<unsigned long long>(last.flip));
+			line += buf;
+		}
+		lines.push_back(line);
+	}
+	for (const auto& e: ring.Query(addr, len, max_events)) lines.push_back("event seq=" + std::to_string(e.seq) + " " + Format(e));
+	return lines;
 }
 
 } // namespace Common::MemEvents
