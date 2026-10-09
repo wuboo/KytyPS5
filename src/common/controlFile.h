@@ -20,6 +20,9 @@
 //                                              once per block, at the first draw whose T# fits the optional filter: decode
 //                                              mip 0 from guest memory (detiled as the texture cache does) and from the
 //                                              host image, write both as PNG with stats and a block diff ([dump-tex])
+//   watch_tex=<ps hex>:<slot dec>[@<addr hex>|@fmt=<n>,<w>x<h>][,...]
+//                                              (S125) once per block, at the first draw whose T# fits: register the guest range of that
+//                                              texture and log the history of everything that touched it ([watch-tex], from memEvents.h)
 //   label=<name>                               arm name used in the file names of dumps
 //   # starts a comment
 //
@@ -113,6 +116,7 @@ struct Snapshot {
 	std::vector<ForceTex> force_tex;
 	std::vector<DiagTex>  diag_tex;
 	std::vector<DumpTex>  dump_tex;
+	std::vector<DumpTex>  watch_tex;
 	std::string           label;
 	std::string           block; // blocks in force ("at=6600-6700+at=6800"), empty = base only
 
@@ -176,9 +180,20 @@ struct Snapshot {
 		}
 		return false;
 	}
+	// watch_tex lists slot `slot` of pixel shader `ps` and its filter (if any) fits the T# `key`.
+	[[nodiscard]] bool WatchTexListed(uint64_t ps, uint32_t slot, const TexKey& key) const {
+		for (const auto& entry: watch_tex) {
+#ifdef KYTY_CONTROL_MUTANT_WATCH_ANY_SLOT
+			if (entry.ps == ps && entry.filter.Matches(key)) return true;
+#else
+			if (entry.ps == ps && entry.slot == slot && entry.filter.Matches(key)) return true;
+#endif
+		}
+		return false;
+	}
 	// Same settings (the generation and the block name do not count).
 	[[nodiscard]] bool SameSettings(const Snapshot& o) const {
-		return skip_cs == o.skip_cs && dump_rt == o.dump_rt && force_tex == o.force_tex && diag_tex == o.diag_tex && dump_tex == o.dump_tex && label == o.label;
+		return skip_cs == o.skip_cs && dump_rt == o.dump_rt && force_tex == o.force_tex && diag_tex == o.diag_tex && dump_tex == o.dump_tex && watch_tex == o.watch_tex && label == o.label;
 	}
 };
 
@@ -391,6 +406,9 @@ inline bool ValidateItem(const Item& item, std::string& why) {
 	} else if (item.key == "dump_tex") {
 		if (ParseDumpTex(item.value, dumptex)) return true;
 		why = "dump_tex is <ps hex>:<slot 0..127>[@<addr hex>|@fmt=<n>,<w>x<h>]";
+	} else if (item.key == "watch_tex") {
+		if (ParseDumpTex(item.value, dumptex)) return true;
+		why = "watch_tex is <ps hex>:<slot 0..127>[@<addr hex>|@fmt=<n>,<w>x<h>]";
 	} else if (item.key == "label") {
 		if (ValidLabel(item.value)) return true;
 		why = "label is up to 48 characters of [A-Za-z0-9_.-]";
@@ -477,6 +495,8 @@ inline void Apply(Snapshot& out, const Item& item) {
 		ParseDiagTex(item.value, out.diag_tex);
 	} else if (item.key == "dump_tex") {
 		ParseDumpTex(item.value, out.dump_tex);
+	} else if (item.key == "watch_tex") {
+		ParseDumpTex(item.value, out.watch_tex);
 	} else if (item.key == "label") {
 		out.label = item.value;
 	}

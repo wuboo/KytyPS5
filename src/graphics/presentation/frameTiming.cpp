@@ -1,5 +1,6 @@
 #include "graphics/presentation/frameTiming.h"
 
+#include "common/memEvents.h"
 #include "common/controlFile.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -131,16 +132,17 @@ void PollControlFile(uint64_t flip) {
 	if (!poller.loaded) return;
 	if (!Common::ControlFile::Publish(Common::ControlFile::Resolve(poller.file, flip + 1))) return;
 	const auto& now = Common::ControlFile::Current();
-	LOGF("[control] gen=%llu from_flip=%llu block=%s label=%s skip_cs=%zu dump_rt=%zu force_tex=%zu diag_tex=%zu dump_tex=%zu\n",
+	LOGF("[control] gen=%llu from_flip=%llu block=%s label=%s skip_cs=%zu dump_rt=%zu force_tex=%zu diag_tex=%zu dump_tex=%zu watch_tex=%zu\n",
 	     static_cast<unsigned long long>(now.gen), static_cast<unsigned long long>(flip + 1),
 	     now.block.empty() ? "base" : now.block.c_str(), now.label.c_str(), now.skip_cs.size(),
-	     now.dump_rt.size(), now.force_tex.size(), now.diag_tex.size(), now.dump_tex.size());
+	     now.dump_rt.size(), now.force_tex.size(), now.diag_tex.size(), now.dump_tex.size(), now.watch_tex.size());
 }
 
 } // namespace
 
 void OnGuestFlip() {
 	const auto flip = g_guest_flips.fetch_add(1, std::memory_order_relaxed) + 1;
+	Common::MemEvents::SetCompletedFlips(flip);
 	PollControlFile(flip);
 }
 

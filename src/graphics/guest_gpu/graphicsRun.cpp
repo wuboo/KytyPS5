@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
+#include "common/memEvents.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/stringUtils.h"
@@ -364,6 +365,8 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 	if (dw_num == 0) {
 		return;
 	}
+	Common::MemEvents::Record(Common::MemEvents::Kind::GpuWriteData, reinterpret_cast<uint64_t>(dst), write_one_address ? 4u : static_cast<uint64_t>(dw_num) * 4u,
+	                          dw_num, dst_sel);
 
 	if (write_one_address) {
 		for (uint32_t i = 0; i < dw_num; i++) {
@@ -426,6 +429,10 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 	bool dst_gds = false;
 	if (!decode_gds(dst_sel, dst_gds)) {
 		EXIT("unsupported dmaData destination selector 0x%02" PRIx8 "\n", dst_sel);
+	}
+	if (!dst_gds) {
+		Common::MemEvents::Record(Common::MemEvents::Kind::GpuDma, dst_address_or_offset, num_bytes, src_address_or_offset_or_immediate, src_sel,
+		                          src_sel == 2 ? "fill" : "copy");
 	}
 	auto& buffer_cache = m_renderer.GetBufferCache();
 	if (src_sel == 2) {

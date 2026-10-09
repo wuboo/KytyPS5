@@ -3,6 +3,7 @@
 #include "common/dateTime.h"
 #include "common/file.h"
 #include "common/logging/log.h"
+#include "common/memEvents.h"
 #include "common/stringUtils.h"
 #include "kernel/eventQueue.h"
 #include "kernel/fileSystem.h"
@@ -1202,6 +1203,13 @@ static int ExecuteCommand(const CommandBufferState::Command& entry) {
 			     ", read=0x%016" PRIx64 ", result=0x%08" PRIx32 "\n",
 			     command.file_id, command.file_offset, command.size, bytes_read,
 			     static_cast<uint32_t>(result));
+		}
+		if (Common::MemEvents::Enabled()) {
+			const auto path = Common::PathToString(host_path);
+			char       tag[56];
+			std::snprintf(tag, sizeof(tag), "id=%u got=%llu ..%s", command.file_id, static_cast<unsigned long long>(bytes_read),
+			              path.size() > 24 ? path.c_str() + path.size() - 24 : path.c_str());
+			Common::MemEvents::Record(Common::MemEvents::Kind::FileRead, command.destination, command.size, command.file_offset, result, tag);
 		}
 		if (result != OK) {
 			LOGF("\tAPR submit read failed: id=0x%08" PRIx32 ", result=0x%08" PRIx32 ", path=%s\n",

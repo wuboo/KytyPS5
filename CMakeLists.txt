@@ -532,7 +532,7 @@ target_include_directories(env_audit_tests PRIVATE ${inc_headers})
 add_executable(control_file_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ControlFileTests.cpp")
 target_include_directories(control_file_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): numbers are read leniently; `until` is ignored.
-foreach(mutant IN ITEMS LAX_NUMBERS NO_UNTIL FORCE_ANY_SLOT DIAG_ANY_SLOT FILTER_IGNORED DIAG_ALL_IGNORED DUMP_ANY_SLOT)
+foreach(mutant IN ITEMS LAX_NUMBERS NO_UNTIL FORCE_ANY_SLOT DIAG_ANY_SLOT FILTER_IGNORED DIAG_ALL_IGNORED DUMP_ANY_SLOT WATCH_ANY_SLOT)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(control_file_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ControlFileTests.cpp")
 	target_include_directories(control_file_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
@@ -849,7 +849,7 @@ if(BUILD_TESTING)
 	set_tests_properties(resource_tracking_mutant_bvh_flag PROPERTIES WILL_FAIL TRUE)
 	foreach(mutant_test control_file_mutant_lax_numbers control_file_mutant_no_until
 			control_file_mutant_force_any_slot control_file_mutant_diag_any_slot
-			control_file_mutant_filter_ignored control_file_mutant_diag_all_ignored control_file_mutant_dump_any_slot
+			control_file_mutant_filter_ignored control_file_mutant_diag_all_ignored control_file_mutant_dump_any_slot control_file_mutant_watch_any_slot
 			bc7_mutant_no_pbit bc7_mutant_subset bc7_mutant_anchor bc7_mutant_shared_pbit
 			bc_dump_mutant_block_row bc_dump_mutant_diff_first_byte bc_dump_tile_mutant_block_row
 			diag_tex_mutant_hist_no_fmt diag_tex_mutant_hist_no_indices rt_dump_mutant_no_addr
@@ -965,6 +965,7 @@ if(BUILD_TESTING)
 		bc_dump_mutant_block_row_tests
 		bc_dump_mutant_diff_first_byte_tests
 		control_file_mutant_dump_any_slot_tests
+		control_file_mutant_watch_any_slot_tests
 		diag_tex_mutant_hist_no_fmt_tests
 		diag_tex_mutant_hist_no_indices_tests
 		rt_dump_mutant_no_addr_tests
