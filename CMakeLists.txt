@@ -712,6 +712,16 @@ foreach(mutant IN ITEMS KEEP_ZERO OFF_BY_ONE)
 	target_compile_definitions(frame_dump_flips_mutant_${mutant_lower}_tests PRIVATE KYTY_FRAMEDUMP_MUTANT_${mutant}=1)
 endforeach()
 
+add_executable(signal_census_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SignalCensusTests.cpp")
+target_include_directories(signal_census_tests PRIVATE ${inc_headers})
+# S276 mutants (each must be caught, WILL_FAIL): SIGBUS counted as SIGSEGV; every thread counted as main; top list unsorted; repeat hits not accumulated; opcode copy ignores the page end; csv row shifted by one column.
+foreach(mutant IN ITEMS SIG_SWAP MAIN_ALWAYS TOP_UNSORTED HIST_COUNT_ONCE NO_PAGE_CLAMP CSV_SHIFTED)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(signal_census_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SignalCensusTests.cpp")
+	target_include_directories(signal_census_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(signal_census_mutant_${mutant_lower}_tests PRIVATE KYTY_SIGCENSUS_MUTANT_${mutant}=1)
+endforeach()
+
 add_executable(cs_trace_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CsTraceTests.cpp")
 target_include_directories(cs_trace_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): read resources dropped from the trace; traced flip off by one.
@@ -942,6 +952,7 @@ if(BUILD_TESTING)
 	add_test(NAME apple_drop COMMAND $<TARGET_FILE:apple_drop_tests>)
 	add_test(NAME cp_counters COMMAND $<TARGET_FILE:cp_counters_tests>)
 	add_test(NAME frame_dump_flips COMMAND $<TARGET_FILE:frame_dump_flips_tests>)
+	add_test(NAME signal_census COMMAND $<TARGET_FILE:signal_census_tests>)
 	add_test(NAME bc7 COMMAND $<TARGET_FILE:bc7_tests>)
 	add_test(NAME bc_dump COMMAND $<TARGET_FILE:bc_dump_tests>)
 	add_test(NAME bc_dump_tile COMMAND $<TARGET_FILE:bc_dump_tile_tests>)
@@ -966,6 +977,7 @@ if(BUILD_TESTING)
 			apple_drop_mutant_invert_clip apple_drop_mutant_always_bounds apple_drop_mutant_native_counts apple_drop_mutant_bias_abs
 			cp_counters_mutant_native_swap cp_counters_mutant_no_clamp cp_counters_mutant_flag_any cp_counters_mutant_skip_ignored
 			frame_dump_flips_mutant_keep_zero frame_dump_flips_mutant_off_by_one
+			signal_census_mutant_sig_swap signal_census_mutant_main_always signal_census_mutant_top_unsorted signal_census_mutant_hist_count_once signal_census_mutant_no_page_clamp signal_census_mutant_csv_shifted
 			per_vertex_unique_mutant_no_instance per_vertex_unique_mutant_no_first per_vertex_unique_mutant_no_ratio
 			per_vertex_unique_mutant_writes_ok per_vertex_unique_mutant_dropped_ok per_vertex_unique_mutant_no_dropped
 			per_vertex_vsstore_mutant_first_third per_vertex_vsstore_mutant_no_instance per_vertex_vsstore_mutant_no_first per_vertex_vsstore_mutant_half_swap per_vertex_vsstore_mutant_no_first_index per_vertex_vsstore_mutant_no_vertex_offset per_vertex_vsstore_mutant_dropped_ok per_vertex_vsstore_mutant_reuse_region per_vertex_vsstore_mutant_param31_ok per_vertex_vsstore_mutant_push_no_first_instance per_vertex_vsstore_mutant_index_no_adjust per_vertex_vsstore_mutant_pool_reuse_busy per_vertex_vsstore_mutant_no_instanced_class per_vertex_vsstore_mutant_no_touch per_vertex_vsstore_mutant_align_ignored per_vertex_vsstore_mutant_ring_ignored per_vertex_vsstore_mutant_push_always per_vertex_vsstore_test_mutant_no_clamp per_vertex_vsstore_test_mutant_no_tail_check)
@@ -1126,6 +1138,13 @@ if(BUILD_TESTING)
 		frame_dump_flips_tests
 		frame_dump_flips_mutant_keep_zero_tests
 		frame_dump_flips_mutant_off_by_one_tests
+		signal_census_tests
+		signal_census_mutant_sig_swap_tests
+		signal_census_mutant_main_always_tests
+		signal_census_mutant_top_unsorted_tests
+		signal_census_mutant_hist_count_once_tests
+		signal_census_mutant_no_page_clamp_tests
+		signal_census_mutant_csv_shifted_tests
 		diag_tex_mutant_nonzero_tests
 		diag_tex_mutant_no_once_tests
 		mem_events_tests
@@ -1177,6 +1196,20 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 		add_test(NAME macos_sse4a COMMAND $<TARGET_FILE:macos_sse4a_tests>)
 		set_tests_properties(macos_sse4a PROPERTIES TIMEOUT 15)
 		add_dependencies(kyty_tests macos_sse4a_tests)
+	endif()
+	# S276 mutant (WILL_FAIL): the SSE4a emulator is counted as the generic CPU-extensions one.
+	add_executable(macos_sse4a_mutant_sse4a_as_cpuext_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/macosSse4aTests.cpp"
+		"${KYTY_SOURCE_DIR}/loader/x64InstructionEmulator.cpp"
+		"${KYTY_SOURCE_DIR}/loader/guestInstructionPatcher.cpp"
+	)
+	target_link_libraries(macos_sse4a_mutant_sse4a_as_cpuext_tests common fmt::fmt Zydis::Zydis xbyak::xbyak)
+	target_include_directories(macos_sse4a_mutant_sse4a_as_cpuext_tests PRIVATE ${inc_headers})
+	target_compile_definitions(macos_sse4a_mutant_sse4a_as_cpuext_tests PRIVATE KYTY_X64EMU_MUTANT_SSE4A_AS_CPUEXT=1)
+	if(BUILD_TESTING)
+		add_test(NAME macos_sse4a_mutant_sse4a_as_cpuext COMMAND $<TARGET_FILE:macos_sse4a_mutant_sse4a_as_cpuext_tests>)
+		set_tests_properties(macos_sse4a_mutant_sse4a_as_cpuext PROPERTIES TIMEOUT 15 WILL_FAIL TRUE)
+		add_dependencies(kyty_tests macos_sse4a_mutant_sse4a_as_cpuext_tests)
 	endif()
 	add_executable(macos_wide_store_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/macosWideStoreTests.cpp"

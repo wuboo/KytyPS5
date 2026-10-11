@@ -3,6 +3,7 @@
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
+#include "common/signalCensus.h"
 #include "common/logging/log.h"
 #include "common/singleton.h"
 #include "common/stringUtils.h"
@@ -964,8 +965,9 @@ static int SignalDispatchHostSignal() {
 	return host_signal;
 }
 
-static void HostSignalDispatchHandler(int /*host_signal*/, siginfo_t* /*info*/,
+static void HostSignalDispatchHandler(int host_signal, siginfo_t* /*info*/,
                                       void* native_context) {
+	Common::SignalCensus::OnSignal(Common::SignalCensus::SigFromHostSignal(host_signal));
 	Pthread current = PthreadSelfOrNull();
 	if (current == nullptr) {
 		return;

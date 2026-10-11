@@ -1,4 +1,5 @@
 #include "common/hostException.h"
+#include "common/signalCensus.h"
 #include "loader/guestInstructionPatcher.h"
 #include "loader/x64InstructionEmulator.h"
 
@@ -144,7 +145,11 @@ static_assert(decltype(g_refuse_skip)::is_always_lock_free);
 void Check(bool value, const char *text) {
 	if (!value) {
 		std::fprintf(stderr, "macosSse4aTests: failed: %s\n", text);
+#ifdef KYTY_X64EMU_MUTANT_SSE4A_AS_CPUEXT
+		std::exit(1); // ctest WILL_FAIL does not invert a signal exit
+#else
 		std::abort();
+#endif
 	}
 }
 
@@ -568,7 +573,58 @@ void TestSplitFromAreaStartClobbersPatcherTrampolines() {
 
 } // namespace
 
+// S276: the census counts the signal, the emulator that took it, and the RIP histogram names the instruction.
+uint64_t CensusColumn(const char *name) {
+	uint64_t values[Common::SignalCensus::kColumnCount];
+	Common::SignalCensus::Snapshot(values);
+	for (size_t column = 0; column < Common::SignalCensus::kColumnCount; column++) {
+		if (std::strcmp(Common::SignalCensus::ColumnName(column), name) == 0) {
+			return values[column];
+		}
+	}
+	Check(false, "census column exists");
+	return 0;
+}
+
+void TestSignalCensus() {
+	using namespace Common::SignalCensus;
+	Check(HistogramEnabled(), "KYTY_DIAG_SIGCENSUS=1 enables the histogram");
+	SetMainThread();
+	Reset();
+	ResetHistogram();
+
+	auto     extrq   = MapCode<BlobFn>(kExtrqXmm2Len40Index0);
+	uint64_t out[2] {};
+	extrq(out, 0.0, 0.0, std::bit_cast<double>(0xaabbccddeeff1122ull));
+	extrq(out, 0.0, 0.0, std::bit_cast<double>(0xaabbccddeeff1122ull));
+	Check(CensusColumn("sig_ill") == 2 && CensusColumn("sig_segv") == 0 && CensusColumn("sig_bus") == 0, "two EXTRQ = two SIGILL");
+	Check(CensusColumn("path_sse4a") == 2, "EXTRQ is counted as the SSE4a emulator");
+	Check(CensusColumn("path_cpuext") == 0 && CensusColumn("path_monitorx_mwaitx") == 0 && CensusColumn("path_rsqrt") == 0 &&
+	          CensusColumn("path_ill_unhandled") == 0,
+	      "no other emulator counted for EXTRQ");
+	Check(CensusColumn("sig_main_thread") == 2 && CensusColumn("sig_other_threads") == 0, "signals taken on the registered thread");
+
+	VoidBlobFn mwaitx = MapCode<VoidBlobFn>(kMwaitx);
+	mwaitx();
+	Check(CensusColumn("path_monitorx_mwaitx") == 1 && CensusColumn("path_sse4a") == 2, "MWAITX counted separately");
+
+	g_refuse_skip.store(2, std::memory_order_relaxed);
+	g_refused.store(false, std::memory_order_relaxed);
+	MapCode<VoidBlobFn>(kUd2)();
+	g_refuse_skip.store(0, std::memory_order_relaxed);
+	Check(CensusColumn("path_ill_unhandled") == 1 && CensusColumn("sig_ill") == 4, "an instruction no emulator knows is counted as unhandled");
+
+	TopEntry top[16] {};
+	const auto found = TopRips(top, 16);
+	Check(found == 3, "three distinct RIPs: EXTRQ, MWAITX, ud2");
+	Check(top[0].count == 2 && top[0].kind == Path::Sse4a, "the EXTRQ site is the top RIP with count 2");
+	const uint8_t expected_op[] = {0x66, 0x0f, 0x78, 0xc2, 0x28, 0x00};
+	Check(std::memcmp(&top[0].opcode, expected_op, sizeof(expected_op)) == 0, "histogram keeps the opcode bytes of the EXTRQ site");
+	Check(top[1].count == 1 && top[2].count == 1, "the other two sites count once");
+}
+
 int main() {
+	::setenv("KYTY_DIAG_SIGCENSUS", "1", 1);
 	Check(Common::HostException::InstallHandler(Handler), "install host exception handler");
 	TestRefusals();
 	TestExtrqImmediate();
@@ -579,6 +635,7 @@ int main() {
 	TestInsertqRegister();
 	TestMwaitxEmulated();
 	TestUnknownInstructionRefused();
+	TestSignalCensus();
 	TestPatchedExtrqImmediate();
 	TestPatchedExtrqRexHigh();
 	TestPatchedInsertqImmediate();
