@@ -329,14 +329,25 @@ Gpu InitGpu() {
 	auto get_instance_proc = reinterpret_cast<PFN_vkGetInstanceProcAddr>(dlsym(lib, "vkGetInstanceProcAddr"));
 	if (get_instance_proc == nullptr) Fail("dlsym vkGetInstanceProcAddr");
 	auto create_instance = reinterpret_cast<PFN_vkCreateInstance>(get_instance_proc(VK_NULL_HANDLE, "vkCreateInstance"));
+	auto enumerate_extensions = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(
+	    get_instance_proc(VK_NULL_HANDLE, "vkEnumerateInstanceExtensionProperties"));
+	if (enumerate_extensions == nullptr) Fail("vkEnumerateInstanceExtensionProperties");
+	uint32_t extension_count = 0;
+	CheckVk(enumerate_extensions(nullptr, &extension_count, nullptr), "vkEnumerateInstanceExtensionProperties");
+	std::vector<VkExtensionProperties> available(extension_count);
+	CheckVk(enumerate_extensions(nullptr, &extension_count, available.data()), "vkEnumerateInstanceExtensionProperties list");
+	bool has_portability = false;
+	for (const auto& e: available) {
+		if (std::strcmp(e.extensionName, VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME) == 0) has_portability = true;
+	}
 	const char* extensions[] {VK_KHR_PORTABILITY_ENUMERATION_EXTENSION_NAME};
 	VkApplicationInfo app {VK_STRUCTURE_TYPE_APPLICATION_INFO};
 	app.apiVersion = VK_API_VERSION_1_3;
 	VkInstanceCreateInfo info {VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO};
 	info.pApplicationInfo        = &app;
-	info.flags                   = VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
-	info.enabledExtensionCount   = 1;
-	info.ppEnabledExtensionNames = extensions;
+	info.flags                   = has_portability ? VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR : 0;
+	info.enabledExtensionCount   = has_portability ? 1u : 0u;
+	info.ppEnabledExtensionNames = has_portability ? extensions : nullptr;
 	Gpu gpu;
 	CheckVk(create_instance(&info, nullptr, &gpu.instance), "vkCreateInstance");
 #define LOAD_INSTANCE(name) name##_ = reinterpret_cast<PFN_##name>(get_instance_proc(gpu.instance, #name));
