@@ -888,8 +888,9 @@ if(BUILD_TESTING)
 	set_tests_properties(emulator_present_mode_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
-	add_test(NAME shader_cfg_pv_vsstore_mutant_first_third COMMAND $<TARGET_FILE:shader_cfg_pv_vsstore_mutant_first_third_tests>)
-	set_tests_properties(shader_cfg_pv_vsstore_mutant_first_third PROPERTIES WILL_FAIL TRUE)
+	# The mutant aborts (Check -> abort), which ctest counts as a crash even with WILL_FAIL: require its failure message instead.
+	add_test(NAME shader_cfg_pv_vsstore_mutant_first_third
+	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pv_vsstore_mutant_first_third_tests> 2>&1 | grep -q 'first/third swapped'")
 	add_test(NAME per_vertex_transform COMMAND $<TARGET_FILE:per_vertex_transform_tests>)
 	add_test(NAME per_vertex_unique COMMAND $<TARGET_FILE:per_vertex_unique_tests>)
 	add_test(NAME per_vertex_vsstore COMMAND $<TARGET_FILE:per_vertex_vsstore_tests>)

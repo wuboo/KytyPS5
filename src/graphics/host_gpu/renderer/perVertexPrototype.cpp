@@ -78,6 +78,14 @@ bool PerVertexUniqueEnabled() {
 	return enabled;
 }
 
+bool PerVertexVsStoreEnabled() {
+	static const bool enabled = [] {
+		const char* value = std::getenv("KYTY_PV_VSSTORE");
+		return value != nullptr && value[0] == '1' && value[1] == '\0';
+	}();
+	return enabled;
+}
+
 PerVertexDrawVerdict ClassifyPerVertexPrototypeDraw(bool ps_active, vk::PrimitiveTopology topology,
                                                     bool primitive_restart, uint32_t index_count) {
 	if (!ps_active) return {false, index_count, "no pixel shader"};

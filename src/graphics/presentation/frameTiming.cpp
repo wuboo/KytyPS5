@@ -92,6 +92,7 @@ constexpr const char* kCounterNames[] = {
     "prototype_unique_draws",
     "prototype_unique_vertices",
     "prototype_unique_fallback",
+    "pv_vsstore_draws",
 };
 static_assert(std::size(kCounterNames) == static_cast<size_t>(Counter::Count));
 static_assert(static_cast<uint32_t>(Counter::DispOther) - static_cast<uint32_t>(Counter::DispGuest) ==
