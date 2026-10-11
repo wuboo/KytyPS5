@@ -458,6 +458,11 @@ foreach(mutant IN ITEMS FIRST_THIRD NO_INSTANCE NO_FIRST HALF_SWAP NO_FIRST_INDE
 endforeach()
 
 add_kyty_full_emulator_test(per_vertex_gpu_execution_tests "${KYTY_TESTS_DIR}/PerVertexGpuExecutionTests.cpp")
+# S150: GPU harness of KYTY_PV_VSSTORE (needs MoltenVK through SDL_VULKAN_LIBRARY, opt-in like the one above).
+# `per_vertex_vsstore_gpu_tests --dump` prints the emitted SPIR-V without a GPU. The mutant (corner 0/2 swapped in the PS emitter) must fail it.
+add_kyty_full_emulator_test(per_vertex_vsstore_gpu_tests "${KYTY_TESTS_DIR}/PerVertexVsStoreGpuTests.cpp")
+add_kyty_full_emulator_test(per_vertex_vsstore_gpu_mutant_first_third_tests "${KYTY_TESTS_DIR}/PerVertexVsStoreGpuTests.cpp")
+target_compile_definitions(per_vertex_vsstore_gpu_mutant_first_third_tests PRIVATE KYTY_PVVS_MUTANT_FIRST_THIRD=1)
 # Keeps device-address buffers alive until queued MoltenVK work completes (the game lost the device
 # otherwise). Needs a real Vulkan driver through SDL_VULKAN_LIBRARY, so it stays opt-in.
 add_executable(device_address_lifetime_gpu_tests EXCLUDE_FROM_ALL
