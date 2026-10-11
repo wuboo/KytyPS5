@@ -126,6 +126,7 @@ bool     HideCursorEnabled();
 bool     VrEnabled();
 bool     IsNetworkConnected();
 Common::AmdCpuMode GetAmdCpuMode();
+uint32_t           GetAmdPatchKinds(); // Common::AmdPatchKind mask from KYTY_AMD_PATCH
 uint32_t GetVblankFrequency();
 uint32_t GetConsoleLanguage();
 bool     VulkanValidationEnabled();

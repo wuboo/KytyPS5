@@ -70,6 +70,27 @@ int main() {
 	          std::end(Common::kKnownKytyEnv),
 	      "KYTY_AMD_CPU unknown to the env audit");
 
+	// KYTY_AMD_PATCH (S280): which instruction groups the patcher rewrites.
+	using namespace Common;
+	Check(ParseAmdPatchKinds("all") == AmdPatchAll && ParseAmdPatchKinds("auto") == AmdPatchAll, "all/auto");
+	Check(ParseAmdPatchKinds("none") == 0u, "none");
+	Check(ParseAmdPatchKinds("sse4a") == AmdPatchSse4a, "sse4a alone");
+	Check(ParseAmdPatchKinds("rsqrt") == AmdPatchRsqrt, "rsqrt alone");
+	Check(ParseAmdPatchKinds("cpuext") == AmdPatchCpuExt, "cpuext alone");
+	Check(ParseAmdPatchKinds("sse4a,cpuext") == (AmdPatchSse4a | AmdPatchCpuExt), "list");
+	Check(!ParseAmdPatchKinds("").has_value() && !ParseAmdPatchKinds("sse4a,").has_value() &&
+	          !ParseAmdPatchKinds("sse4a,bogus").has_value() && !ParseAmdPatchKinds("ALL").has_value(),
+	      "garbage accepted");
+	Check(ResolveAmdPatchKinds(nullptr) == AmdPatchAll && ResolveAmdPatchKinds("bogus") == AmdPatchAll,
+	      "unset/bad value keeps the default set");
+	Check(ResolveAmdPatchKinds("none") == 0u && ResolveAmdPatchKinds("rsqrt") == AmdPatchRsqrt, "env value used");
+	Check(AmdPatchKindsName(AmdPatchAll) == "all" && AmdPatchKindsName(0) == "none" &&
+	          AmdPatchKindsName(AmdPatchSse4a | AmdPatchRsqrt) == "sse4a,rsqrt",
+	      "kinds name");
+	Check(std::ranges::find(Common::kKnownKytyEnv, std::string_view("KYTY_AMD_PATCH")) !=
+	          std::end(Common::kKnownKytyEnv),
+	      "KYTY_AMD_PATCH unknown to the env audit");
+
 	std::puts("AmdCpuModeTests: ok");
 	return 0;
 }
