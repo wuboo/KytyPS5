@@ -437,6 +437,20 @@ foreach(mutant IN ITEMS NO_INSTANCE NO_FIRST NO_RATIO WRITES_OK DROPPED_OK NO_DR
 	target_compile_definitions(per_vertex_unique_mutant_${mutant_lower}_tests PRIVATE KYTY_PVU_MUTANT_${mutant}=1)
 endforeach()
 
+# S149: KYTY_PV_VSSTORE planner, record model and pass ring (CPU). Mutants (each must be caught, WILL_FAIL): corner 0/2 swapped, instance term and "- first" dropped, 16-bit halves swapped, first_index and vertex_offset ignored, dropped corners accepted, ring region reused.
+add_executable(per_vertex_vsstore_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PerVertexVsStoreTests.cpp"
+)
+target_include_directories(per_vertex_vsstore_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS FIRST_THIRD NO_INSTANCE NO_FIRST HALF_SWAP NO_FIRST_INDEX NO_VERTEX_OFFSET DROPPED_OK REUSE_REGION)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(per_vertex_vsstore_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/PerVertexVsStoreTests.cpp"
+	)
+	target_include_directories(per_vertex_vsstore_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(per_vertex_vsstore_mutant_${mutant_lower}_tests PRIVATE KYTY_PVVS_MUTANT_${mutant}=1)
+endforeach()
+
 add_kyty_full_emulator_test(per_vertex_gpu_execution_tests "${KYTY_TESTS_DIR}/PerVertexGpuExecutionTests.cpp")
 # Keeps device-address buffers alive until queued MoltenVK work completes (the game lost the device
 # otherwise). Needs a real Vulkan driver through SDL_VULKAN_LIBRARY, so it stays opt-in.
@@ -873,6 +887,7 @@ if(BUILD_TESTING)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
 	add_test(NAME per_vertex_transform COMMAND $<TARGET_FILE:per_vertex_transform_tests>)
 	add_test(NAME per_vertex_unique COMMAND $<TARGET_FILE:per_vertex_unique_tests>)
+	add_test(NAME per_vertex_vsstore COMMAND $<TARGET_FILE:per_vertex_vsstore_tests>)
 	add_test(NAME push_descriptor_policy COMMAND $<TARGET_FILE:push_descriptor_policy_tests>)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
@@ -924,7 +939,8 @@ if(BUILD_TESTING)
 			cp_counters_mutant_native_swap cp_counters_mutant_no_clamp cp_counters_mutant_flag_any cp_counters_mutant_skip_ignored
 			frame_dump_flips_mutant_keep_zero frame_dump_flips_mutant_off_by_one
 			per_vertex_unique_mutant_no_instance per_vertex_unique_mutant_no_first per_vertex_unique_mutant_no_ratio
-			per_vertex_unique_mutant_writes_ok per_vertex_unique_mutant_dropped_ok per_vertex_unique_mutant_no_dropped)
+			per_vertex_unique_mutant_writes_ok per_vertex_unique_mutant_dropped_ok per_vertex_unique_mutant_no_dropped
+			per_vertex_vsstore_mutant_first_third per_vertex_vsstore_mutant_no_instance per_vertex_vsstore_mutant_no_first per_vertex_vsstore_mutant_half_swap per_vertex_vsstore_mutant_no_first_index per_vertex_vsstore_mutant_no_vertex_offset per_vertex_vsstore_mutant_dropped_ok per_vertex_vsstore_mutant_reuse_region)
 		add_test(NAME ${mutant_test} COMMAND $<TARGET_FILE:${mutant_test}_tests>)
 		set_tests_properties(${mutant_test} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
@@ -1052,6 +1068,15 @@ if(BUILD_TESTING)
 		per_vertex_unique_mutant_writes_ok_tests
 		per_vertex_unique_mutant_dropped_ok_tests
 		per_vertex_unique_mutant_no_dropped_tests
+		per_vertex_vsstore_tests
+		per_vertex_vsstore_mutant_first_third_tests
+		per_vertex_vsstore_mutant_no_instance_tests
+		per_vertex_vsstore_mutant_no_first_tests
+		per_vertex_vsstore_mutant_half_swap_tests
+		per_vertex_vsstore_mutant_no_first_index_tests
+		per_vertex_vsstore_mutant_no_vertex_offset_tests
+		per_vertex_vsstore_mutant_dropped_ok_tests
+		per_vertex_vsstore_mutant_reuse_region_tests
 		cp_counters_tests
 		cp_counters_mutant_native_swap_tests
 		cp_counters_mutant_no_clamp_tests
