@@ -96,8 +96,9 @@ static bool AmdCpuPatchEnabled() {
 		const auto host     = GetGuestInstructionHostFeatures();
 		const auto decision = Common::DecideAmdCpu(Config::GetAmdCpuMode(),
 		                                           {host.sse4a, host.rdpid, host.clwb});
-		Log::WriteToConsoleAndLog(fmt::format("AMD CPU compatibility: patching {} ({})\n",
-		                                      decision.enabled ? "on" : "off", decision.reason));
+		Log::WriteToConsoleAndLog(fmt::format("AMD CPU compatibility: patching {} ({}), kinds={}\n",
+		                                      decision.enabled ? "on" : "off", decision.reason,
+		                                      Common::AmdPatchKindsName(Config::GetAmdPatchKinds())));
 		return decision.enabled;
 	}();
 	return enabled;
@@ -1864,7 +1865,9 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		GuestInstructionPatchResult totals {};
 		for (const auto& [segment_addr, segment_size]: executable_segments) {
 			const auto result = PatchGuestInstructions(segment_addr, segment_size, function_starts,
-			                                           protect_memory_faults, emulate_amd);
+			                                           protect_memory_faults, emulate_amd,
+			                                           GetGuestInstructionHostFeatures(),
+			                                           Config::GetAmdPatchKinds());
 			totals.reciprocal_sqrt += result.reciprocal_sqrt;
 			totals.extrq += result.extrq;
 			totals.insertq += result.insertq;
