@@ -552,9 +552,9 @@ int RunGpu(const Shaders& shaders) {
 	cb_alloc.commandBufferCount = 1;
 	VkCommandBuffer cmd = VK_NULL_HANDLE;
 	CheckVk(vkAllocateCommandBuffers_(gpu.device, &cb_alloc, &cmd), "command buffer");
-	const VkDescriptorPoolSize pool_size {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16};
+	const VkDescriptorPoolSize pool_size {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 64}; // 2 bindings per set, up to 32 sets
 	VkDescriptorPoolCreateInfo dp_info {VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-	dp_info.maxSets       = 8;
+	dp_info.maxSets       = 32;
 	dp_info.poolSizeCount = 1;
 	dp_info.pPoolSizes    = &pool_size;
 	VkDescriptorPool descriptor_pool = VK_NULL_HANDLE;
