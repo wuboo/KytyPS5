@@ -274,6 +274,69 @@ void TestSlabs() {
 	Check(f.ok && !f.created && f.base == 0, "a finished tick recycles a slab from the start");
 	Check(!slabs.Place(101, 8, done).ok, "region larger than a slab");
 	Check(slabs.Size() == 2, "slab count capped");
+	// A flush between Place() and the recording moves the draw to a newer tick.
+	PvVsStoreSlabs touched(100, 1);
+	auto t = touched.Place(10, 10, never);
+	touched.Touch(t.slab, 11);
+	const auto finished_10 = [](uint64_t tick) { return tick <= 10; };
+	Check(!touched.Place(10, 12, finished_10).ok, "a slab touched in tick 11 is busy while only tick 10 finished");
+	Check(touched.Place(10, 12, done).ok, "... and free once tick 11 has finished");
+}
+
+void TestFallbackClass() {
+	using V = PvVsStoreVerdict;
+	using F = PvVsStoreFallback;
+	Check(ClassifyPvVsStoreFallback(V::Use, 1) == F::None && ClassifyPvVsStoreFallback(V::Disabled, 1) == F::None, "no fallback");
+	Check(ClassifyPvVsStoreFallback(V::NotTriangleList, 1) == F::Topology &&
+	          ClassifyPvVsStoreFallback(V::PrimitiveRestart, 3) == F::Topology,
+	      "topology class");
+	Check(ClassifyPvVsStoreFallback(V::NoRange, 1) == F::Range && ClassifyPvVsStoreFallback(V::TooLarge, 1) == F::Range,
+	      "range class");
+	Check(ClassifyPvVsStoreFallback(V::TooLarge, 4) == F::Instanced && ClassifyPvVsStoreFallback(V::RingFull, 2) == F::Instanced,
+	      "instanced size failures");
+	Check(ClassifyPvVsStoreFallback(V::RingFull, 1) == F::Ring, "ring class");
+	Check(ClassifyPvVsStoreFallback(PvVsStoreInterfaceVerdict::Param31) == F::Param31 &&
+	          ClassifyPvVsStoreFallback(PvVsStoreInterfaceVerdict::MissingOutput) == F::Interface,
+	      "interface classes");
+}
+
+void TestPushRange() {
+	Check(PvVsStorePushRangeBytes(128, false) == 128, "default pipelines keep the native push range");
+	Check(PvVsStorePushRangeBytes(128, true) == 128 + kPvVsStorePushDwords * 4, "VS-store variants add the block");
+}
+
+void TestDecision() {
+	using F = PvVsStoreFallback;
+	const auto place_ok   = [](const PvVsStorePlan&) { return true; };
+	const auto place_full = [](const PvVsStorePlan&) { return false; };
+	const auto good       = [] {
+        PvVsStoreRequest r;
+        r.enabled = r.triangle_list = r.indexed = r.range_known = true;
+        r.index_size = 2; r.range_first = 0; r.range_end = 12; r.index_count = 12; r.instance_count = 1; r.record_stride_vec4 = 2;
+        return r;
+	};
+	auto d = DecidePvVsStore(PvVsStoreInterfaceVerdict::Use, good(), true, place_ok);
+	Check(d.use && d.fallback == F::None && d.plan.records == 12, "a plain draw is taken");
+	d = DecidePvVsStore(PvVsStoreInterfaceVerdict::Param31, good(), true, place_ok);
+	Check(!d.use && d.fallback == F::Param31, "location 31 stays on the prototype");
+	d = DecidePvVsStore(PvVsStoreInterfaceVerdict::Use, good(), false, place_ok);
+	Check(!d.use && d.fallback == F::Range, "an index buffer that cannot be bound stays on the prototype");
+	d = DecidePvVsStore(PvVsStoreInterfaceVerdict::Use, good(), true, place_full);
+	Check(!d.use && d.fallback == F::Ring, "no ring room stays on the prototype");
+	auto r = good();
+	r.instance_count = 3;
+	d = DecidePvVsStore(PvVsStoreInterfaceVerdict::Use, r, true, place_full);
+	Check(!d.use && d.fallback == F::Instanced, "instanced draw without ring room is counted as instanced");
+	r = good();
+	r.triangle_list = false;
+	d = DecidePvVsStore(PvVsStoreInterfaceVerdict::Use, r, true, place_ok);
+	Check(!d.use && d.fallback == F::Topology, "rect list stays on the prototype");
+	// the ring is only asked for a draw the plan accepts
+	int asked = 0;
+	r = good();
+	r.primitive_restart = true;
+	(void)DecidePvVsStore(PvVsStoreInterfaceVerdict::Use, r, true, [&](const PvVsStorePlan&) { asked++; return true; });
+	Check(asked == 0, "no region is reserved for a rejected draw");
 }
 
 } // namespace
@@ -287,6 +350,9 @@ int main() {
 	TestPushBlock();
 	TestIndexBinding();
 	TestSlabs();
+	TestFallbackClass();
+	TestDecision();
+	TestPushRange();
 	if (g_failures != 0) {
 		std::fprintf(stderr, "per_vertex_vsstore_tests: %d failure(s)\n", g_failures);
 		return EXIT_FAILURE;

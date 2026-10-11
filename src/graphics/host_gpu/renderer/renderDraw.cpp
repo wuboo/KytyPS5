@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/perVertexPrototype.h"
+#include "graphics/host_gpu/renderer/perVertexVsStoreRuntime.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -1387,12 +1388,145 @@ static void DiagDumpAfterDraw(RenderContext& context, bool ps_active, uint64_t p
 
 #include "graphics/host_gpu/renderer/perVertexPrototypeDraw.inc"
 
+// ---- S150: KYTY_PV_VSSTORE=1 ----
+static void CountPvFallback(PvVsStoreFallback fallback) {
+	using C = FrameTiming::Counter;
+	switch (fallback) {
+		case PvVsStoreFallback::None: break;
+		case PvVsStoreFallback::Topology: FrameTiming::Add(C::PvFallbackTopology); break;
+		case PvVsStoreFallback::Range: FrameTiming::Add(C::PvFallbackRange); break;
+		case PvVsStoreFallback::Instanced: FrameTiming::Add(C::PvFallbackInstanced); break;
+		case PvVsStoreFallback::Ring: FrameTiming::Add(C::PvFallbackRing); break;
+		case PvVsStoreFallback::Param31: FrameTiming::Add(C::PvFallbackParam31); break;
+		case PvVsStoreFallback::Interface: FrameTiming::Add(C::PvFallbackInterface); break;
+	}
+}
+
+bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRenderState& state,
+                                      vk::PrimitiveTopology topology, bool primitive_restart_enable,
+                                      const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source,
+                                      PvVsStoreDrawSetup& setup) {
+	if (!state.ps_active || state.vertex_info[0].logical_stage != ShaderType::Vertex ||
+	    state.vertex_info[0].stage.program->stage == ShaderType::Mesh)
+		return false;
+	auto&       graphics = m_context.GetGraphics();
+	const auto* programs = GetPvVsStorePrograms(graphics, state.programs);
+	if (programs == nullptr) return false; // not a per-vertex pair the store knows
+	if (programs->verdict != PvVsStoreInterfaceVerdict::Use) {
+		CountPvFallback(ClassifyPvVsStoreFallback(programs->verdict));
+		return false;
+	}
+	const uint32_t element_size =
+	    index_source.host_data != nullptr ? sizeof(uint16_t) : index_source.guest_element_size;
+
+	PvVsStoreRequest request;
+	request.enabled            = true;
+	request.triangle_list      = topology == vk::PrimitiveTopology::eTriangleList;
+	request.indexed            = draw.IsIndexed();
+	request.primitive_restart  = primitive_restart_enable;
+	request.index_size         = draw.IsIndexed() ? element_size : 0;
+	request.index_count        = draw.index_count;
+	request.instance_count     = draw.instance_count;
+	request.record_stride_vec4 = programs->stride_vec4;
+	const bool scannable = request.triangle_list && request.indexed && !primitive_restart_enable &&
+	                       (element_size == 2 || element_size == 4) && index_source.size != 0;
+	if (scannable) {
+		const void* idx_bytes = index_source.host_data != nullptr
+		                            ? index_source.host_data
+		                            : reinterpret_cast<const void*>(index_source.address);
+		// The scan of a big index buffer is the expensive part; meshes recur, so it is memoized by the
+		// content hash exactly like the prototype does.
+		constexpr uint32_t kNoDropLimit = 0x7fffffffu; // only negative vertex numbers count as dropped
+		const PerVertexRangeMemo::Key memo_key {XXH3_64bits(idx_bytes, index_source.size), index_source.size,
+		                                        element_size, draw.index_count, emit.vertex_offset, kNoDropLimit};
+		PerVertexRecordRange range;
+		bool                 known = false;
+		const auto           memoized = m_prototype_range_memo.Find(memo_key);
+		if (memoized.found) {
+			range = memoized.range;
+			known = memoized.derivable;
+		} else {
+			known = ComputePerVertexRecordRange(true, idx_bytes, index_source.size, element_size,
+			                                    draw.index_count, emit.first_vertex, emit.vertex_offset,
+			                                    kNoDropLimit, range);
+			m_prototype_range_memo.Insert(memo_key, known, range);
+		}
+		request.range_known   = known;
+		request.range_dropped = range.dropped;
+		request.range_first   = range.first;
+		request.range_end     = range.end;
+	}
+	// A storage descriptor is bound from an aligned offset and the difference becomes first_index; the
+	// guest address decides the offset modulo the element size, so an odd one stays on the prototype.
+	const bool index_aligned =
+	    element_size == 0 || index_source.host_data != nullptr || index_source.address % element_size == 0;
+	if (!m_pv_vsstore) m_pv_vsstore = std::make_shared<PvVsStoreRuntime>(graphics, m_context.GetCommandScheduler());
+	PvVsStoreRuntime::Region region;
+	const auto decision = DecidePvVsStore(programs->verdict, request, index_aligned, [&](const PvVsStorePlan& plan) {
+		region = m_pv_vsstore->Place(plan.records, programs->stride_vec4);
+		return region.ok;
+	});
+	if (!decision.use) {
+		CountPvFallback(decision.fallback);
+		return false;
+	}
+	const auto& plan = decision.plan;
+	setup.programs           = programs;
+	setup.index_element_size = element_size;
+	setup.region             = region;
+	setup.draw.base          = region.base_record;
+	setup.draw.span          = plan.span;
+	setup.draw.first         = plan.first;
+	setup.draw.first_instance = emit.first_instance;
+	setup.draw.first_index   = 0; // set once the index buffer is bound (alignment)
+	setup.draw.vertex_offset = emit.vertex_offset;
+	setup.draw.index32       = element_size == 4;
+	return true;
+}
+
+// Binds set 1 (cap slab + index buffer) and pushes the VS-store block; the pipeline of the draw is the
+// one made from setup.programs, so its layout has both.
+static void BindPvVsStore(RenderContext& context, vk::CommandBuffer vk_buffer, const PipelineCache::Pipeline& pipeline,
+                          PvVsStoreDrawSetup& setup, const PreparedIndexBuffer& index_binding,
+                          const DrawIndexBufferSource& index_source) {
+	auto&      graphics = context.GetGraphics();
+	const auto bind     = PvVsStoreBindIndex(index_binding.offset, setup.index_element_size, graphics.StorageMinAlignment());
+	EXIT_IF(!bind.ok || index_binding.buffer == nullptr);
+	setup.draw.first_index = bind.first_index;
+	const uint64_t index_range = uint64_t {bind.first_index} * setup.index_element_size + index_source.size;
+	const vk::DescriptorBufferInfo infos[] {
+	    {setup.region.buffer, 0, setup.region.buffer_size},
+	    {index_binding.buffer, bind.offset, index_range},
+	};
+	const auto set = context.GetDescriptorHeap().Commit(PvVsStoreSetLayout(graphics));
+	vk::WriteDescriptorSet writes[2] {};
+	for (uint32_t i = 0; i < 2; ++i) {
+		writes[i].dstSet          = set;
+		writes[i].dstBinding      = i;
+		writes[i].descriptorCount = 1;
+		writes[i].descriptorType  = vk::DescriptorType::eStorageBuffer;
+		writes[i].pBufferInfo     = &infos[i];
+	}
+	graphics.device.updateDescriptorSets(2, writes, 0, nullptr);
+	vk_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline.pipeline_layout, 1, 1, &set, 0, nullptr);
+	const auto block = PvVsStorePushBlock(setup.draw, setup.programs->stride_vec4);
+	vk_buffer.pushConstants(pipeline.pipeline_layout, vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
+	                        PvVsStorePushOffset(), sizeof(block), block.data());
+}
+
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
                                          const DrawCallInfo& draw, DrawRenderState& state,
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
 	                                     bool primitive_restart_enable) {
-	if (state.vertex_info[0].logical_stage == ShaderType::Vertex) {
+	PvVsStoreDrawSetup pv_store;
+	const bool         use_pv_store =
+	    PerVertexVsStoreEnabled() &&
+	    TryPvVsStoreDraw(draw, state, topology, primitive_restart_enable, emit, index_source, pv_store);
+	if (use_pv_store) {
+		FrameTiming::Add(FrameTiming::Counter::PvVsStoreDraws);
+	}
+	if (!use_pv_store && state.vertex_info[0].logical_stage == ShaderType::Vertex) {
 		if (const auto* prototype = GetPerVertexPrototypePrograms(
 		        m_context.GetGraphics(), state.programs, state.vertex_info[0],
 		        m_context.GetPipelineCache().DriverCache())) {
@@ -1509,7 +1643,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
 	    std::span {state.color_info, state.color_count}, state.depth_info, vertex_stages, buffer,
 	    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
-	    state.programs);
+	    use_pv_store ? pv_store.programs->graphics : state.programs);
 	vk::ImageAspectFlags feedback_aspects;
 	const auto rendering =
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
@@ -1529,6 +1663,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
 	if (!mesh_active) {
 		CommitIndexBuffer(vk_buffer, index_binding);
+		if (use_pv_store) {
+			m_pv_vsstore->Touch(pv_store.region);
+			BindPvVsStore(m_context, vk_buffer, pipeline, pv_store, index_binding, index_source);
+		}
 	}
 	const auto draw_dwords = ShaderRecompiler::IR::PushData::GraphicsDrawDwords(
 	    mesh_active, state.ps_input_info.object_primitive_id);

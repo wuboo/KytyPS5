@@ -38,6 +38,8 @@ struct DrawEmitInfo;
 struct DrawIndexBufferSource;
 struct DrawRenderState;
 struct PerVertexPrototypePrograms;
+class PvVsStoreRuntime;
+struct PvVsStoreDrawSetup;
 class RenderContext;
 class CommandScheduler;
 struct RenderExecutorTestAccess;
@@ -211,6 +213,12 @@ private:
 	                         DrawRenderState& state, vk::PrimitiveTopology topology,
 	                         const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source,
 	                         bool primitive_restart_enable);
+	// S150 (KYTY_PV_VSSTORE=1): true when the draw takes the VS-store path (fills `setup`); counts the
+	// fallback reason otherwise.
+	[[nodiscard]] bool TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRenderState& state,
+	                                    vk::PrimitiveTopology topology, bool primitive_restart_enable,
+	                                    const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source,
+	                                    PvVsStoreDrawSetup& setup);
 	void ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer& buffer,
 	                               const DrawCallInfo& draw, DrawRenderState& state,
 	                               vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
@@ -269,6 +277,7 @@ private:
 	};
 	std::unordered_map<uint64_t, CachedPrototypeCapture> m_prototype_capture_cache;
 	PerVertexRangeMemo                                   m_prototype_range_memo;
+	std::shared_ptr<PvVsStoreRuntime>                    m_pv_vsstore; // S150, created on the first VS-store draw
 
 	// Batching of consecutive per-vertex-prototype replay draws into one render pass (see
 	// perVertexPrototypeDraw.inc, bench-notes.md 2026-09-27 "Kierunek A"). A draw is appended here

@@ -251,6 +251,17 @@ constexpr std::array<uint32_t, kPvVsStorePushDwords> PvVsStorePushBlock(const Pv
 	return block;
 }
 
+// Push constant range of a graphics pipeline layout: the native data, plus the VS-store block only for
+// the VS-store variants (every other pipeline keeps the layout it always had).
+constexpr uint32_t PvVsStorePushRangeBytes(uint32_t native_bytes, bool vs_store_variant) {
+#if defined(KYTY_PVVS_MUTANT_PUSH_ALWAYS)
+	(void)vs_store_variant;
+	return native_bytes + kPvVsStorePushDwords * 4u;
+#else
+	return native_bytes + (vs_store_variant ? kPvVsStorePushDwords * 4u : 0u);
+#endif
+}
+
 // Storage-buffer descriptors must start at minStorageBufferOffsetAlignment: the draw binds the
 // index buffer from the aligned-down offset and moves the difference into first_index.
 struct PvVsStoreIndexBinding {
@@ -324,6 +335,16 @@ public:
 		if (!try_slab(static_cast<uint32_t>(m_slabs.size() - 1))) out.created = false;
 		return out;
 	}
+	// The draw of a placed region is recorded in `tick`, which can be newer than the tick of Place() when
+	// resource preparation flushed the scheduler in between: the slab is busy until that tick finishes.
+	void Touch(uint32_t slab, uint64_t tick) {
+#if !defined(KYTY_PVVS_MUTANT_NO_TOUCH)
+		if (slab < m_slabs.size() && m_slabs[slab].tick < tick) m_slabs[slab].tick = tick;
+#else
+		(void)slab;
+		(void)tick;
+#endif
+	}
 	[[nodiscard]] size_t   Size() const { return m_slabs.size(); }
 	[[nodiscard]] uint64_t SlabRecords() const { return m_slab_records; }
 
@@ -338,6 +359,87 @@ private:
 	uint32_t          m_max_slabs;
 	uint32_t          m_current = UINT32_MAX;
 };
+
+// Which pv_fallback_* counter a draw that stays on the prototype is counted in. Instanced draws that
+// fail for a size reason (range / region too large / no ring room) are counted as instanced.
+enum class PvVsStoreFallback : uint32_t { None, Topology, Range, Instanced, Ring, Param31, Interface };
+
+constexpr PvVsStoreFallback ClassifyPvVsStoreFallback(PvVsStoreVerdict verdict, uint32_t instance_count) {
+	using V = PvVsStoreVerdict;
+	using F = PvVsStoreFallback;
+	switch (verdict) {
+		case V::Disabled:
+		case V::Use: return F::None;
+		case V::NotTriangleList:
+		case V::NotIndexed:
+		case V::PrimitiveRestart:
+		case V::BadIndexSize: return F::Topology;
+		case V::RingFull: return instance_count > 1 ? F::Instanced : F::Ring;
+		case V::NoRange:
+		case V::Dropped:
+		case V::Empty:
+		case V::TooLarge:
+#if defined(KYTY_PVVS_MUTANT_NO_INSTANCED_CLASS)
+			return F::Range;
+#else
+			return instance_count > 1 ? F::Instanced : F::Range;
+#endif
+	}
+	return F::Range;
+}
+
+constexpr PvVsStoreFallback ClassifyPvVsStoreFallback(PvVsStoreInterfaceVerdict verdict) {
+	using V = PvVsStoreInterfaceVerdict;
+	switch (verdict) {
+		case V::Use:
+		case V::NoPerVertex: return PvVsStoreFallback::None;
+		case V::Param31: return PvVsStoreFallback::Param31;
+		case V::MissingOutput: return PvVsStoreFallback::Interface;
+	}
+	return PvVsStoreFallback::Interface;
+}
+
+
+// The whole decision of a draw, in the order the renderer applies it: the shader pair must be a
+// candidate, the plan must accept the draw, the index buffer must be bindable as an SSBO, and the cap
+// ring must have room (`place(plan)` reserves the region). Anything else stays on the prototype and is
+// counted under `fallback`.
+struct PvVsStoreDecision {
+	bool              use      = false;
+	PvVsStoreFallback fallback = PvVsStoreFallback::None;
+	PvVsStorePlan     plan;
+};
+
+template <class Place>
+PvVsStoreDecision DecidePvVsStore(PvVsStoreInterfaceVerdict interface_verdict, const PvVsStoreRequest& request,
+                                  bool index_aligned, Place&& place) {
+	PvVsStoreDecision decision;
+	if (interface_verdict != PvVsStoreInterfaceVerdict::Use) {
+		decision.fallback = ClassifyPvVsStoreFallback(interface_verdict);
+		return decision;
+	}
+	decision.plan = PlanPvVsStore(request);
+	if (!decision.plan.Use()) {
+		decision.fallback = ClassifyPvVsStoreFallback(decision.plan.verdict, request.instance_count);
+		return decision;
+	}
+#if !defined(KYTY_PVVS_MUTANT_ALIGN_IGNORED)
+	if (!index_aligned) {
+		decision.fallback = PvVsStoreFallback::Range;
+		return decision;
+	}
+#endif
+#if !defined(KYTY_PVVS_MUTANT_RING_IGNORED)
+	if (!place(decision.plan)) {
+		decision.fallback = ClassifyPvVsStoreFallback(PvVsStoreVerdict::RingFull, request.instance_count);
+		return decision;
+	}
+#else
+	(void)place(decision.plan);
+#endif
+	decision.use = true;
+	return decision;
+}
 
 } // namespace Libs::Graphics
 
