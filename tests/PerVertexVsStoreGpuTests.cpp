@@ -567,6 +567,13 @@ int RunGpu(const Shaders& shaders) {
 	cases.push_back({"32-bit, first_instance=1, 2 instances", true, {2, 0, 1, 5, 3, 4, 8, 6, 7, 11, 9, 10}, 0, 1, 2, 0});
 	cases.push_back({"16-bit, vertex_offset=-2, index buffer at byte 18 (unaligned descriptor)", false,
 	                 {2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}, -2, 0, 1, 18});
+	// odd-element descriptor starts (the index buffer moves into first_index); the triangles keep whole vertex groups
+	cases.push_back({"16-bit, vertex_offset=0, index buffer at byte 2", false,
+	                 {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, 0, 0, 1, 2});
+	cases.push_back({"16-bit, vertex_offset=-3, index buffer at byte 6", false,
+	                 {3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}, -3, 0, 1, 6});
+	cases.push_back({"16-bit, vertex_offset=+3, index buffer at byte 22", false,
+	                 {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}, 3, 0, 1, 22});
 	cases.push_back({"32-bit, vertex_offset=+6, first_instance=3, 2 instances, index buffer at byte 36", true,
 	                 {1, 2, 0, 4, 5, 3, 7, 8, 6, 10, 11, 9}, 6, 3, 2, 36});
 
@@ -607,7 +614,7 @@ int RunGpu(const Shaders& shaders) {
 		VkDescriptorSet set = VK_NULL_HANDLE;
 		CheckVk(vkAllocateDescriptorSets_(gpu.device, &alloc, &set), "allocate set");
 		const VkDescriptorBufferInfo infos[2] {{cap.buffer, 0, cap.size},
-		                                       {index_buffer.buffer, bind.offset, c.bind_byte_offset - bind.offset + count * element}};
+		                                       {index_buffer.buffer, bind.offset, PvVsStoreIndexRange(bind.first_index, element, count * element)}};
 		VkWriteDescriptorSet writes[2] {};
 		for (uint32_t i = 0; i < 2; ++i) {
 			writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};

@@ -1493,7 +1493,7 @@ static void BindPvVsStore(RenderContext& context, vk::CommandBuffer vk_buffer, c
 	const auto bind     = PvVsStoreBindIndex(index_binding.offset, setup.index_element_size, graphics.StorageMinAlignment());
 	EXIT_IF(!bind.ok || index_binding.buffer == nullptr);
 	setup.draw.first_index = bind.first_index;
-	const uint64_t index_range = uint64_t {bind.first_index} * setup.index_element_size + index_source.size;
+	const uint64_t index_range = PvVsStoreIndexRange(bind.first_index, setup.index_element_size, index_source.size);
 	const vk::DescriptorBufferInfo infos[] {
 	    {setup.region.buffer, 0, setup.region.buffer_size},
 	    {index_binding.buffer, bind.offset, index_range},
