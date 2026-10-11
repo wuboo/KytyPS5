@@ -94,6 +94,7 @@ enum class Counter : uint32_t {
 	PrototypeUniqueDraws,    // prototype draws that took the unique path
 	PrototypeUniqueVertices, // ... capture invocations of those draws (unique vertices * instances)
 	PrototypeUniqueFallback, // prototype draws that stayed on the per-corner path with the switch on
+	PvVsStoreDraws,   // S149 (KYTY_PV_VSSTORE=1): draws that took the VS-store path instead of the prototype
 	Count,
 };
 
