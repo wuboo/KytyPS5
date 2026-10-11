@@ -1,0 +1,83 @@
+#pragma once
+
+// S150: renderer side of KYTY_PV_VSSTORE=1 (default OFF; the math and the shader side are in
+// perVertexVsStore.h and the SPIR-V emitter). Shader variants of the VS and of the per-vertex PS are
+// emitted when the guest shaders are compiled, paired into pipeline programs on first use, and the
+// cap regions of the draws come from slabs that are recycled only after the GPU has finished them.
+
+#include "graphics/host_gpu/renderer/cache/streamBuffer.h"
+#include "graphics/host_gpu/renderer/perVertexVsStore.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+namespace Libs::Graphics {
+class CommandScheduler;
+struct GraphicContext;
+namespace ShaderRecompiler {
+struct CompileResult;
+struct CompileOptions;
+} // namespace ShaderRecompiler
+
+// Compile-time hook (next to RememberPerVertexPrototypeShader): emits the VS-store variant of a vertex
+// shader and of a pixel shader with PerVertexKHR inputs. No-op unless KYTY_PV_VSSTORE=1.
+void RememberPvVsStoreShader(const ShaderProgram& program, const ShaderRecompiler::CompileResult& result,
+                             const ShaderRecompiler::CompileOptions& options);
+
+struct PvVsStorePrograms {
+	PvVsStoreInterfaceVerdict       verdict     = PvVsStoreInterfaceVerdict::NoPerVertex;
+	uint32_t                        stride_vec4 = 0;
+	PipelineCache::GraphicsPrograms graphics; // valid when verdict == Use
+};
+
+// The VS-store programs of a VS/PS pair; nullptr when the pair is not a candidate at all (switch off,
+// PS without per-vertex input, a variant failed to emit or validate, geometry/tessellation stages).
+const PvVsStorePrograms* GetPvVsStorePrograms(GraphicContext& graphics, const PipelineCache::GraphicsPrograms& programs);
+
+// Set 1 of the VS-store pipelines: binding 0 = cap (VS write, PS read), binding 1 = guest indices (PS).
+vk::DescriptorSetLayout PvVsStoreSetLayout(GraphicContext& graphics);
+
+// Push constant offset of the VS-store block (it follows the native push data).
+uint32_t PvVsStorePushOffset();
+
+// Cap slabs of one render executor. A region is valid until the command buffer it was placed in has
+// finished on the GPU; a slab is reused only then (PvVsStoreSlabs).
+class PvVsStoreRuntime {
+public:
+	PvVsStoreRuntime(GraphicContext& graphics, CommandScheduler& scheduler);
+	~PvVsStoreRuntime();
+	PvVsStoreRuntime(const PvVsStoreRuntime&)            = delete;
+	PvVsStoreRuntime& operator=(const PvVsStoreRuntime&) = delete;
+
+	struct Region {
+		bool       ok          = false;
+		uint32_t   slab        = 0;
+		uint32_t   base_record = 0; // first record (stride_vec4 vec4s each) of the region
+		vk::Buffer buffer      = nullptr;
+		uint64_t   buffer_size = 0;
+	};
+	// `records` records of `stride_vec4` vec4s, for the command buffer that is open now.
+	Region Place(uint64_t records, uint32_t stride_vec4);
+	// Call when the draw is recorded (after resource preparation, which may flush the scheduler).
+	void Touch(const Region& region);
+	// Largest region (in vec4s) a draw may take.
+	[[nodiscard]] static uint64_t SlabVec4s();
+
+private:
+	GraphicContext&                      m_graphics;
+	CommandScheduler&                    m_scheduler;
+	PvVsStoreSlabs                       m_slabs;
+	std::vector<std::unique_ptr<Buffer>> m_buffers;
+};
+
+// A draw that was accepted for the VS-store path (decided before any resource of the draw is prepared).
+struct PvVsStoreDrawSetup {
+	const PvVsStorePrograms*  programs = nullptr;
+	PvVsStoreDraw             draw;
+	uint32_t                  index_element_size = 0;
+	PvVsStoreRuntime::Region  region;
+};
+
+} // namespace Libs::Graphics

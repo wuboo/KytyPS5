@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/perVertexPrototype.h"
+#include "graphics/host_gpu/renderer/perVertexVsStoreRuntime.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/tlasDiag.h"
@@ -333,6 +334,7 @@ struct PipelineCache::ProgramCache {
 		}
 		const ShaderProgram handle {.id = ++next_shader_id, .module = module};
 		RememberPerVertexPrototypeShader(handle, result, options, graphics.subgroup_size);
+		RememberPvVsStoreShader(handle, result, options);
 		return {
 		    .function_code  = {function_code.begin(), function_code.end()},
 		    .specialization = std::move(specialization),

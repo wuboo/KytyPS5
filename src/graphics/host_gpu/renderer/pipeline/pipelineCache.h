@@ -120,6 +120,9 @@ public:
 		std::array<ShaderProgram, 3> vertex;
 		ShaderProgram                pixel;
 		vk::DescriptorSetLayout      prototype_extra_layout = nullptr;
+		// S150 (KYTY_PV_VSSTORE): set 1 = cap + index SSBOs and 32 more push bytes in VS|FS; the vertex
+		// input stays native (unlike the prototype's replay shaders).
+		vk::DescriptorSetLayout      pv_store_layout        = nullptr;
 
 		[[nodiscard]] uint32_t VertexStageCount() const { return vertex[1] ? 3u : 1u; }
 	};

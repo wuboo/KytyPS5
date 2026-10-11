@@ -95,6 +95,13 @@ enum class Counter : uint32_t {
 	PrototypeUniqueVertices, // ... capture invocations of those draws (unique vertices * instances)
 	PrototypeUniqueFallback, // prototype draws that stayed on the per-corner path with the switch on
 	PvVsStoreDraws,   // S149 (KYTY_PV_VSSTORE=1): draws that took the VS-store path instead of the prototype
+	// S150: per-vertex draws that stayed on the prototype with the switch on, by reason.
+	PvFallbackInstanced, // instance_count > 1 and the region / range / ring did not fit
+	PvFallbackRange,     // vertex range unknown, dropped corner, empty, record math too large
+	PvFallbackTopology,  // not a triangle list, not indexed, primitive restart, 8-bit indices
+	PvFallbackParam31,   // VS or PS uses host location 31 (carries the instance index)
+	PvFallbackRing,      // no cap slab free (all in flight on the GPU)
+	PvFallbackInterface, // the PS reads a per-vertex location the VS does not write
 	Count,
 };
 
