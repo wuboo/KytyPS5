@@ -8,7 +8,7 @@ namespace Common {
 // Every KYTY_* variable this build reads (grep of getenv), sorted. Keep in sync when adding a switch:
 // KYTY_ENV_STRICT=1 aborts on a name that is not listed here.
 inline constexpr std::string_view kKnownKytyEnv[] = {
-    "KYTY_AMD_CPU", "KYTY_AUDIO_GAIN", "KYTY_BENCH_DROP_DIVERGENT_BARRIERS", "KYTY_BENCH_FOREGROUND",
+    "KYTY_AMD_CPU", "KYTY_AMD_PATCH", "KYTY_AUDIO_GAIN", "KYTY_BENCH_DROP_DIVERGENT_BARRIERS", "KYTY_BENCH_FOREGROUND",
     "KYTY_BORDERLESS",
 #ifndef KYTY_KNOWNENV_MUTANT_NO_DIAG
     "KYTY_CONTROL_FILE", "KYTY_DIAG_CS_TRACE_FLIP", "KYTY_DIAG_DIR", "KYTY_DIAG_PROTO_SKIP", "KYTY_DIAG_TLAS",

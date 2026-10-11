@@ -611,6 +611,12 @@ add_amd_cpu_mode_mutant(ZERO_UNPARSED common/amdCpuMode.h "text == \"off\" || te
 add_amd_cpu_mode_mutant(OFF_PATCHES common/amdCpuMode.h "return {false, \"forced off" "return {true, \"forced off")
 add_amd_cpu_mode_mutant(BAD_ENV_OFF common/amdCpuMode.h "	return AmdCpuMode::Auto;\n}\n\ninline AmdCpuDecision" "	return AmdCpuMode::Off;\n}\n\ninline AmdCpuDecision")
 add_amd_cpu_mode_mutant(ENV_UNKNOWN common/knownEnv.h "\"KYTY_AMD_CPU\", " "")
+# S280 KYTY_AMD_PATCH: PATCH_NONE_ALL: "none" selects everything; PATCH_RSQRT_DROPPED: rsqrt not understood;
+# PATCH_BAD_NONE: an unparsable value disables all kinds; PATCH_ENV_UNKNOWN: variable missing from the known list.
+add_amd_cpu_mode_mutant(PATCH_NONE_ALL common/amdCpuMode.h "if (text == \"none\") return 0u;" "if (text == \"none\") return AmdPatchAll;")
+add_amd_cpu_mode_mutant(PATCH_RSQRT_DROPPED common/amdCpuMode.h "else if (item == \"rsqrt\") kinds |= AmdPatchRsqrt;" "else if (item == \"rsqrt\") kinds |= 0;")
+add_amd_cpu_mode_mutant(PATCH_BAD_NONE common/amdCpuMode.h "	return AmdPatchAll;\n}\n\ninline std::string AmdPatchKindsName" "	return 0u;\n}\n\ninline std::string AmdPatchKindsName")
+add_amd_cpu_mode_mutant(PATCH_ENV_UNKNOWN common/knownEnv.h "\"KYTY_AMD_PATCH\", " "")
 
 add_executable(control_file_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ControlFileTests.cpp")
 target_include_directories(control_file_tests PRIVATE ${inc_headers})
@@ -986,6 +992,14 @@ if(BUILD_TESTING)
 	set_tests_properties(amd_cpu_mode_mutant_off_patches PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME amd_cpu_mode_mutant_bad_env_off COMMAND $<TARGET_FILE:amd_cpu_mode_mutant_bad_env_off_tests>)
 	set_tests_properties(amd_cpu_mode_mutant_bad_env_off PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME amd_cpu_mode_mutant_patch_none_all COMMAND $<TARGET_FILE:amd_cpu_mode_mutant_patch_none_all_tests>)
+	set_tests_properties(amd_cpu_mode_mutant_patch_none_all PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME amd_cpu_mode_mutant_patch_rsqrt_dropped COMMAND $<TARGET_FILE:amd_cpu_mode_mutant_patch_rsqrt_dropped_tests>)
+	set_tests_properties(amd_cpu_mode_mutant_patch_rsqrt_dropped PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME amd_cpu_mode_mutant_patch_bad_none COMMAND $<TARGET_FILE:amd_cpu_mode_mutant_patch_bad_none_tests>)
+	set_tests_properties(amd_cpu_mode_mutant_patch_bad_none PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME amd_cpu_mode_mutant_patch_env_unknown COMMAND $<TARGET_FILE:amd_cpu_mode_mutant_patch_env_unknown_tests>)
+	set_tests_properties(amd_cpu_mode_mutant_patch_env_unknown PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME amd_cpu_mode_mutant_env_unknown COMMAND $<TARGET_FILE:amd_cpu_mode_mutant_env_unknown_tests>)
 	set_tests_properties(amd_cpu_mode_mutant_env_unknown PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME control_file COMMAND $<TARGET_FILE:control_file_tests>)
@@ -1124,6 +1138,10 @@ if(BUILD_TESTING)
 		amd_cpu_mode_mutant_off_patches_tests
 		amd_cpu_mode_mutant_bad_env_off_tests
 		amd_cpu_mode_mutant_env_unknown_tests
+		amd_cpu_mode_mutant_patch_none_all_tests
+		amd_cpu_mode_mutant_patch_rsqrt_dropped_tests
+		amd_cpu_mode_mutant_patch_bad_none_tests
+		amd_cpu_mode_mutant_patch_env_unknown_tests
 		control_file_tests
 		control_file_mutant_lax_numbers_tests
 		control_file_mutant_no_until_tests
