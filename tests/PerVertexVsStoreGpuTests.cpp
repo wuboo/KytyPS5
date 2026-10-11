@@ -9,7 +9,8 @@
 //      settles whether gl_VertexIndex includes vertex_offset and gl_InstanceIndex first_instance.
 // Cases: 16-bit and 32-bit indices, vertex_offset > 0 and < 0, first_instance != 0, 2 instances, an index
 // buffer bound at an offset that is not a multiple of minStorageBufferOffsetAlignment.
-// Run: per_vertex_vsstore_gpu_tests [--dump]   (--dump needs no GPU: prints the emitted SPIR-V).
+// Run: per_vertex_vsstore_gpu_tests [--dump] [--stress]  (--stress: 2M triangles x 2..4 instances, parameter-buffer overflow)
+//   previously:  per_vertex_vsstore_gpu_tests [--dump]   (--dump needs no GPU: prints the emitted SPIR-V).
 // NOT the prototype: the prototype chain is compared in the game (A/B frames); this harness compares
 // with the CPU model of the per-vertex semantics. The emitter mutant (KYTY_PVVS_MUTANT_FIRST_THIRD)
 // must fail it.
@@ -47,6 +48,8 @@ namespace Libs::Graphics {
 namespace {
 
 using namespace ShaderRecompiler;
+
+bool g_stress = false; // --stress: the >= 2M triangle cases (S151)
 
 [[noreturn]] void Fail(const char* message) {
 	std::fprintf(stderr, "per-vertex-vsstore-gpu-tests: FAILED: %s\n", message);
@@ -577,6 +580,22 @@ int RunGpu(const Shaders& shaders) {
 	cases.push_back({"32-bit, vertex_offset=+6, first_instance=3, 2 instances, index buffer at byte 36", true,
 	                 {1, 2, 0, 4, 5, 3, 7, 8, 6, 10, 11, 9}, 6, 3, 2, 36});
 
+	// S151 (--stress): >= 2M triangles x 2..4 instances in one draw, so that the tile parameter buffer of the TBDR GPU
+	// overflows mid-draw. Triangle t sits in cell t % 4 with whole-vertex corners, so the last writer of every cell is
+	// known (the last 4 triangles) and the result must still match the CPU model bit for bit.
+	if (g_stress) {
+		constexpr uint32_t kStressTriangles = 2'000'000u;
+		for (const bool index32: {true, false}) {
+			Case big {index32 ? "STRESS 32-bit, 2M triangles, 4 instances, first_instance=1"
+			                  : "STRESS 16-bit, 2M triangles, 2 instances, index buffer at byte 6",
+			          index32, {}, 0, index32 ? 1u : 0u, index32 ? 4u : 2u, index32 ? 0u : 6u};
+			big.indices.resize(size_t {kStressTriangles} * 3);
+			for (uint32_t t = 0; t < kStressTriangles; ++t)
+				for (uint32_t k = 0; k < 3; ++k) big.indices[size_t {t} * 3 + k] = (t % 4u) * 3u + k;
+			cases.push_back(std::move(big));
+		}
+	}
+
 	int failures = 0;
 	for (const auto& c: cases) {
 		const uint32_t element = c.index32 ? 4u : 2u;
@@ -614,7 +633,7 @@ int RunGpu(const Shaders& shaders) {
 		VkDescriptorSet set = VK_NULL_HANDLE;
 		CheckVk(vkAllocateDescriptorSets_(gpu.device, &alloc, &set), "allocate set");
 		const VkDescriptorBufferInfo infos[2] {{cap.buffer, 0, cap.size},
-		                                       {index_buffer.buffer, bind.offset, PvVsStoreIndexRange(bind.first_index, element, count * element)}};
+		                                       {index_buffer.buffer, bind.offset, PvVsStoreIndexDescriptorFor(c.bind_byte_offset, element, gpu.storage_alignment, count * element, index_buffer.size).range}};
 		VkWriteDescriptorSet writes[2] {};
 		for (uint32_t i = 0; i < 2; ++i) {
 			writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -659,7 +678,8 @@ int RunGpu(const Shaders& shaders) {
 
 		int bad_pixels = 0, bad_records = 0;
 		const auto* pixels = static_cast<const uint32_t*>(readback.mapped);
-		for (uint32_t t = 0; t < 4; ++t) {
+		const uint32_t tri_count = static_cast<uint32_t>(c.indices.size() / 3);
+		for (uint32_t t = tri_count - 4; t < tri_count; ++t) { // the last writer of each cell
 			// the triangle lands in the cell of its vertices (vertex v is in cell (v / 3) % 4)
 			const uint32_t v0 = static_cast<uint32_t>(static_cast<int32_t>(c.indices[t * 3]) + c.vertex_offset);
 			const uint32_t cell = (v0 / 3u) % 4u;
@@ -674,11 +694,11 @@ int RunGpu(const Shaders& shaders) {
 		}
 		// cap: record(instance, vertex) holds {vertex, instance, 0, 0} in slot 1, the color in slot 0
 		const auto* cap_words = static_cast<const uint32_t*>(cap.mapped);
+		std::vector<bool> used_vertex(last + 1, false);
+		for (auto idx: c.indices) used_vertex[static_cast<uint32_t>(static_cast<int32_t>(idx) + c.vertex_offset)] = true;
 		for (uint32_t i = 0; i < c.instance_count; ++i) {
 			for (uint32_t vtx = first; vtx <= last; ++vtx) {
-				bool used = false;
-				for (auto idx: c.indices) used |= static_cast<uint32_t>(static_cast<int32_t>(idx) + c.vertex_offset) == vtx;
-				if (!used) continue;
+				if (!used_vertex[vtx]) continue;
 				const uint32_t record = PvVsStoreVertexRecord(draw.base, draw.span, draw.first, draw.first_instance, c.first_instance + i, vtx);
 				const uint32_t* slot1 = cap_words + (record * shaders.stride_vec4 + 1) * 4;
 				if (slot1[0] != vtx || slot1[1] != c.first_instance + i) {
@@ -701,6 +721,8 @@ int RunGpu(const Shaders& shaders) {
 
 int main(int argc, char** argv) {
 	using namespace Libs::Graphics;
+	for (int i = 1; i < argc; ++i)
+		if (std::strcmp(argv[i], "--stress") == 0) g_stress = true;
 	EnsureConfigInitialized();
 	const Shaders shaders = BuildShaders();
 	if (argc > 1 && std::strcmp(argv[1], "--dump") == 0) {
