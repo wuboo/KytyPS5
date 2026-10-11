@@ -9,9 +9,12 @@
 // the GPU harness: the plan for a draw, the record numbering both shader sides must agree on, and
 // the per-pass region ring. The emitter mirrors the arithmetic below in SPIR-V.
 
+#include <array>
+#include <bit>
 #include <cstdint>
 #include <map>
 #include <span>
+#include <vector>
 
 namespace Libs::Graphics {
 
@@ -28,7 +31,7 @@ enum PvVsStorePush : uint32_t {
 	kPvPushFirstIndex    = 4, // element offset into the index buffer
 	kPvPushVertexOffset  = 5, // signed
 	kPvPushIndex32       = 6, // 1: 32-bit indices, 0: 16-bit
-	kPvPushReserved      = 7,
+	kPvPushStride        = 7, // vec4 slots per record (S150: slot == host parameter location, stride from the VS)
 };
 constexpr uint32_t kPvVsStorePushDwords = 8;
 
@@ -203,6 +206,138 @@ inline std::map<uint32_t, uint32_t> PvVsStoreSlots(std::span<const uint32_t> par
 	for (auto& [location, value]: sorted) value = slot++;
 	return sorted;
 }
+
+// S150: the two shader variants are emitted at compile time, independently (the PS does not know its
+// VS), so a Parameter output of host location L lives in slot L of a record and the record stride
+// (push dword kPvPushStride) is the highest location the VS writes plus one.
+constexpr uint32_t PvVsStoreStrideFor(uint32_t vs_location_mask) {
+	return vs_location_mask == 0 ? 0u : 32u - static_cast<uint32_t>(std::countl_zero(vs_location_mask));
+}
+
+enum class PvVsStoreInterfaceVerdict : uint32_t {
+	Use,
+	Param31,       // the VS or the PS uses host location 31, which carries the instance index
+	MissingOutput, // the PS reads a per-vertex location the VS does not write
+	NoPerVertex,   // the PS has no per-vertex input at all
+};
+
+constexpr PvVsStoreInterfaceVerdict ClassifyPvVsStoreInterface(uint32_t vs_location_mask,
+                                                              uint32_t ps_location_mask) {
+	using V = PvVsStoreInterfaceVerdict;
+	if (ps_location_mask == 0) return V::NoPerVertex;
+#if !defined(KYTY_PVVS_MUTANT_PARAM31_OK)
+	if (((vs_location_mask | ps_location_mask) >> kPvVsStoreInstanceLocation) & 1u) return V::Param31;
+#endif
+	if ((ps_location_mask & ~vs_location_mask) != 0) return V::MissingOutput;
+	return V::Use;
+}
+
+// The push block both stages read after the native push data (dword order = PvVsStorePush).
+constexpr std::array<uint32_t, kPvVsStorePushDwords> PvVsStorePushBlock(const PvVsStoreDraw& draw,
+                                                                       uint32_t stride_vec4) {
+	std::array<uint32_t, kPvVsStorePushDwords> block {};
+	block[kPvPushBase]          = draw.base;
+	block[kPvPushSpan]          = draw.span;
+	block[kPvPushFirst]         = draw.first;
+#if defined(KYTY_PVVS_MUTANT_PUSH_NO_FIRST_INSTANCE)
+	block[kPvPushFirstInstance] = 0;
+#else
+	block[kPvPushFirstInstance] = draw.first_instance;
+#endif
+	block[kPvPushFirstIndex]    = draw.first_index;
+	block[kPvPushVertexOffset]  = static_cast<uint32_t>(draw.vertex_offset);
+	block[kPvPushIndex32]       = draw.index32 ? 1u : 0u;
+	block[kPvPushStride]        = stride_vec4;
+	return block;
+}
+
+// Storage-buffer descriptors must start at minStorageBufferOffsetAlignment: the draw binds the
+// index buffer from the aligned-down offset and moves the difference into first_index.
+struct PvVsStoreIndexBinding {
+	uint64_t offset      = 0; // descriptor offset (aligned)
+	uint32_t first_index = 0; // element offset inside the descriptor range
+	bool     ok          = false;
+};
+constexpr PvVsStoreIndexBinding PvVsStoreBindIndex(uint64_t byte_offset, uint32_t element_size,
+                                                   uint64_t alignment) {
+	if (alignment == 0 || (alignment & (alignment - 1)) != 0 || (element_size != 2 && element_size != 4))
+		return {};
+	const uint64_t aligned = byte_offset & ~(alignment - 1);
+	const uint64_t delta   = byte_offset - aligned;
+	if (delta % element_size != 0) return {};
+#if defined(KYTY_PVVS_MUTANT_INDEX_NO_ADJUST)
+	return {aligned, 0, true};
+#else
+	return {aligned, static_cast<uint32_t>(delta / element_size), true};
+#endif
+}
+
+// Cap slabs of the renderer. A region lives until the command buffer of its draw has finished on the
+// GPU, so a slab is recycled only after the tick it was last used in is free; regions inside a slab
+// are never reused (PvVsStoreRing). The buffers themselves are the renderer's; this is the bookkeeping.
+class PvVsStoreSlabs {
+public:
+	struct Placement {
+		bool     ok      = false;
+		bool     created = false; // the caller must create the buffer of slab `slab`
+		uint32_t slab    = 0;
+		uint32_t base    = 0;
+	};
+	PvVsStoreSlabs(uint64_t slab_records, uint32_t max_slabs)
+	    : m_slab_records(slab_records), m_max_slabs(max_slabs) {}
+
+	template <class IsFree>
+	Placement Place(uint64_t records, uint64_t tick, IsFree&& is_free) {
+		Placement out;
+		if (records == 0 || records > m_slab_records) return out;
+		const auto try_slab = [&](uint32_t index) {
+			if (!m_slabs[index].ring.Allocate(records, out.base)) return false;
+			m_slabs[index].tick = tick;
+			m_current           = index;
+			out.ok              = true;
+			out.slab            = index;
+			return true;
+		};
+		if (m_current < m_slabs.size() && m_slabs[m_current].tick == tick && try_slab(m_current))
+			return out;
+		for (uint32_t i = 0; i < m_slabs.size(); ++i) {
+			if (i == m_current) continue;
+			auto& slab = m_slabs[i];
+#if defined(KYTY_PVVS_MUTANT_POOL_REUSE_BUSY)
+			const bool reusable = true;
+#else
+			const bool reusable = slab.tick == tick || !slab.used || is_free(slab.tick);
+#endif
+			if (!reusable) continue;
+			if (slab.tick != tick) slab.ring.EndPass();
+			slab.used = true;
+			if (try_slab(i)) return out;
+		}
+		if (m_current < m_slabs.size() && m_slabs[m_current].tick != tick &&
+		    (!m_slabs[m_current].used || is_free(m_slabs[m_current].tick))) {
+			m_slabs[m_current].ring.EndPass();
+			if (try_slab(m_current)) return out;
+		}
+		if (m_slabs.size() >= m_max_slabs) return out;
+		m_slabs.push_back({PvVsStoreRing(m_slab_records), tick, true});
+		out.created = true;
+		if (!try_slab(static_cast<uint32_t>(m_slabs.size() - 1))) out.created = false;
+		return out;
+	}
+	[[nodiscard]] size_t   Size() const { return m_slabs.size(); }
+	[[nodiscard]] uint64_t SlabRecords() const { return m_slab_records; }
+
+private:
+	struct Slab {
+		PvVsStoreRing ring;
+		uint64_t      tick = 0;
+		bool          used = false;
+	};
+	std::vector<Slab> m_slabs;
+	uint64_t          m_slab_records;
+	uint32_t          m_max_slabs;
+	uint32_t          m_current = UINT32_MAX;
+};
 
 } // namespace Libs::Graphics
 

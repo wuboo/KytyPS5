@@ -16541,6 +16541,26 @@ void TestPvVsStoreEmission() {
         "coherent flag did not reach the VS");
   Check(Spirv::EmitProgram(vs.program, vs_options.input_info) == vs.spirv,
         "VS SPIR-V changed without the VS-store switch");
+  // S150: stride 0 = slot is the host location, the stride comes from push dword 7, the touched
+  // locations are reported through location_mask.
+  {
+    uint32_t vs_mask = 0;
+    Spirv::PvStoreInfo dynamic;
+    dynamic.role = Spirv::PvStoreInfo::Role::Vertex;
+    dynamic.location_mask = &vs_mask;
+    const auto dynamic_words = Spirv::EmitProgram(vs.program, vs_options.input_info, nullptr, &dynamic);
+    CheckSpirvBinaryValidates(dynamic_words);
+    uint32_t expect_mask = 0;
+    for (const auto &output : vs.program.info.outputs) {
+      if (output.kind == IR::StageOutputKind::Parameter) expect_mask |= 1u << output.location;
+    }
+    Check(vs_mask != 0 && vs_mask == expect_mask,
+          "dynamic-stride VS reported other locations than its parameter outputs");
+    Check(DisassembleSpirvBinary(dynamic_words).find("%vsharp %uint_1 %uint_7") != std::string::npos,
+          "dynamic stride is not read from push dword 7");
+    Check(vs_text.find("%vsharp %uint_1 %uint_7") == std::string::npos,
+          "fixed-stride VS reads the dynamic stride");
+  }
 
   // --- pixel side
   auto options = MakeCompileOptions(ShaderType::Pixel);
@@ -16585,6 +16605,18 @@ void TestPvVsStoreEmission() {
         "PS does not read the flat instance index");
   Check(Spirv::EmitProgram(ps.program, options.input_info) == ps.spirv,
         "PS SPIR-V changed without the VS-store switch");
+  {
+    uint32_t ps_mask = 0;
+    Spirv::PvStoreInfo dynamic;
+    dynamic.role = Spirv::PvStoreInfo::Role::Pixel;
+    dynamic.location_mask = &ps_mask;
+    const auto dynamic_words = Spirv::EmitProgram(ps.program, options.input_info, nullptr, &dynamic);
+    CheckSpirvBinaryValidates(dynamic_words);
+    Check(ps_mask != 0 && (ps_mask & (1u << 31)) == 0,
+          "dynamic-stride PS did not report its per-vertex locations");
+    Check(DisassembleSpirvBinary(dynamic_words).find("%vsharp %uint_1 %uint_7") != std::string::npos,
+          "dynamic stride is not read from push dword 7");
+  }
   // Corner k of the guest read must be element k of the primitive: the order of the vertex
   // numbers in the PerVertexKHR array accesses equals the order of the corner constants added to
   // first_index + primitive * 3.

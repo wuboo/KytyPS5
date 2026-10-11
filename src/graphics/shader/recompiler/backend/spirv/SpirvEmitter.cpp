@@ -226,7 +226,7 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	state.pv_store = pv_store;
 	if (pv_store != nullptr) {
 		const bool vertex = pv_store->role == PvStoreInfo::Role::Vertex;
-		if (vertex_capture != nullptr || pv_store->record_stride_vec4 == 0 ||
+		if (vertex_capture != nullptr ||
 		    program.stage != (vertex ? ShaderType::Vertex : ShaderType::Pixel) ||
 		    (vertex ? input_info.vertex == nullptr : input_info.pixel == nullptr)) {
 			Fail(program, "invalid PerVertex VS-store stage or record layout");

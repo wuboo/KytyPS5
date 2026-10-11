@@ -28,7 +28,10 @@ struct PvStoreInfo {
 	enum class Role { Vertex, Pixel };
 	Role                         role               = Role::Vertex;
 	uint32_t                     record_stride_vec4 = 0;
+	// record_stride_vec4 == 0 (S150): slot == host parameter location, the stride is read from the push
+	// block, and `location_mask` (when set) collects the host locations the stage stores / reads.
 	std::map<uint32_t, uint32_t> parameter_slots; // host parameter location -> slot in a record
+	uint32_t*                    location_mask      = nullptr;
 	bool                         coherent           = false; // Coherent cap + OpMemoryBarrier after the VS stores
 };
 
