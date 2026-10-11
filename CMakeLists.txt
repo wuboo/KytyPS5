@@ -411,6 +411,9 @@ function(configure_macos_guest_address_space target)
 endfunction()
 
 add_kyty_full_emulator_test(shader_cfg_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
+# S149: emitter mutant of the VS-store PS (corner 0 and 2 swapped); TestPvVsStoreEmission must catch it (WILL_FAIL).
+add_kyty_full_emulator_test(shader_cfg_pv_vsstore_mutant_first_third_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
+target_compile_definitions(shader_cfg_pv_vsstore_mutant_first_third_tests PRIVATE KYTY_PVVS_MUTANT_FIRST_THIRD=1)
 
 add_executable(per_vertex_transform_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PerVertexTransformTests.cpp"
@@ -885,6 +888,8 @@ if(BUILD_TESTING)
 	set_tests_properties(emulator_present_mode_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
+	add_test(NAME shader_cfg_pv_vsstore_mutant_first_third COMMAND $<TARGET_FILE:shader_cfg_pv_vsstore_mutant_first_third_tests>)
+	set_tests_properties(shader_cfg_pv_vsstore_mutant_first_third PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME per_vertex_transform COMMAND $<TARGET_FILE:per_vertex_transform_tests>)
 	add_test(NAME per_vertex_unique COMMAND $<TARGET_FILE:per_vertex_unique_tests>)
 	add_test(NAME per_vertex_vsstore COMMAND $<TARGET_FILE:per_vertex_vsstore_tests>)
@@ -1012,6 +1017,7 @@ if(BUILD_TESTING)
 	add_custom_target(kyty_tests DEPENDS
 		ime_dialog_tests
 		shader_cfg_tests
+		shader_cfg_pv_vsstore_mutant_first_third_tests
 		scalar_provenance_tests
 		image_page_table_tests
 		memory_tracker_tests
