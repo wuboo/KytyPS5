@@ -871,6 +871,7 @@ void EmitProgram(EmitterState& state) {
 		                                     ConstantU32(state, LdsDwordCount(state)));
 	}
 	InitializeVertexCapture(state);
+	InitializePvStore(state);
 	EmitMemoryOffsets(state);
 	if (program.blocks.empty()) {
 		EmitReturn(ctx);

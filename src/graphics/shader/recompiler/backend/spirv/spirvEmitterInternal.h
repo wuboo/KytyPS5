@@ -3,6 +3,7 @@
 
 #include "common/common.h"
 #include "common/stringUtils.h"
+#include "graphics/host_gpu/renderer/perVertexVsStore.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvBuilder.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
@@ -112,6 +113,13 @@ struct EmitterState {
 	uint32_t                                         lane_count              = 1;
 	uint32_t                                         lane_half               = 0;
 	const VertexCaptureInfo*                         vertex_capture          = nullptr;
+	// S149 PerVertex VS-store: cap records (set 1 b0), PS index buffer (set 1 b1), the flat instance
+	// carried VS -> PS (location 31) and the VS record computed once at the start of main.
+	const PvStoreInfo*                               pv_store                = nullptr;
+	uint32_t                                         pv_cap_buffer           = 0;
+	uint32_t                                         pv_index_buffer         = 0;
+	uint32_t                                         pv_instance_variable    = 0;
+	uint32_t                                         pv_vertex_record        = 0;
 	std::array<uint32_t, 3>                          capture_buffers {};
 	std::array<uint32_t, 2>                          capture_index {};
 	std::array<uint32_t, 2>                          capture_valid {};
@@ -288,6 +296,10 @@ struct DppTargetLane {
 };
 
 void     DefineVertexCapture(EmitterState& state);
+void     DefinePvStore(EmitterState& state);
+void     InitializePvStore(EmitterState& state);
+void     EmitPvStoreParameter(EmitterState& state, uint32_t host_location, uint32_t value);
+uint32_t EmitPvLoadCorner(EmitterState& state, uint32_t host_location, uint32_t corner, uint32_t chan);
 void     InitializeVertexCapture(EmitterState& state);
 uint32_t CaptureInput(EmitterState& state, bool attribute, uint32_t location, uint32_t component);
 uint32_t CaptureOutputPointer(EmitterState& state, uint32_t slot, uint32_t component = UINT32_MAX);

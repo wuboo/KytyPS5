@@ -19,12 +19,26 @@ struct VertexCaptureInfo {
 	std::map<uint32_t, uint32_t> parameter_slots;
 };
 
+// S149 (KYTY_PV_VSSTORE): the VS writes its PerVertex parameters to cap[record * stride + slot]
+// (uvec4, bits unchanged) and the PS reads the three corners of its primitive back from there
+// instead of PerVertexKHR. Set 1 binding 0 = cap (uvec4[]), binding 1 (PS) = the index buffer
+// (uint[]); a push block of kPvVsStorePushDwords dwords follows the native push data (layout and
+// record math in host_gpu/renderer/perVertexVsStore.h).
+struct PvStoreInfo {
+	enum class Role { Vertex, Pixel };
+	Role                         role               = Role::Vertex;
+	uint32_t                     record_stride_vec4 = 0;
+	std::map<uint32_t, uint32_t> parameter_slots; // host parameter location -> slot in a record
+	bool                         coherent           = false; // Coherent cap + OpMemoryBarrier after the VS stores
+};
+
 // Resets and writes backend IDs and descriptor indices; do not emit the same program concurrently.
 std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo input_info,
                                   uint32_t push_data_start_dword = 0,
                                   bool maintenance8_enabled = false,
                                   bool emit_debug_info = false,
-                                  const VertexCaptureInfo* vertex_capture = nullptr);
+                                  const VertexCaptureInfo* vertex_capture = nullptr,
+                                  const PvStoreInfo* pv_store = nullptr);
 
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv
 
