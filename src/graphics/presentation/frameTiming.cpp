@@ -4,6 +4,7 @@
 #include "common/controlFile.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "common/signalCensus.h"
 
 #include <array>
 #include <atomic>
@@ -119,6 +120,7 @@ FILE* OpenFrameLog() {
 		for (const auto* name: kCounterNames) {
 			std::fprintf(file, ",%s", name);
 		}
+		Common::SignalCensus::WriteCsvHeader(file); // S276
 		std::fputs("\n", file);
 	}
 	return file;
@@ -149,6 +151,7 @@ void OnFramePresented() {
 			std::fprintf(log, ",%llu",
 			             static_cast<unsigned long long>(counter.load(std::memory_order_relaxed)));
 		}
+		Common::SignalCensus::WriteCsvRow(log); // S276
 		std::fputs("\n", log);
 		// The emulator usually exits through a hard stop, so keep the file current.
 		std::fflush(log);
@@ -180,6 +183,12 @@ void PollControlFile(uint64_t flip) {
 void OnGuestFlip() {
 	const auto flip = g_guest_flips.fetch_add(1, std::memory_order_relaxed) + 1;
 	Common::MemEvents::SetCompletedFlips(flip);
+	// S276: KYTY_DIAG_SIGCENSUS=1 dumps the RIP histogram every 600 guest flips (and at exit, see ProgramExitHandler).
+	if (flip % 600 == 0 && Common::SignalCensus::HistogramEnabled()) {
+		char why[32];
+		std::snprintf(why, sizeof(why), "flip %llu", static_cast<unsigned long long>(flip));
+		Common::SignalCensus::DumpHistogram(why, [](const char* line) { LOGF("%s", line); });
+	}
 	PollControlFile(flip);
 }
 

@@ -1,4 +1,5 @@
 #include "common/hostException.h"
+#include "common/signalCensus.h"
 
 #include <atomic>
 #include <cstdio>
@@ -164,6 +165,7 @@ static AccessViolationType DecodeAccess(uint64_t err) {
 // re-executing the faulting instruction against the now-fixed protection. An unresolved
 // fault restores the default disposition so the retry terminates the process.
 static void SignalHandler(int sig, siginfo_t* si, void* uctx) {
+	SignalCensus::OnSignal(SignalCensus::SigFromHostSignal(sig));
 	auto*       uc = static_cast<ucontext_t*>(uctx);
 	const auto* mc = uc->uc_mcontext;
 	const auto& ss = mc->__ss;
@@ -226,6 +228,7 @@ static void ChainToDefault(int signal_number) noexcept {
 }
 
 static void SignalHandler(int signal_number, siginfo_t* signal_info, void* native_context) {
+	SignalCensus::OnSignal(SignalCensus::SigFromHostSignal(signal_number));
 	auto* context = static_cast<ucontext_t*>(native_context);
 	auto* gregs   = context->uc_mcontext.gregs;
 

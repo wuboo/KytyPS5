@@ -2,6 +2,7 @@
 
 #include "common/common.h"
 #include "common/logging/log.h"
+#include "common/signalCensus.h"
 
 #include <Zydis/Zydis.h>
 #include <algorithm>
@@ -1393,6 +1394,16 @@ bool TryEmulate(void* native_context) {
 #else
 	Context context {static_cast<ucontext_t*>(native_context)};
 #endif
+	// S276: count which emulator took the instruction (always) and where (KYTY_DIAG_SIGCENSUS=1).
+	const uint64_t rip = context.Rip();
+	const auto     done = [rip](Common::SignalCensus::Path path) {
+		Common::SignalCensus::OnPath(path);
+		if (Common::SignalCensus::HistogramEnabled()) {
+			Common::SignalCensus::RecordRip(rip, path);
+		}
+		return path != Common::SignalCensus::Path::IllUnhandled;
+	};
+	using Common::SignalCensus::Path;
 	if (auto* trap = FindWideStoreTrapEntry(context.Rip()); trap != nullptr) {
 		const auto trampoline = trap->trampoline.load(std::memory_order_acquire);
 		if (trap->hits.fetch_add(1, std::memory_order_relaxed) + 1 == WideStoreHotHits) {
@@ -1405,14 +1416,20 @@ bool TryEmulate(void* native_context) {
 			     static_cast<unsigned long long>(context.Rip()));
 		}
 		context.SetRip(trampoline);
-		return true;
+		return done(Path::WideStoreTrap);
 	}
-	return TryEmulateReciprocalSquareRoot(context) || TryEmulateMonitorxMwaitx(context) ||
-	       TryEmulateSse4a(context) ||
-#if !defined(__APPLE__)
-	       TryEmulateShaNi(context) ||
+	if (TryEmulateReciprocalSquareRoot(context)) return done(Path::Rsqrt);
+	if (TryEmulateMonitorxMwaitx(context)) return done(Path::MonitorxMwaitx);
+#ifdef KYTY_X64EMU_MUTANT_SSE4A_AS_CPUEXT
+	if (TryEmulateSse4a(context)) return done(Path::CpuExtensions);
+#else
+	if (TryEmulateSse4a(context)) return done(Path::Sse4a);
 #endif
-	       TryEmulateCpuExtensions(context);
+#if !defined(__APPLE__)
+	if (TryEmulateShaNi(context)) return done(Path::ShaNi);
+#endif
+	if (TryEmulateCpuExtensions(context)) return done(Path::CpuExtensions);
+	return done(Path::IllUnhandled);
 }
 
 } // namespace Loader::X64InstructionEmulator

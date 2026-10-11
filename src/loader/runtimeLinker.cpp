@@ -8,6 +8,7 @@
 #include "common/hostException.h"
 #include "common/logging/log.h"
 #include "common/platform/sysDbg.h"
+#include "common/signalCensus.h"
 #include "common/profiler.h"
 #include "common/singleton.h"
 #include "common/stringUtils.h"
@@ -681,12 +682,16 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			case CoreAccess::Read: access = GpuAccess::Read; break;
 			case CoreAccess::Write: access = GpuAccess::Write; break;
 			case CoreAccess::Execute: access = GpuAccess::Execute; break;
-			case CoreAccess::Unknown: return false;
+			case CoreAccess::Unknown:
+				Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultUnhandled);
+				return false;
 		}
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
+			Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultHandled);
 			return true;
 		}
+		Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultUnhandled);
 	}
 	// Report whatever guest context can be read safely before terminating: which guest thread
 	// faulted, the register file, the faulting code bytes and the top of its stack.
@@ -781,7 +786,26 @@ static void GetDynPtr(Elf64* elf, T* out, Elf64_Sxword tag) {
 	}
 }
 
+// S276: module name + offset of a guest RIP for the KYTY_DIAG_SIGCENSUS dumps (runs on the flip thread / at exit, never in a handler).
+static bool SignalCensusResolve(uint64_t rip, char* module, size_t module_size, uint64_t* offset) {
+	auto* program = Common::Singleton<RuntimeLinker>::Instance()->FindProgramByAddr(rip);
+	if (program == nullptr) {
+		return false;
+	}
+	std::snprintf(module, module_size, "%s",
+	              Common::FilenameWithoutDirectory(Common::PathToGenericString(program->file_name)).c_str());
+	*offset = rip - program->base_vaddr;
+	return true;
+}
+
+static void SignalCensusEmit(const char* line) {
+	LOGF("%s", line);
+}
+
 static void KYTY_SYSV_ABI ProgramExitHandler() {
+	if (Common::SignalCensus::HistogramEnabled()) {
+		Common::SignalCensus::DumpHistogram("exit", SignalCensusEmit);
+	}
 	Common::Singleton<RuntimeLinker>::Instance()->StopAllModules();
 
 	LOGF("exit!!!\n");
@@ -1306,6 +1330,8 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 
 		LOGF("stack_addr = %" PRIx64 "\n", reinterpret_cast<uint64_t>(params));
 
+		Common::SignalCensus::SetMainThread();
+		Common::SignalCensus::SetResolver(SignalCensusResolve);
 		RunEntry(entry, params, ProgramExitHandler,
 		         reinterpret_cast<void*>(reinterpret_cast<uintptr_t>(params) - 0x1000u));
 	}
