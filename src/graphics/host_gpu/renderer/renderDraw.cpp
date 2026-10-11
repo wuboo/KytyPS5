@@ -678,6 +678,7 @@ struct DrawIndexBufferSource {
 struct PreparedIndexBuffer {
 	vk::Buffer     buffer = nullptr;
 	vk::DeviceSize offset = 0;
+	vk::DeviceSize size   = 0; // bytes of `buffer` (the descriptor of the VS-store draw must stay inside)
 	vk::IndexType  type   = vk::IndexType::eUint16;
 };
 
@@ -1006,13 +1007,22 @@ static PreparedIndexBuffer PrepareIndexBuffer(CommandBuffer&               buffe
 	prepared.type = source.type;
 	if (source.host_data != nullptr) {
 		auto& stream = buffer.GetContext().GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream);
-		prepared.offset = stream.Copy(source.host_data, source.size, 16);
+		// Reserved to a whole word (the VS-store PS reads uint32 words); the pad is zeroed.
+		const uint64_t reserved = (source.size + 3u) & ~uint64_t {3};
+		auto [mapped, offset]   = stream.Map(reserved, 16);
+		EXIT_IF(mapped == nullptr);
+		std::memcpy(mapped, source.host_data, static_cast<size_t>(source.size));
+		std::memset(mapped + source.size, 0, static_cast<size_t>(reserved - source.size));
+		stream.Commit();
+		prepared.offset = offset;
 		prepared.buffer = stream.Handle();
+		prepared.size   = stream.Size();
 	} else {
 		auto [buffer_ptr, offset] =
 		    buffer.GetContext().GetBufferCache().ObtainBuffer(source.address, source.size, false);
 		prepared.buffer = buffer_ptr->Handle();
 		prepared.offset = offset;
+		prepared.size   = buffer_ptr->Size();
 	}
 	return prepared;
 }
@@ -1399,6 +1409,7 @@ static void CountPvFallback(PvVsStoreFallback fallback) {
 		case PvVsStoreFallback::Ring: FrameTiming::Add(C::PvFallbackRing); break;
 		case PvVsStoreFallback::Param31: FrameTiming::Add(C::PvFallbackParam31); break;
 		case PvVsStoreFallback::Interface: FrameTiming::Add(C::PvFallbackInterface); break;
+		case PvVsStoreFallback::IndexTail: FrameTiming::Add(C::PvFallbackIndexTail); break;
 	}
 }
 
@@ -1460,14 +1471,33 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 	// guest address decides the offset modulo the element size, so an odd one stays on the prototype.
 	const bool index_aligned =
 	    element_size == 0 || index_source.host_data != nullptr || index_source.address % element_size == 0;
+	// The descriptor of the index buffer must stay inside the buffer the cache hands out (its end is not
+	// ours to choose): obtain the binding now (the draw obtains the same range again) and ask whether the
+	// last word the PS reads fits. A host copy is padded to a whole word in PrepareIndexBuffer.
+	bool index_tail_fits = true;
+	if (index_aligned && scannable && index_source.host_data == nullptr) {
+		const auto [index_buffer, index_offset] =
+		    m_context.GetBufferCache().ObtainBuffer(index_source.address, index_source.size, false);
+		index_tail_fits = PvVsStoreIndexDescriptorFor(index_offset, element_size, graphics.StorageMinAlignment(),
+		                                              index_source.size, index_buffer->Size()).tail_fits;
+	}
 	if (!m_pv_vsstore) m_pv_vsstore = std::make_shared<PvVsStoreRuntime>(graphics, m_context.GetCommandScheduler());
 	PvVsStoreRuntime::Region region;
 	const auto decision = DecidePvVsStore(programs->verdict, request, index_aligned, [&](const PvVsStorePlan& plan) {
 		region = m_pv_vsstore->Place(plan.records, programs->stride_vec4);
 		return region.ok;
-	});
+	}, index_tail_fits);
 	if (!decision.use) {
 		CountPvFallback(decision.fallback);
+		// S151: the first draw that stays on the prototype for its topology says which one it was.
+		static std::atomic<bool> topology_logged {false};
+		if (decision.fallback == PvVsStoreFallback::Topology && !topology_logged.exchange(true)) {
+			LOGF("PvVsStore: first topology fallback: topology=%u indexed=%d restart=%d index_size=%u indices=%u "
+			     "VS=0x%016llx PS=0x%016llx\n",
+			     static_cast<uint32_t>(topology), request.indexed ? 1 : 0, primitive_restart_enable ? 1 : 0,
+			     request.index_size, draw.index_count, static_cast<unsigned long long>(state.programs.vertex[0].id),
+			     static_cast<unsigned long long>(state.programs.pixel.id));
+		}
 		return false;
 	}
 	const auto& plan = decision.plan;
@@ -1490,13 +1520,13 @@ static void BindPvVsStore(RenderContext& context, vk::CommandBuffer vk_buffer, c
                           PvVsStoreDrawSetup& setup, const PreparedIndexBuffer& index_binding,
                           const DrawIndexBufferSource& index_source) {
 	auto&      graphics = context.GetGraphics();
-	const auto bind     = PvVsStoreBindIndex(index_binding.offset, setup.index_element_size, graphics.StorageMinAlignment());
+	const auto bind     = PvVsStoreIndexDescriptorFor(index_binding.offset, setup.index_element_size,
+	                                                  graphics.StorageMinAlignment(), index_source.size, index_binding.size);
 	EXIT_IF(!bind.ok || index_binding.buffer == nullptr);
 	setup.draw.first_index = bind.first_index;
-	const uint64_t index_range = PvVsStoreIndexRange(bind.first_index, setup.index_element_size, index_source.size);
 	const vk::DescriptorBufferInfo infos[] {
 	    {setup.region.buffer, 0, setup.region.buffer_size},
-	    {index_binding.buffer, bind.offset, index_range},
+	    {index_binding.buffer, bind.offset, bind.range},
 	};
 	const auto set = context.GetDescriptorHeap().Commit(PvVsStoreSetLayout(graphics));
 	vk::WriteDescriptorSet writes[2] {};
@@ -1525,6 +1555,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	    TryPvVsStoreDraw(draw, state, topology, primitive_restart_enable, emit, index_source, pv_store);
 	if (use_pv_store) {
 		FrameTiming::Add(FrameTiming::Counter::PvVsStoreDraws);
+		if (draw.instance_count > 1) FrameTiming::Add(FrameTiming::Counter::PvVsStoreInstanced);
 	}
 	if (!use_pv_store && state.vertex_info[0].logical_stage == ShaderType::Vertex) {
 		if (const auto* prototype = GetPerVertexPrototypePrograms(

@@ -99,6 +99,8 @@ constexpr const char* kCounterNames[] = {
     "pv_fallback_param31",
     "pv_fallback_ring",
     "pv_fallback_interface",
+    "pv_fallback_index_tail",
+    "pv_vsstore_instanced",
 };
 static_assert(std::size(kCounterNames) == static_cast<size_t>(Counter::Count));
 static_assert(static_cast<uint32_t>(Counter::DispOther) - static_cast<uint32_t>(Counter::DispGuest) ==

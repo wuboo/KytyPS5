@@ -264,6 +264,56 @@ void TestIndexRange() {
 	Check(PvVsStoreIndexRange(3, 4, 12) == 24, "32-bit unchanged");
 }
 
+// S151: the index descriptor stays inside the buffer. The test mutants (KYTY_PVVS_TEST_MUTANT_*) are seams
+// of this file only: they call the production functions with the check switched off.
+#if defined(KYTY_PVVS_TEST_MUTANT_NO_CLAMP)
+constexpr bool kClamp = false;
+#else
+constexpr bool kClamp = true;
+#endif
+#if defined(KYTY_PVVS_TEST_MUTANT_NO_TAIL_CHECK)
+constexpr bool kCheckTail = false;
+#else
+constexpr bool kCheckTail = true;
+#endif
+
+void TestIndexDescriptor() {
+	// 16-bit, 5 indices (10 bytes) at the very end of a 10-byte buffer: the last word (bytes 8..11) does not fit
+	auto d = PvVsStoreIndexDescriptorFor(0, 2, 16, 10, 10, kClamp);
+	Check(d.ok && !d.tail_fits, "16-bit odd end at the buffer end: the last word does not fit");
+	Check(d.offset + d.range <= 10, "descriptor range never passes the buffer end");
+	// the same draw with a 12-byte buffer fits and is rounded to a whole word
+	d = PvVsStoreIndexDescriptorFor(0, 2, 16, 10, 12, kClamp);
+	Check(d.ok && d.tail_fits && d.range == 12 && d.offset + d.range <= 12, "word-padded buffer: range 12");
+	// aligned-down offset: byte 36 of a 64-byte buffer, 24 bytes, alignment 16 -> offset 32, first_index 1 (32-bit)
+	d = PvVsStoreIndexDescriptorFor(36, 4, 16, 24, 64, kClamp);
+	Check(d.ok && d.tail_fits && d.offset == 32 && d.first_index == 1 && d.range == 28, "aligned-down offset keeps the delta in the range");
+	// the delta moves the end: 36..60 inside 60 bytes would need offset 32 + 28 = 60 (fits), a 59-byte buffer does not
+	d = PvVsStoreIndexDescriptorFor(36, 4, 16, 24, 59, kClamp);
+	Check(d.ok && !d.tail_fits && d.offset + d.range <= 59, "range reaching past the buffer is clamped and reported");
+	// a buffer smaller than the offset
+	d = PvVsStoreIndexDescriptorFor(32, 4, 16, 8, 16, kClamp);
+	Check(d.ok && !d.tail_fits && d.range == 0, "buffer ends before the aligned offset");
+	// 32-bit, exact fit
+	d = PvVsStoreIndexDescriptorFor(0, 4, 16, 12, 12, kClamp);
+	Check(d.ok && d.tail_fits && d.range == 12, "32-bit exact fit");
+	Check(!PvVsStoreIndexDescriptorFor(0, 1, 16, 12, 12, kClamp).ok, "bad element size");
+}
+
+void TestIndexTailDecision() {
+	const auto place_ok = [](const PvVsStorePlan&) { return true; };
+	PvVsStoreRequest r;
+	r.enabled = r.triangle_list = r.indexed = r.range_known = true;
+	r.index_size = 2; r.range_first = 0; r.range_end = 12; r.index_count = 12; r.instance_count = 1; r.record_stride_vec4 = 2;
+	auto d = DecidePvVsStore(PvVsStoreInterfaceVerdict::Use, r, true, place_ok, false, kCheckTail);
+	Check(!d.use && d.fallback == PvVsStoreFallback::IndexTail, "index tail that does not fit stays on the prototype (pv_fallback_index_tail)");
+	int asked = 0;
+	(void)DecidePvVsStore(PvVsStoreInterfaceVerdict::Use, r, true, [&](const PvVsStorePlan&) { asked++; return true; }, false, kCheckTail);
+	Check(asked == 0, "no ring region is reserved for a draw rejected by the index tail");
+	d = DecidePvVsStore(PvVsStoreInterfaceVerdict::Use, r, true, place_ok, true, kCheckTail);
+	Check(d.use, "a fitting tail is taken");
+}
+
 void TestSlabs() {
 	const auto never = [](uint64_t) { return false; };
 	const auto done  = [](uint64_t) { return true; };
@@ -358,6 +408,8 @@ int main() {
 	TestPushBlock();
 	TestIndexBinding();
 	TestIndexRange();
+	TestIndexDescriptor();
+	TestIndexTailDecision();
 	TestSlabs();
 	TestFallbackClass();
 	TestDecision();

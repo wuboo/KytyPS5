@@ -457,6 +457,16 @@ foreach(mutant IN ITEMS FIRST_THIRD NO_INSTANCE NO_FIRST HALF_SWAP NO_FIRST_INDE
 	target_compile_definitions(per_vertex_vsstore_mutant_${mutant_lower}_tests PRIVATE KYTY_PVVS_MUTANT_${mutant}=1)
 endforeach()
 
+# S151: seam mutants of the index descriptor (clamp / tail check switched off in the test file), each must be caught.
+foreach(mutant IN ITEMS NO_CLAMP NO_TAIL_CHECK)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(per_vertex_vsstore_test_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/PerVertexVsStoreTests.cpp"
+	)
+	target_include_directories(per_vertex_vsstore_test_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(per_vertex_vsstore_test_mutant_${mutant_lower}_tests PRIVATE KYTY_PVVS_TEST_MUTANT_${mutant}=1)
+endforeach()
+
 add_kyty_full_emulator_test(per_vertex_gpu_execution_tests "${KYTY_TESTS_DIR}/PerVertexGpuExecutionTests.cpp")
 # S150: GPU harness of KYTY_PV_VSSTORE (needs MoltenVK through SDL_VULKAN_LIBRARY, opt-in like the one above).
 # `per_vertex_vsstore_gpu_tests --dump` prints the emitted SPIR-V without a GPU. The mutant (corner 0/2 swapped in the PS emitter) must fail it.
@@ -958,7 +968,7 @@ if(BUILD_TESTING)
 			frame_dump_flips_mutant_keep_zero frame_dump_flips_mutant_off_by_one
 			per_vertex_unique_mutant_no_instance per_vertex_unique_mutant_no_first per_vertex_unique_mutant_no_ratio
 			per_vertex_unique_mutant_writes_ok per_vertex_unique_mutant_dropped_ok per_vertex_unique_mutant_no_dropped
-			per_vertex_vsstore_mutant_first_third per_vertex_vsstore_mutant_no_instance per_vertex_vsstore_mutant_no_first per_vertex_vsstore_mutant_half_swap per_vertex_vsstore_mutant_no_first_index per_vertex_vsstore_mutant_no_vertex_offset per_vertex_vsstore_mutant_dropped_ok per_vertex_vsstore_mutant_reuse_region per_vertex_vsstore_mutant_param31_ok per_vertex_vsstore_mutant_push_no_first_instance per_vertex_vsstore_mutant_index_no_adjust per_vertex_vsstore_mutant_pool_reuse_busy per_vertex_vsstore_mutant_no_instanced_class per_vertex_vsstore_mutant_no_touch per_vertex_vsstore_mutant_align_ignored per_vertex_vsstore_mutant_ring_ignored per_vertex_vsstore_mutant_push_always)
+			per_vertex_vsstore_mutant_first_third per_vertex_vsstore_mutant_no_instance per_vertex_vsstore_mutant_no_first per_vertex_vsstore_mutant_half_swap per_vertex_vsstore_mutant_no_first_index per_vertex_vsstore_mutant_no_vertex_offset per_vertex_vsstore_mutant_dropped_ok per_vertex_vsstore_mutant_reuse_region per_vertex_vsstore_mutant_param31_ok per_vertex_vsstore_mutant_push_no_first_instance per_vertex_vsstore_mutant_index_no_adjust per_vertex_vsstore_mutant_pool_reuse_busy per_vertex_vsstore_mutant_no_instanced_class per_vertex_vsstore_mutant_no_touch per_vertex_vsstore_mutant_align_ignored per_vertex_vsstore_mutant_ring_ignored per_vertex_vsstore_mutant_push_always per_vertex_vsstore_test_mutant_no_clamp per_vertex_vsstore_test_mutant_no_tail_check)
 		add_test(NAME ${mutant_test} COMMAND $<TARGET_FILE:${mutant_test}_tests>)
 		set_tests_properties(${mutant_test} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
@@ -1106,6 +1116,8 @@ if(BUILD_TESTING)
 		per_vertex_vsstore_mutant_align_ignored_tests
 		per_vertex_vsstore_mutant_ring_ignored_tests
 		per_vertex_vsstore_mutant_push_always_tests
+		per_vertex_vsstore_test_mutant_no_clamp_tests
+		per_vertex_vsstore_test_mutant_no_tail_check_tests
 		cp_counters_tests
 		cp_counters_mutant_native_swap_tests
 		cp_counters_mutant_no_clamp_tests
