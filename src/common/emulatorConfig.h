@@ -1,6 +1,7 @@
 #ifndef KYTY_COMMON_EMULATOR_CONFIG_H_
 #define KYTY_COMMON_EMULATOR_CONFIG_H_
 
+#include "common/amdCpuMode.h"
 #include "common/common.h"
 
 #include <cstddef>
@@ -66,8 +67,8 @@ struct ConfigOptions {
 	bool                   hide_cursor_enabled         = false;
 	bool                   splash_enabled              = true;
 	bool                   vr_enabled                  = false;
-	bool                   amd_cpu_enabled             = false;
 	bool                   network_connected           = false;
+	std::optional<Common::AmdCpuMode> amd_cpu_mode;
 	uint32_t               vblank_frequency            = 60;
 	uint32_t               console_language            = DEFAULT_CONSOLE_LANGUAGE;
 	bool                   vulkan_validation_enabled   = false;
@@ -123,8 +124,8 @@ bool     FullscreenEnabled();
 bool     HdrEnabled();
 bool     HideCursorEnabled();
 bool     VrEnabled();
-bool     AmdCpuEnabled();
 bool     IsNetworkConnected();
+Common::AmdCpuMode GetAmdCpuMode();
 uint32_t GetVblankFrequency();
 uint32_t GetConsoleLanguage();
 bool     VulkanValidationEnabled();

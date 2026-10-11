@@ -584,6 +584,34 @@ add_executable(env_audit_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(env_audit_tests PRIVATE ${inc_headers})
 
+add_executable(amd_cpu_mode_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/AmdCpuModeTests.cpp")
+target_include_directories(amd_cpu_mode_tests PRIVATE ${inc_headers})
+# Mutants (each must be caught, WILL_FAIL): the header is copied with one edit into the build tree, so the sources carry no test hooks.
+# SSE4A_IGNORED / RDPID_IGNORED / CLWB_IGNORED: auto does not look at that CPUID bit; CLI_IGNORED: the flag loses to the variable;
+# ZERO_UNPARSED: KYTY_AMD_CPU=0 not understood; OFF_PATCHES: --no-amd-cpu still patches; BAD_ENV_OFF: unparsable variable disables;
+# ENV_UNKNOWN: KYTY_AMD_CPU missing from the known variables.
+function(add_amd_cpu_mode_mutant name header from to)
+	string(TOLOWER ${name} name_lower)
+	set(mutant_dir "${CMAKE_CURRENT_BINARY_DIR}/amd_cpu_mutants/${name_lower}")
+	file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/${header}" text)
+	string(REPLACE "${from}" "${to}" edited "${text}")
+	if(edited STREQUAL text)
+		message(FATAL_ERROR "amd_cpu_mode mutant ${name}: pattern not found in ${header}")
+	endif()
+	file(WRITE "${mutant_dir}/${header}" "${edited}")
+	add_executable(amd_cpu_mode_mutant_${name_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/AmdCpuModeTests.cpp")
+	target_include_directories(amd_cpu_mode_mutant_${name_lower}_tests PRIVATE ${inc_headers})
+	target_include_directories(amd_cpu_mode_mutant_${name_lower}_tests BEFORE PRIVATE "${mutant_dir}")
+endfunction()
+add_amd_cpu_mode_mutant(SSE4A_IGNORED common/amdCpuMode.h "add(host.sse4a, \"SSE4a\");" "add(true, \"SSE4a\");")
+add_amd_cpu_mode_mutant(RDPID_IGNORED common/amdCpuMode.h "add(host.rdpid, \"RDPID\");" "add(true, \"RDPID\");")
+add_amd_cpu_mode_mutant(CLWB_IGNORED common/amdCpuMode.h "add(host.clwb, \"CLWB\");" "add(true, \"CLWB\");")
+add_amd_cpu_mode_mutant(CLI_IGNORED common/amdCpuMode.h "if (command_line) return *command_line;" "")
+add_amd_cpu_mode_mutant(ZERO_UNPARSED common/amdCpuMode.h "text == \"off\" || text == \"0\"" "text == \"off\"")
+add_amd_cpu_mode_mutant(OFF_PATCHES common/amdCpuMode.h "return {false, \"forced off" "return {true, \"forced off")
+add_amd_cpu_mode_mutant(BAD_ENV_OFF common/amdCpuMode.h "	return AmdCpuMode::Auto;\n}\n\ninline AmdCpuDecision" "	return AmdCpuMode::Off;\n}\n\ninline AmdCpuDecision")
+add_amd_cpu_mode_mutant(ENV_UNKNOWN common/knownEnv.h "\"KYTY_AMD_CPU\", " "")
+
 add_executable(control_file_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ControlFileTests.cpp")
 target_include_directories(control_file_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): numbers are read leniently; `until` is ignored.
@@ -943,6 +971,23 @@ if(BUILD_TESTING)
 	add_test(NAME env_audit COMMAND $<TARGET_FILE:env_audit_tests>)
 	add_test(NAME env_audit_mutant COMMAND $<TARGET_FILE:env_audit_mutant_tests>)
 	set_tests_properties(env_audit_mutant PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME amd_cpu_mode COMMAND $<TARGET_FILE:amd_cpu_mode_tests>)
+	add_test(NAME amd_cpu_mode_mutant_sse4a_ignored COMMAND $<TARGET_FILE:amd_cpu_mode_mutant_sse4a_ignored_tests>)
+	set_tests_properties(amd_cpu_mode_mutant_sse4a_ignored PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME amd_cpu_mode_mutant_rdpid_ignored COMMAND $<TARGET_FILE:amd_cpu_mode_mutant_rdpid_ignored_tests>)
+	set_tests_properties(amd_cpu_mode_mutant_rdpid_ignored PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME amd_cpu_mode_mutant_clwb_ignored COMMAND $<TARGET_FILE:amd_cpu_mode_mutant_clwb_ignored_tests>)
+	set_tests_properties(amd_cpu_mode_mutant_clwb_ignored PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME amd_cpu_mode_mutant_cli_ignored COMMAND $<TARGET_FILE:amd_cpu_mode_mutant_cli_ignored_tests>)
+	set_tests_properties(amd_cpu_mode_mutant_cli_ignored PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME amd_cpu_mode_mutant_zero_unparsed COMMAND $<TARGET_FILE:amd_cpu_mode_mutant_zero_unparsed_tests>)
+	set_tests_properties(amd_cpu_mode_mutant_zero_unparsed PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME amd_cpu_mode_mutant_off_patches COMMAND $<TARGET_FILE:amd_cpu_mode_mutant_off_patches_tests>)
+	set_tests_properties(amd_cpu_mode_mutant_off_patches PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME amd_cpu_mode_mutant_bad_env_off COMMAND $<TARGET_FILE:amd_cpu_mode_mutant_bad_env_off_tests>)
+	set_tests_properties(amd_cpu_mode_mutant_bad_env_off PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME amd_cpu_mode_mutant_env_unknown COMMAND $<TARGET_FILE:amd_cpu_mode_mutant_env_unknown_tests>)
+	set_tests_properties(amd_cpu_mode_mutant_env_unknown PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME control_file COMMAND $<TARGET_FILE:control_file_tests>)
 	add_test(NAME cs_trace COMMAND $<TARGET_FILE:cs_trace_tests>)
 	add_test(NAME rt_dump COMMAND $<TARGET_FILE:rt_dump_tests>)
@@ -1070,6 +1115,15 @@ if(BUILD_TESTING)
 		resource_materialization_tests
 		env_audit_tests
 		env_audit_mutant_tests
+		amd_cpu_mode_tests
+		amd_cpu_mode_mutant_sse4a_ignored_tests
+		amd_cpu_mode_mutant_rdpid_ignored_tests
+		amd_cpu_mode_mutant_clwb_ignored_tests
+		amd_cpu_mode_mutant_cli_ignored_tests
+		amd_cpu_mode_mutant_zero_unparsed_tests
+		amd_cpu_mode_mutant_off_patches_tests
+		amd_cpu_mode_mutant_bad_env_off_tests
+		amd_cpu_mode_mutant_env_unknown_tests
 		control_file_tests
 		control_file_mutant_lax_numbers_tests
 		control_file_mutant_no_until_tests
