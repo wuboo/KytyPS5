@@ -283,6 +283,17 @@ constexpr PvVsStoreIndexBinding PvVsStoreBindIndex(uint64_t byte_offset, uint32_
 #endif
 }
 
+// Descriptor range of the index buffer: the PS reads it as uint32 words, so a range that ends inside a
+// word (16-bit indices, odd end) makes the last word out of range and the last index reads wrong.
+constexpr uint64_t PvVsStoreIndexRange(uint32_t first_index, uint32_t element_size, uint64_t source_size) {
+	const uint64_t bytes = uint64_t {first_index} * element_size + source_size;
+#if defined(KYTY_PVVS_MUTANT_INDEX_RANGE_NO_ROUND)
+	return bytes;
+#else
+	return (bytes + 3u) & ~uint64_t {3};
+#endif
+}
+
 // Cap slabs of the renderer. A region lives until the command buffer of its draw has finished on the
 // GPU, so a slab is recycled only after the tick it was last used in is free; regions inside a slab
 // are never reused (PvVsStoreRing). The buffers themselves are the renderer's; this is the bookkeeping.

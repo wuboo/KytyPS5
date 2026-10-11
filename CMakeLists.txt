@@ -448,7 +448,7 @@ add_executable(per_vertex_vsstore_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PerVertexVsStoreTests.cpp"
 )
 target_include_directories(per_vertex_vsstore_tests PRIVATE ${inc_headers})
-foreach(mutant IN ITEMS FIRST_THIRD NO_INSTANCE NO_FIRST HALF_SWAP NO_FIRST_INDEX NO_VERTEX_OFFSET DROPPED_OK REUSE_REGION PARAM31_OK PUSH_NO_FIRST_INSTANCE INDEX_NO_ADJUST POOL_REUSE_BUSY NO_INSTANCED_CLASS NO_TOUCH ALIGN_IGNORED RING_IGNORED PUSH_ALWAYS)
+foreach(mutant IN ITEMS FIRST_THIRD NO_INSTANCE NO_FIRST HALF_SWAP NO_FIRST_INDEX NO_VERTEX_OFFSET DROPPED_OK REUSE_REGION PARAM31_OK PUSH_NO_FIRST_INSTANCE INDEX_NO_ADJUST POOL_REUSE_BUSY NO_INSTANCED_CLASS NO_TOUCH ALIGN_IGNORED RING_IGNORED PUSH_ALWAYS INDEX_RANGE_NO_ROUND)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(per_vertex_vsstore_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/PerVertexVsStoreTests.cpp"
@@ -463,6 +463,8 @@ add_kyty_full_emulator_test(per_vertex_gpu_execution_tests "${KYTY_TESTS_DIR}/Pe
 add_kyty_full_emulator_test(per_vertex_vsstore_gpu_tests "${KYTY_TESTS_DIR}/PerVertexVsStoreGpuTests.cpp")
 add_kyty_full_emulator_test(per_vertex_vsstore_gpu_mutant_first_third_tests "${KYTY_TESTS_DIR}/PerVertexVsStoreGpuTests.cpp")
 target_compile_definitions(per_vertex_vsstore_gpu_mutant_first_third_tests PRIVATE KYTY_PVVS_MUTANT_FIRST_THIRD=1)
+add_kyty_full_emulator_test(per_vertex_vsstore_gpu_mutant_range_tests "${KYTY_TESTS_DIR}/PerVertexVsStoreGpuTests.cpp")
+target_compile_definitions(per_vertex_vsstore_gpu_mutant_range_tests PRIVATE KYTY_PVVS_MUTANT_INDEX_RANGE_NO_ROUND=1)
 # Keeps device-address buffers alive until queued MoltenVK work completes (the game lost the device
 # otherwise). Needs a real Vulkan driver through SDL_VULKAN_LIBRARY, so it stays opt-in.
 add_executable(device_address_lifetime_gpu_tests EXCLUDE_FROM_ALL

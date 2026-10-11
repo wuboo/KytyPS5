@@ -256,6 +256,14 @@ void TestIndexBinding() {
 	Check(!PvVsStoreBindIndex(256, 1, 16).ok && !PvVsStoreBindIndex(256, 2, 12).ok, "bad size / alignment");
 }
 
+void TestIndexRange() {
+	Check(PvVsStoreIndexRange(0, 2, 24) == 24, "aligned 16-bit range");
+	Check(PvVsStoreIndexRange(1, 2, 24) == 28, "16-bit odd start: 26 bytes rounded to a whole word");
+	Check(PvVsStoreIndexRange(3, 2, 18) == 24, "16-bit: 24 bytes");
+	Check(PvVsStoreIndexRange(0, 2, 6) == 8, "16-bit, 3 indices");
+	Check(PvVsStoreIndexRange(3, 4, 12) == 24, "32-bit unchanged");
+}
+
 void TestSlabs() {
 	const auto never = [](uint64_t) { return false; };
 	const auto done  = [](uint64_t) { return true; };
@@ -349,6 +357,7 @@ int main() {
 	TestInterface();
 	TestPushBlock();
 	TestIndexBinding();
+	TestIndexRange();
 	TestSlabs();
 	TestFallbackClass();
 	TestDecision();
