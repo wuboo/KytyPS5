@@ -294,6 +294,33 @@ constexpr uint64_t PvVsStoreIndexRange(uint32_t first_index, uint32_t element_si
 #endif
 }
 
+// What the draw binds for the index buffer: the aligned descriptor offset, first_index, and the range
+// clamped so that offset + range never exceeds the buffer (a descriptor past the end is invalid). When the
+// buffer ends inside the last word the PS reads, that word does not fit: `tail_fits` is false and the
+// draw stays on the prototype (pv_fallback_index_tail). `clamp` is a seam for the tests' mutant.
+struct PvVsStoreIndexDescriptor {
+	uint64_t offset      = 0;
+	uint32_t first_index = 0;
+	uint64_t range       = 0;
+	bool     ok          = false; // the offset can be bound at all
+	bool     tail_fits   = false; // the whole last word is inside the buffer
+};
+constexpr PvVsStoreIndexDescriptor PvVsStoreIndexDescriptorFor(uint64_t byte_offset, uint32_t element_size,
+                                                               uint64_t alignment, uint64_t source_size,
+                                                               uint64_t buffer_size, bool clamp = true) {
+	PvVsStoreIndexDescriptor out;
+	const auto               bind = PvVsStoreBindIndex(byte_offset, element_size, alignment);
+	if (!bind.ok) return out;
+	out.ok          = true;
+	out.offset      = bind.offset;
+	out.first_index = bind.first_index;
+	const uint64_t wanted    = PvVsStoreIndexRange(bind.first_index, element_size, source_size);
+	const uint64_t available = buffer_size > bind.offset ? buffer_size - bind.offset : 0;
+	out.range                = clamp && wanted > available ? available : wanted;
+	out.tail_fits            = !clamp || wanted <= available;
+	return out;
+}
+
 // Cap slabs of the renderer. A region lives until the command buffer of its draw has finished on the
 // GPU, so a slab is recycled only after the tick it was last used in is free; regions inside a slab
 // are never reused (PvVsStoreRing). The buffers themselves are the renderer's; this is the bookkeeping.
@@ -373,7 +400,7 @@ private:
 
 // Which pv_fallback_* counter a draw that stays on the prototype is counted in. Instanced draws that
 // fail for a size reason (range / region too large / no ring room) are counted as instanced.
-enum class PvVsStoreFallback : uint32_t { None, Topology, Range, Instanced, Ring, Param31, Interface };
+enum class PvVsStoreFallback : uint32_t { None, Topology, Range, Instanced, Ring, Param31, Interface, IndexTail };
 
 constexpr PvVsStoreFallback ClassifyPvVsStoreFallback(PvVsStoreVerdict verdict, uint32_t instance_count) {
 	using V = PvVsStoreVerdict;
@@ -423,7 +450,8 @@ struct PvVsStoreDecision {
 
 template <class Place>
 PvVsStoreDecision DecidePvVsStore(PvVsStoreInterfaceVerdict interface_verdict, const PvVsStoreRequest& request,
-                                  bool index_aligned, Place&& place) {
+                                  bool index_aligned, Place&& place,
+                                  bool index_tail_fits = true, bool check_tail = true) {
 	PvVsStoreDecision decision;
 	if (interface_verdict != PvVsStoreInterfaceVerdict::Use) {
 		decision.fallback = ClassifyPvVsStoreFallback(interface_verdict);
@@ -440,6 +468,10 @@ PvVsStoreDecision DecidePvVsStore(PvVsStoreInterfaceVerdict interface_verdict, c
 		return decision;
 	}
 #endif
+	if (check_tail && !index_tail_fits) { // check before the ring is touched; check_tail=false is the tests' mutant seam
+		decision.fallback = PvVsStoreFallback::IndexTail;
+		return decision;
+	}
 #if !defined(KYTY_PVVS_MUTANT_RING_IGNORED)
 	if (!place(decision.plan)) {
 		decision.fallback = ClassifyPvVsStoreFallback(PvVsStoreVerdict::RingFull, request.instance_count);

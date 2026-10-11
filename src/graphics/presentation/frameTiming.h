@@ -102,6 +102,8 @@ enum class Counter : uint32_t {
 	PvFallbackParam31,   // VS or PS uses host location 31 (carries the instance index)
 	PvFallbackRing,      // no cap slab free (all in flight on the GPU)
 	PvFallbackInterface, // the PS reads a per-vertex location the VS does not write
+	PvFallbackIndexTail, // S151: the index buffer ends inside the last word the PS reads (descriptor would pass the buffer end)
+	PvVsStoreInstanced,  // S151: VS-store draws with instance_count > 1
 	Count,
 };
 
