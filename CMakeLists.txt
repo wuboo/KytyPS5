@@ -414,6 +414,9 @@ add_kyty_full_emulator_test(shader_cfg_tests "${KYTY_TESTS_DIR}/shaderCfgTests.c
 # S149: emitter mutant of the VS-store PS (corner 0 and 2 swapped); TestPvVsStoreEmission must catch it (WILL_FAIL).
 add_kyty_full_emulator_test(shader_cfg_pv_vsstore_mutant_first_third_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
 target_compile_definitions(shader_cfg_pv_vsstore_mutant_first_third_tests PRIVATE KYTY_PVVS_MUTANT_FIRST_THIRD=1)
+# S150: the dynamic record stride must come from push dword 7.
+add_kyty_full_emulator_test(shader_cfg_pv_vsstore_mutant_stride_dword_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
+target_compile_definitions(shader_cfg_pv_vsstore_mutant_stride_dword_tests PRIVATE KYTY_PVVS_MUTANT_STRIDE_DWORD=1)
 
 add_executable(per_vertex_transform_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PerVertexTransformTests.cpp"
@@ -445,7 +448,7 @@ add_executable(per_vertex_vsstore_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PerVertexVsStoreTests.cpp"
 )
 target_include_directories(per_vertex_vsstore_tests PRIVATE ${inc_headers})
-foreach(mutant IN ITEMS FIRST_THIRD NO_INSTANCE NO_FIRST HALF_SWAP NO_FIRST_INDEX NO_VERTEX_OFFSET DROPPED_OK REUSE_REGION)
+foreach(mutant IN ITEMS FIRST_THIRD NO_INSTANCE NO_FIRST HALF_SWAP NO_FIRST_INDEX NO_VERTEX_OFFSET DROPPED_OK REUSE_REGION PARAM31_OK PUSH_NO_FIRST_INSTANCE INDEX_NO_ADJUST POOL_REUSE_BUSY)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(per_vertex_vsstore_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/PerVertexVsStoreTests.cpp"
@@ -891,6 +894,8 @@ if(BUILD_TESTING)
 	# The mutant aborts (Check -> abort), which ctest counts as a crash even with WILL_FAIL: require its failure message instead.
 	add_test(NAME shader_cfg_pv_vsstore_mutant_first_third
 	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pv_vsstore_mutant_first_third_tests> 2>&1 | grep -q 'first/third swapped'")
+	add_test(NAME shader_cfg_pv_vsstore_mutant_stride_dword
+	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pv_vsstore_mutant_stride_dword_tests> 2>&1 | grep -q 'not read from push dword 7'")
 	add_test(NAME per_vertex_transform COMMAND $<TARGET_FILE:per_vertex_transform_tests>)
 	add_test(NAME per_vertex_unique COMMAND $<TARGET_FILE:per_vertex_unique_tests>)
 	add_test(NAME per_vertex_vsstore COMMAND $<TARGET_FILE:per_vertex_vsstore_tests>)
@@ -946,7 +951,7 @@ if(BUILD_TESTING)
 			frame_dump_flips_mutant_keep_zero frame_dump_flips_mutant_off_by_one
 			per_vertex_unique_mutant_no_instance per_vertex_unique_mutant_no_first per_vertex_unique_mutant_no_ratio
 			per_vertex_unique_mutant_writes_ok per_vertex_unique_mutant_dropped_ok per_vertex_unique_mutant_no_dropped
-			per_vertex_vsstore_mutant_first_third per_vertex_vsstore_mutant_no_instance per_vertex_vsstore_mutant_no_first per_vertex_vsstore_mutant_half_swap per_vertex_vsstore_mutant_no_first_index per_vertex_vsstore_mutant_no_vertex_offset per_vertex_vsstore_mutant_dropped_ok per_vertex_vsstore_mutant_reuse_region)
+			per_vertex_vsstore_mutant_first_third per_vertex_vsstore_mutant_no_instance per_vertex_vsstore_mutant_no_first per_vertex_vsstore_mutant_half_swap per_vertex_vsstore_mutant_no_first_index per_vertex_vsstore_mutant_no_vertex_offset per_vertex_vsstore_mutant_dropped_ok per_vertex_vsstore_mutant_reuse_region per_vertex_vsstore_mutant_param31_ok per_vertex_vsstore_mutant_push_no_first_instance per_vertex_vsstore_mutant_index_no_adjust per_vertex_vsstore_mutant_pool_reuse_busy)
 		add_test(NAME ${mutant_test} COMMAND $<TARGET_FILE:${mutant_test}_tests>)
 		set_tests_properties(${mutant_test} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
@@ -1019,6 +1024,7 @@ if(BUILD_TESTING)
 		ime_dialog_tests
 		shader_cfg_tests
 		shader_cfg_pv_vsstore_mutant_first_third_tests
+		shader_cfg_pv_vsstore_mutant_stride_dword_tests
 		scalar_provenance_tests
 		image_page_table_tests
 		memory_tracker_tests
@@ -1084,6 +1090,10 @@ if(BUILD_TESTING)
 		per_vertex_vsstore_mutant_no_vertex_offset_tests
 		per_vertex_vsstore_mutant_dropped_ok_tests
 		per_vertex_vsstore_mutant_reuse_region_tests
+		per_vertex_vsstore_mutant_param31_ok_tests
+		per_vertex_vsstore_mutant_push_no_first_instance_tests
+		per_vertex_vsstore_mutant_index_no_adjust_tests
+		per_vertex_vsstore_mutant_pool_reuse_busy_tests
 		cp_counters_tests
 		cp_counters_mutant_native_swap_tests
 		cp_counters_mutant_no_clamp_tests

@@ -218,6 +218,64 @@ void TestSlots() {
 	Check(slots.size() == 3 && slots.at(2) == 0 && slots.at(7) == 1 && slots.at(30) == 2, "dense slots by location");
 }
 
+// S150: interface of a VS/PS pair, push block, index binding, slab pool.
+void TestInterface() {
+	using V = PvVsStoreInterfaceVerdict;
+	Check(PvVsStoreStrideFor(0) == 0 && PvVsStoreStrideFor(1) == 1 && PvVsStoreStrideFor(0b10100) == 5 &&
+	          PvVsStoreStrideFor(1u << 30) == 31,
+	      "stride is the highest written location + 1");
+	Check(ClassifyPvVsStoreInterface(0b111, 0b101) == V::Use, "PS subset of the VS outputs");
+	Check(ClassifyPvVsStoreInterface(0b111, 0b1000) == V::MissingOutput, "PS reads a location the VS lacks");
+	Check(ClassifyPvVsStoreInterface(0b111, 0) == V::NoPerVertex, "no per-vertex input");
+	Check(ClassifyPvVsStoreInterface(1u << 31 | 1u, 1u) == V::Param31, "VS writes location 31");
+	Check(ClassifyPvVsStoreInterface(0b11, 1u << 31) == V::Param31, "PS reads location 31");
+}
+
+void TestPushBlock() {
+	PvVsStoreDraw draw;
+	draw.base = 11; draw.span = 22; draw.first = 33; draw.first_instance = 44;
+	draw.first_index = 55; draw.vertex_offset = -66; draw.index32 = false;
+	const auto block = PvVsStorePushBlock(draw, 7);
+	Check(block[kPvPushBase] == 11 && block[kPvPushSpan] == 22 && block[kPvPushFirst] == 33 &&
+	          block[kPvPushFirstInstance] == 44 && block[kPvPushFirstIndex] == 55 &&
+	          block[kPvPushVertexOffset] == static_cast<uint32_t>(-66) && block[kPvPushIndex32] == 0 &&
+	          block[kPvPushStride] == 7,
+	      "push block dwords");
+	draw.index32 = true;
+	Check(PvVsStorePushBlock(draw, 7)[kPvPushIndex32] == 1, "32-bit flag");
+}
+
+void TestIndexBinding() {
+	auto b = PvVsStoreBindIndex(256, 2, 16);
+	Check(b.ok && b.offset == 256 && b.first_index == 0, "aligned offset needs no adjustment");
+	b = PvVsStoreBindIndex(270, 2, 16);
+	Check(b.ok && b.offset == 256 && b.first_index == 7, "16-bit: 14 bytes = 7 elements");
+	b = PvVsStoreBindIndex(268, 4, 16);
+	Check(b.ok && b.offset == 256 && b.first_index == 3, "32-bit: 12 bytes = 3 elements");
+	Check(!PvVsStoreBindIndex(257, 2, 16).ok, "misaligned to the element size");
+	Check(!PvVsStoreBindIndex(256, 1, 16).ok && !PvVsStoreBindIndex(256, 2, 12).ok, "bad size / alignment");
+}
+
+void TestSlabs() {
+	const auto never = [](uint64_t) { return false; };
+	const auto done  = [](uint64_t) { return true; };
+	PvVsStoreSlabs slabs(100, 2);
+	auto a = slabs.Place(60, 5, never);
+	Check(a.ok && a.created && a.slab == 0 && a.base == 0, "first region creates slab 0");
+	auto b = slabs.Place(30, 5, never);
+	Check(b.ok && !b.created && b.slab == 0 && b.base == 60, "same tick shares the slab, regions do not overlap");
+	auto c = slabs.Place(60, 5, never);
+	Check(c.ok && c.created && c.slab == 1 && c.base == 0, "a full slab moves to a new one");
+	auto d = slabs.Place(60, 5, never);
+	Check(!d.ok, "no free slab: the caller falls back");
+	auto e = slabs.Place(10, 6, never);
+	Check(!e.ok, "slabs of an unfinished tick are not recycled");
+	auto f = slabs.Place(10, 7, done);
+	Check(f.ok && !f.created && f.base == 0, "a finished tick recycles a slab from the start");
+	Check(!slabs.Place(101, 8, done).ok, "region larger than a slab");
+	Check(slabs.Size() == 2, "slab count capped");
+}
+
 } // namespace
 
 int main() {
@@ -225,6 +283,10 @@ int main() {
 	TestPlan();
 	TestRing();
 	TestSlots();
+	TestInterface();
+	TestPushBlock();
+	TestIndexBinding();
+	TestSlabs();
 	if (g_failures != 0) {
 		std::fprintf(stderr, "per_vertex_vsstore_tests: %d failure(s)\n", g_failures);
 		return EXIT_FAILURE;

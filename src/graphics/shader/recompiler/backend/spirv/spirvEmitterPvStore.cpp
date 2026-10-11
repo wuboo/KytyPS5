@@ -48,9 +48,16 @@ uint32_t Record(EmitterState& state, uint32_t instance, uint32_t vertex) {
 
 uint32_t CapComponentPointer(EmitterState& state, uint32_t record, uint32_t slot,
                              uint32_t component) {
-	const auto element = U(state, spv::OpIAdd,
-	                       U(state, spv::OpIMul, record, C(state, state.pv_store->record_stride_vec4)),
-	                       C(state, slot));
+	// S150: stride 0 = the stride comes with the draw (the two variants are emitted independently).
+#if defined(KYTY_PVVS_MUTANT_STRIDE_DWORD)
+	constexpr uint32_t kStrideDword = kPvPushSpan;
+#else
+	constexpr uint32_t kStrideDword = kPvPushStride;
+#endif
+	const auto stride = state.pv_store->record_stride_vec4 != 0
+	                        ? C(state, state.pv_store->record_stride_vec4)
+	                        : Push(state, kStrideDword);
+	const auto element = U(state, spv::OpIAdd, U(state, spv::OpIMul, record, stride), C(state, slot));
 	const auto pointer = state.builder.AllocateId();
 	if (component == UINT32_MAX) {
 		state.builder.AddFunction(
@@ -66,6 +73,12 @@ uint32_t CapComponentPointer(EmitterState& state, uint32_t record, uint32_t slot
 }
 
 uint32_t SlotOf(const EmitterState& state, uint32_t host_location) {
+	if (state.pv_store->record_stride_vec4 == 0) {
+		// Dynamic stride: slot == host location (location 31 carries the instance index).
+		EXIT_IF(host_location >= kPvVsStoreInstanceLocation);
+		if (state.pv_store->location_mask != nullptr) *state.pv_store->location_mask |= 1u << host_location;
+		return host_location;
+	}
 	const auto slot = state.pv_store->parameter_slots.find(host_location);
 	EXIT_IF(slot == state.pv_store->parameter_slots.end() ||
 	        slot->second >= state.pv_store->record_stride_vec4);
