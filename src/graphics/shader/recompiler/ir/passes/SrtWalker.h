@@ -31,6 +31,8 @@ public:
 	SrtRuntime ObservedRuntime();
 	// True when the runtime's ordinary reads copy host memory directly.
 	static bool ReadsHostMemory(const SrtRuntime& runtime);
+	// The ranges of an observed runtime whose ordinary reads use mapped memory directly.
+	static std::vector<std::pair<uint64_t, uint64_t>>* DirectRanges(const SrtRuntime& runtime);
 
 private:
 	static bool ReadStrict(void* userdata, uint64_t address, std::span<uint32_t> values);
