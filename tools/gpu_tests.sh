@@ -35,7 +35,16 @@ if [ -z "$variant" ] || [ ! -f "$variant/libMoltenVK.dylib" ]; then
 	exit 2
 fi
 
-lock=${GPU_LOCK:-$root/../kbench-results/GPU_LOCK}
+if [ -z "${GPU_LOCK:-}" ]; then # nearest kbench-results/ above the repo or worktree
+	dir=$root
+	while [ "$dir" != "/" ] && [ ! -d "$dir/kbench-results" ]; do dir=$(dirname "$dir"); done
+	GPU_LOCK=$dir/kbench-results/GPU_LOCK
+fi
+lock=$GPU_LOCK
+if [ ! -d "$(dirname "$lock")" ]; then
+	echo "no directory for $lock (set GPU_LOCK)" >&2
+	exit 2
+fi
 if [ -e "$lock" ]; then
 	echo "BUSY: $lock exists ($(head -1 "$lock" 2>/dev/null))"
 	exit 75

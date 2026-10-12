@@ -32,7 +32,14 @@ import time
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-GPU_LOCK = Path(os.environ.get("GPU_LOCK", REPO.parent / "kbench-results" / "GPU_LOCK"))
+def _default_lock() -> Path:
+    for d in [REPO, *REPO.parents]:  # nearest kbench-results/ above the repo or worktree
+        if (d / "kbench-results").is_dir():
+            return d / "kbench-results" / "GPU_LOCK"
+    return REPO.parent / "kbench-results" / "GPU_LOCK"
+
+
+GPU_LOCK = Path(os.environ.get("GPU_LOCK") or _default_lock())
 GPU_SHARE = Path(os.environ.get("GPU_SHARE_SLOT2", GPU_LOCK.parent / "GPU_SHARE-slot2"))
 MIN_FREE_GB = 15
 
