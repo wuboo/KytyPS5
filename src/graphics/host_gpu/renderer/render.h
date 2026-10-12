@@ -341,7 +341,7 @@ private:
 	};
 	PendingPrototypeBatch m_prototype_batch;
 	struct TextureDescriptionEntry {
-		ShaderRecompiler::IR::ImageResource   resource;
+		ShaderRecompiler::IR::ImageResource   inputs;
 		ShaderRecompiler::IR::DescriptorValue value;
 		TextureDescription                    description;
 	};
