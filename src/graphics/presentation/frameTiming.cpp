@@ -102,6 +102,11 @@ constexpr const char* kCounterNames[] = {
     "pv_fallback_interface",
     "pv_fallback_index_tail",
     "pv_vsstore_instanced",
+    "depth_ro_elided",
+    "depth_ro_reject_dirty",
+    "depth_ro_reject_not_subset",
+    "depth_ro_reject_layout",
+    "depth_ro_bad_elide",
 };
 static_assert(std::size(kCounterNames) == static_cast<size_t>(Counter::Count));
 static_assert(static_cast<uint32_t>(Counter::DispOther) - static_cast<uint32_t>(Counter::DispGuest) ==

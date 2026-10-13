@@ -173,6 +173,7 @@ bool GraphicContext::CreateImage(const vk::ImageCreateInfo& image_info, VulkanIm
 	image.flags      = image_info.flags;
 	image.state      = {.layout = image_info.initialLayout};
 	image.subresource_states.clear();
+	image.dirty_since_barrier = true;
 
 	return true;
 }
