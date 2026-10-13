@@ -132,7 +132,8 @@ enum class InstructionReplacement {
 	ExtractQ,
 	InsertQ,
 	ReadProcessorId,
-	CacheLineWriteBack
+	CacheLineWriteBack,
+	RosettaCompare
 };
 
 struct InstructionRewrite {
@@ -149,12 +150,15 @@ InstructionPatchCounts& ReplacementCounts(GuestInstructionPatchResult& result,
 		case InstructionReplacement::ExtractQ: return result.extrq;
 		case InstructionReplacement::InsertQ: return result.insertq;
 		case InstructionReplacement::ReadProcessorId: return result.rdpid;
+		case InstructionReplacement::RosettaCompare: return result.rosettacmp;
 		default: return result.clwb;
 	}
 }
 
 bool UsesInstructionTrap(InstructionReplacement replacement, bool trap_replacements) {
+	// The Rosetta compare fix is native only: there is nothing to trap, an unrelocatable site stays as it is.
 	return replacement != InstructionReplacement::None &&
+	       replacement != InstructionReplacement::RosettaCompare &&
 	       (trap_replacements || replacement == InstructionReplacement::InsertQ ||
 	        replacement == InstructionReplacement::ReadProcessorId);
 }
@@ -922,6 +926,49 @@ void GenerateExtractQ(const DecodedCodeInstruction& decoded, Xbyak::CodeGenerato
 	generator.lea(rsp, ptr[rsp + GuestRedZoneSize]);
 }
 
+// Rosetta 2 computes a wrong result for VCMPSS with a predicate other than 0, 1, 2, 11, 27 and for the legacy
+// CMPSS with a predicate 3..7 when the result register is then overwritten by a full VEX load (shadPS4 #5297).
+// Every such compare is fixed, not only those followed by the load: the fix is a self move and costs nothing.
+bool IsRosettaCompareSite(const DecodedCodeInstruction& decoded) {
+	const auto& instruction = decoded.instruction;
+	const bool  vex         = instruction.mnemonic == ZYDIS_MNEMONIC_VCMPSS &&
+	                  instruction.encoding == ZYDIS_INSTRUCTION_ENCODING_VEX;
+	const bool legacy = instruction.mnemonic == ZYDIS_MNEMONIC_CMPSS &&
+	                    instruction.encoding == ZYDIS_INSTRUCTION_ENCODING_LEGACY;
+	if (!vex && !legacy) {
+		return false;
+	}
+	const size_t count = instruction.operand_count_visible;
+	if (count != (vex ? 4u : 3u) || decoded.operands[0].type != ZYDIS_OPERAND_TYPE_REGISTER ||
+	    decoded.operands[0].reg.value < ZYDIS_REGISTER_XMM0 ||
+	    decoded.operands[0].reg.value > ZYDIS_REGISTER_XMM15 ||
+	    decoded.operands[count - 1].type != ZYDIS_OPERAND_TYPE_IMMEDIATE) {
+		return false;
+	}
+	const u64 predicate = decoded.operands[count - 1].imm.value.u;
+	if (legacy) {
+		return predicate >= 3 && predicate <= 7;
+	}
+	const u64 low = predicate & 0x1f;
+	return low != 0 && low != 1 && low != 2 && low != 11 && low != 27;
+}
+
+// The compare itself, then a move of the result register onto itself. The VEX form zeroes the upper YMM half
+// exactly as VCMPSS (VEX.128) does, the legacy form leaves it as CMPSS does.
+bool GenerateRosettaCompare(const DecodedCodeInstruction& decoded, Xbyak::CodeGenerator& generator,
+                            s64 stack_adjustment) {
+	if (!EncodeRelocatedInstruction(decoded, generator, stack_adjustment)) {
+		return false;
+	}
+	const Xbyak::Xmm destination(decoded.operands[0].reg.value - ZYDIS_REGISTER_XMM0);
+	if (decoded.instruction.encoding == ZYDIS_INSTRUCTION_ENCODING_VEX) {
+		generator.vmovaps(destination, destination);
+	} else {
+		generator.movaps(destination, destination);
+	}
+	return true;
+}
+
 void CollectAmdInstructions(const DecodedFunction&                   function,
                             std::map<uintptr_t, InstructionRewrite>& rewrite_sites,
                             GuestInstructionPatchResult&             result,
@@ -936,6 +983,8 @@ void CollectAmdInstructions(const DecodedFunction&                   function,
 		    instruction.raw.vex.offset == 0 && decoded.operands[0].size == 128 &&
 		    decoded.operands[1].type == ZYDIS_OPERAND_TYPE_REGISTER) {
 			replacement = InstructionReplacement::ReciprocalSquareRoot;
+		} else if ((amd_kinds & Common::AmdPatchRosettaCmp) != 0 && IsRosettaCompareSite(decoded)) {
+			replacement = InstructionReplacement::RosettaCompare;
 		} else if ((amd_kinds & Common::AmdPatchSse4a) != 0 && !host_features.sse4a &&
 		           IsSupportedBitFieldInstruction(decoded)) {
 			replacement = instruction.mnemonic == ZYDIS_MNEMONIC_EXTRQ
@@ -994,6 +1043,9 @@ void TrapUnrelocatedInstructions(const PatchModule& module, const DecodedFunctio
 		    module.patched.contains(reinterpret_cast<u8*>(address))) {
 			continue;
 		}
+		if (rewrite.replacement == InstructionReplacement::RosettaCompare) {
+			continue;
+		}
 		const auto& decoded = function.instructions.at(address);
 		if (NeedsTrapRedZoneProtection(decoded)) {
 			if (rewrite.replacement != InstructionReplacement::ReciprocalSquareRoot) {
@@ -1046,7 +1098,8 @@ void RelocateGuestInstructions(PatchModule* module, const DecodedFunction& funct
 				const bool protect_red_zone =
 				    (rewrite != rewrite_sites.end() && rewrite->second.protect_red_zone &&
 				     !protected_indirect_call) ||
-				    ((uses_trap || replacement == InstructionReplacement::CacheLineWriteBack) &&
+				    ((uses_trap || replacement == InstructionReplacement::CacheLineWriteBack ||
+				     replacement == InstructionReplacement::RosettaCompare) &&
 				     NeedsTrapRedZoneProtection(*decoded));
 				if (protect_red_zone) {
 					generator.lea(rsp, ptr[rsp - GuestRedZoneSize]);
@@ -1057,6 +1110,9 @@ void RelocateGuestInstructions(PatchModule* module, const DecodedFunction& funct
 						                                  protect_red_zone ? GuestRedZoneSize : 0);
 					} else if (replacement == InstructionReplacement::ReciprocalSquareRoot) {
 						GenerateReciprocalSquareRoot(*decoded, generator);
+					} else if (replacement == InstructionReplacement::RosettaCompare) {
+						encoded = GenerateRosettaCompare(*decoded, generator,
+						                                 protect_red_zone ? GuestRedZoneSize : 0);
 					} else if (replacement == InstructionReplacement::ExtractQ) {
 						GenerateExtractQ(*decoded, generator);
 					} else {

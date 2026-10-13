@@ -87,6 +87,23 @@ int main() {
 	Check(AmdPatchKindsName(AmdPatchAll) == "all" && AmdPatchKindsName(0) == "none" &&
 	          AmdPatchKindsName(AmdPatchSse4a | AmdPatchRsqrt) == "sse4a,rsqrt",
 	      "kinds name");
+	// rosettacmp (S318): only by name, and added to the default set only under Rosetta.
+	Check(ParseAmdPatchKinds("rosettacmp") == AmdPatchRosettaCmp, "rosettacmp alone");
+	Check(ParseAmdPatchKinds("sse4a,rosettacmp") == (AmdPatchSse4a | AmdPatchRosettaCmp), "rosettacmp in a list");
+	Check((AmdPatchAll & AmdPatchRosettaCmp) == 0, "rosettacmp is not in all");
+	Check(ResolveAmdPatchKinds(nullptr, true) == (AmdPatchAll | AmdPatchRosettaCmp) &&
+	          ResolveAmdPatchKinds("auto", true) == (AmdPatchAll | AmdPatchRosettaCmp) &&
+	          ResolveAmdPatchKinds("all", true) == (AmdPatchAll | AmdPatchRosettaCmp) &&
+	          ResolveAmdPatchKinds("bogus", true) == (AmdPatchAll | AmdPatchRosettaCmp),
+	      "default set under Rosetta");
+	Check(ResolveAmdPatchKinds(nullptr, false) == AmdPatchAll && ResolveAmdPatchKinds("all", false) == AmdPatchAll,
+	      "default set off Rosetta");
+	Check(ResolveAmdPatchKinds("sse4a", true) == AmdPatchSse4a && ResolveAmdPatchKinds("none", true) == 0u &&
+	          ResolveAmdPatchKinds("sse4a,rsqrt,cpuext", true) == AmdPatchAll,
+	      "an explicit list is used as written");
+	Check(AmdPatchKindsName(AmdPatchAll | AmdPatchRosettaCmp) == "sse4a,rsqrt,cpuext,rosettacmp" &&
+	          AmdPatchKindsName(AmdPatchRosettaCmp) == "rosettacmp",
+	      "kinds name with rosettacmp");
 	Check(std::ranges::find(Common::kKnownKytyEnv, std::string_view("KYTY_AMD_PATCH")) !=
 	          std::end(Common::kKnownKytyEnv),
 	      "KYTY_AMD_PATCH unknown to the env audit");

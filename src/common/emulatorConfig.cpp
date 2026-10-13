@@ -115,7 +115,7 @@ Common::AmdCpuMode GetAmdCpuMode() {
 }
 
 uint32_t GetAmdPatchKinds() {
-	return Common::ResolveAmdPatchKinds(std::getenv("KYTY_AMD_PATCH"));
+	return Common::ResolveAmdPatchKinds(std::getenv("KYTY_AMD_PATCH"), Common::IsRunningUnderRosetta());
 }
 
 uint32_t GetVblankFrequency() {

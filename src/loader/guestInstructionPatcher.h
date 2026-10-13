@@ -51,6 +51,7 @@ struct GuestInstructionPatchResult {
 	InstructionPatchCounts insertq;
 	InstructionPatchCounts rdpid;
 	InstructionPatchCounts clwb;
+	InstructionPatchCounts rosettacmp;
 };
 
 void RegisterGuestInstructionPatchModule(void* module_ptr, uint64_t module_size,

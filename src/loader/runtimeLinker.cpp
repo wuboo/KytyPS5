@@ -1873,6 +1873,7 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			totals.insertq += result.insertq;
 			totals.rdpid += result.rdpid;
 			totals.clwb += result.clwb;
+			totals.rosettacmp += result.rosettacmp;
 			if (protect_memory_faults) {
 				LOGF("Windows guest red-zone patching: %s, functions=%" PRIu64 ", red_zone=%" PRIu64
 				     ", memory=%" PRIu64 ", patched=%" PRIu64 ", short=%" PRIu64 ", stack=%" PRIu64
@@ -1893,7 +1894,8 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			                                  {"EXTRQ", totals.extrq},
 			                                  {"INSERTQ", totals.insertq},
 			                                  {"RDPID", totals.rdpid},
-			                                  {"CLWB", totals.clwb}}) {
+			                                  {"CLWB", totals.clwb},
+			                                  {"ROSETTACMP", totals.rosettacmp}}) {
 				combined += counts;
 				if (!details.empty()) details += "; ";
 				details += fmt::format("{}: native={}, trapped={}, skipped={}", name, counts.native,
