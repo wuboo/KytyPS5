@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/renderer/image/tiler.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
+#include "graphics/presentation/depthRoUnion.h"
 #include "graphics/presentation/frameTiming.h"
 #include "kernel/memory.h"
 
@@ -228,8 +229,59 @@ void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destina
 		destination_stage |=
 		    vk::PipelineStageFlagBits2::eAllGraphics | vk::PipelineStageFlagBits2::eComputeShader;
 	}
+	const bool pass_open = m_scheduler.RenderingOpen();
+	// S316 (KYTY_DEPTH_RO_UNION=1|shadow): a depth image in a read-only layout, attached to the open pass, needs no barrier for an
+	// access within the union already visible while nothing has written it since the last barrier (depthRoUnion.h).
+	const auto ro_mode  = DepthRoUnion::CurrentMode();
+	const bool ro_track = ro_mode != DepthRoUnion::Mode::Off && info.IsDepth();
+	bool                  ro_whole = false;
+	DepthRoUnion::Decision ro_decision {};
+	const auto old_dirty = backing.dirty_since_barrier;
+	if (ro_track) {
+		ro_whole = backing.subresource_states.empty() &&
+		           (!range || (range->base_level == 0 && range->level_count >= info.resources.levels &&
+		                       range->base_layer == 0 && range->layer_count >= info.resources.layers));
+		DepthRoUnion::Request ro {};
+		ro.layout_old = static_cast<uint32_t>(backing.state.layout);
+		ro.layout_new = static_cast<uint32_t>(destination_layout);
+		ro.access_old = static_cast<uint64_t>(static_cast<VkAccessFlags2>(backing.state.access_mask));
+		ro.access_new = static_cast<uint64_t>(static_cast<VkAccessFlags2>(destination_access));
+		ro.pass_open  = pass_open;
+		ro.whole      = ro_whole;
+		ro.dirty      = old_dirty || DepthRoUnion::Writes(ro.layout_new, ro.access_new);
+		for (const auto& view: views) {
+			ro.attached = ro.attached || m_scheduler.RenderingAttaches(view.view);
+		}
+		constexpr uint64_t repeated = DepthRoUnion::kShaderWrite | DepthRoUnion::kTransferWrite | DepthRoUnion::kMemoryWrite;
+		// Only requests that GetBarriers would answer with a barrier are decided and counted.
+		const bool would_barrier = ro.layout_old != ro.layout_new || ro.access_old != ro.access_new || (ro.access_old & repeated) != 0;
+		if (would_barrier) {
+			ro_decision = DepthRoUnion::Decide(ro);
+			switch (ro_decision.reason) {
+				case DepthRoUnion::Reason::Elided: FrameTiming::Add(FrameTiming::Counter::DepthRoElided); break;
+				case DepthRoUnion::Reason::Dirty: FrameTiming::Add(FrameTiming::Counter::DepthRoRejectDirty); break;
+				case DepthRoUnion::Reason::NotSubset: FrameTiming::Add(FrameTiming::Counter::DepthRoRejectNotSubset); break;
+				case DepthRoUnion::Reason::Layout: FrameTiming::Add(FrameTiming::Counter::DepthRoRejectLayout); break;
+				default: break;
+			}
+			if (DepthRoUnion::BadElide(ro, ro_decision.action)) FrameTiming::Add(FrameTiming::Counter::DepthRoBadElide);
+		}
+		if (ro_mode == DepthRoUnion::Mode::On && ro_decision.action == DepthRoUnion::Action::Elide) {
+			// Not dirty and no write in the request (Decide), so the flag stays as it is; the state stays the union.
+			return;
+		}
+	}
+	const auto ro_old_access = backing.state.access_mask;
 	const auto barriers =
 	    GetBarriers(destination_layout, destination_access, destination_stage, range);
+	if (ro_track) {
+		backing.dirty_since_barrier = DepthRoUnion::DirtyAfter(old_dirty, !barriers.empty() && ro_whole,
+		                                                       static_cast<uint32_t>(destination_layout),
+		                                                       static_cast<uint64_t>(static_cast<VkAccessFlags2>(destination_access)));
+		if (ro_mode == DepthRoUnion::Mode::On && !barriers.empty() && ro_decision.reason == DepthRoUnion::Reason::NotSubset) {
+			backing.state.access_mask |= ro_old_access;
+		}
+	}
 	if (barriers.empty()) {
 		return;
 	}

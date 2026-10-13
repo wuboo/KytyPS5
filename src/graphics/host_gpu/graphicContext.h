@@ -150,6 +150,7 @@ struct VulkanImage {
 	vk::Image                     image      = nullptr;
 	VulkanImageState              state;
 	std::vector<VulkanImageState> subresource_states;
+	bool                          dirty_since_barrier = true; // S316: written since the last recorded whole-image barrier (KYTY_DEPTH_RO_UNION)
 	VmaAllocation                 allocation = nullptr;
 };
 

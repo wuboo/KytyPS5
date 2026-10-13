@@ -730,6 +730,16 @@ foreach(mutant IN ITEMS NATIVE_SWAP NO_CLAMP FLAG_ANY SKIP_IGNORED)
 	target_compile_definitions(cp_counters_mutant_${mutant_lower}_tests PRIVATE KYTY_CPCOUNTERS_MUTANT_${mutant}=1)
 endforeach()
 
+add_executable(depth_ro_union_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/DepthRoUnionTests.cpp")
+target_include_directories(depth_ro_union_tests PRIVATE ${inc_headers})
+# S316 mutants (each must be caught, WILL_FAIL): dirty ignored; GENERAL / feedback loop counted as read-only.
+foreach(mutant IN ITEMS IGNORE_DIRTY ALLOW_GENERAL)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(depth_ro_union_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/DepthRoUnionTests.cpp")
+	target_include_directories(depth_ro_union_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(depth_ro_union_mutant_${mutant_lower}_tests PRIVATE KYTY_DEPTH_RO_UNION_MUTANT_${mutant}=1)
+endforeach()
+
 add_executable(frame_dump_flips_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/FrameDumpFlipsTests.cpp")
 target_include_directories(frame_dump_flips_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): zero kept as a flip; match off by one.
@@ -996,6 +1006,7 @@ if(BUILD_TESTING)
 	add_test(NAME min_lod_view COMMAND $<TARGET_FILE:min_lod_view_tests>)
 	add_test(NAME apple_drop COMMAND $<TARGET_FILE:apple_drop_tests>)
 	add_test(NAME cp_counters COMMAND $<TARGET_FILE:cp_counters_tests>)
+	add_test(NAME depth_ro_union COMMAND $<TARGET_FILE:depth_ro_union_tests>)
 	add_test(NAME frame_dump_flips COMMAND $<TARGET_FILE:frame_dump_flips_tests>)
 	add_test(NAME signal_census COMMAND $<TARGET_FILE:signal_census_tests>)
 	add_test(NAME bc7 COMMAND $<TARGET_FILE:bc7_tests>)
@@ -1022,6 +1033,7 @@ if(BUILD_TESTING)
 			apple_drop_mutant_invert_clip apple_drop_mutant_always_bounds apple_drop_mutant_native_counts apple_drop_mutant_bias_abs
 			cp_counters_mutant_native_swap cp_counters_mutant_no_clamp cp_counters_mutant_flag_any cp_counters_mutant_skip_ignored
 			frame_dump_flips_mutant_keep_zero frame_dump_flips_mutant_off_by_one
+			gpu_truth_mutant_sum gpu_truth_mutant_no_extend gpu_truth_mutant_no_clamp gpu_truth_mutant_bucket_edge gpu_truth_mutant_site_swap gpu_truth_mutant_cause_swap gpu_truth_mutant_reopen_any gpu_truth_mutant_load_cleared gpu_truth_mutant_every_run gpu_truth_mutant_site_line gpu_truth_mutant_site_no_bytes transit_hoist_mutant_write_elided transit_hoist_mutant_unseen_access depth_layout_mutant_feedback depth_layout_mutant_skip_any submit_causes_mutant_bucket submit_causes_mutant_nowait submit_causes_mutant_lifo submit_causes_mutant_sticky barrier_causes_mutant_order barrier_causes_mutant_waw_attach barrier_causes_mutant_relation depth_ro_union_mutant_ignore_dirty depth_ro_union_mutant_allow_general
 			signal_census_mutant_sig_swap signal_census_mutant_main_always signal_census_mutant_top_unsorted signal_census_mutant_hist_count_once signal_census_mutant_no_page_clamp signal_census_mutant_csv_shifted
 			per_vertex_unique_mutant_no_instance per_vertex_unique_mutant_no_first per_vertex_unique_mutant_no_ratio
 			per_vertex_unique_mutant_writes_ok per_vertex_unique_mutant_dropped_ok per_vertex_unique_mutant_no_dropped
@@ -1185,6 +1197,9 @@ if(BUILD_TESTING)
 		per_vertex_vsstore_test_mutant_no_clamp_tests
 		per_vertex_vsstore_test_mutant_no_tail_check_tests
 		cp_counters_tests
+		depth_ro_union_tests
+		depth_ro_union_mutant_ignore_dirty_tests
+		depth_ro_union_mutant_allow_general_tests
 		cp_counters_mutant_native_swap_tests
 		cp_counters_mutant_no_clamp_tests
 		cp_counters_mutant_flag_any_tests
