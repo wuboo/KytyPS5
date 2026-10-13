@@ -1352,6 +1352,48 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 	add_bitexact_mutant(EMU_INSERTQ_CONTROLS_LOW x64InstructionEmulator.cpp "source[prefix == 0x66 ? 0 : 1]" "source[0]" "" "")
 	add_bitexact_mutant(EMU_INDEX_SHIFT9 x64InstructionEmulator.cpp "static_cast<uint8_t>(controls >> 8u)" "static_cast<uint8_t>(controls >> 9u)" "" "")
 	add_bitexact_mutant(EMU_INSERT_SWAPPED x64InstructionEmulator.cpp "dest[0] = InsertBitField(dest[0], source[0], length, index);" "dest[0] = InsertBitField(source[0], dest[0], length, index);" "" "")
+	# S318: the patcher kind rosettacmp (Rosetta 2 VCMPSS/CMPSS bug), executed on the CPU and checked structurally.
+	add_executable(rosetta_cmp_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/rosettaCmpTests.cpp"
+		"${KYTY_SOURCE_DIR}/loader/x64InstructionEmulator.cpp"
+		"${KYTY_SOURCE_DIR}/loader/guestInstructionPatcher.cpp"
+	)
+	target_link_libraries(rosetta_cmp_tests common fmt::fmt Zydis::Zydis xbyak::xbyak)
+	target_include_directories(rosetta_cmp_tests PRIVATE ${inc_headers})
+	if(BUILD_TESTING)
+		add_test(NAME rosetta_cmp COMMAND $<TARGET_FILE:rosetta_cmp_tests>)
+		set_tests_properties(rosetta_cmp PROPERTIES TIMEOUT 60)
+		add_dependencies(kyty_tests rosetta_cmp_tests)
+	endif()
+	# S318 mutants of the patcher for rosetta_cmp (each must fail, WILL_FAIL; the test exits with 1 on a failed check):
+	#   NO_SELF_MOVE (the fix is dropped), ALL_PREDICATES (every VCMPSS is rewritten), LEGACY_FROM_0 (CMPSS 0..2 too),
+	#   KIND_IGNORED (KYTY_AMD_PATCH selection ignored), LEGACY_VEX_MOVE (a VEX move after the legacy CMPSS).
+	function(add_rosettacmp_mutant name from to)
+		string(TOLOWER ${name} name_lower)
+		set(mutant_dir "${CMAKE_CURRENT_BINARY_DIR}/rosettacmp_mutants/${name_lower}")
+		file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/loader/guestInstructionPatcher.cpp" text)
+		string(REPLACE "${from}" "${to}" edited "${text}")
+		if(edited STREQUAL text)
+			message(FATAL_ERROR "rosettacmp mutant ${name}: pattern not found")
+		endif()
+		file(WRITE "${mutant_dir}/guestInstructionPatcher.cpp" "${edited}")
+		add_executable(rosetta_cmp_mutant_${name_lower}_tests EXCLUDE_FROM_ALL
+			"${KYTY_TESTS_DIR}/rosettaCmpTests.cpp"
+			"${KYTY_SOURCE_DIR}/loader/x64InstructionEmulator.cpp"
+			"${mutant_dir}/guestInstructionPatcher.cpp")
+		target_link_libraries(rosetta_cmp_mutant_${name_lower}_tests common fmt::fmt Zydis::Zydis xbyak::xbyak)
+		target_include_directories(rosetta_cmp_mutant_${name_lower}_tests PRIVATE ${inc_headers})
+		if(BUILD_TESTING)
+			add_test(NAME rosetta_cmp_mutant_${name_lower} COMMAND $<TARGET_FILE:rosetta_cmp_mutant_${name_lower}_tests>)
+			set_tests_properties(rosetta_cmp_mutant_${name_lower} PROPERTIES TIMEOUT 60 WILL_FAIL TRUE)
+			add_dependencies(kyty_tests rosetta_cmp_mutant_${name_lower}_tests)
+		endif()
+	endfunction()
+	add_rosettacmp_mutant(NO_SELF_MOVE "generator.vmovaps(destination, destination);" "")
+	add_rosettacmp_mutant(ALL_PREDICATES "return low != 0 && low != 1 && low != 2 && low != 11 && low != 27;" "return true;")
+	add_rosettacmp_mutant(LEGACY_FROM_0 "return predicate >= 3 && predicate <= 7;" "return predicate <= 7;")
+	add_rosettacmp_mutant(KIND_IGNORED "(amd_kinds & Common::AmdPatchRosettaCmp) != 0 && IsRosettaCompareSite(decoded)" "IsRosettaCompareSite(decoded)")
+	add_rosettacmp_mutant(LEGACY_VEX_MOVE "generator.movaps(destination, destination);" "generator.vmovaps(destination, destination);")
 	add_executable(macos_wide_store_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/macosWideStoreTests.cpp"
 		"${KYTY_SOURCE_DIR}/loader/x64InstructionEmulator.cpp"
