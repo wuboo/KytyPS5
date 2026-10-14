@@ -542,6 +542,26 @@ add_executable(lru_cache_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/LruCacheTests.cpp"
 )
 target_include_directories(lru_cache_tests PRIVATE ${inc_headers})
+add_executable(eager_submit_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/EagerSubmitTests.cpp"
+)
+target_include_directories(eager_submit_tests PRIVATE ${inc_headers})
+# S326 mutants: split with an open pass; split while the GPU is busy; no age threshold. All must be caught (WILL_FAIL).
+add_executable(eager_submit_mutant_pass_open_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/EagerSubmitTests.cpp"
+)
+target_include_directories(eager_submit_mutant_pass_open_tests PRIVATE ${inc_headers})
+target_compile_definitions(eager_submit_mutant_pass_open_tests PRIVATE KYTY_EAGER_MUTANT_PASS_OPEN=1)
+add_executable(eager_submit_mutant_busy_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/EagerSubmitTests.cpp"
+)
+target_include_directories(eager_submit_mutant_busy_tests PRIVATE ${inc_headers})
+target_compile_definitions(eager_submit_mutant_busy_tests PRIVATE KYTY_EAGER_MUTANT_BUSY=1)
+add_executable(eager_submit_mutant_no_age_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/EagerSubmitTests.cpp"
+)
+target_include_directories(eager_submit_mutant_no_age_tests PRIVATE ${inc_headers})
+target_compile_definitions(eager_submit_mutant_no_age_tests PRIVATE KYTY_EAGER_MUTANT_NO_AGE=1)
 add_executable(pad_script_parser_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PadScriptParserTests.cpp"
 )
@@ -1006,6 +1026,11 @@ if(BUILD_TESTING)
 	add_test(NAME vdecsw COMMAND $<TARGET_FILE:vdecsw_tests>)
 	add_test(NAME bit_array COMMAND $<TARGET_FILE:bit_array_tests>)
 	add_test(NAME lru_cache COMMAND $<TARGET_FILE:lru_cache_tests>)
+	add_test(NAME eager_submit COMMAND $<TARGET_FILE:eager_submit_tests>)
+	add_test(NAME eager_submit_mutant_pass_open COMMAND $<TARGET_FILE:eager_submit_mutant_pass_open_tests>)
+	add_test(NAME eager_submit_mutant_busy COMMAND $<TARGET_FILE:eager_submit_mutant_busy_tests>)
+	add_test(NAME eager_submit_mutant_no_age COMMAND $<TARGET_FILE:eager_submit_mutant_no_age_tests>)
+	set_tests_properties(eager_submit_mutant_pass_open eager_submit_mutant_busy eager_submit_mutant_no_age PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME pad_script_parser COMMAND $<TARGET_FILE:pad_script_parser_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
@@ -1159,6 +1184,10 @@ if(BUILD_TESTING)
 		vdecsw_tests
 		bit_array_tests
 		lru_cache_tests
+		eager_submit_tests
+		eager_submit_mutant_pass_open_tests
+		eager_submit_mutant_busy_tests
+		eager_submit_mutant_no_age_tests
 		push_descriptor_policy_tests
 		pad_script_parser_tests
 		shader_vertex_metadata_tests

@@ -251,6 +251,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	CpPhases::Scope dispatch_phase(CpPhases::Phase::Dispatch);
 	EXIT_IF(buffer.IsInvalid());
 	FrameTiming::Add(FrameTiming::Counter::Dispatches);
+	m_context.GetCommandScheduler().MaybeEagerSplit();
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& ctx    = buffer.GetRegisters();
 	auto& sh_ctx = buffer.GetShaders();
@@ -466,6 +467,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	EXIT_IF(buffer.IsInvalid() || args_addr == 0 || (args_addr & 3u) != 0 ||
 	        (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0);
 	FrameTiming::Add(FrameTiming::Counter::Dispatches);
+	m_context.GetCommandScheduler().MaybeEagerSplit();
 	m_context.GetCommandScheduler().PopPendingOperations();
 	buffer.SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::DispatchIndirect), submit_id,
 	                    static_cast<uint32_t>(args_addr), static_cast<uint32_t>(args_addr >> 32u),

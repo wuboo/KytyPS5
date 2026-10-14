@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/host_gpu/renderer/eagerSubmit.h"
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -233,25 +234,30 @@ void CommandScheduler::Flush(SubmitInfo& submit) {
 }
 
 void CommandScheduler::FlushAndWait() {
+	NoteDrainBegin();
 	const auto tick = Submit();
 	m_master.Wait(tick);
 	BeginNext();
+	NoteDrainEnd();
 }
 
 void CommandScheduler::Finish() {
 	CheckActive();
+	NoteDrainBegin();
 	FrameTiming::Add(FrameTiming::Counter::Finishes);
 	if (!m_command.IsInvalid()) {
 		Submit();
 	}
 	m_master.Wait(CurrentTick() - 1);
 	BeginNext();
+	NoteDrainEnd();
 	PopPendingOperations();
 }
 
 void CommandScheduler::Wait(uint64_t tick) {
 	EXIT_IF(tick > CurrentTick());
 	if (tick == CurrentTick()) {
+		NoteDrainBegin();
 		CheckActive();
 		// A stream-buffer wrap can wait while a draw is being prepared through a reference to
 		// Current(). The wrapper stays stable while its pooled Vulkan buffer is retired. Deferred
@@ -260,6 +266,7 @@ void CommandScheduler::Wait(uint64_t tick) {
 		EXIT_IF(submitted_tick != tick);
 		m_master.Wait(tick);
 		BeginNext();
+		NoteDrainEnd();
 	} else {
 		m_master.Wait(tick);
 	}
@@ -391,6 +398,7 @@ CommandBuffer& CommandScheduler::Current() {
 CommandBuffer& CommandScheduler::BeginCommand() {
 	EXIT_IF(!m_command.IsInvalid());
 	m_command.m_buffer = m_command_pool.Commit();
+	m_open_since_ns    = FrameTiming::SteadyNowNs();
 	m_command.Begin();
 	m_dynamic_state.Invalidate();
 	return m_command;
@@ -409,6 +417,10 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	}
 	if (!m_command.m_recorded) {
 		FrameTiming::Add(FrameTiming::Counter::EmptySubmits);
+	} else if (m_seg_first_pending && m_drain_depth == 0) {
+		FrameTiming::Add(FrameTiming::Counter::SegDrainToFirstSubmitNs,
+		                 FrameTiming::ElapsedNs(m_seg_start_ns, FrameTiming::SteadyNowNs()));
+		m_seg_first_pending = false;
 	}
 	m_flush_requests = 0; // this submit carries everything a pending flush would
 	m_command.End();
@@ -527,6 +539,46 @@ void CommandScheduler::DrainAsyncSubmits() {
 	}
 	std::unique_lock lock(m_submit_mutex);
 	m_submit_cv.wait(lock, [&] { return m_submit_jobs.empty() && !m_submit_busy; });
+}
+
+void CommandScheduler::NoteDrainBegin() {
+	if (m_drain_depth++ != 0) return;
+	if (m_seg_start_ns == 0) return;
+	const uint64_t length = FrameTiming::ElapsedNs(m_seg_start_ns, FrameTiming::SteadyNowNs());
+	const uint64_t waited = FrameTiming::Get(FrameTiming::Counter::CpWaitGuestNs) +
+	                        FrameTiming::Get(FrameTiming::Counter::CpWaitGpuNs) - m_seg_wait_base;
+	FrameTiming::Add(FrameTiming::Counter::SegN);
+	FrameTiming::Add(FrameTiming::Counter::SegRecordNs, length > waited ? length - waited : 0);
+}
+
+void CommandScheduler::NoteDrainEnd() {
+	if (m_drain_depth == 0 || --m_drain_depth != 0) return;
+	m_seg_start_ns      = FrameTiming::SteadyNowNs();
+	m_seg_first_pending = true;
+	m_seg_wait_base     = FrameTiming::Get(FrameTiming::Counter::CpWaitGuestNs) + FrameTiming::Get(FrameTiming::Counter::CpWaitGpuNs);
+}
+
+void CommandScheduler::MaybeEagerSplit() {
+	static const bool     enabled = [] { const char* v = std::getenv("KYTY_EAGER_SUBMIT"); return v != nullptr && v[0] == '1'; }();
+	static const uint64_t min_us  = [] {
+		const char* v = std::getenv("KYTY_EAGER_SUBMIT_US");
+		return v != nullptr ? static_cast<uint64_t>(std::strtoull(v, nullptr, 10)) : 300ull;
+	}();
+	if (!enabled || !Active() || m_command.IsInvalid() || InDeferredOperation() || m_in_pre_submit) return;
+	Sync::EagerQuery query;
+	query.enabled    = true;
+	query.pass_open  = RenderingOpen();
+	query.has_work   = m_command.m_recorded;
+	query.gpu_idle   = true; // refreshed below only when everything cheaper already says yes
+	query.age_us     = FrameTiming::ElapsedNs(m_open_since_ns, FrameTiming::SteadyNowNs()) / 1000u;
+	query.min_age_us = min_us;
+	if (!Sync::ShouldEagerSplit(query)) return;
+	m_master.Refresh();
+	query.gpu_idle = m_master.KnownGpuTick() + 1 >= CurrentTick();
+	if (!Sync::ShouldEagerSplit(query)) return;
+	NoteSplit(Sync::SubmitReason::Other);
+	FrameTiming::Add(FrameTiming::Counter::EagerSubmitN);
+	Flush();
 }
 
 void CommandScheduler::BeginNext() {
