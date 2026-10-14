@@ -1,4 +1,5 @@
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/presentation/cpPhases.h"
 
 #include "common/memEvents.h"
 #include "common/controlFile.h"
@@ -107,7 +108,31 @@ constexpr const char* kCounterNames[] = {
     "depth_ro_reject_not_subset",
     "depth_ro_reject_layout",
     "depth_ro_bad_elide",
+    "cp_parse_ns",
+    "cp_handler_ns",
+    "cp_draw_shaders_ns",
+    "cp_draw_bind_ns",
+    "cp_draw_pipeline_ns",
+    "cp_draw_targets_ns",
+    "cp_draw_desc_ns",
+    "cp_draw_vkcmd_ns",
+    "cp_pvstore_ns",
+    "cp_dispatch_ns",
+    "cp_eop_ns",
+    "cp_barrier_ns",
+    "cp_readback_cpu_ns",
+    "cp_gc_ns",
+    "cp_submit_cpu_ns",
+    "cp_cmds_ns",
+    "cp_phase_wait_ns",
+    "pm4_packets",
+    "mprotect_n",
+    "mprotect_ns",
+    "rb_download_bytes",
+    "pv_vsstore_index_bytes",
 };
+static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
+              static_cast<uint32_t>(CpPhases::Phase::Wait));
 static_assert(std::size(kCounterNames) == static_cast<size_t>(Counter::Count));
 static_assert(static_cast<uint32_t>(Counter::DispOther) - static_cast<uint32_t>(Counter::DispGuest) ==
               static_cast<uint32_t>(DispatchClass::Other));

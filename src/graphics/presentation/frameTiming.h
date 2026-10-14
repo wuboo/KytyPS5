@@ -109,6 +109,42 @@ enum class Counter : uint32_t {
 	DepthRoRejectNotSubset,     // S316: ... rejected: the new access is not within the visible union
 	DepthRoRejectLayout,        // S316: ... rejected: layout changes or is not read-only
 	DepthRoBadElide,            // S316: ... elision of a dirty image or in a writable layout (MUST stay 0)
+	RtLoadBytes,       // width x height x bytes per pixel of the attachments loaded (not cleared) by opened passes
+	RtStoreBytes,      // ... and stored
+	ComputeRuns,       // stretches of dispatches with no render pass opened between them
+	GpuPadIters,       // S320: chain lengths the pads read back were sent with (same pads as gpu_pad_ns; iters / ns = ALU speed)
+	// S321 (KYTY_DIAG_GPU_PAD_AT=idle): fixed-length pads sent right after a blocking CP wait, at most one per flip.
+	GpuPadIdleNs,       // GPU time of the idle pads read back
+	GpuPadIdleN,        // idle pads read back
+	GpuPadIdleIters,    // their chain lengths (iters / ns = ALU speed)
+	GpuPadIdleHistLt35, // idle pads by speed in iters/us: < 35 ...
+	GpuPadIdleHist35_50,
+	GpuPadIdleHist50_62,
+	GpuPadIdleHist62_76,
+	GpuPadIdleHistGe76, // ... >= 76
+	// S323 (KYTY_DIAG_CP_PHASES=1): self ns of each CP phase (cpPhases.h); phases + cp_phase_wait_ns = outer span <= cp_busy.
+	CpParseNs,
+	CpHandlerNs,
+	CpDrawShadersNs,
+	CpDrawBindNs,
+	CpDrawPipelineNs,
+	CpDrawTargetsNs,
+	CpDrawDescNs,
+	CpDrawVkcmdNs,
+	CpPvstoreNs,
+	CpDispatchNs,
+	CpEopNs,
+	CpBarrierNs,
+	CpReadbackCpuNs,
+	CpGcNs,
+	CpSubmitCpuNs,
+	CpCmdsNs,
+	CpPhaseWaitNs,        // blocked in MasterSemaphore::Wait while a phase was open (carved out of the phases)
+	Pm4Packets,           // PM4 packets walked by the CP
+	MprotectN,            // ProtectGuestHostMemory calls on the CP thread
+	MprotectNs,           // ... time inside them
+	RbDownloadBytes,      // bytes DownloadBufferMemory copied back to guest memory
+	PvVsstoreIndexBytes,  // index bytes hashed by TryPvVsStoreDraw
 	Count,
 };
 

@@ -643,6 +643,16 @@ foreach(mutant IN ITEMS LAX_NUMBERS NO_UNTIL FORCE_ANY_SLOT DIAG_ANY_SLOT FILTER
 	target_compile_definitions(control_file_mutant_${mutant_lower}_tests PRIVATE KYTY_CONTROL_MUTANT_${mutant}=1)
 endforeach()
 
+add_executable(cp_phases_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPhasesTests.cpp")
+target_include_directories(cp_phases_tests PRIVATE ${inc_headers})
+# Mutants (each must be caught, WILL_FAIL): a phase is not reduced by its children; the Parse phase is never counted.
+foreach(mutant IN ITEMS KEEP_CHILDREN DROP_PARSE)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(cp_phases_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPhasesTests.cpp")
+	target_include_directories(cp_phases_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_phases_mutant_${mutant_lower}_tests PRIVATE KYTY_CPPHASES_MUTANT_${mutant}=1)
+endforeach()
+
 add_executable(mem_events_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/MemEventsTests.cpp")
 target_include_directories(mem_events_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): an inclusive range end; repeats merge whatever the address.
@@ -1028,6 +1038,7 @@ if(BUILD_TESTING)
 	add_test(NAME cs_trace COMMAND $<TARGET_FILE:cs_trace_tests>)
 	add_test(NAME rt_dump COMMAND $<TARGET_FILE:rt_dump_tests>)
 	add_test(NAME mem_events COMMAND $<TARGET_FILE:mem_events_tests>)
+	add_test(NAME cp_phases COMMAND $<TARGET_FILE:cp_phases_tests>)
 	add_test(NAME diag_tex COMMAND $<TARGET_FILE:diag_tex_tests>)
 	add_test(NAME min_lod_view COMMAND $<TARGET_FILE:min_lod_view_tests>)
 	add_test(NAME apple_drop COMMAND $<TARGET_FILE:apple_drop_tests>)
@@ -1055,6 +1066,7 @@ if(BUILD_TESTING)
 			rt_dump_mutant_ignore_flip rt_dump_mutant_ignore_ps
 			bvh_node_parser_mutant_base_shift bvh_node_parser_mutant_keep_empty
 			mem_events_mutant_inclusive_end mem_events_mutant_merge_any_addr
+			cp_phases_mutant_keep_children cp_phases_mutant_drop_parse
 			min_lod_view_mutant_floor min_lod_view_mutant_no_cap min_lod_view_mutant_resinfo
 			apple_drop_mutant_invert_clip apple_drop_mutant_always_bounds apple_drop_mutant_native_counts apple_drop_mutant_bias_abs
 			cp_counters_mutant_native_swap cp_counters_mutant_no_clamp cp_counters_mutant_flag_any cp_counters_mutant_skip_ignored
@@ -1242,6 +1254,9 @@ if(BUILD_TESTING)
 		signal_census_mutant_csv_shifted_tests
 		diag_tex_mutant_nonzero_tests
 		diag_tex_mutant_no_once_tests
+		cp_phases_tests
+		cp_phases_mutant_keep_children_tests
+		cp_phases_mutant_drop_parse_tests
 		mem_events_tests
 		mem_events_mutant_inclusive_end_tests
 		mem_events_mutant_merge_any_addr_tests

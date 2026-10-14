@@ -28,6 +28,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -955,7 +956,10 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	state.ps_active = buffer.GetShaders().GetPs().ps_regs.data_addr != 0 &&
 	                  (color_output_mask != 0 ||
 	                   PixelShaderHasDepthOrCoverageSideEffects(shader_regs));
-	RefreshShaders(buffer, draw, color_output_mask, state);
+	{
+		CpPhases::Scope phase(CpPhases::Phase::DrawShaders);
+		RefreshShaders(buffer, draw, color_output_mask, state);
+	}
 	if (!state.programs.vertex[0]) {
 		// GetGraphicsPrograms() returns an empty GraphicsPrograms when it could not prepare the
 		// vertex stage (currently: a mesh-shader draw on a host without mesh shader support).
@@ -1448,6 +1452,7 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 		// The scan of a big index buffer is the expensive part; meshes recur, so it is memoized by the
 		// content hash exactly like the prototype does.
 		constexpr uint32_t kNoDropLimit = 0x7fffffffu; // only negative vertex numbers count as dropped
+		FrameTiming::Add(FrameTiming::Counter::PvVsstoreIndexBytes, index_source.size);
 		const PerVertexRangeMemo::Key memo_key {XXH3_64bits(idx_bytes, index_source.size), index_source.size,
 		                                        element_size, draw.index_count, emit.vertex_offset, kNoDropLimit};
 		PerVertexRecordRange range;
@@ -1550,9 +1555,12 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
                                          const DrawIndexBufferSource& index_source,
 	                                     bool primitive_restart_enable) {
 	PvVsStoreDrawSetup pv_store;
-	const bool         use_pv_store =
-	    PerVertexVsStoreEnabled() &&
-	    TryPvVsStoreDraw(draw, state, topology, primitive_restart_enable, emit, index_source, pv_store);
+	bool               use_pv_store = false;
+	if (PerVertexVsStoreEnabled()) {
+		CpPhases::Scope phase(CpPhases::Phase::PvStore);
+		use_pv_store =
+		    TryPvVsStoreDraw(draw, state, topology, primitive_restart_enable, emit, index_source, pv_store);
+	}
 	if (use_pv_store) {
 		FrameTiming::Add(FrameTiming::Counter::PvVsStoreDraws);
 		if (draw.instance_count > 1) FrameTiming::Add(FrameTiming::Counter::PvVsStoreInstanced);
@@ -1647,6 +1655,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                                                index_source.guest_element_size);
 	}
 	LogDrawPhase(draw.Name(), "PrepareBindings");
+	std::optional<CpPhases::Scope> bind_phase;
+	bind_phase.emplace(CpPhases::Phase::DrawBind);
 	auto&                            bindings = m_graphics_bindings;
 	std::array<PreparedBindings*, 4> descriptor_stages {};
 	uint32_t                         stage_count = 0;
@@ -1661,6 +1671,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	const auto stages = std::span {descriptor_stages.data(), stage_count};
 	PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
+	bind_phase.reset();
 	PreparedVertexBuffers vertex_bindings;
 	PreparedIndexBuffer   index_binding;
 	if (!mesh_active) {
@@ -1671,14 +1682,20 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "CreatePipeline");
 	}
+	std::optional<CpPhases::Scope> pipeline_phase;
+	pipeline_phase.emplace(CpPhases::Phase::DrawPipeline);
 	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(
 	    std::span {state.color_info, state.color_count}, state.depth_info, vertex_stages, buffer,
 	    state.ps_active ? &state.ps_input_info : nullptr, topology, primitive_restart_enable,
 	    use_pv_store ? pv_store.programs->graphics : state.programs);
+	pipeline_phase.reset();
 	vk::ImageAspectFlags feedback_aspects;
+	pipeline_phase.emplace(CpPhases::Phase::DrawTargets);
 	const auto rendering =
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
 	                         feedback_aspects, stages);
+	pipeline_phase.reset();
+	CpPhases::Scope vkcmd_phase(CpPhases::Phase::DrawVkcmd); // to the end of the draw; CommitBindings below is its child
 
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
 	// point onward, every operation targets the current command buffer and cannot touch guest
@@ -1691,7 +1708,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (state.ps_active && !draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x300u);
 	}
-	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
+	{
+		CpPhases::Scope desc_phase(CpPhases::Phase::DrawDesc);
+		CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
+	}
 	if (!mesh_active) {
 		CommitIndexBuffer(vk_buffer, index_binding);
 		if (use_pv_store) {

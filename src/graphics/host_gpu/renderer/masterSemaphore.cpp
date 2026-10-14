@@ -4,6 +4,7 @@
 #include "common/debugCounters.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
 
 #include <optional>
@@ -59,6 +60,7 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	// S132: only the command-processor thread's blocking time is cp_wait_gpu_ns.
 	std::optional<FrameTiming::ScopedCounterNs> cp_wait;
 	if (GuestGpu::IsGpuThread()) cp_wait.emplace(FrameTiming::Counter::CpWaitGpuNs);
+	CpPhases::Scope phase(CpPhases::Phase::Wait);
 	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	Refresh();
