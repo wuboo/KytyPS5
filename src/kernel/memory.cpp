@@ -8,6 +8,7 @@
 #include "common/virtualMemory.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/presentation/cpPhaseScope.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
 
@@ -3895,6 +3896,17 @@ bool ProtectGuestMemory(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode,
 }
 
 bool ProtectGuestHostMemory(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode) {
+	// S323: calls and time on the CP thread (cp_phases); not a phase, it overlaps readback_cpu and the others.
+	struct CpMprotectTimer {
+		const bool on = Graphics::CpPhases::OnCpThread();
+		int64_t    begin = on ? Graphics::FrameTiming::SteadyNowNs() : 0;
+		~CpMprotectTimer() {
+			if (!on) return;
+			Graphics::FrameTiming::Add(Graphics::FrameTiming::Counter::MprotectN);
+			Graphics::FrameTiming::Add(Graphics::FrameTiming::Counter::MprotectNs,
+			                           Graphics::FrameTiming::ElapsedNs(begin, Graphics::FrameTiming::SteadyNowNs()));
+		}
+	} cp_mprotect_timer;
 	if (g_guest_address_space == nullptr) {
 		return false;
 	}

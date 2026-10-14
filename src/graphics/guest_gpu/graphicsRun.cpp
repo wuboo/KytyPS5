@@ -1,4 +1,5 @@
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
 
 #include "common/assert.h"
@@ -474,6 +475,8 @@ void GuestGpu::ThreadRun(void* data) {
 	KYTY_PROFILER_THREAD("Thread_Gpu");
 	g_gpu_thread = true;
 	g_gpu_state  = gpu;
+	CpPhases::BindCpThread();
+	CpPhases::NameCurrentThread("Thread_Gpu");
 
 	for (;;) {
 		// Lazy flush: before the thread waits (no command, no runnable submission), submit what
@@ -553,7 +556,10 @@ void GuestGpu::ThreadRun(void* data) {
 		if (command) {
 			EXIT_IF(g_current_processor != nullptr);
 			const auto busy_begin = std::chrono::steady_clock::now();
-			command();
+			{
+				CpPhases::Scope phase(CpPhases::Phase::Cmds);
+				command();
+			}
 			const auto busy_ns = static_cast<uint64_t>(
 			    std::chrono::duration_cast<std::chrono::nanoseconds>(
 			        std::chrono::steady_clock::now() - busy_begin)
@@ -733,8 +739,10 @@ void CommandProcessor::SuspendPm4() {
 }
 
 void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
+	CpPhases::Scope parse_phase(CpPhases::Phase::Parse); // S323: handler bodies are Phase::Handler, children subtract
 	while (!execution.m_buffer_stack.empty()) {
 		if (g_gpu_state != nullptr) {
+			CpPhases::Scope phase(CpPhases::Phase::Cmds);
 			g_gpu_state->ProcessCommands();
 		}
 		auto& cursor = execution.m_buffer_stack.back();
@@ -829,8 +837,12 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
 		}
 
-		const auto packet_dw =
-		    handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
+		if (CpPhases::Enabled()) FrameTiming::Add(FrameTiming::Counter::Pm4Packets);
+		uint32_t packet_dw;
+		{
+			CpPhases::Scope handler_phase(CpPhases::Phase::Handler);
+			packet_dw = handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
+		}
 		EXIT_IF(packet_dw > remaining_dw);
 		if (execution.m_suspended) {
 			// Defense in depth: the op above should already have been preceded by a flush (it is
@@ -1132,6 +1144,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
                                         uint32_t interrupt_context_id) {
 	static_assert(sizeof(T) == sizeof(uint32_t) || sizeof(T) == sizeof(uint64_t));
 
+	CpPhases::Scope eop_phase(CpPhases::Phase::Eop);
 	auto& command = CurrentBuffer();
 
 	if (GraphicsRunDebugDumpEnabled()) {

@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/presentation/cpPhaseScope.h"
 
 #include "common/assert.h"
 #include "common/logging/log.h"
@@ -199,6 +200,7 @@ void RenderContext::PrepareBda() {
 }
 
 void RenderContext::RunGarbageCollector() {
+	CpPhases::Scope phase(CpPhases::Phase::Gc);
 	if (m_fault_process_pending) {
 		m_fault_process_pending = false;
 		m_buffer_cache.ProcessFaultBuffer();
