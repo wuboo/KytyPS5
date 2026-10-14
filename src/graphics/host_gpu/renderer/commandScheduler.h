@@ -90,6 +90,7 @@ private:
 		uint64_t          debug_submit_id = 0;
 		uint32_t          debug_args[4]   = {};
 		uint64_t          debug_arg4      = 0;
+		bool              first_seg       = false; // S328: first submit with work after a drain
 		int64_t           queued_ns       = 0; // S132: steady clock at push (async_submit queue wait)
 	};
 	void SubmitThread(std::stop_token stop);
@@ -139,7 +140,8 @@ private:
 	uint32_t m_drain_depth = 0;
 	uint64_t m_seg_wait_base = 0;     // cp_wait_guest_ns + cp_wait_gpu_ns at the segment start
 	void ConsumeSegPassEnd();
-	bool     EagerSplitNow(bool pass_closing, bool* closed_pass);
+	bool     EagerSplitNow(bool pass_closing, bool* closed_pass, bool mid_pass = false);
+	uint32_t m_seg_mid_splits = 0;    // S328: mid-pass eager splits in this segment
 	int64_t  m_open_since_ns = 0;     // when the open buffer began (eager policy age)
 	bool HasOperationsAtCurrentTick();
 	uint32_t                              m_flush_requests = 0;

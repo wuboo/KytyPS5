@@ -415,9 +415,11 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		m_pre_submit();
 		m_in_pre_submit = false;
 	}
+	bool first_after_drain = false; // S328
 	if (!m_command.m_recorded) {
 		FrameTiming::Add(FrameTiming::Counter::EmptySubmits);
 	} else if (m_seg_first_pending && m_drain_depth == 0) {
+		first_after_drain = true;
 		FrameTiming::Add(FrameTiming::Counter::SegDrainToFirstSubmitNs,
 		                 FrameTiming::ElapsedNs(m_seg_start_ns, FrameTiming::SteadyNowNs()));
 		m_seg_first_pending = false;
@@ -438,6 +440,8 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	job.debug_args[2]   = m_command.m_debug_arg2;
 	job.debug_args[3]   = m_command.m_debug_arg3;
 	job.debug_arg4      = m_command.m_debug_arg4;
+	job.first_seg       = first_after_drain;
+	job.queued_ns       = first_after_drain ? FrameTiming::SteadyNowNs() : 0; // S328 (the async path overwrites it with the same clock)
 	// Only timeline-only submissions may be deferred: a binary semaphore wait/signal must reach
 	// the queue before whatever the caller does next (e.g. vkQueuePresentKHR).
 	const bool deferrable =
@@ -486,9 +490,16 @@ void CommandScheduler::QueueSubmitNow(SubmitJob& job) {
 	submit_info.pSignalSemaphores    = job.submit.signal_semaphores.data();
 
 	vk::Result result;
+	const int64_t vk_begin_ns = job.first_seg ? FrameTiming::SteadyNowNs() : 0;
 	{
 		FrameTiming::ScopedCounterNs encode(FrameTiming::Counter::SubmitEncodeNs);
 		result = m_graphics.queue.submit(1, &submit_info, nullptr);
+	}
+	if (job.first_seg) { // S328: the gap after a drain, in pieces
+		const int64_t vk_end_ns = FrameTiming::SteadyNowNs();
+		FrameTiming::Add(FrameTiming::Counter::FirstSubmitN);
+		FrameTiming::Add(FrameTiming::Counter::FirstSubmitEnqToVkNs, FrameTiming::ElapsedNs(job.queued_ns, vk_begin_ns));
+		FrameTiming::Add(FrameTiming::Counter::FirstSubmitEncodeNs, FrameTiming::ElapsedNs(vk_begin_ns, vk_end_ns));
 	}
 	if (result != vk::Result::eSuccess) {
 		ReportVulkanFatal("vkQueueSubmit", result, job.tick, job.debug_op, job.debug_submit_id,
@@ -557,6 +568,7 @@ void CommandScheduler::NoteDrainEnd() {
 	if (m_drain_depth == 0 || --m_drain_depth != 0) return;
 	m_seg_start_ns      = FrameTiming::SteadyNowNs();
 	m_seg_first_pending = true;
+	m_seg_mid_splits    = 0;
 	m_seg_wait_base     = FrameTiming::Get(FrameTiming::Counter::CpWaitGuestNs) + FrameTiming::Get(FrameTiming::Counter::CpWaitGpuNs);
 	m_command.m_pass_end_ns   = 0;
 	m_command.m_note_pass_end = true;
@@ -564,7 +576,12 @@ void CommandScheduler::NoteDrainEnd() {
 
 namespace {
 bool EagerEnabled() {
-	static const bool enabled = [] { const char* v = std::getenv("KYTY_EAGER_SUBMIT"); return v != nullptr && v[0] == '1'; }();
+	static const bool enabled = [] { const char* v = std::getenv("KYTY_EAGER_SUBMIT"); return v != nullptr && (v[0] == '1' || v[0] == '2'); }();
+	return enabled;
+}
+// S328: KYTY_EAGER_SUBMIT=2 also splits ONE open pass in the middle, in the first command buffer after a drain.
+bool EagerMidEnabled() {
+	static const bool enabled = [] { const char* v = std::getenv("KYTY_EAGER_SUBMIT"); return v != nullptr && v[0] == '2'; }();
 	return enabled;
 }
 uint64_t EagerMinUs() {
@@ -577,7 +594,7 @@ uint64_t EagerMinUs() {
 } // namespace
 
 // Asks the policy; true = the buffer was split (when pass_closing, the open pass was closed first and *closed_pass is set).
-bool CommandScheduler::EagerSplitNow(bool pass_closing, bool* closed_pass) {
+bool CommandScheduler::EagerSplitNow(bool pass_closing, bool* closed_pass, bool mid_pass) {
 	Sync::EagerQuery query;
 	query.enabled      = true;
 	query.pass_open    = RenderingOpen();
@@ -586,6 +603,9 @@ bool CommandScheduler::EagerSplitNow(bool pass_closing, bool* closed_pass) {
 	query.gpu_idle     = true; // refreshed below only when everything cheaper already says yes
 	query.age_us       = FrameTiming::ElapsedNs(m_open_since_ns, FrameTiming::SteadyNowNs()) / 1000u;
 	query.min_age_us   = EagerMinUs();
+	query.mid_mode     = mid_pass && EagerMidEnabled();
+	query.first_cb_after_drain = m_seg_first_pending && m_drain_depth == 0;
+	query.mid_splits   = m_seg_mid_splits;
 	if (!Sync::ShouldEagerSplit(query)) return false;
 	m_master.Refresh();
 	query.gpu_idle = m_master.KnownGpuTick() + 1 >= CurrentTick();
@@ -607,8 +627,16 @@ void CommandScheduler::MaybeEagerSplit() {
 
 void CommandScheduler::MaybeEagerSplitAtPass(const RenderState& next) {
 	if (!EagerEnabled() || !Active() || m_command.IsInvalid() || InDeferredOperation() || m_in_pre_submit) return;
-	if (!m_command.m_rendering || m_command.m_render_state == next) return; // no pass to close here
+	if (!m_command.m_rendering) return;
 	bool closed = false;
+	if (m_command.SamePass(next)) {
+		// S328: the draw continues the open pass; the policy may still split it in the middle (first buffer after a drain only).
+		if (!EagerMidEnabled() || !EagerSplitNow(false, &closed, true)) return;
+		++m_seg_mid_splits;
+		FrameTiming::Add(FrameTiming::Counter::EagerMidN);
+		m_command.ArmReopenLoad(); // the new buffer reopens this pass with loadOp=LOAD
+		return;
+	}
 	if (EagerSplitNow(true, &closed)) FrameTiming::Add(FrameTiming::Counter::EagerSubmitPassN);
 }
 
