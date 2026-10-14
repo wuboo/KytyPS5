@@ -156,6 +156,15 @@ enum class Counter : uint32_t {
 	GpuGapMidNs,             // KYTY_DIAG_GPUTRUTH=1: GPU idle between two buffers with no drain between them
 	EagerSubmitPassN,        // KYTY_EAGER_SUBMIT=1: command buffers split at a pass boundary (the old pass was closing anyway)
 	SegFirstPassEndNs,       // sum: end of the drain -> end of the first render pass of the segment
+	// S328
+	EagerMidN,               // KYTY_EAGER_SUBMIT=2: buffers split in the middle of an open pass (first buffer after a drain)
+	FirstSubmitN,            // first submits with work after a drain (the denominator of first_submit_enq_to_vk_ns / first_submit_encode_ns)
+	FirstSubmitEnqToVkNs,    // sum: CP hands the first buffer over -> the submit thread calls vkQueueSubmit
+	FirstSubmitEncodeNs,     // sum: vkQueueSubmit (MoltenVK encode) of the first buffer
+	DrainWakeLagN,           // KYTY_DIAG_GPUTRUTH=1: drain waits whose wake lag was measured
+	DrainWakeLagNs,          // sum: end of the buffer on the GPU (timestamp) -> the CP returns from Wait; minus the smallest lag seen (see GpuGap::ClockMap)
+	FirstSubmitVkToGpuBeginN,  // KYTY_DIAG_GPUTRUTH=1: first buffers whose GPU start was measured
+	FirstSubmitVkToGpuBeginNs, // sum: vkQueueSubmit returned -> start of the buffer on the GPU (timestamp, same clock estimate)
 	Count,
 };
 

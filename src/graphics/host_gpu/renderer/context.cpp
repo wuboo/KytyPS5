@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
+#include "graphics/host_gpu/renderer/eagerSubmit.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -63,10 +64,22 @@ void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0,
 	m_debug_arg4      = arg4;
 }
 
-void CommandBuffer::BeginRendering(const RenderState& state) const {
-	if (m_rendering && m_render_state == state) {
+bool CommandBuffer::SamePass(const RenderState& state) const {
+	if (!m_rendering) return false;
+	if (m_render_state == state) return true;
+	if (!m_strip_clears) return false;
+	RenderState stripped = state;
+	Sync::StripClearsOnReopen(stripped);
+	return m_render_state == stripped;
+}
+
+void CommandBuffer::BeginRendering(const RenderState& wanted) const {
+	if (SamePass(wanted)) {
 		return;
 	}
+	RenderState state = wanted;
+	// S328: the pass armed by a mid-pass eager split is opened here: load, never clear again (an open stripped pass that is replaced is not).
+	if (m_strip_clears && !m_rendering) Sync::StripClearsOnReopen(state);
 	EXIT_IF(state.width == 0 || state.height == 0 || state.num_layers == 0 ||
 	        state.num_color_attachments > RENDER_COLOR_ATTACHMENTS_MAX);
 	EndRendering();
@@ -116,6 +129,7 @@ void CommandBuffer::EndRendering() const {
 	if (!m_rendering) {
 		return;
 	}
+	m_strip_clears = false; // S328: a closed pass ends the reopen
 	Handle().endRendering();
 	if (m_note_pass_end) {
 		m_note_pass_end = false;

@@ -114,6 +114,11 @@ public:
 	void SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0 = 0, uint32_t arg1 = 0,
 	                  uint32_t arg2 = 0, uint32_t arg3 = 0, uint64_t arg4 = 0);
 	void BeginRendering(const RenderState& state) const;
+	// S328: true when `state` needs no new pass because the open one is it (after a mid-pass eager split the open pass has its clears
+	// stripped, so compare through the same normalisation BeginRendering uses).
+	[[nodiscard]] bool SamePass(const RenderState& state) const;
+	// S328: the pass that is (re)opened next has no clears (reopen of a split pass); lasts until that pass is closed.
+	void ArmReopenLoad() const { m_strip_clears = true; }
 	void EndRendering() const;
 
 	[[nodiscard]] vk::CommandBuffer Handle() const;
@@ -147,6 +152,7 @@ private:
 	mutable RenderState m_render_state;
 	mutable bool        m_rendering   = false;
 	// S327: the scheduler arms this at a drain end; the next real EndRendering stamps the time (seg_first_pass_end_ns).
+	mutable bool        m_strip_clears = false; // S328
 	mutable bool        m_note_pass_end = false;
 	mutable int64_t     m_pass_end_ns   = 0;
 	// Set by Handle(): something (possibly) recorded since Begin(). Over-reporting is harmless.

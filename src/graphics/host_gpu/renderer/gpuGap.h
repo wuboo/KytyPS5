@@ -43,6 +43,31 @@ private:
 	bool     m_have_prev = false;
 };
 
+// S328: GPU timestamps (ns since the first stamp) -> host steady clock, without a calibrated-timestamps extension. Every wake of the CP after
+// a buffer finished gives host_ns - gpu_end_ns = offset + lag with lag >= 0, so the smallest sample is the best (upper) estimate of the offset
+// and the lag measured against it is the excess over the smallest lag seen. Lags and gaps derived this way are therefore lower bounds
+// (the floor of the wake lag is subtracted); the same estimate is used for both ends of every interval, so differences stay consistent.
+class ClockMap {
+public:
+	void Observe(int64_t host_ns, uint64_t gpu_ns) {
+		const int64_t sample = host_ns - static_cast<int64_t>(gpu_ns);
+#ifdef KYTY_GAP_MUTANT_CLOCK_MAX
+		if (!m_valid || sample > m_offset) m_offset = sample;
+#else
+		if (!m_valid || sample < m_offset) m_offset = sample;
+#endif
+		m_valid = true;
+	}
+	[[nodiscard]] bool    Valid() const { return m_valid; }
+	[[nodiscard]] int64_t ToHost(uint64_t gpu_ns) const { return static_cast<int64_t>(gpu_ns) + m_offset; }
+	// host - ToHost(gpu): the wake lag of an observation (>= 0 after Observe of the same sample).
+	[[nodiscard]] int64_t Lag(int64_t host_ns, uint64_t gpu_ns) const { return host_ns - ToHost(gpu_ns); }
+
+private:
+	bool    m_valid  = false;
+	int64_t m_offset = 0;
+};
+
 // A drain ended. `harvest` reads the intervals of the buffers the GPU has finished (all of them after a drain); it runs first.
 template <class Harvest>
 void NoteDrain(Ledger& ledger, uint64_t next_tick, Harvest&& harvest) {

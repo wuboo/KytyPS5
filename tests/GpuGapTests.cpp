@@ -73,6 +73,18 @@ int main() {
 		s.Harvest();
 		Check(s.totals.mid_ns == 5, "mid gap from the latest end");
 	}
+	{
+		// S328: ClockMap: the smallest host - gpu sample is the offset; lags are measured against it and never negative after Observe.
+		Libs::Graphics::GpuGap::ClockMap clock;
+		Check(!clock.Valid(), "clock: invalid before the first sample");
+		clock.Observe(1000, 100); // sample 900
+		clock.Observe(1150, 200); // sample 950: lag 50 over the best
+		clock.Observe(1290, 400); // sample 890: new best (lag floor was 10)
+		Check(clock.Valid(), "clock: valid after a sample");
+		Check(clock.ToHost(400) == 1290, "clock: ToHost with the smallest offset");
+		Check(clock.Lag(1150, 200) == 60, "clock: lag of an earlier wake is measured against the best offset");
+		Check(clock.Lag(1290, 400) == 0, "clock: the best sample has lag 0");
+	}
 	std::printf("GpuGapTests: ok\n");
 	return 0;
 }
