@@ -145,6 +145,12 @@ enum class Counter : uint32_t {
 	MprotectNs,           // ... time inside them
 	RbDownloadBytes,      // bytes DownloadBufferMemory copied back to guest memory
 	PvVsstoreIndexBytes,  // index bytes hashed by TryPvVsStoreDraw
+	// S326: segments = from the end of a drain (Wait on the open tick / FlushAndWait / Finish) to the next drain.
+	SegN,
+	SegDrainToFirstSubmitNs, // sum: end of the drain -> first submit with work
+	SegRecordNs,             // sum: CP time in the segment outside waiting (segment length minus cp_wait_guest/gpu deltas)
+	GpuGapAfterDrainNs,      // KYTY_DIAG_GPUTRUTH=1: end of the last CB before a drain -> start of the first CB after it (GPU timestamps)
+	EagerSubmitN,            // KYTY_EAGER_SUBMIT=1: command buffers split by the eager policy
 	Count,
 };
 

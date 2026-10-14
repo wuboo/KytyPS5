@@ -36,6 +36,8 @@ public:
 	void               FlushPending();
 	[[nodiscard]] bool FlushRequested() const noexcept { return m_flush_requests != 0; }
 	void           FlushAndWait();
+	// S326 (KYTY_EAGER_SUBMIT=1): at a safe point (before a draw / dispatch) submits the open buffer when the GPU queue is empty (eagerSubmit.h).
+	void MaybeEagerSplit();
 	void           Finish();
 	CommandBuffer& BeginCommand();
 	uint64_t       Submit(SubmitInfo submit = {});
@@ -126,6 +128,14 @@ private:
 	};
 
 	void BeginNext();
+	// S326 segments: drain end -> next drain (seg_* counters) and the DIAG gap after a drain.
+	void NoteDrainBegin();
+	void NoteDrainEnd();
+	int64_t  m_seg_start_ns = 0;      // 0 = no segment open
+	bool     m_seg_first_pending = false;
+	uint32_t m_drain_depth = 0;
+	uint64_t m_seg_wait_base = 0;     // cp_wait_guest_ns + cp_wait_gpu_ns at the segment start
+	int64_t  m_open_since_ns = 0;     // when the open buffer began (eager policy age)
 	bool HasOperationsAtCurrentTick();
 	uint32_t                              m_flush_requests = 0;
 	std::chrono::steady_clock::time_point m_first_flush_request {};
