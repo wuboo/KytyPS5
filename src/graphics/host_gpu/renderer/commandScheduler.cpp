@@ -494,6 +494,7 @@ void CommandScheduler::EnableAsyncSubmit() {
 }
 
 void CommandScheduler::SubmitThread(std::stop_token stop) {
+	CpPhases::NameCurrentThread("Thread_Submit");
 	for (;;) {
 		SubmitJob job;
 		{
