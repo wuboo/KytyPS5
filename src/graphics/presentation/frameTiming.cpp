@@ -135,6 +135,10 @@ constexpr const char* kCounterNames[] = {
     "seg_record_ns",
     "gpu_gap_after_drain_ns",
     "eager_submit_n",
+    "gpu_gap_n",
+    "gpu_gap_mid_ns",
+    "eager_submit_pass_n",
+    "seg_first_pass_end_ns",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

@@ -146,6 +146,9 @@ private:
 	uint64_t            m_debug_arg4      = 0;
 	mutable RenderState m_render_state;
 	mutable bool        m_rendering   = false;
+	// S327: the scheduler arms this at a drain end; the next real EndRendering stamps the time (seg_first_pass_end_ns).
+	mutable bool        m_note_pass_end = false;
+	mutable int64_t     m_pass_end_ns   = 0;
 	// Set by Handle(): something (possibly) recorded since Begin(). Over-reporting is harmless.
 	mutable bool        m_recorded    = false;
 	HW::Context*        m_registers   = nullptr;

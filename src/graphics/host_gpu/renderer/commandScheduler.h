@@ -38,6 +38,9 @@ public:
 	void           FlushAndWait();
 	// S326 (KYTY_EAGER_SUBMIT=1): at a safe point (before a draw / dispatch) submits the open buffer when the GPU queue is empty (eagerSubmit.h).
 	void MaybeEagerSplit();
+	// S327: a draw needs `next` as the pass state. When that differs from the open pass (which BeginRendering would close anyway) and the
+	// eager policy agrees, closes it and splits the buffer here, before anything of the draw is recorded.
+	void MaybeEagerSplitAtPass(const RenderState& next);
 	void           Finish();
 	CommandBuffer& BeginCommand();
 	uint64_t       Submit(SubmitInfo submit = {});
@@ -135,6 +138,8 @@ private:
 	bool     m_seg_first_pending = false;
 	uint32_t m_drain_depth = 0;
 	uint64_t m_seg_wait_base = 0;     // cp_wait_guest_ns + cp_wait_gpu_ns at the segment start
+	void ConsumeSegPassEnd();
+	bool     EagerSplitNow(bool pass_closing, bool* closed_pass);
 	int64_t  m_open_since_ns = 0;     // when the open buffer began (eager policy age)
 	bool HasOperationsAtCurrentTick();
 	uint32_t                              m_flush_requests = 0;

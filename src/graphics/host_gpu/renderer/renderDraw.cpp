@@ -1695,6 +1695,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
 	                         feedback_aspects, stages);
 	pipeline_phase.reset();
+	// S327: the pass about to be needed differs from the open one (BeginRendering would close it below): split here, before this draw
+	// records anything into the buffer.
+	m_context.GetCommandScheduler().MaybeEagerSplitAtPass(rendering);
 	CpPhases::Scope vkcmd_phase(CpPhases::Phase::DrawVkcmd); // to the end of the draw; CommitBindings below is its child
 
 	// Resource preparation above may synchronously finish and restart the scheduler. From this

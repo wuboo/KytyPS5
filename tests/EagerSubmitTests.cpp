@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 
-// S326: policy of the eager submit (ShouldEagerSplit). Built four times: normally and with KYTY_EAGER_MUTANT_PASS_OPEN / _BUSY / _NO_AGE.
+// S326: policy of the eager submit (ShouldEagerSplit). Built four times: normally and with KYTY_EAGER_MUTANT_PASS_OPEN / _BUSY / _NO_AGE / _NO_CLOSING (S327).
 // The mutant builds must FAIL (ctest WILL_FAIL).
 
 namespace {
@@ -47,6 +47,20 @@ int main() {
 		auto q = Ready();
 		q.pass_open = true;
 		Check(!ShouldEagerSplit(q), "open pass: no split");
+		q.pass_closing = true;
+		Check(ShouldEagerSplit(q), "S327: open pass that is being closed at a pass boundary: split");
+		q.has_work = false;
+		Check(!ShouldEagerSplit(q), "S327: pass boundary but empty buffer: no split");
+	}
+	{
+		auto q = Ready();
+		q.pass_open    = true;
+		q.pass_closing = true;
+		q.gpu_idle     = false;
+		Check(!ShouldEagerSplit(q), "S327: pass boundary, busy GPU: no split");
+		q.gpu_idle = true;
+		q.age_us   = 10;
+		Check(!ShouldEagerSplit(q), "S327: pass boundary, young buffer: no split");
 	}
 	{
 		auto q = Ready();
