@@ -117,6 +117,10 @@ void CommandBuffer::EndRendering() const {
 		return;
 	}
 	Handle().endRendering();
+	if (m_note_pass_end) {
+		m_note_pass_end = false;
+		m_pass_end_ns   = FrameTiming::SteadyNowNs();
+	}
 	m_rendering    = false;
 	m_render_state = {};
 }

@@ -424,6 +424,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	}
 	m_flush_requests = 0; // this submit carries everything a pending flush would
 	m_command.End();
+	ConsumeSegPassEnd(); // End() closed the last pass; the first pass end of the segment may be that one
 	const auto buffer   = m_command.m_buffer;
 	auto&      graphics = m_graphics;
 	EXIT_IF(graphics.queue == nullptr);
@@ -543,6 +544,7 @@ void CommandScheduler::DrainAsyncSubmits() {
 
 void CommandScheduler::NoteDrainBegin() {
 	if (m_drain_depth++ != 0) return;
+	ConsumeSegPassEnd();
 	if (m_seg_start_ns == 0) return;
 	const uint64_t length = FrameTiming::ElapsedNs(m_seg_start_ns, FrameTiming::SteadyNowNs());
 	const uint64_t waited = FrameTiming::Get(FrameTiming::Counter::CpWaitGuestNs) +
@@ -556,29 +558,66 @@ void CommandScheduler::NoteDrainEnd() {
 	m_seg_start_ns      = FrameTiming::SteadyNowNs();
 	m_seg_first_pending = true;
 	m_seg_wait_base     = FrameTiming::Get(FrameTiming::Counter::CpWaitGuestNs) + FrameTiming::Get(FrameTiming::Counter::CpWaitGpuNs);
+	m_command.m_pass_end_ns   = 0;
+	m_command.m_note_pass_end = true;
 }
 
-void CommandScheduler::MaybeEagerSplit() {
-	static const bool     enabled = [] { const char* v = std::getenv("KYTY_EAGER_SUBMIT"); return v != nullptr && v[0] == '1'; }();
-	static const uint64_t min_us  = [] {
+namespace {
+bool EagerEnabled() {
+	static const bool enabled = [] { const char* v = std::getenv("KYTY_EAGER_SUBMIT"); return v != nullptr && v[0] == '1'; }();
+	return enabled;
+}
+uint64_t EagerMinUs() {
+	static const uint64_t min_us = [] {
 		const char* v = std::getenv("KYTY_EAGER_SUBMIT_US");
 		return v != nullptr ? static_cast<uint64_t>(std::strtoull(v, nullptr, 10)) : 300ull;
 	}();
-	if (!enabled || !Active() || m_command.IsInvalid() || InDeferredOperation() || m_in_pre_submit) return;
+	return min_us;
+}
+} // namespace
+
+// Asks the policy; true = the buffer was split (when pass_closing, the open pass was closed first and *closed_pass is set).
+bool CommandScheduler::EagerSplitNow(bool pass_closing, bool* closed_pass) {
 	Sync::EagerQuery query;
-	query.enabled    = true;
-	query.pass_open  = RenderingOpen();
-	query.has_work   = m_command.m_recorded;
-	query.gpu_idle   = true; // refreshed below only when everything cheaper already says yes
-	query.age_us     = FrameTiming::ElapsedNs(m_open_since_ns, FrameTiming::SteadyNowNs()) / 1000u;
-	query.min_age_us = min_us;
-	if (!Sync::ShouldEagerSplit(query)) return;
+	query.enabled      = true;
+	query.pass_open    = RenderingOpen();
+	query.pass_closing = pass_closing;
+	query.has_work     = m_command.m_recorded;
+	query.gpu_idle     = true; // refreshed below only when everything cheaper already says yes
+	query.age_us       = FrameTiming::ElapsedNs(m_open_since_ns, FrameTiming::SteadyNowNs()) / 1000u;
+	query.min_age_us   = EagerMinUs();
+	if (!Sync::ShouldEagerSplit(query)) return false;
 	m_master.Refresh();
 	query.gpu_idle = m_master.KnownGpuTick() + 1 >= CurrentTick();
-	if (!Sync::ShouldEagerSplit(query)) return;
+	if (!Sync::ShouldEagerSplit(query)) return false;
+	if (query.pass_open) {
+		m_command.EndRendering();
+		*closed_pass = true;
+	}
 	NoteSplit(Sync::SubmitReason::Other);
-	FrameTiming::Add(FrameTiming::Counter::EagerSubmitN);
 	Flush();
+	return true;
+}
+
+void CommandScheduler::MaybeEagerSplit() {
+	if (!EagerEnabled() || !Active() || m_command.IsInvalid() || InDeferredOperation() || m_in_pre_submit) return;
+	bool closed = false;
+	if (EagerSplitNow(false, &closed)) FrameTiming::Add(FrameTiming::Counter::EagerSubmitN);
+}
+
+void CommandScheduler::MaybeEagerSplitAtPass(const RenderState& next) {
+	if (!EagerEnabled() || !Active() || m_command.IsInvalid() || InDeferredOperation() || m_in_pre_submit) return;
+	if (!m_command.m_rendering || m_command.m_render_state == next) return; // no pass to close here
+	bool closed = false;
+	if (EagerSplitNow(true, &closed)) FrameTiming::Add(FrameTiming::Counter::EagerSubmitPassN);
+}
+
+void CommandScheduler::ConsumeSegPassEnd() {
+	if (m_command.m_pass_end_ns == 0) return;
+	if (m_seg_start_ns != 0) {
+		FrameTiming::Add(FrameTiming::Counter::SegFirstPassEndNs, FrameTiming::ElapsedNs(m_seg_start_ns, m_command.m_pass_end_ns));
+	}
+	m_command.m_pass_end_ns = 0;
 }
 
 void CommandScheduler::BeginNext() {

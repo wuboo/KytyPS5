@@ -562,6 +562,22 @@ add_executable(eager_submit_mutant_no_age_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(eager_submit_mutant_no_age_tests PRIVATE ${inc_headers})
 target_compile_definitions(eager_submit_mutant_no_age_tests PRIVATE KYTY_EAGER_MUTANT_NO_AGE=1)
+# S327 mutant: split off an open pass that is not being closed. Must be caught (WILL_FAIL).
+add_executable(eager_submit_mutant_no_closing_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/EagerSubmitTests.cpp"
+)
+target_include_directories(eager_submit_mutant_no_closing_tests PRIVATE ${inc_headers})
+target_compile_definitions(eager_submit_mutant_no_closing_tests PRIVATE KYTY_EAGER_MUTANT_NO_CLOSING=1)
+add_executable(gpu_gap_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/GpuGapTests.cpp"
+)
+target_include_directories(gpu_gap_tests PRIVATE ${inc_headers})
+# S327 mutant: the new gap is armed before the pending buffers are harvested (loses the gap that is still armed). Must be caught (WILL_FAIL).
+add_executable(gpu_gap_mutant_arm_first_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/GpuGapTests.cpp"
+)
+target_include_directories(gpu_gap_mutant_arm_first_tests PRIVATE ${inc_headers})
+target_compile_definitions(gpu_gap_mutant_arm_first_tests PRIVATE KYTY_GAP_MUTANT_ARM_FIRST=1)
 add_executable(pad_script_parser_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PadScriptParserTests.cpp"
 )
@@ -1031,6 +1047,10 @@ if(BUILD_TESTING)
 	add_test(NAME eager_submit_mutant_busy COMMAND $<TARGET_FILE:eager_submit_mutant_busy_tests>)
 	add_test(NAME eager_submit_mutant_no_age COMMAND $<TARGET_FILE:eager_submit_mutant_no_age_tests>)
 	set_tests_properties(eager_submit_mutant_pass_open eager_submit_mutant_busy eager_submit_mutant_no_age PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME eager_submit_mutant_no_closing COMMAND $<TARGET_FILE:eager_submit_mutant_no_closing_tests>)
+	add_test(NAME gpu_gap COMMAND $<TARGET_FILE:gpu_gap_tests>)
+	add_test(NAME gpu_gap_mutant_arm_first COMMAND $<TARGET_FILE:gpu_gap_mutant_arm_first_tests>)
+	set_tests_properties(eager_submit_mutant_pass_open eager_submit_mutant_busy eager_submit_mutant_no_age eager_submit_mutant_no_closing gpu_gap_mutant_arm_first PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME pad_script_parser COMMAND $<TARGET_FILE:pad_script_parser_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
@@ -1188,6 +1208,9 @@ if(BUILD_TESTING)
 		eager_submit_mutant_pass_open_tests
 		eager_submit_mutant_busy_tests
 		eager_submit_mutant_no_age_tests
+		eager_submit_mutant_no_closing_tests
+		gpu_gap_tests
+		gpu_gap_mutant_arm_first_tests
 		push_descriptor_policy_tests
 		pad_script_parser_tests
 		shader_vertex_metadata_tests

@@ -150,7 +150,12 @@ enum class Counter : uint32_t {
 	SegDrainToFirstSubmitNs, // sum: end of the drain -> first submit with work
 	SegRecordNs,             // sum: CP time in the segment outside waiting (segment length minus cp_wait_guest/gpu deltas)
 	GpuGapAfterDrainNs,      // KYTY_DIAG_GPUTRUTH=1: end of the last CB before a drain -> start of the first CB after it (GPU timestamps)
-	EagerSubmitN,            // KYTY_EAGER_SUBMIT=1: command buffers split by the eager policy
+	EagerSubmitN,            // KYTY_EAGER_SUBMIT=1: command buffers split by the eager policy at a draw / dispatch
+	// S327
+	GpuGapN,                 // KYTY_DIAG_GPUTRUTH=1: drain gaps counted (gpu_gap_after_drain_ns is their sum)
+	GpuGapMidNs,             // KYTY_DIAG_GPUTRUTH=1: GPU idle between two buffers with no drain between them
+	EagerSubmitPassN,        // KYTY_EAGER_SUBMIT=1: command buffers split at a pass boundary (the old pass was closing anyway)
+	SegFirstPassEndNs,       // sum: end of the drain -> end of the first render pass of the segment
 	Count,
 };
 
