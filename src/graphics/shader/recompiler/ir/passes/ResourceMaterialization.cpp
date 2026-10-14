@@ -1591,8 +1591,97 @@ uint64_t PlanUsedUserDataMask(const ResourcePlan& plan) {
 	return mask;
 }
 
+namespace {
+
+bool MaterializeResourcesWalk(const ResourcePlan& program, const SrtRuntime& runtime,
+                              ResourceSnapshot& snapshot, ResourceSpecialization& specialization);
+
+// Logs every read the walk issues (value or failure) in front of the real readers.
+struct MemoRecorder {
+	SrtRuntime source;
+	SrtMemo&   memo;
+};
+
+bool MemoRecordStrict(void* userdata, uint64_t address, std::span<uint32_t> values) {
+	auto&      recorder = *static_cast<MemoRecorder*>(userdata);
+	const bool ok       = recorder.source.read_specialization_memory(recorder.source.userdata, address, values);
+	recorder.memo.Record(false, address, values, ok);
+	return ok;
+}
+
+bool MemoRecordOrdinary(void* userdata, uint64_t address, std::span<uint32_t> values) {
+	auto&      recorder = *static_cast<MemoRecorder*>(userdata);
+	const bool ok       = recorder.source.read_memory(recorder.source.userdata, address, values);
+	recorder.memo.Record(true, address, values, ok);
+	return ok;
+}
+
+// Index of the first flat slot that differs, UINT32_MAX when the flat buffers agree but a descriptor does not.
+uint32_t FirstDifference(const ResourceSnapshot& before, const ResourceSnapshot& after) {
+	if (before.flattened_srt.size() == after.flattened_srt.size()) {
+		for (size_t i = 0; i < before.flattened_srt.size(); ++i) {
+			if (before.flattened_srt[i] != after.flattened_srt[i]) return static_cast<uint32_t>(i);
+		}
+	}
+	return UINT32_MAX;
+}
+
+} // namespace
+
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
+	if (runtime.fast_mode == SrtFastMode::Off || runtime.read_specialization_memory == nullptr ||
+	    !program.resource_tracking_complete) {
+		snapshot.srt_outcome = SrtMemoOutcome::None;
+		return MaterializeResourcesWalk(program, runtime, snapshot, specialization);
+	}
+	auto&      memo     = snapshot.srt_memo;
+	const bool ordinary = runtime.read_memory != nullptr;
+	const bool predicted =
+	    memo.KeyMatches(&program, runtime.user_data, runtime.shader_base, runtime.workgroup_counts,
+	                    runtime.min_lod_remap, ordinary) &&
+	    memo.ReadsUnchanged(runtime.read_specialization_memory, runtime.read_memory, runtime.userdata);
+	if (predicted && runtime.fast_mode == SrtFastMode::On) {
+		snapshot.srt_outcome = SrtMemoOutcome::Hit;
+		return true;
+	}
+	ResourceSnapshot before;
+	if (predicted) {
+		before.flattened_srt = snapshot.flattened_srt;
+		before.buffers       = snapshot.buffers;
+		before.images        = snapshot.images;
+		before.samplers      = snapshot.samplers;
+	}
+	SrtMemo recorded;
+	recorded.Begin(&program, runtime.user_data, runtime.shader_base, runtime.workgroup_counts,
+	               runtime.min_lod_remap, ordinary);
+	MemoRecorder recorder {runtime, recorded};
+	SrtRuntime   observed = runtime;
+	observed.userdata                   = &recorder;
+	observed.read_specialization_memory = MemoRecordStrict;
+	observed.read_memory                = ordinary ? MemoRecordOrdinary : nullptr;
+	const bool ok = MaterializeResourcesWalk(program, observed, snapshot, specialization);
+	if (ok) {
+		recorded.valid = true;
+		memo           = std::move(recorded);
+	} else {
+		memo.Clear();
+	}
+	snapshot.srt_outcome = predicted ? SrtMemoOutcome::Hit : SrtMemoOutcome::Miss;
+	snapshot.srt_mismatch = UINT32_MAX;
+	if (predicted && ok &&
+	    (before.flattened_srt != snapshot.flattened_srt || before.buffers != snapshot.buffers ||
+	     before.images != snapshot.images || before.samplers != snapshot.samplers)) {
+		snapshot.srt_outcome  = SrtMemoOutcome::Mismatch;
+		snapshot.srt_mismatch = FirstDifference(before, snapshot);
+	}
+	return ok;
+}
+
+namespace {
+
+bool MaterializeResourcesWalk(const ResourcePlan& program, const SrtRuntime& runtime,
+                              ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
 	for (auto& keys: program.selector_keys) keys.resolved = false;
 	if (!program.resource_tracking_complete ||
 	    ((program.requires_specialization_memory || !program.source_reads.empty()) &&
@@ -1869,6 +1958,8 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	snapshot.user_data.assign(runtime.user_data.begin(), runtime.user_data.end());
 	return BuildResourceSpecialization(program, snapshot, specialization, runtime.min_lod_remap);
 }
+
+} // namespace
 
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization) {
 	EXIT_IF(!program.resource_tracking_complete || program.shader_info_complete);

@@ -1,6 +1,9 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+#include "kernel/srtReadPass.h"
 
+#include <algorithm>
+#include <array>
 #include <bit>
 #include <cstdio>
 #include <cstdlib>
@@ -1558,6 +1561,158 @@ void DbgExit(int) { std::abort(); }
 
 } // namespace Common
 
+// S324 KYTY_SRT_FAST: a stage whose user data and every logged guest read are unchanged reuses its snapshot.
+struct SequencedMemory {
+  uint64_t address = 0;
+  std::array<uint32_t, 8> values{};
+  uint32_t reads = 0;
+  bool fail = false;
+};
+
+bool ReadSequencedMemory(void *userdata, uint64_t address,
+                         std::span<uint32_t> words) {
+  auto &memory = *static_cast<SequencedMemory *>(userdata);
+  const auto index = std::min<uint32_t>(memory.reads++, memory.values.size() - 1);
+  if (memory.fail || address != memory.address || words.size() != 1) {
+    return false;
+  }
+  words[0] = memory.values[index];
+  return true;
+}
+
+void TestSrtFastMemo() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  constexpr uint32_t poison = 0xdeadbeefu;
+  auto plan = SrtPlan(0x1000);
+  SequencedMemory memory{.address = 0x1000};
+  memory.values.fill(0x11u);
+  std::array<uint32_t, 2> user_data{1u, 2u};
+  SrtRuntime runtime{.user_data = user_data,
+                     .userdata = &memory,
+                     .read_specialization_memory = ReadSequencedMemory,
+                     .fast_mode = SrtFastMode::On};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.srt_outcome == SrtMemoOutcome::Miss &&
+            snapshot.flattened_srt == std::vector<uint32_t>{0x11u} &&
+            snapshot.srt_memo.valid && !snapshot.srt_memo.reads.empty(),
+        "memo: first walk was not a recorded miss");
+
+  // Hit: only the logged reads happen again; the snapshot is not rebuilt (the poison survives).
+  snapshot.flattened_srt[0] = poison;
+  memory.reads = 0;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.srt_outcome == SrtMemoOutcome::Hit &&
+            snapshot.flattened_srt[0] == poison &&
+            memory.reads == snapshot.srt_memo.reads.size(),
+        "memo: unchanged reads did not reuse the snapshot");
+
+  // The value under a logged address changed: miss, the new value reaches the flat buffer.
+  memory.values.fill(0x22u);
+  memory.reads = 0;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.srt_outcome == SrtMemoOutcome::Miss &&
+            snapshot.flattened_srt == std::vector<uint32_t>{0x22u},
+        "memo: a changed guest value was served from the memo");
+
+  // User data is part of the key.
+  snapshot.flattened_srt[0] = poison;
+  std::array<uint32_t, 2> other_user_data{1u, 3u};
+  runtime.user_data = other_user_data;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.srt_outcome == SrtMemoOutcome::Miss &&
+            snapshot.flattened_srt == std::vector<uint32_t>{0x22u},
+        "memo: changed user data hit the memo");
+  runtime.user_data = other_user_data;
+
+  // A failed walk drops the memo.
+  memory.fail = true;
+  Check(!MaterializeResources(plan, runtime, snapshot, specialization) &&
+            !snapshot.srt_memo.valid,
+        "memo: a failed walk left a valid memo");
+  memory.fail = false;
+
+  // Shadow: unchanged memory agrees (Hit); a read that answers differently during the walk than
+  // during the validation is reported as a mismatch and the walk's result is the one kept.
+  runtime.fast_mode = SrtFastMode::Shadow;
+  memory.values.fill(0x33u);
+  memory.reads = 0;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.srt_outcome == SrtMemoOutcome::Miss,
+        "memo: shadow did not record after a failed walk");
+  memory.reads = 0;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.srt_outcome == SrtMemoOutcome::Hit &&
+            snapshot.flattened_srt == std::vector<uint32_t>{0x33u},
+        "memo: shadow disagreed on unchanged memory");
+  memory.values = {0x33u, 0x44u};
+  memory.reads = 0;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.srt_outcome == SrtMemoOutcome::Mismatch &&
+            snapshot.srt_mismatch == 0u &&
+            snapshot.flattened_srt == std::vector<uint32_t>{0x44u},
+        "memo: shadow did not flag a snapshot the memo would have reused wrongly");
+
+  // Off keeps no memo at all.
+  runtime.fast_mode = SrtFastMode::Off;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.srt_outcome == SrtMemoOutcome::None,
+        "memo: SRT_FAST=0 took the memo path");
+}
+
+// Reads that failed during the walk are part of the key: when they start to succeed the walk may differ.
+void TestSrtMemoLogsFailedReads() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  struct Reader {
+    bool ok = false;
+    uint32_t value = 7;
+  } reader;
+  const auto read = [](void *data, uint64_t, std::span<uint32_t> words) {
+    auto &reader = *static_cast<Reader *>(data);
+    if (reader.ok) words[0] = reader.value;
+    return reader.ok;
+  };
+  uint32_t word = 0;
+  SrtMemo memo;
+  memo.Begin(nullptr, {}, 0, {}, false, false);
+  memo.Record(false, 0x2000, std::span<const uint32_t>(&word, 1), false);
+  word = 7;
+  memo.Record(false, 0x2004, std::span<const uint32_t>(&word, 1), true);
+  memo.valid = true;
+  reader.ok = false;
+  Check(!memo.ReadsUnchanged(read, nullptr, &reader), "memo: a logged successful read that now fails was accepted");
+  Check(memo.reads.size() == 2, "memo: a failed read was not logged");
+  // Both addresses answer through the same fake: the failed one succeeding must break the memo.
+  struct Split {
+    bool first_ok = false;
+    uint32_t second = 7;
+  } split;
+  const auto split_read = [](void *data, uint64_t address, std::span<uint32_t> words) {
+    auto &split = *static_cast<Split *>(data);
+    if (address == 0x2000) return split.first_ok;
+    words[0] = split.second;
+    return true;
+  };
+  Check(memo.ReadsUnchanged(split_read, nullptr, &split), "memo: identical results were rejected");
+  split.first_ok = true;
+  Check(!memo.ReadsUnchanged(split_read, nullptr, &split), "memo: a failed read that now succeeds kept the memo");
+  split.first_ok = false;
+  split.second = 8;
+  Check(!memo.ReadsUnchanged(split_read, nullptr, &split), "memo: a changed value kept the memo");
+}
+
+// S324: a page counts as quiet only after it was checked; the table is bounded and never claims a page it dropped.
+void TestSrtReadPassPages() {
+  Libs::LibKernel::Memory::SrtReadPass pass;
+  Check(!pass.IsClean(0x1000), "pass: an unchecked page was quiet");
+  pass.AddClean(0x1000);
+  Check(pass.IsClean(0x1000) && !pass.IsClean(0x2000), "pass: quiet page lookup is wrong");
+  for (uint64_t page = 0x10000; page < 0x10000 + 64 * 0x1000; page += 0x1000) pass.AddClean(page);
+  Check(pass.count == pass.clean.size() && !pass.IsClean(0x10000 + 63 * 0x1000),
+        "pass: a page that did not fit was reported quiet");
+}
+
 int main() {
   TestMappedSrtUsesDirectReaderByDefault();
   TestNullPageSrtReadsZero();
@@ -1582,6 +1737,9 @@ int main() {
   TestMixedSamplerVariantsShareRuntimeDescriptor();
   TestSignedStorageSpecialization();
   for (const bool mixed : {false, true}) TestIndirectImageSamplerClasses(mixed);
+  TestSrtFastMemo();
+  TestSrtMemoLogsFailedReads();
+  TestSrtReadPassPages();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }

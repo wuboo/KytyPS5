@@ -2,6 +2,7 @@
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_SRTWALKER_H_
 
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
+#include "graphics/shader/recompiler/ir/SrtMemo.h"
 
 #include <algorithm>
 #include <span>
@@ -22,6 +23,7 @@ struct SrtRuntime {
 	uint64_t                  indirect_args_address = 0;
 	// The host folds T# MinLod into the view base level (no VK_EXT_image_view_min_lod): RESINFO must be corrected.
 	bool                      min_lod_remap = false;
+	SrtFastMode               fast_mode     = SrtFastMode::Off; // S324: MaterializeResources memo
 };
 
 class SrtReadCapture {

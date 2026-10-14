@@ -789,6 +789,21 @@ add_executable(resource_materialization_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(resource_materialization_tests fmt::fmt xbyak::xbyak)
 target_include_directories(resource_materialization_tests PRIVATE ${inc_headers})
+# S324 mutants (each must be caught, WILL_FAIL): the memo validates addresses but not values; failed reads are not logged;
+# a page counts as quiet once any page was.
+foreach(mutant IN ITEMS ADDR_ONLY NO_FAILED PAGE_ANY)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(srt_memo_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/ResourceMaterializationTests.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
+	)
+	target_link_libraries(srt_memo_mutant_${mutant_lower}_tests fmt::fmt)
+	target_include_directories(srt_memo_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(srt_memo_mutant_${mutant_lower}_tests PRIVATE KYTY_SRTMEMO_MUTANT_${mutant}=1)
+endforeach()
 
 add_executable(env_audit_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/EnvAuditTests.cpp"
@@ -1569,6 +1584,7 @@ if(BUILD_TESTING)
 			rt_dump_mutant_ignore_flip rt_dump_mutant_ignore_ps
 			mem_events_mutant_inclusive_end mem_events_mutant_merge_any_addr
 			cp_phases_mutant_keep_children cp_phases_mutant_drop_parse
+			srt_memo_mutant_addr_only srt_memo_mutant_no_failed srt_memo_mutant_page_any
 			min_lod_view_mutant_floor min_lod_view_mutant_no_cap min_lod_view_mutant_resinfo
 			apple_drop_mutant_invert_clip apple_drop_mutant_always_bounds apple_drop_mutant_native_counts apple_drop_mutant_bias_abs
 			lod_stats_mutant_real_as_full lod_stats_mutant_no_slot lod_stats_mutant_unset_zero
@@ -1864,6 +1880,9 @@ if(BUILD_TESTING)
 		spec_cond_mutant_superset_clean_tests
 		cp_phases_mutant_keep_children_tests
 		cp_phases_mutant_drop_parse_tests
+		srt_memo_mutant_addr_only_tests
+		srt_memo_mutant_no_failed_tests
+		srt_memo_mutant_page_any_tests
 		mem_events_tests
 		mem_events_mutant_inclusive_end_tests
 		mem_events_mutant_merge_any_addr_tests

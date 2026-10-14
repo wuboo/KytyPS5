@@ -1,6 +1,8 @@
 #ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_RESOURCESNAPSHOT_H_
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_RESOURCESNAPSHOT_H_
 
+#include "graphics/shader/recompiler/ir/SrtMemo.h"
+
 #include <array>
 #include <cstdint>
 #include <utility>
@@ -46,6 +48,10 @@ struct ResourceSnapshot {
 	std::vector<std::pair<uint64_t, uint64_t>> specialization_reads;
 	UniformFill                 uniform_fill;
 	std::vector<ImageNullNote>  image_null_notes;
+	// S324 (KYTY_SRT_FAST): the walk that produced this snapshot, and what the last MaterializeResources did with it.
+	SrtMemo                     srt_memo;
+	SrtMemoOutcome              srt_outcome  = SrtMemoOutcome::None;
+	uint32_t                    srt_mismatch = UINT32_MAX; // Shadow: first differing flat slot (UINT32_MAX: a descriptor)
 };
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
