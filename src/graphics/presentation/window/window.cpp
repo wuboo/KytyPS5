@@ -7,6 +7,7 @@
 #endif
 
 #include "common/assert.h"
+#include "common/benchWindow.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -742,6 +743,30 @@ void WindowContext::ProcessEvent(double time_s) {
 	}
 }
 
+#if defined(__APPLE__)
+// NSWindowOcclusionStateVisible bit of the SDL window's NSWindow, or -1 when it cannot be read.
+static int BenchNsOcclusionVisible(SDL_Window* window) {
+	if (window == nullptr) {
+		return -1;
+	}
+	void* ns_window = SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_COCOA_WINDOW_POINTER, nullptr);
+	if (ns_window == nullptr) {
+		return -1;
+	}
+	const auto state = reinterpret_cast<unsigned long (*)(id, SEL)>(objc_msgSend)(
+	    reinterpret_cast<id>(ns_window), sel_registerName("occlusionState"));
+	return (state & 2UL) != 0 ? 1 : 0; // NSWindowOcclusionStateVisible
+}
+
+static void LogBenchWindowState(SDL_Window* window, uint64_t frames) {
+	const auto flags = static_cast<uint64_t>(SDL_GetWindowFlags(window));
+	LOGF("%s\n", Common::FormatBenchWindowState((flags & SDL_WINDOW_FULLSCREEN) != 0u, (flags & SDL_WINDOW_HIDDEN) != 0u,
+	                                            (flags & SDL_WINDOW_OCCLUDED) != 0u, (flags & SDL_WINDOW_INPUT_FOCUS) != 0u,
+	                                            BenchNsOcclusionVisible(window), frames)
+	                 .c_str());
+}
+#endif
+
 void WindowContext::Run() {
 	Common::Timer timer;
 	timer.Start();
@@ -753,6 +778,10 @@ void WindowContext::Run() {
 	constexpr uint64_t title_interval_ms = 1000;
 	auto               title_time        = SDL_GetTicks();
 	auto               title_frames      = loop.presented_frames.load(std::memory_order_relaxed);
+#if defined(__APPLE__)
+	const bool bench_fullscreen = Common::BenchFullscreenRequested(std::getenv("KYTY_BENCH_FULLSCREEN"));
+	uint64_t   bench_logged     = title_frames / 600;
+#endif
 
 	while (!loop.need_exit) {
 		if (loop.paused.load(std::memory_order_acquire)) {
@@ -775,6 +804,15 @@ void WindowContext::Run() {
 			title_time   = now;
 			title_frames = frames;
 		}
+#if defined(__APPLE__)
+		if (bench_fullscreen) {
+			const auto flips = loop.presented_frames.load(std::memory_order_relaxed);
+			if (flips / 600 > bench_logged) {
+				bench_logged = flips / 600;
+				LogBenchWindowState(window, flips);
+			}
+		}
+#endif
 		const auto wait_ms = static_cast<int>(title_interval_ms - (now - title_time));
 		if (!HostInputWaitEvent(&loop.event, wait_ms)) {
 			continue;
@@ -832,6 +870,11 @@ static void WindowCreate(WindowContext& context) {
 	if (std::getenv("KYTY_BENCH_FOREGROUND") != nullptr) {
 		window_flags |= static_cast<uint32_t>(SDL_WINDOW_ALWAYS_ON_TOP);
 	}
+	// Benchmarks: SDL3 SDL_WINDOW_FULLSCREEN without a chosen mode is desktop full screen, which on macOS is a native
+	// full-screen Space (the state Game Mode and the GPU power policy key on); not the exclusive-mode kind.
+	if (Common::BenchFullscreenRequested(std::getenv("KYTY_BENCH_FULLSCREEN"))) {
+		window_flags |= static_cast<uint32_t>(SDL_WINDOW_FULLSCREEN);
+	}
 #endif
 	context.window = SDL_CreateWindow(KYTY_SDL_WINDOW_CAPTION, width, height, window_flags);
 #if defined(__APPLE__)
@@ -863,6 +906,13 @@ static void WindowCreate(WindowContext& context) {
 	}
 
 	SDL_SetWindowPosition(context.window, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED);
+#if defined(__APPLE__)
+	if (Common::BenchFullscreenRequested(std::getenv("KYTY_BENCH_FULLSCREEN"))) {
+		SDL_ShowWindow(context.window);
+		SDL_RaiseWindow(context.window);
+		LogBenchWindowState(context.window, 0);
+	}
+#endif
 	HostInputInit(context.window);
 	InitializeSystemOverlayInput(context.window);
 	context.UpdateIcon();
