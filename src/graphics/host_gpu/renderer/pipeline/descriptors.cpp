@@ -24,6 +24,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/minLodView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/descAssert.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -1139,9 +1140,19 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
 		        (pipeline_bind_point == vk::PipelineBindPoint::eCompute &&
 		         shader_stage != vk::ShaderStageFlagBits::eCompute));
 	}
+	// KYTY_DESC_ASSERT: the overlap checks below are pure EXIT assertions of the recompiler's own invariants; 0 / sample skip them.
+	static const DescAssert::Mode assert_mode = DescAssert::GlobalMode();
+	bool                          run_assertions = true;
+	if (assert_mode != DescAssert::Mode::On) {
+		static std::atomic<uint64_t> assert_draws {0};
+		run_assertions = DescAssert::ShouldRun(assert_mode, assert_draws.fetch_add(1, std::memory_order_relaxed));
+		FrameTiming::Add(run_assertions ? FrameTiming::Counter::DescAssertRunN : FrameTiming::Counter::DescAssertSkipN);
+	} else {
+		FrameTiming::Add(FrameTiming::Counter::DescAssertRunN);
+	}
 	for (const auto* reader: prepared_bindings) {
 		const auto& reads = reader->runtime->resources->specialization_reads;
-		if (reads.empty()) continue;
+		if (reads.empty() || !run_assertions) continue;
 		for (const auto* writer: prepared_bindings) {
 			if (writer->runtime->program->has_address_writes) {
 				EXIT("scalar resource reads cannot be proven disjoint from shader address writes\n");
