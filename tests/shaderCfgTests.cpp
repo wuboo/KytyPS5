@@ -17151,6 +17151,42 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
   setenv("KYTY_SHADER_LOOP_LIMIT", "0", 1);
 }
 
+// S358: KYTY_SPV_NOCONTRACT = all|fma|none. A legacy V_MAD_F32 (product + sum) and a fused V_FMA_F32 are compiled
+// in each mode; the NoContraction decorations are counted in the disassembly and every module must validate.
+void TestSpvNoContractionModes() {
+  const uint32_t shader[] = {
+      EncodeVop3Word0(0x141, 1),            // v_mad_f32 v1, v0, v0, v0
+      EncodeVop3Word1(256, 256, 256),
+      EncodeVop3Word0(0x14b, 2),            // v_fma_f32 v2, v0, v0, v0
+      EncodeVop3Word1(256, 256, 256),
+      EncodeMubuf0(0x1c, 0, false),         // buffer_store_dword v1
+      EncodeMubuf1(1, 12, 0),
+      EncodeMubuf0(0x1c, 4, false),         // buffer_store_dword v2
+      EncodeMubuf1(2, 12, 0),
+      0xbf810000u,
+  };
+  const char *saved = std::getenv("KYTY_SPV_NOCONTRACT");
+  const std::string saved_value = saved != nullptr ? saved : "";
+  const auto count_for = [&](const char *mode) {
+    if (mode != nullptr) setenv("KYTY_SPV_NOCONTRACT", mode, 1);
+    else unsetenv("KYTY_SPV_NOCONTRACT");
+    const auto result = RecompileForTest(shader, MakeCompileOptions(ShaderType::Compute));
+    CheckSpirvBinaryValidates(result.spirv);
+    return CountSourceOccurrences(DisassembleSpirvBinary(result.spirv), "NoContraction");
+  };
+  const auto unset = count_for(nullptr);
+  const auto all = count_for("all");
+  const auto fma = count_for("fma");
+  const auto none = count_for("none");
+  const auto junk = count_for("bogus");
+  if (saved != nullptr) setenv("KYTY_SPV_NOCONTRACT", saved_value.c_str(), 1);
+  else unsetenv("KYTY_SPV_NOCONTRACT");
+  Check(all == 3u, "KYTY_SPV_NOCONTRACT=all must decorate mad product, mad sum and the fma result");
+  Check(unset == all && junk == all, "unset or unknown KYTY_SPV_NOCONTRACT must behave like all");
+  Check(fma == 1u, "KYTY_SPV_NOCONTRACT=fma must decorate only the mad product");
+  Check(none == 0u, "KYTY_SPV_NOCONTRACT=none must leave FP32 mad/fma undecorated");
+}
+
 #include "ShaderRayTracingTests.inc"
 
 } // namespace
@@ -17169,6 +17205,7 @@ int main(int argc, char** argv) {
     TestPerVertexPrototypeDrawGate();
     return 0;
   }
+  TestSpvNoContractionModes();
   TestRayTracingInstructions();
   TestPvVsStoreEmission();
   TestResourceDescriptorClassification();
