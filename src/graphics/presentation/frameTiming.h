@@ -165,6 +165,9 @@ enum class Counter : uint32_t {
 	DrainWakeLagNs,          // sum: end of the buffer on the GPU (timestamp) -> the CP returns from Wait; minus the smallest lag seen (see GpuGap::ClockMap)
 	FirstSubmitVkToGpuBeginN,  // KYTY_DIAG_GPUTRUTH=1: first buffers whose GPU start was measured
 	FirstSubmitVkToGpuBeginNs, // sum: vkQueueSubmit returned -> start of the buffer on the GPU (timestamp, same clock estimate)
+	DescDynHitN, DescDynMissN, DescDynStaleN, DescDynMismatchN, DescAssertCachedN,
+	DescAssertRunN, DescAssertSkipN, DescAssertReadsN,
+	DescAssertNs, DescKeyNs, DescUpdateNs, DescTransitNs,
 	Count,
 };
 
