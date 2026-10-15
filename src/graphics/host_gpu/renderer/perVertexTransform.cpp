@@ -870,8 +870,12 @@ std::string GetPerVertexTransformSignature(bool unique) {
 #define KYTY_GIT_REVISION "unknown"
 #endif
 	// S134: the unique-vertex replay shaders are a different transformation (separate files too).
-	return fmt::format("v2:{}:{}:env=vk1.2:num_ids{}", KYTY_GIT_REVISION,
-	                   KYTY_PER_VERTEX_TRANSFORM_SIGNATURE, unique ? ":pvu1" : "");
+	// S358: KYTY_SPV_NOCONTRACT changes the stored SPIR-V; the default (all) keeps the old signature.
+	const char* nocontract = std::getenv("KYTY_SPV_NOCONTRACT");
+	const bool  nc_mode    = nocontract != nullptr && (std::strcmp(nocontract, "fma") == 0 || std::strcmp(nocontract, "none") == 0);
+	return fmt::format("v2:{}:{}:env=vk1.2:num_ids{}{}{}", KYTY_GIT_REVISION,
+	                   KYTY_PER_VERTEX_TRANSFORM_SIGNATURE, unique ? ":pvu1" : "", nc_mode ? ":nc=" : "",
+	                   nc_mode ? nocontract : "");
 }
 
 bool SaveTransformedShadersToDisk(const std::filesystem::path& cache_dir, uint64_t vs_hash,

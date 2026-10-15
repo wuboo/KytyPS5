@@ -394,6 +394,25 @@ inline uint32_t ShaderLoopLimit() {
 	return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : (1u << 16u);
 }
 
+// KYTY_SPV_NOCONTRACT (S358): which FP32 results of V_MAD/V_MAC/V_FMA get a NoContraction decoration.
+// SPIRV-Cross turns each decorated FMul/FAdd into a [[clang::optnone]] spvFMul/spvFAdd helper
+// (fma(l,r,0) / fma(1,l,r)) that MSL never inlines or fuses.
+//   all  - product and sum of a legacy MAD plus the fused FMA result (the behaviour before S358).
+//   fma  - only the product of a legacy MAD, the one rounding point the guest has between its multiply and
+//          its add; the sum and the already single-rounded FMA are left undecorated.
+//   none - no FP32 decoration (possible 1 ulp differences against the guest MAD).
+// F64 arithmetic and the BVH intersection math keep their decorations in every mode.
+enum class NoContractionMode { All, Fma, None };
+
+inline NoContractionMode GetNoContractionMode() {
+	// Read per shader compile (cheap), so tests can switch it.
+	const char* value = std::getenv("KYTY_SPV_NOCONTRACT");
+	if (value == nullptr) return NoContractionMode::All;
+	if (std::strcmp(value, "none") == 0) return NoContractionMode::None;
+	if (std::strcmp(value, "fma") == 0) return NoContractionMode::Fma;
+	return NoContractionMode::All;
+}
+
 uint32_t ConstantU64(EmitterState& state, uint64_t value);
 
 uint32_t ConstantU32CompositeZero(EmitterState& state, uint32_t components);
