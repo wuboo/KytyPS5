@@ -22,6 +22,10 @@
 
 namespace Libs::Graphics {
 
+namespace NullDesc {
+struct Hint;
+}
+
 namespace HW {
 class Context;
 class UserConfig;
@@ -202,9 +206,11 @@ private:
 	};
 
 	// ps_hash/slot (pixel stage only, 0 = none) let the control file's force_tex replace the T#.
+	// hint is the S379 stand-in reason for this slot (null when the diag is off).
 	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	                                            const ShaderRecompiler::IR::DescriptorValue& value,
-	                                            uint64_t ps_hash = 0, uint32_t slot = 0);
+	                                            uint64_t ps_hash = 0, uint32_t slot = 0,
+	                                            const NullDesc::Hint* null_hint = nullptr);
 	void                         PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
 	                                                     std::span<RenderColorInfo>         colors);
 	void ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& target,

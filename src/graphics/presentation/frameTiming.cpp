@@ -1,5 +1,6 @@
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/presentation/cpPhases.h"
+#include "graphics/shader/nullDescDiag.h"
 
 #include "common/memEvents.h"
 #include "common/controlFile.h"
@@ -208,6 +209,9 @@ void OnFramePresented() {
 		// The emulator usually exits through a hard stop, so keep the file current.
 		std::fflush(log);
 	}
+	NullDesc::OnPresented(static_cast<uint32_t>(frame),
+	                      static_cast<uint32_t>(g_guest_flips.load(std::memory_order_relaxed)),
+	                      Get(Counter::MinLodRemapped), Get(Counter::MinLodDropped));
 }
 
 namespace {

@@ -21,6 +21,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/diagDump.h"
+#include "graphics/shader/nullDescDiag.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/minLodView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
@@ -560,7 +561,8 @@ static bool ForcedTextureBinding(TextureCache& texture_cache, const ShaderRecomp
 
 TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
                                               const ShaderRecompiler::IR::DescriptorValue& value,
-                                              uint64_t ps_hash, uint32_t slot) {
+                                              uint64_t ps_hash, uint32_t slot,
+                                              const NullDesc::Hint* null_hint) {
 	if (TextureBinding forced; ForcedTextureBinding(m_context.GetTextureCache(), resource, ps_hash, slot, nullptr, forced)) {
 		return forced;
 	}
@@ -581,6 +583,19 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		auto       desc = NullTextureDesc(resource, storage ? TextureCache::BindingType::Storage
 		                                                    : TextureCache::BindingType::Texture);
 		const auto id   = texture_cache.FindImage(desc);
+		auto reason = NullDesc::Reason::EmptyT;
+		uint64_t addr = 0;
+		uint64_t shader = ps_hash;
+		if (null_hint != nullptr) {
+			if (null_hint->reason != 0) {
+				reason = static_cast<NullDesc::Reason>(null_hint->reason);
+			}
+			addr = null_hint->addr;
+			if (null_hint->shader != 0) {
+				shader = null_hint->shader;
+			}
+		}
+		NullDesc::NoteStandin(shader, slot, addr, reason);
 		return {id, nullptr, std::move(desc)};
 	}
 
@@ -886,8 +901,14 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	prepared.samplers.clear();
 	prepared.shader_data.clear();
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
+		NullDesc::Hint null_hint {};
+		if (i < snapshot.image_null_notes.size()) {
+			null_hint.reason = snapshot.image_null_notes[i].reason;
+			null_hint.addr   = snapshot.image_null_notes[i].addr;
+		}
+		null_hint.shader = program.shader_hash;
 		auto binding = ResolveTexture(program.info.images[i], snapshot.images[i],
-		                              program.stage == ShaderType::Pixel ? program.shader_hash : 0, i);
+		                              program.stage == ShaderType::Pixel ? program.shader_hash : 0, i, &null_hint);
 		BindImage(binding.image_id, binding.desc.type == TextureCache::BindingType::Storage);
 		binding.mip_views.swap(prepared.images[i].mip_views);
 		binding.mip_views.clear();
@@ -1008,8 +1029,14 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 			if (old_image != nullptr) {
 				old_image->binding = {};
 			}
+			NullDesc::Hint null_hint {};
+			if (i < snapshot.image_null_notes.size()) {
+				null_hint.reason = snapshot.image_null_notes[i].reason;
+				null_hint.addr   = snapshot.image_null_notes[i].addr;
+			}
+			null_hint.shader = program.shader_hash;
 			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i],
-			                           program.stage == ShaderType::Pixel ? program.shader_hash : 0, i);
+			                           program.stage == ShaderType::Pixel ? program.shader_hash : 0, i, &null_hint);
 			BindImage(images[i].image_id,
 			          images[i].desc.type == TextureCache::BindingType::Storage);
 		}

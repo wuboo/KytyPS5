@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include "common/abi.h"
+#include "graphics/shader/nullDescDiag.h"
 #include "common/assert.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
@@ -48,6 +49,7 @@ bool SrtReadCapture::ReadOrdinary(void* userdata, uint64_t address, std::span<ui
 	if (capture.m_source.read_memory != nullptr) {
 		if (!capture.m_source.read_memory(capture.m_source.userdata, address, values)) return false;
 	} else if (address < GUEST_MEMORY_MIN) {
+		NullDesc::NoteUnresolved(address);
 		std::ranges::fill(values, 0u);
 		return true;
 	} else {
@@ -755,6 +757,7 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 	// A host-memory read through a table below guest memory reads zero, whatever its offset.
 	if (!vector && base < GUEST_MEMORY_MIN &&
 	    (reader == nullptr || SrtReadCapture::ReadsHostMemory(m_runtime))) {
+		NullDesc::NoteNullTable(base);
 		result = 0;
 		return true;
 	}
@@ -766,6 +769,8 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		if (vector) return false;
 		if (address >= GUEST_MEMORY_MIN) {
 			std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
+		} else {
+			NullDesc::NoteUnresolved(address);
 		}
 	}
 	result = word;

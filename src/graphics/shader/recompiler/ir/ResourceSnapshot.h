@@ -30,6 +30,13 @@ struct UniformFill {
 	bool operator==(const UniformFill&) const = default;
 };
 
+// S379: why a bound image became a null T#. Empty unless KYTY_DIAG_NULLDESC=1.
+// Not a specialization key.
+struct ImageNullNote {
+	uint8_t  reason = 0;
+	uint64_t addr   = 0;
+};
+
 struct ResourceSnapshot {
 	std::vector<DescriptorValue> buffers;
 	std::vector<DescriptorValue> images;
@@ -38,6 +45,7 @@ struct ResourceSnapshot {
 	std::vector<uint32_t>        user_data;
 	std::vector<std::pair<uint64_t, uint64_t>> specialization_reads;
 	UniformFill                 uniform_fill;
+	std::vector<ImageNullNote>  image_null_notes;
 };
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
