@@ -1331,7 +1331,7 @@ static void DumpTexOne(RenderContext& context, const DiagDump::DumpTexRequest& r
 	}
 
 	// (d) when the host copy was uploaded and what the CPU-write tracker knows since
-	const char* uma = std::getenv("KYTY_UMA");
+	const char* uma = "0"; // UMA is not part of this build
 	std::snprintf(note, sizeof(note),
 	              "[dump-tex] state cur_flip=%" PRIu64 " host_upload_flip=%" PRIu64 " uploads=%" PRIu64 " cpu_dirty=%d maybe_dirty=%d gpu_modified=%d "
 	              "buffer_modified=%d tracked=%d write_flip=%" PRIu64 " writes=%" PRIu64 " page_write_flip=%" PRIu64 " page_writes=%" PRIu64
