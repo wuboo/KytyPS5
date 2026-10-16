@@ -445,6 +445,16 @@ void TestCompiledSrtReadsFollowBlocks() {
     Check(!walker.RefreshFlatBuffer(flat) && flat == std::vector<uint32_t>(5, 0u),
           "compiled SRT slots accepted truncated user data");
   }
+  {
+    // A null root table must not fault the compiled slot reads: they fall back to the
+    // interpreted walk, which reads zero (PR #1528 on top of the compiled slots of #1456).
+    const std::array<uint32_t, 3> null_data{0u, 0u, 0u};
+    std::vector<uint32_t> flat;
+    SrtWalker walker(plan, SrtRuntime{.user_data = null_data});
+    walker.RefreshFlatBuffer(flat);
+    Check(flat.size() == 5 && flat[4] == 0u && flat[3] == 0u,
+          "compiled SRT slots did not read a null root table as zero");
+  }
   uint32_t callbacks = 0;
   const SrtRuntime callback_runtime{
       .user_data = user_data,
