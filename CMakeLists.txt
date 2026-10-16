@@ -500,6 +500,15 @@ add_executable(null_descriptor_policy_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(null_descriptor_policy_tests PRIVATE ${inc_headers})
 target_link_libraries(null_descriptor_policy_tests Vulkan::Headers)
+add_executable(null_desc_diag_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/NullDescDiagTests.cpp"
+)
+target_include_directories(null_desc_diag_tests PRIVATE ${inc_headers})
+add_executable(null_desc_diag_mutant_classify_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/NullDescDiagTests.cpp"
+)
+target_include_directories(null_desc_diag_mutant_classify_tests PRIVATE ${inc_headers})
+target_compile_definitions(null_desc_diag_mutant_classify_tests PRIVATE KYTY_NULLDESC_MUTANT_EMPTY_FOR_NULLTABLE=1)
 add_executable(guest_driver_memory_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GuestDriverMemoryTests.cpp"
 )
@@ -1077,6 +1086,9 @@ if(BUILD_TESTING)
 	add_test(NAME per_vertex_vsstore COMMAND $<TARGET_FILE:per_vertex_vsstore_tests>)
 	add_test(NAME push_descriptor_policy COMMAND $<TARGET_FILE:push_descriptor_policy_tests>)
 	add_test(NAME null_descriptor_policy COMMAND $<TARGET_FILE:null_descriptor_policy_tests>)
+	add_test(NAME null_desc_diag COMMAND $<TARGET_FILE:null_desc_diag_tests>)
+	add_test(NAME null_desc_diag_mutant_classify COMMAND $<TARGET_FILE:null_desc_diag_mutant_classify_tests>)
+	set_tests_properties(null_desc_diag_mutant_classify PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME guest_driver_memory COMMAND $<TARGET_FILE:guest_driver_memory_tests>)
 	foreach(mutant IN LISTS KYTY_GDM_MUTANTS)
 		add_test(NAME guest_driver_memory_mutant_${mutant} COMMAND $<TARGET_FILE:guest_driver_memory_mutant_${mutant}_tests>)
@@ -1278,6 +1290,8 @@ if(BUILD_TESTING)
 		gpu_gap_mutant_clock_max_tests
 		push_descriptor_policy_tests
 		null_descriptor_policy_tests
+		null_desc_diag_tests
+		null_desc_diag_mutant_classify_tests
 		guest_driver_memory_tests
 		pad_script_parser_tests
 		shader_vertex_metadata_tests
