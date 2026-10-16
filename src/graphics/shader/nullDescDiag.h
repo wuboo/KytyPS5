@@ -13,11 +13,21 @@
 #include <cstdint>
 #include <cstdlib>
 #include <mutex>
+#include <span>
 #include <vector>
 
 namespace Libs::Graphics::NullDesc {
 
-enum class Reason : uint8_t { None = 0, EmptyT = 1, NullTable = 2, Unresolved = 3, Other = 4 };
+// EmptyT stays for the null-table mutant and for a hint that was never classified.
+// inactive / filtered_* / zero_mem split the old "empty addr=0" bucket.
+enum class Reason : uint8_t {
+	None = 0, EmptyT = 1, NullTable = 2, Unresolved = 3, Other = 4,
+	Inactive = 5, FilteredValid = 6, FilteredDim = 7, ZeroMem = 8,
+};
+
+inline constexpr uint32_t kReasonCount = 9;
+inline constexpr uint64_t kDriverWindowLo = 0xfe0000000ull;
+inline constexpr uint64_t kDriverWindowHi = 0xfe0200000ull;
 
 struct FlipWindow {
 	uint32_t lo = 6590;
@@ -74,8 +84,12 @@ inline uint64_t TextureBase40(const uint32_t* dwords) {
 
 // `was_null` / `valid` describe the descriptor before it is forced to zeros.
 // A null-table read wins over a failed validity check: a zeroed table looks invalid too.
-inline Reason Classify(bool was_null, bool valid, uint32_t null_table_delta, uint32_t unresolved_delta) {
-	const bool bad = was_null || !valid;
+inline Reason Classify(bool was_null, bool valid, uint32_t null_table_delta, uint32_t unresolved_delta,
+                       bool inactive = false, bool filtered_dim = false) {
+	if (inactive) {
+		return Reason::Inactive;
+	}
+	const bool bad = was_null || !valid || filtered_dim;
 	if (null_table_delta != 0 && bad) {
 #if defined(KYTY_NULLDESC_MUTANT_EMPTY_FOR_NULLTABLE)
 		return Reason::EmptyT;
@@ -86,11 +100,14 @@ inline Reason Classify(bool was_null, bool valid, uint32_t null_table_delta, uin
 	if (unresolved_delta != 0 && bad) {
 		return Reason::Unresolved;
 	}
+	if (filtered_dim && !was_null) {
+		return Reason::FilteredDim;
+	}
 	if (!valid && !was_null) {
-		return Reason::Other;
+		return Reason::FilteredValid;
 	}
 	if (bad) {
-		return Reason::EmptyT;
+		return Reason::ZeroMem;
 	}
 	return Reason::None;
 }
@@ -101,6 +118,10 @@ inline const char* ReasonName(Reason reason) {
 		case Reason::NullTable: return "nulltable";
 		case Reason::Unresolved: return "unresolved";
 		case Reason::Other: return "other";
+		case Reason::Inactive: return "inactive";
+		case Reason::FilteredValid: return "filtered_valid";
+		case Reason::FilteredDim: return "filtered_dim";
+		case Reason::ZeroMem: return "zero_mem";
 		case Reason::None: return "none";
 	}
 	return "none";
@@ -259,17 +280,55 @@ inline void NoteUnresolved(uint64_t address) {
 }
 
 struct StandinState {
-	std::atomic<uint64_t> n[5] {};
+	std::atomic<uint64_t> n[kReasonCount] {};
 	std::mutex            lock;
 	TopList               top;
 	bool                  dumped              = false;
-	uint64_t              last[5]             {};
+	uint64_t              last[kReasonCount]  {};
 	uint64_t              last_walker_null    = 0;
 	uint64_t              last_walker_unres   = 0;
 	uint64_t              last_minlod_remap   = 0;
 	uint64_t              last_minlod_dropped = 0;
+	uint64_t              last_driver_reads   = 0;
+	uint64_t              last_driver_nonzero = 0;
+	uint64_t              last_gpu_dirty      = 0;
 	bool                  announced           = false;
 };
+
+inline std::atomic<uint64_t>& SrtDriverWindowReads() {
+	static std::atomic<uint64_t> total {0};
+	return total;
+}
+
+inline std::atomic<uint64_t>& SrtDriverWindowNonzero() {
+	static std::atomic<uint64_t> total {0};
+	return total;
+}
+
+inline std::atomic<uint64_t>& SrtGpuDirtyReads() {
+	static std::atomic<uint64_t> total {0};
+	return total;
+}
+
+// Ordinary SRT reads. The compiled walker (main, read_memory empty) does not pass through here.
+inline void NoteSrtRead(uint64_t address, std::span<const uint32_t> words, bool gpu_dirty) {
+	if (!Enabled()) {
+		return;
+	}
+	if (gpu_dirty) {
+		SrtGpuDirtyReads().fetch_add(1, std::memory_order_relaxed);
+	}
+	if (address < kDriverWindowLo || address >= kDriverWindowHi) {
+		return;
+	}
+	SrtDriverWindowReads().fetch_add(1, std::memory_order_relaxed);
+	for (const auto word: words) {
+		if (word != 0u) {
+			SrtDriverWindowNonzero().fetch_add(1, std::memory_order_relaxed);
+			break;
+		}
+	}
+}
 
 inline StandinState& Standins() {
 	static StandinState state;
@@ -282,7 +341,7 @@ inline void NoteStandin(uint64_t shader, uint32_t slot, uint64_t addr, Reason re
 	}
 	auto& state = Standins();
 	const auto index = static_cast<uint32_t>(reason);
-	if (index < 5) {
+	if (index < kReasonCount) {
 		state.n[index].fetch_add(1, std::memory_order_relaxed);
 	}
 	if (!InWindow(Window(), DrawingFrame().load(std::memory_order_relaxed))) {
@@ -304,32 +363,51 @@ inline void OnPresented(uint32_t frame, uint32_t guest_flips, uint64_t minlod_re
 		LOGF("[nulldesc] on frame_window=%u-%u (frames.csv frame / frame_flip_N, not guest flips)\n", window.lo,
 		     window.hi);
 	}
-	uint64_t standin[5];
-	for (uint32_t i = 0; i < 5; i++) {
+	uint64_t standin[kReasonCount];
+	for (uint32_t i = 0; i < kReasonCount; i++) {
 		standin[i] = state.n[i].load(std::memory_order_relaxed);
 	}
 	const auto walker_null = WalkerNullTotal().load(std::memory_order_relaxed);
 	const auto walker_bad  = WalkerUnresolvedTotal().load(std::memory_order_relaxed);
+	const auto driver_reads = SrtDriverWindowReads().load(std::memory_order_relaxed);
+	const auto driver_nonzero = SrtDriverWindowNonzero().load(std::memory_order_relaxed);
+	const auto gpu_dirty = SrtGpuDirtyReads().load(std::memory_order_relaxed);
 	const auto empty       = static_cast<uint32_t>(Reason::EmptyT);
 	const auto nulltable   = static_cast<uint32_t>(Reason::NullTable);
 	const auto unresolved  = static_cast<uint32_t>(Reason::Unresolved);
 	const auto other       = static_cast<uint32_t>(Reason::Other);
+	const auto inactive    = static_cast<uint32_t>(Reason::Inactive);
+	const auto filtered_valid = static_cast<uint32_t>(Reason::FilteredValid);
+	const auto filtered_dim   = static_cast<uint32_t>(Reason::FilteredDim);
+	const auto zero_mem       = static_cast<uint32_t>(Reason::ZeroMem);
 	LOGF("[nulldesc] frame=%u guest_flips=%u standin_empty=%llu standin_nulltable=%llu "
-	     "standin_unresolved=%llu standin_other=%llu walker_nulltable=%llu walker_unresolved=%llu "
+	     "standin_unresolved=%llu standin_other=%llu standin_inactive=%llu standin_filtered_valid=%llu "
+	     "standin_filtered_dim=%llu standin_zero_mem=%llu walker_nulltable=%llu walker_unresolved=%llu "
+	     "srt_read_driver_window=%llu srt_read_driver_nonzero=%llu srt_read_gpu_dirty=%llu "
 	     "minlod_remap=%llu minlod_dropped=%llu\n",
 	     frame, guest_flips, static_cast<unsigned long long>(standin[empty] - state.last[empty]),
 	     static_cast<unsigned long long>(standin[nulltable] - state.last[nulltable]),
 	     static_cast<unsigned long long>(standin[unresolved] - state.last[unresolved]),
 	     static_cast<unsigned long long>(standin[other] - state.last[other]),
+	     static_cast<unsigned long long>(standin[inactive] - state.last[inactive]),
+	     static_cast<unsigned long long>(standin[filtered_valid] - state.last[filtered_valid]),
+	     static_cast<unsigned long long>(standin[filtered_dim] - state.last[filtered_dim]),
+	     static_cast<unsigned long long>(standin[zero_mem] - state.last[zero_mem]),
 	     static_cast<unsigned long long>(walker_null - state.last_walker_null),
 	     static_cast<unsigned long long>(walker_bad - state.last_walker_unres),
+	     static_cast<unsigned long long>(driver_reads - state.last_driver_reads),
+	     static_cast<unsigned long long>(driver_nonzero - state.last_driver_nonzero),
+	     static_cast<unsigned long long>(gpu_dirty - state.last_gpu_dirty),
 	     static_cast<unsigned long long>(minlod_remap_total - state.last_minlod_remap),
 	     static_cast<unsigned long long>(minlod_dropped_total - state.last_minlod_dropped));
-	for (uint32_t i = 0; i < 5; i++) {
+	for (uint32_t i = 0; i < kReasonCount; i++) {
 		state.last[i] = standin[i];
 	}
 	state.last_walker_null    = walker_null;
 	state.last_walker_unres   = walker_bad;
+	state.last_driver_reads   = driver_reads;
+	state.last_driver_nonzero = driver_nonzero;
+	state.last_gpu_dirty      = gpu_dirty;
 	state.last_minlod_remap   = minlod_remap_total;
 	state.last_minlod_dropped = minlod_dropped_total;
 	DrawingFrame().store(frame + 1, std::memory_order_relaxed);

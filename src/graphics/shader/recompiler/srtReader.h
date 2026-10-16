@@ -7,6 +7,7 @@
 // checked: PipelineCache installs ReadShaderGuestMemoryOrZero. A miss returns
 // zeros and success, because MaterializeResources treats a false read as EXIT.
 
+#include "graphics/shader/nullDescDiag.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include <algorithm>
@@ -89,14 +90,22 @@ inline bool ReadOrZero(uint64_t address, std::span<uint32_t> values, BackingRead
 #endif
 	};
 	if (address < kGuestMemoryMin) {
-		return zeros();
+		if (!zeros()) {
+			return false;
+		}
+		NullDesc::NoteSrtRead(address, values, false);
+		return true;
 	}
 	bool gpu_dirty = false;
 	if (read_backing == nullptr ||
 	    !read_backing(userdata, address, values.data(), values.size_bytes(), &gpu_dirty)) {
-		return zeros();
+		if (!zeros()) {
+			return false;
+		}
+		NullDesc::NoteSrtRead(address, values, false);
+		return true;
 	}
-	(void)gpu_dirty;
+	NullDesc::NoteSrtRead(address, values, gpu_dirty);
 	return true;
 }
 

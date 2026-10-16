@@ -41,8 +41,10 @@ int main() {
 	Check(Classify(true, false, 3, 9) == Reason::NullTable, "null table wins over unresolved");
 	Check(Classify(false, false, 2, 0) == Reason::NullTable, "null table wins over an invalid T#");
 	Check(Classify(true, false, 0, 4) == Reason::Unresolved, "unresolved address of a null T#");
-	Check(Classify(false, false, 0, 0) == Reason::Other, "invalid non-null T# is other");
-	Check(Classify(true, false, 0, 0) == Reason::EmptyT, "game null T# is empty");
+	Check(Classify(false, false, 0, 0) == Reason::FilteredValid, "invalid non-null T# is filtered_valid");
+	Check(Classify(true, false, 0, 0) == Reason::ZeroMem, "game null T# is zero_mem");
+	Check(Classify(false, true, 0, 0, false, true) == Reason::FilteredDim, "dimension reject keeps the T#");
+	Check(Classify(true, false, 0, 0, true) == Reason::Inactive, "inactive source is not zero_mem");
 	Check(Classify(false, true, 1, 1) == Reason::None, "a valid T# is not a stand-in");
 
 	uint32_t words[2] = {0, 0};

@@ -868,6 +868,16 @@ bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 	       g_guest_address_space->TryReadBacking(vaddr, data, size);
 }
 
+bool QueryShaderGpuDirty(uint64_t vaddr, uint64_t size) {
+	if (size == 0 || g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
+		return false;
+	}
+	if (!Graphics::GuestGpu::IsGpuThread()) {
+		return false;
+	}
+	return GetGpuResources().GetBufferCache().HasGpuDirtyBytes(vaddr, size);
+}
+
 bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size)) {
 		if (!Graphics::GuestGpu::IsGpuThread()) {

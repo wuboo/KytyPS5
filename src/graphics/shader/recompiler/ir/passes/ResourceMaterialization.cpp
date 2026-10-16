@@ -21,22 +21,31 @@ namespace {
 
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
 
-void RememberNullImage(ResourceSnapshot& snapshot, uint32_t slot, const DescriptorValue& value,
-                       bool was_null, bool valid, NullDesc::WalkMark mark) {
+struct NullImageFact {
+	bool inactive = false;
+	bool was_null = false;
+	bool valid = false;
+	bool filtered_dim = false;
+	uint64_t base = 0;
+	NullDesc::WalkMark mark {};
+};
+
+void RememberNullImage(ResourceSnapshot& snapshot, uint32_t slot, const NullImageFact& fact) {
 	if (!NullDesc::Enabled()) {
 		return;
 	}
-	const auto delta  = NullDesc::Since(mark);
-	const auto reason = NullDesc::Classify(was_null, valid, delta.null_tables, delta.unresolved);
+	const auto delta = NullDesc::Since(fact.mark);
+	const auto reason = NullDesc::Classify(fact.was_null, fact.valid, delta.null_tables, delta.unresolved,
+	                                       fact.inactive, fact.filtered_dim);
 	if (snapshot.image_null_notes.size() <= slot) {
 		snapshot.image_null_notes.resize(slot + 1);
 	}
 	auto& note = snapshot.image_null_notes[slot];
 	note.reason = static_cast<uint8_t>(reason);
-	const auto base = NullDesc::TextureBase40(value.dwords.data());
 	note.addr = reason == NullDesc::Reason::NullTable ? delta.table
-	          : reason == NullDesc::Reason::Unresolved && base == 0 ? delta.unresolved_addr
-	                                                                 : base;
+	          : reason == NullDesc::Reason::Unresolved && fact.base == 0 ? delta.unresolved_addr
+	          : reason == NullDesc::Reason::Inactive ? 0
+	                                                 : fact.base;
 }
 
 bool SpecializationFail(std::string_view message) {
@@ -1711,33 +1720,84 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		if (source->indirect_descriptor.has_value()) {
 			snapshot.images[i] = {.dword_count = 8u};
 			if (!active.empty() && !active[image.source]) {
+				NullImageFact fact;
+				fact.inactive = true;
+				fact.was_null = true;
+				fact.mark = NullDesc::MarkWalk();
+				RememberNullImage(snapshot, i, fact);
 				continue;
 			}
 			const auto& indirect = *source->indirect_descriptor;
 			const bool bounded_table = IsBoundedDescriptorTable(program, indirect);
 			const auto mark = NullDesc::MarkWalk();
+			// Rank keeps the strongest rejection seen before the filter zeros the T#.
+			struct SeenFilter {
+				int rank = 0;
+				bool was_null = false;
+				bool valid = false;
+				bool filtered_dim = false;
+				uint64_t base = 0;
+			} seen;
+			const auto consider = [&](const DescriptorValue& value) {
+				const bool was_null = NullImageDescriptor(value);
+				const bool valid = !was_null && ValidImageDescriptor(value, image.r128);
+				const bool dim = valid && bounded_table &&
+				                 DescriptorDimension(value, image.dimension) != image.dimension;
+				const int rank = dim ? 3 : (!was_null && !valid) ? 2 : was_null ? 1 : 0;
+				if (rank <= seen.rank) {
+					return;
+				}
+				seen.rank = rank;
+				seen.was_null = was_null;
+				seen.valid = valid;
+				seen.filtered_dim = dim;
+				seen.base = NullDesc::TextureBase40(value.dwords.data());
+			};
 			if (!MaterializeIndirectDescriptor(
 			        program, image.source, i, 8u, image.r128 ? 4u : 8u, observed, clean, snapshot, snapshot.images,
 			        specialization.images, [&](DescriptorValue& value) {
 				        // A broad heap also contains resources for other typed image operations.
+#if defined(KYTY_NULLDESC_MUTANT_NOTE_AFTER_FILTER)
 				        if (NullImageDescriptor(value) || !ValidImageDescriptor(value, image.r128) ||
 				            (bounded_table && DescriptorDimension(value, image.dimension) != image.dimension))
 					        value.dwords.fill(0u);
+				        consider(value);
+#else
+				        consider(value);
+				        if (NullImageDescriptor(value) || !ValidImageDescriptor(value, image.r128) ||
+				            (bounded_table && DescriptorDimension(value, image.dimension) != image.dimension))
+					        value.dwords.fill(0u);
+#endif
 				        return true;
 			        })) {
 				return resource_failed("image", i, image.source, snapshot.images.size());
 			}
-			RememberNullImage(snapshot, i, snapshot.images[i], NullImageDescriptor(snapshot.images[i]),
-			                  ValidImageDescriptor(snapshot.images[i], image.r128), mark);
+			NullImageFact fact;
+			fact.mark = mark;
+			if (seen.rank > 0) {
+				fact.was_null = seen.was_null;
+				fact.valid = seen.valid;
+				fact.filtered_dim = seen.filtered_dim;
+				fact.base = seen.base;
+			} else {
+				fact.was_null = NullImageDescriptor(snapshot.images[i]);
+				fact.valid = ValidImageDescriptor(snapshot.images[i], image.r128);
+				fact.base = NullDesc::TextureBase40(snapshot.images[i].dwords.data());
+			}
+			RememberNullImage(snapshot, i, fact);
 		} else {
 			const auto mark = NullDesc::MarkWalk();
 			if (!evaluate(image.source, snapshot.images[i], image.written)) {
 				return false;
 			}
-			const bool was_null = NullImageDescriptor(snapshot.images[i]);
-			const bool valid    = ValidImageDescriptor(snapshot.images[i], image.r128);
-			RememberNullImage(snapshot, i, snapshot.images[i], was_null, valid, mark);
-			if (!valid) {
+			NullImageFact fact;
+			fact.inactive = !active.empty() && !active[image.source];
+			fact.was_null = NullImageDescriptor(snapshot.images[i]);
+			fact.valid = ValidImageDescriptor(snapshot.images[i], image.r128);
+			fact.base = NullDesc::TextureBase40(snapshot.images[i].dwords.data());
+			fact.mark = mark;
+			RememberNullImage(snapshot, i, fact);
+			if (!fact.valid) {
 				snapshot.images[i].dwords.fill(0);
 			}
 		}
