@@ -97,6 +97,13 @@ DeviceAddressBufferDestructionWaitsForQueue(vk::DriverId driver_id) {
 	return max_push_descriptors > 0 && descriptor_count <= max_push_descriptors;
 }
 
+// Unbound textures bind VK_NULL_HANDLE only when robustness2.nullDescriptor is enabled on the device
+// (MoltenVK does not report it); otherwise they bind a 1x1 stand-in image.
+[[nodiscard]] constexpr inline bool UseNativeNullDescriptor(bool robustness2_extension,
+                                                            bool null_descriptor_feature) {
+	return robustness2_extension && null_descriptor_feature;
+}
+
 } // namespace Libs::Graphics
 
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_VULKANCOMMON_H_

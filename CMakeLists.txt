@@ -495,6 +495,11 @@ add_executable(push_descriptor_policy_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(push_descriptor_policy_tests PRIVATE ${inc_headers})
 target_link_libraries(push_descriptor_policy_tests Vulkan::Headers)
+add_executable(null_descriptor_policy_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/NullDescriptorPolicyTests.cpp"
+)
+target_include_directories(null_descriptor_policy_tests PRIVATE ${inc_headers})
+target_link_libraries(null_descriptor_policy_tests Vulkan::Headers)
 
 add_executable(scalar_provenance_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ScalarProvenanceTests.cpp"
@@ -1066,6 +1071,7 @@ if(BUILD_TESTING)
 	add_test(NAME per_vertex_unique COMMAND $<TARGET_FILE:per_vertex_unique_tests>)
 	add_test(NAME per_vertex_vsstore COMMAND $<TARGET_FILE:per_vertex_vsstore_tests>)
 	add_test(NAME push_descriptor_policy COMMAND $<TARGET_FILE:push_descriptor_policy_tests>)
+	add_test(NAME null_descriptor_policy COMMAND $<TARGET_FILE:null_descriptor_policy_tests>)
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
 	add_test(NAME gpu_keepwarm COMMAND $<TARGET_FILE:gpu_keepwarm_tests>)
 	foreach(mutant IN LISTS KYTY_KW_MUTANTS)
@@ -1261,6 +1267,7 @@ if(BUILD_TESTING)
 		eager_submit_mutant_clear_reopen_tests
 		gpu_gap_mutant_clock_max_tests
 		push_descriptor_policy_tests
+		null_descriptor_policy_tests
 		pad_script_parser_tests
 		shader_vertex_metadata_tests
 		resource_materialization_tests
