@@ -9,6 +9,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/cpPhaseScope.h"
+#include "kernel/guestDriverMemory.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
 
