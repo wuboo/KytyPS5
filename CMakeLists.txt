@@ -649,6 +649,24 @@ add_executable(env_audit_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(env_audit_tests PRIVATE ${inc_headers})
 
+# S370: every getenv("KYTY_...") of src/ is in knownEnv.h; the mutant drops KYTY_SRT_MEMO2 from the list and must be caught (WILL_FAIL).
+# S370: every getenv("KYTY_...") of src/ is in knownEnv.h; the mutant drops KYTY_SRT_MEMO2 from the list and must be caught (WILL_FAIL).
+# S370 diag tests (values of the place=shader drains, decision classes, log window); mutants must be caught (WILL_FAIL).
+add_executable(other_drain_diag_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/OtherDrainDiagTests.cpp")
+target_include_directories(other_drain_diag_tests PRIVATE ${inc_headers})
+foreach(mutant NEVER_CHANGED IGNORE_VALUE)
+	string(TOLOWER "${mutant}" mutant_lower)
+	add_executable(other_drain_diag_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/OtherDrainDiagTests.cpp")
+	target_include_directories(other_drain_diag_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(other_drain_diag_mutant_${mutant_lower}_tests PRIVATE KYTY_OTHERDRAINDIAG_MUTANT_${mutant}=1)
+endforeach()
+add_executable(env_source_scan_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/EnvSourceScanTests.cpp")
+target_include_directories(env_source_scan_tests PRIVATE ${inc_headers})
+target_compile_definitions(env_source_scan_tests PRIVATE KYTY_SOURCE_SCAN_DIR="${KYTY_SOURCE_DIR}")
+add_executable(env_source_scan_mutant_no_memo2_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/EnvSourceScanTests.cpp")
+target_include_directories(env_source_scan_mutant_no_memo2_tests PRIVATE ${inc_headers})
+target_compile_definitions(env_source_scan_mutant_no_memo2_tests PRIVATE KYTY_SOURCE_SCAN_DIR="${KYTY_SOURCE_DIR}" KYTY_KNOWNENV_MUTANT_NO_MEMO2=1)
+
 add_executable(amd_cpu_mode_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/AmdCpuModeTests.cpp")
 target_include_directories(amd_cpu_mode_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): the header is copied with one edit into the build tree, so the sources carry no test hooks.
@@ -1125,6 +1143,9 @@ if(BUILD_TESTING)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
 	add_test(NAME env_audit COMMAND $<TARGET_FILE:env_audit_tests>)
 	add_test(NAME env_audit_mutant COMMAND $<TARGET_FILE:env_audit_mutant_tests>)
+	add_test(NAME env_source_scan COMMAND $<TARGET_FILE:env_source_scan_tests>)
+	add_test(NAME env_source_scan_mutant_no_memo2 COMMAND $<TARGET_FILE:env_source_scan_mutant_no_memo2_tests>)
+	set_tests_properties(env_source_scan_mutant_no_memo2 PROPERTIES WILL_FAIL TRUE)
 	set_tests_properties(env_audit_mutant PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME bench_window COMMAND $<TARGET_FILE:bench_window_tests>)
 	foreach(mutant IN ITEMS fullscreen_zero_on occlusion_ignored env_unknown)
@@ -1294,6 +1315,8 @@ if(BUILD_TESTING)
 		resource_materialization_tests
 		env_audit_tests
 		env_audit_mutant_tests
+		env_source_scan_tests
+		env_source_scan_mutant_no_memo2_tests
 		amd_cpu_mode_tests
 		amd_cpu_mode_mutant_sse4a_ignored_tests
 		amd_cpu_mode_mutant_rdpid_ignored_tests
