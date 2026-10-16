@@ -513,6 +513,11 @@ void CompileSrtReads(ResourcePlan& program) {
 		code.or_(code.rax, code.r10);
 		code.mov(code.r10, AddressMask & ~uint64_t {3});
 		code.and_(code.rax, code.r10);
+		// A table below guest memory (a null pointer) falls back to the interpreted read, which
+		// reads zero there instead of faulting the host.
+		code.mov(code.r10, GUEST_MEMORY_MIN);
+		code.cmp(code.rax, code.r10);
+		code.jb(failed, Xbyak::CodeGenerator::T_NEAR);
 		const auto& memory = program.memory_info[inst->Flags<SrtReadFlags>().index];
 		const auto  relative =
 		    (static_cast<int64_t>(static_cast<int32_t>(memory.offset)) & ~int64_t {3}) +
