@@ -1055,6 +1055,8 @@ if(BUILD_TESTING)
 	set_tests_properties(emulator_present_mode_invalid PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME ime_dialog COMMAND $<TARGET_FILE:ime_dialog_tests>)
 	add_test(NAME shader_cfg COMMAND $<TARGET_FILE:shader_cfg_tests>)
+	# Apple vertex shaders derive the guest lane from gl_VertexIndex by default; tests that check lane selection need the builtin.
+	set_tests_properties(shader_cfg PROPERTIES ENVIRONMENT "KYTY_VS_LANE_FROM_INDEX=0")
 	# The mutant aborts (Check -> abort), which ctest counts as a crash even with WILL_FAIL: require its failure message instead.
 	add_test(NAME shader_cfg_pv_vsstore_mutant_first_third
 	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pv_vsstore_mutant_first_third_tests> 2>&1 | grep -q 'first/third swapped'")
