@@ -172,7 +172,7 @@ bool DecodePerVertexPrototypeAttribute(Prospero::BufferFormat   format,
 }
 
 void RememberPerVertexPrototypeShader(const ShaderProgram&                    program,
-                                      const ShaderRecompiler::CompileResult&  result,
+                                      ShaderRecompiler::CompileResult&        result,
                                       const ShaderRecompiler::CompileOptions& options,
                                       uint32_t                                host_subgroup_size) {
 	if (!PerVertexPrototypeEnabled()) return;
@@ -216,7 +216,7 @@ void RememberPerVertexPrototypeShader(const ShaderProgram&                    pr
 		const Spirv::VertexCaptureInfo capture {
 		    host_subgroup_size, static_cast<uint32_t>(vs.resources_num), layout.record_stride_vec4,
 		    layout.clip_slot, layout.location_to_slot};
-		it->second.capture_words = Spirv::EmitProgram(result.program, options.input_info, &capture);
+		it->second.capture_words = Spirv::EmitProgram(result.program, options.input_info, 0, false, false, &capture);
 		// Validation of our own emitter output is ~30% of a vertex permutation's cost; bench-only
 		// switch KYTY_PV_SKIP_VALIDATE=1 skips it (the first draw would still be validated by Vulkan).
 		static const bool skip_validate = std::getenv("KYTY_PV_SKIP_VALIDATE") != nullptr;
@@ -428,10 +428,13 @@ const PerVertexPrototypePrograms* GetPerVertexPrototypePrograms(
 	value.capture_pipeline.prototype_vertex_capture = true;
 	value.capture_pipeline.uses_push_descriptors    = false;
 	std::vector<vk::DescriptorSetLayoutBinding> resources;
-	for (const auto& binding: vs_info.stage.program->bindings.descriptors) {
+	const auto& vs_bindings = vs_info.stage.program->bindings;
+	for (auto mask = vs_bindings.descriptor_mask; mask != 0; mask &= mask - 1) {
+		const auto index = static_cast<size_t>(std::countr_zero(mask));
+		const auto kind  = static_cast<ShaderRecompiler::IR::DescriptorBindingKind>(index);
 		resources.emplace_back(
-		    ShaderRecompiler::IR::NativeBinding(ShaderType::Vertex, binding.kind),
-		    NativeDescriptorType(binding.kind), NativeDescriptorCount(binding),
+		    ShaderRecompiler::IR::NativeBinding(ShaderType::Vertex, kind),
+		    NativeDescriptorType(kind), vs_bindings.descriptor_counts[index],
 		    vk::ShaderStageFlagBits::eCompute);
 	}
 	vk::DescriptorSetLayoutCreateInfo resource_info {};

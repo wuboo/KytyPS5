@@ -256,6 +256,22 @@ void Add(Counter counter, uint64_t value) {
 	g_counters[static_cast<size_t>(counter)].fetch_add(value, std::memory_order_relaxed);
 }
 
+void Set(Counter counter, uint64_t value) {
+	g_counters[static_cast<size_t>(counter)].store(value, std::memory_order_relaxed);
+}
+
+uint64_t Get(Counter counter) {
+	return g_counters[static_cast<size_t>(counter)].load(std::memory_order_relaxed);
+}
+
+void Max(Counter counter, uint64_t value) {
+	auto& slot  = g_counters[static_cast<size_t>(counter)];
+	auto  known = slot.load(std::memory_order_relaxed);
+	while (known < value &&
+	       !slot.compare_exchange_weak(known, value, std::memory_order_relaxed)) {
+	}
+}
+
 bool OptEnabled(const char* name) {
 	static const std::string disabled = [] {
 		const char* value = std::getenv("KYTY_OPT_OFF");
