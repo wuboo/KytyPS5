@@ -922,7 +922,7 @@ void TestThreadBitConstantLaneMask() {
     Fixture fixture;
     EmitThreadBit(fixture, Value(0xffffffffu), EmitBoundedLaneShift(fixture));
     ConstantPropagationPass(fixture.program.blocks);
-    RemoveIdentities(fixture.program.blocks);
+    RemoveIdentities(fixture.program);
     EliminateDeadCode(fixture.program.blocks);
     Check(ReferencedBitTest(fixture.BlockAt()) == Value(true) &&
               !ContainsLaneId(fixture.BlockAt()),
@@ -933,7 +933,7 @@ void TestThreadBitConstantLaneMask() {
     Fixture fixture;
     EmitThreadBit(fixture, Value(0u), EmitBoundedLaneShift(fixture));
     ConstantPropagationPass(fixture.program.blocks);
-    RemoveIdentities(fixture.program.blocks);
+    RemoveIdentities(fixture.program);
     EliminateDeadCode(fixture.program.blocks);
     Check(ReferencedBitTest(fixture.BlockAt()) == Value(false) &&
               !ContainsLaneId(fixture.BlockAt()),
@@ -944,7 +944,7 @@ void TestThreadBitConstantLaneMask() {
     Fixture fixture;
     EmitThreadBit(fixture, Value(0xffffffffu), EmitBoundedLaneShift(fixture, true), Value(1u), true);
     ConstantPropagationPass(fixture.program.blocks);
-    RemoveIdentities(fixture.program.blocks);
+    RemoveIdentities(fixture.program);
     EliminateDeadCode(fixture.program.blocks);
     Check(ReferencedBitTest(fixture.BlockAt()) == Value(true) &&
               !ContainsLaneId(fixture.BlockAt()),
@@ -956,7 +956,7 @@ void TestThreadBitConstantLaneMask() {
     Fixture fixture;
     EmitThreadBit(fixture, Value(0x0f0f0f0fu), EmitBoundedLaneShift(fixture));
     ConstantPropagationPass(fixture.program.blocks);
-    RemoveIdentities(fixture.program.blocks);
+    RemoveIdentities(fixture.program);
     EliminateDeadCode(fixture.program.blocks);
     Check(!ReferencedBitTest(fixture.BlockAt()).IsImmediate() &&
               ContainsLaneId(fixture.BlockAt()),
@@ -968,7 +968,7 @@ void TestThreadBitConstantLaneMask() {
                                       {Value(static_cast<ScalarReg>(2))});
     EmitThreadBit(fixture, runtime, EmitBoundedLaneShift(fixture));
     ConstantPropagationPass(fixture.program.blocks);
-    RemoveIdentities(fixture.program.blocks);
+    RemoveIdentities(fixture.program);
     EliminateDeadCode(fixture.program.blocks);
     Check(!ReferencedBitTest(fixture.BlockAt()).IsImmediate() &&
               ContainsLaneId(fixture.BlockAt()),
@@ -979,7 +979,7 @@ void TestThreadBitConstantLaneMask() {
     EmitThreadBit(fixture, Value(0xffffffffu), EmitBoundedLaneShift(fixture),
                   Value(2u));
     ConstantPropagationPass(fixture.program.blocks);
-    RemoveIdentities(fixture.program.blocks);
+    RemoveIdentities(fixture.program);
     EliminateDeadCode(fixture.program.blocks);
     Check(!ReferencedBitTest(fixture.BlockAt()).IsImmediate() &&
               ContainsLaneId(fixture.BlockAt()),
@@ -991,7 +991,7 @@ void TestThreadBitConstantLaneMask() {
     const auto lane = fixture.Emit(ValueOpcode::LaneId);
     EmitThreadBit(fixture, Value(0xffffffffu), lane);
     ConstantPropagationPass(fixture.program.blocks);
-    RemoveIdentities(fixture.program.blocks);
+    RemoveIdentities(fixture.program);
     EliminateDeadCode(fixture.program.blocks);
     Check(!ReferencedBitTest(fixture.BlockAt()).IsImmediate() &&
               ContainsLaneId(fixture.BlockAt()),

@@ -921,7 +921,7 @@ add_executable(resource_tracking_mutant_bvh_flag_tests EXCLUDE_FROM_ALL
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ShaderInfoCollection.cpp"
 )
-target_link_libraries(resource_tracking_mutant_bvh_flag_tests fmt::fmt)
+target_link_libraries(resource_tracking_mutant_bvh_flag_tests fmt::fmt xbyak::xbyak)
 target_include_directories(resource_tracking_mutant_bvh_flag_tests PRIVATE ${inc_headers})
 target_compile_definitions(resource_tracking_mutant_bvh_flag_tests PRIVATE KYTY_BVHFLAG_MUTANT_NOT_SET=1)
 
