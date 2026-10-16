@@ -74,7 +74,7 @@ uint32_t CaptureInput(EmitterState& state, bool attribute, uint32_t location, ui
 	                     ConstantU32(state, location))
 	        : index;
 	const auto pointer = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state), pointer,
+	state.builder.AddFunction(spv::OpAccessChain, TypePointer(state, spv::StorageClassStorageBuffer, TypeU32(state)), pointer,
 	                          state.capture_buffers[attribute ? 0 : 2], ConstantU32(state, 0),
 	                          record, ConstantU32(state, component));
 	const auto value = state.builder.AllocateId();

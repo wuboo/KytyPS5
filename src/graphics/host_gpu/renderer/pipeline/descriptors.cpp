@@ -745,7 +745,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		info.host_image    = reinterpret_cast<uint64_t>(static_cast<VkImage>(image->backing.image));
 		info.gpu_modified  = image->IsGpuModified();
 		info.cpu_dirty     = image->IsCpuDirty();
-		info.uma           = std::getenv("KYTY_UMA") != nullptr ? std::getenv("KYTY_UMA") : "0";
+		info.uma           = "0"; // UMA is not part of this build
 		std::copy(std::begin(descriptor.fields), std::begin(descriptor.fields) + 8, info.dwords);
 		if (diag_all) {
 			DiagDump::TexDraw draw;
