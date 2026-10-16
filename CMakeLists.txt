@@ -649,23 +649,14 @@ add_executable(env_audit_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(env_audit_tests PRIVATE ${inc_headers})
 
-# S370: every getenv("KYTY_...") of src/ is in knownEnv.h; the mutant drops KYTY_SRT_MEMO2 from the list and must be caught (WILL_FAIL).
-# S370: every getenv("KYTY_...") of src/ is in knownEnv.h; the mutant drops KYTY_SRT_MEMO2 from the list and must be caught (WILL_FAIL).
-# S370 diag tests (values of the place=shader drains, decision classes, log window); mutants must be caught (WILL_FAIL).
-add_executable(other_drain_diag_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/OtherDrainDiagTests.cpp")
-target_include_directories(other_drain_diag_tests PRIVATE ${inc_headers})
-foreach(mutant NEVER_CHANGED IGNORE_VALUE)
-	string(TOLOWER "${mutant}" mutant_lower)
-	add_executable(other_drain_diag_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/OtherDrainDiagTests.cpp")
-	target_include_directories(other_drain_diag_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
-	target_compile_definitions(other_drain_diag_mutant_${mutant_lower}_tests PRIVATE KYTY_OTHERDRAINDIAG_MUTANT_${mutant}=1)
-endforeach()
+# S370: every getenv("KYTY_...") of src/ is in knownEnv.h; the mutant drops KYTY_EAGER_SUBMIT from the list and must be caught (WILL_FAIL).
+# S370: every getenv("KYTY_...") of src/ is in knownEnv.h; the mutant drops KYTY_EAGER_SUBMIT from the list and must be caught (WILL_FAIL).
 add_executable(env_source_scan_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/EnvSourceScanTests.cpp")
 target_include_directories(env_source_scan_tests PRIVATE ${inc_headers})
 target_compile_definitions(env_source_scan_tests PRIVATE KYTY_SOURCE_SCAN_DIR="${KYTY_SOURCE_DIR}")
-add_executable(env_source_scan_mutant_no_memo2_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/EnvSourceScanTests.cpp")
-target_include_directories(env_source_scan_mutant_no_memo2_tests PRIVATE ${inc_headers})
-target_compile_definitions(env_source_scan_mutant_no_memo2_tests PRIVATE KYTY_SOURCE_SCAN_DIR="${KYTY_SOURCE_DIR}" KYTY_KNOWNENV_MUTANT_NO_MEMO2=1)
+add_executable(env_source_scan_mutant_no_eager_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/EnvSourceScanTests.cpp")
+target_include_directories(env_source_scan_mutant_no_eager_tests PRIVATE ${inc_headers})
+target_compile_definitions(env_source_scan_mutant_no_eager_tests PRIVATE KYTY_SOURCE_SCAN_DIR="${KYTY_SOURCE_DIR}" KYTY_KNOWNENV_MUTANT_NO_EAGER=1)
 
 add_executable(amd_cpu_mode_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/AmdCpuModeTests.cpp")
 target_include_directories(amd_cpu_mode_tests PRIVATE ${inc_headers})
@@ -894,26 +885,6 @@ foreach(mutant IN ITEMS SIG_SWAP MAIN_ALWAYS TOP_UNSORTED HIST_COUNT_ONCE NO_PAG
 	target_compile_definitions(signal_census_mutant_${mutant_lower}_tests PRIVATE KYTY_SIGCENSUS_MUTANT_${mutant}=1)
 endforeach()
 
-add_executable(cs_trace_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CsTraceTests.cpp")
-target_include_directories(cs_trace_tests PRIVATE ${inc_headers})
-# Mutants (each must be caught, WILL_FAIL): read resources dropped from the trace; traced flip off by one.
-foreach(mutant IN ITEMS DROP_READS OFF_BY_ONE)
-	string(TOLOWER ${mutant} mutant_lower)
-	add_executable(cs_trace_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CsTraceTests.cpp")
-	target_include_directories(cs_trace_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
-	target_compile_definitions(cs_trace_mutant_${mutant_lower}_tests PRIVATE KYTY_CSTRACE_MUTANT_${mutant}=1)
-endforeach()
-
-add_executable(bvh_node_parser_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BvhNodeParserTests.cpp")
-target_include_directories(bvh_node_parser_tests PRIVATE ${inc_headers})
-# Mutants (each must be caught, WILL_FAIL): T# base shifted by 6 instead of 8; empty child slots listed.
-foreach(mutant IN ITEMS BASE_SHIFT KEEP_EMPTY)
-	string(TOLOWER ${mutant} mutant_lower)
-	add_executable(bvh_node_parser_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BvhNodeParserTests.cpp")
-	target_include_directories(bvh_node_parser_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
-	target_compile_definitions(bvh_node_parser_mutant_${mutant_lower}_tests PRIVATE KYTY_BVHPARSER_MUTANT_${mutant}=1)
-endforeach()
-
 add_executable(rt_miss_switch_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RtMissSwitchTests.cpp")
 target_include_directories(rt_miss_switch_tests PRIVATE ${inc_headers})
 # Mutant (must be caught, WILL_FAIL): the switch is never seen.
@@ -949,7 +920,6 @@ add_executable(resource_tracking_mutant_bvh_flag_tests EXCLUDE_FROM_ALL
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ShaderInfoCollection.cpp"
-	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/BindingLayout.cpp"
 )
 target_link_libraries(resource_tracking_mutant_bvh_flag_tests fmt::fmt)
 target_include_directories(resource_tracking_mutant_bvh_flag_tests PRIVATE ${inc_headers})
@@ -1144,8 +1114,8 @@ if(BUILD_TESTING)
 	add_test(NAME env_audit COMMAND $<TARGET_FILE:env_audit_tests>)
 	add_test(NAME env_audit_mutant COMMAND $<TARGET_FILE:env_audit_mutant_tests>)
 	add_test(NAME env_source_scan COMMAND $<TARGET_FILE:env_source_scan_tests>)
-	add_test(NAME env_source_scan_mutant_no_memo2 COMMAND $<TARGET_FILE:env_source_scan_mutant_no_memo2_tests>)
-	set_tests_properties(env_source_scan_mutant_no_memo2 PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME env_source_scan_mutant_no_eager COMMAND $<TARGET_FILE:env_source_scan_mutant_no_eager_tests>)
+	set_tests_properties(env_source_scan_mutant_no_eager PROPERTIES WILL_FAIL TRUE)
 	set_tests_properties(env_audit_mutant PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME bench_window COMMAND $<TARGET_FILE:bench_window_tests>)
 	foreach(mutant IN ITEMS fullscreen_zero_on occlusion_ignored env_unknown)
@@ -1170,7 +1140,6 @@ if(BUILD_TESTING)
 	add_test(NAME amd_cpu_mode_mutant_env_unknown COMMAND $<TARGET_FILE:amd_cpu_mode_mutant_env_unknown_tests>)
 	set_tests_properties(amd_cpu_mode_mutant_env_unknown PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME control_file COMMAND $<TARGET_FILE:control_file_tests>)
-	add_test(NAME cs_trace COMMAND $<TARGET_FILE:cs_trace_tests>)
 	add_test(NAME rt_dump COMMAND $<TARGET_FILE:rt_dump_tests>)
 	add_test(NAME mem_events COMMAND $<TARGET_FILE:mem_events_tests>)
 	add_test(NAME cp_phases COMMAND $<TARGET_FILE:cp_phases_tests>)
@@ -1186,7 +1155,6 @@ if(BUILD_TESTING)
 	add_test(NAME bc7 COMMAND $<TARGET_FILE:bc7_tests>)
 	add_test(NAME bc_dump COMMAND $<TARGET_FILE:bc_dump_tests>)
 	add_test(NAME bc_dump_tile COMMAND $<TARGET_FILE:bc_dump_tile_tests>)
-	add_test(NAME bvh_node_parser COMMAND $<TARGET_FILE:bvh_node_parser_tests>)
 	add_test(NAME rt_miss_switch COMMAND $<TARGET_FILE:rt_miss_switch_tests>)
 	add_test(NAME rt_miss_switch_mutant COMMAND $<TARGET_FILE:rt_miss_switch_mutant_tests>)
 	set_tests_properties(rt_miss_switch_mutant PROPERTIES WILL_FAIL TRUE)
@@ -1199,18 +1167,16 @@ if(BUILD_TESTING)
 			bc_dump_mutant_block_row bc_dump_mutant_diff_first_byte bc_dump_tile_mutant_block_row bc_dump_tile_mutant_tile0
 			diag_tex_mutant_hist_no_fmt diag_tex_mutant_hist_no_indices rt_dump_mutant_no_addr
 			diag_tex_mutant_nonzero diag_tex_mutant_no_once
-			cs_trace_mutant_drop_reads cs_trace_mutant_off_by_one
 			rt_dump_mutant_ignore_flip rt_dump_mutant_ignore_ps
-			bvh_node_parser_mutant_base_shift bvh_node_parser_mutant_keep_empty
 			mem_events_mutant_inclusive_end mem_events_mutant_merge_any_addr
 			cp_phases_mutant_keep_children cp_phases_mutant_drop_parse
 			min_lod_view_mutant_floor min_lod_view_mutant_no_cap min_lod_view_mutant_resinfo
 			apple_drop_mutant_invert_clip apple_drop_mutant_always_bounds apple_drop_mutant_native_counts apple_drop_mutant_bias_abs
 			cp_counters_mutant_native_swap cp_counters_mutant_no_clamp cp_counters_mutant_flag_any cp_counters_mutant_skip_ignored
 			frame_dump_flips_mutant_keep_zero frame_dump_flips_mutant_off_by_one
-			gpu_truth_mutant_sum gpu_truth_mutant_no_extend gpu_truth_mutant_no_clamp gpu_truth_mutant_bucket_edge gpu_truth_mutant_site_swap gpu_truth_mutant_cause_swap gpu_truth_mutant_reopen_any gpu_truth_mutant_load_cleared gpu_truth_mutant_every_run gpu_truth_mutant_site_line gpu_truth_mutant_site_no_bytes transit_hoist_mutant_write_elided transit_hoist_mutant_unseen_access depth_layout_mutant_feedback depth_layout_mutant_skip_any submit_causes_mutant_bucket submit_causes_mutant_nowait submit_causes_mutant_lifo submit_causes_mutant_sticky barrier_causes_mutant_order barrier_causes_mutant_waw_attach barrier_causes_mutant_relation depth_ro_union_mutant_ignore_dirty depth_ro_union_mutant_allow_general
-			rt_load_store_mutant_blend rt_load_store_mutant_partial_fold rt_load_store_mutant_fold_sticky rt_load_store_mutant_read_no_violation rt_load_store_mutant_neg_viewport rt_load_store_mutant_old_pred rt_load_store_mutant_reason_swap rt_load_store_mutant_no_flip_reset rt_loadop_mutant_no_flush_sample rt_loadop_mutant_fs_no_geometry rt_loadop_mutant_fold_partial rt_loadop_mutant_geom_ignored bind_memo_mutant_no_gen bind_memo_mutant_key_ignores_dword bind_memo_mutant_offset_ignored bind_memo_mutant_tex_desc desc_dyn_mutant_offset_in_key desc_dyn_mutant_no_gen desc_dyn_mutant_shadow_ignores_range guest_prio_mutant_reversed streamer_log_mutant_no_name_filter streamer_log_mutant_no_window gpu_truth_mutant_sum gpu_truth_mutant_no_extend gpu_truth_mutant_no_clamp gpu_truth_mutant_bucket_edge gpu_truth_mutant_site_swap gpu_truth_mutant_cause_swap gpu_truth_mutant_reopen_any gpu_truth_mutant_load_cleared gpu_truth_mutant_every_run gpu_truth_mutant_site_line gpu_truth_mutant_site_no_bytes transit_hoist_mutant_write_elided transit_hoist_mutant_unseen_access depth_layout_mutant_feedback depth_layout_mutant_skip_any submit_causes_mutant_bucket submit_causes_mutant_nowait submit_causes_mutant_lifo submit_causes_mutant_sticky barrier_causes_mutant_order barrier_causes_mutant_waw_attach barrier_causes_mutant_relation f16_hist_mutant_pk f16_hist_mutant_cvt f16_hist_mutant_int16 f16_hist_mutant_all_families shader_stats_mutant_no_dpp shader_stats_mutant_atomic_all shader_stats_mutant_atomic_range shader_stats_mutant_exact_only depth_ro_union_mutant_ignore_dirty depth_ro_union_mutant_allow_general
-			rt_load_store_mutant_blend rt_load_store_mutant_partial_fold rt_load_store_mutant_fold_sticky rt_load_store_mutant_read_no_violation rt_load_store_mutant_neg_viewport rt_load_store_mutant_old_pred rt_load_store_mutant_reason_swap rt_load_store_mutant_no_flip_reset rt_loadop_mutant_no_flush_sample rt_loadop_mutant_fs_no_geometry rt_loadop_mutant_fold_partial rt_loadop_mutant_geom_ignored bind_memo_mutant_no_gen bind_memo_mutant_key_ignores_dword bind_memo_mutant_offset_ignored bind_memo_mutant_tex_desc desc_dyn_mutant_offset_in_key desc_dyn_mutant_no_gen desc_dyn_mutant_shadow_ignores_range desc_assert_mutant_sample_never desc_assert_mutant_off_runs desc_assert_mutant_on_samples guest_prio_mutant_reversed streamer_log_mutant_no_name_filter streamer_log_mutant_no_window gpu_truth_mutant_sum gpu_truth_mutant_no_extend gpu_truth_mutant_no_clamp gpu_truth_mutant_bucket_edge gpu_truth_mutant_site_swap gpu_truth_mutant_cause_swap gpu_truth_mutant_reopen_any gpu_truth_mutant_load_cleared gpu_truth_mutant_every_run gpu_truth_mutant_site_line gpu_truth_mutant_site_no_bytes transit_hoist_mutant_write_elided transit_hoist_mutant_unseen_access depth_layout_mutant_feedback depth_layout_mutant_skip_any submit_causes_mutant_bucket submit_causes_mutant_nowait submit_causes_mutant_lifo submit_causes_mutant_sticky barrier_causes_mutant_order barrier_causes_mutant_waw_attach barrier_causes_mutant_relation f16_hist_mutant_pk f16_hist_mutant_cvt f16_hist_mutant_int16 f16_hist_mutant_all_families shader_stats_mutant_no_dpp shader_stats_mutant_atomic_all shader_stats_mutant_atomic_range shader_stats_mutant_exact_only depth_ro_union_mutant_ignore_dirty depth_ro_union_mutant_allow_general
+			depth_ro_union_mutant_ignore_dirty depth_ro_union_mutant_allow_general
+			desc_dyn_mutant_offset_in_key desc_dyn_mutant_no_gen desc_dyn_mutant_shadow_ignores_range
+			desc_assert_mutant_sample_never desc_assert_mutant_off_runs desc_assert_mutant_on_samples
 			signal_census_mutant_sig_swap signal_census_mutant_main_always signal_census_mutant_top_unsorted signal_census_mutant_hist_count_once signal_census_mutant_no_page_clamp signal_census_mutant_csv_shifted
 			per_vertex_unique_mutant_no_instance per_vertex_unique_mutant_no_first per_vertex_unique_mutant_no_ratio
 			per_vertex_unique_mutant_writes_ok per_vertex_unique_mutant_dropped_ok per_vertex_unique_mutant_no_dropped
@@ -1316,7 +1282,7 @@ if(BUILD_TESTING)
 		env_audit_tests
 		env_audit_mutant_tests
 		env_source_scan_tests
-		env_source_scan_mutant_no_memo2_tests
+		env_source_scan_mutant_no_eager_tests
 		amd_cpu_mode_tests
 		amd_cpu_mode_mutant_sse4a_ignored_tests
 		amd_cpu_mode_mutant_rdpid_ignored_tests
@@ -1423,12 +1389,6 @@ if(BUILD_TESTING)
 		rt_dump_tests
 		rt_dump_mutant_ignore_flip_tests
 		rt_dump_mutant_ignore_ps_tests
-		cs_trace_tests
-		cs_trace_mutant_drop_reads_tests
-		cs_trace_mutant_off_by_one_tests
-		bvh_node_parser_tests
-		bvh_node_parser_mutant_base_shift_tests
-		bvh_node_parser_mutant_keep_empty_tests
 		rt_miss_switch_tests
 		rt_miss_switch_mutant_tests
 		resource_tracking_mutant_bvh_flag_tests
