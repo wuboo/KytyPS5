@@ -16520,7 +16520,7 @@ void TestPvVsStoreEmission() {
   }
   Check(parameters == 1, "test VS must have one parameter output");
   vs_info.record_stride_vec4 = parameters;
-  const auto vs_words = Spirv::EmitProgram(vs.program, vs_options.input_info, 0, false, false, 0, false, false, nullptr, &vs_info);
+  const auto vs_words = Spirv::EmitProgram(vs.program, vs_options.input_info, 0, false, false, nullptr, &vs_info);
   CheckSpirvBinaryValidates(vs_words);
   const auto vs_text = DisassembleSpirvBinary(vs_words);
   Check(count(vs_text, "OpAccessChain %_ptr_StorageBuffer_v4uint %pv_cap") == parameters,
@@ -16535,7 +16535,7 @@ void TestPvVsStoreEmission() {
         "VS push block lacks the VS-store parameters");
   vs_info.coherent = true;
   const auto vs_coherent_text = DisassembleSpirvBinary(
-      Spirv::EmitProgram(vs.program, vs_options.input_info, 0, false, false, 0, false, false, nullptr, &vs_info));
+      Spirv::EmitProgram(vs.program, vs_options.input_info, 0, false, false, nullptr, &vs_info));
   Check(vs_coherent_text.find("OpDecorate %pv_cap Coherent") != std::string::npos &&
             vs_coherent_text.find("OpMemoryBarrier") != std::string::npos,
         "coherent flag did not reach the VS");
