@@ -6,6 +6,8 @@
 // (the same index as frame_flip_<n>), not the guest `flips` column.
 // Walker counters live inline so shader test binaries do not link the presenter.
 
+#include "common/logging/log.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cstdint>
@@ -256,8 +258,111 @@ inline void NoteUnresolved(uint64_t address) {
 	WalkerUnresolvedTotal().fetch_add(1, std::memory_order_relaxed);
 }
 
-void NoteStandin(uint64_t shader, uint32_t slot, uint64_t addr, Reason reason);
-void OnPresented(uint32_t frame, uint32_t guest_flips, uint64_t minlod_remap_total, uint64_t minlod_dropped_total);
+struct StandinState {
+	std::atomic<uint64_t> n[5] {};
+	std::mutex            lock;
+	TopList               top;
+	bool                  dumped              = false;
+	uint64_t              last[5]             {};
+	uint64_t              last_walker_null    = 0;
+	uint64_t              last_walker_unres   = 0;
+	uint64_t              last_minlod_remap   = 0;
+	uint64_t              last_minlod_dropped = 0;
+	bool                  announced           = false;
+};
+
+inline StandinState& Standins() {
+	static StandinState state;
+	return state;
+}
+
+inline void NoteStandin(uint64_t shader, uint32_t slot, uint64_t addr, Reason reason) {
+	if (!Enabled()) {
+		return;
+	}
+	auto& state = Standins();
+	const auto index = static_cast<uint32_t>(reason);
+	if (index < 5) {
+		state.n[index].fetch_add(1, std::memory_order_relaxed);
+	}
+	if (!InWindow(Window(), DrawingFrame().load(std::memory_order_relaxed))) {
+		return;
+	}
+	std::lock_guard lock {state.lock};
+	state.top.Add(shader, slot, addr, reason);
+}
+
+inline void OnPresented(uint32_t frame, uint32_t guest_flips, uint64_t minlod_remap_total,
+                        uint64_t minlod_dropped_total) {
+	if (!Enabled()) {
+		return;
+	}
+	auto& state = Standins();
+	if (!state.announced) {
+		state.announced = true;
+		const auto window = Window();
+		LOGF("[nulldesc] on frame_window=%u-%u (frames.csv frame / frame_flip_N, not guest flips)\n", window.lo,
+		     window.hi);
+	}
+	uint64_t standin[5];
+	for (uint32_t i = 0; i < 5; i++) {
+		standin[i] = state.n[i].load(std::memory_order_relaxed);
+	}
+	const auto walker_null = WalkerNullTotal().load(std::memory_order_relaxed);
+	const auto walker_bad  = WalkerUnresolvedTotal().load(std::memory_order_relaxed);
+	const auto empty       = static_cast<uint32_t>(Reason::EmptyT);
+	const auto nulltable   = static_cast<uint32_t>(Reason::NullTable);
+	const auto unresolved  = static_cast<uint32_t>(Reason::Unresolved);
+	const auto other       = static_cast<uint32_t>(Reason::Other);
+	LOGF("[nulldesc] frame=%u guest_flips=%u standin_empty=%llu standin_nulltable=%llu "
+	     "standin_unresolved=%llu standin_other=%llu walker_nulltable=%llu walker_unresolved=%llu "
+	     "minlod_remap=%llu minlod_dropped=%llu\n",
+	     frame, guest_flips, static_cast<unsigned long long>(standin[empty] - state.last[empty]),
+	     static_cast<unsigned long long>(standin[nulltable] - state.last[nulltable]),
+	     static_cast<unsigned long long>(standin[unresolved] - state.last[unresolved]),
+	     static_cast<unsigned long long>(standin[other] - state.last[other]),
+	     static_cast<unsigned long long>(walker_null - state.last_walker_null),
+	     static_cast<unsigned long long>(walker_bad - state.last_walker_unres),
+	     static_cast<unsigned long long>(minlod_remap_total - state.last_minlod_remap),
+	     static_cast<unsigned long long>(minlod_dropped_total - state.last_minlod_dropped));
+	for (uint32_t i = 0; i < 5; i++) {
+		state.last[i] = standin[i];
+	}
+	state.last_walker_null    = walker_null;
+	state.last_walker_unres   = walker_bad;
+	state.last_minlod_remap   = minlod_remap_total;
+	state.last_minlod_dropped = minlod_dropped_total;
+	DrawingFrame().store(frame + 1, std::memory_order_relaxed);
+
+	const auto window = Window();
+	if (state.dumped || frame != window.hi) {
+		return;
+	}
+	state.dumped = true;
+	std::vector<TopEntry> standin_top;
+	std::vector<TopEntry> walker_top;
+	{
+		std::lock_guard lock {state.lock};
+		standin_top = state.top.Top(20);
+	}
+	{
+		std::lock_guard lock {WalkerTopLock()};
+		walker_top = WalkerTop().Top(20);
+	}
+	LOGF("[nulldesc] top frame=%u-%u standin=%zu walker=%zu\n", window.lo, window.hi, standin_top.size(),
+	     walker_top.size());
+	for (uint32_t rank = 0; rank < standin_top.size(); rank++) {
+		const auto& hit = standin_top[rank];
+		LOGF("[nulldesc] top rank=%u n=%u reason=%s shader=0x%016llx slot=%u addr=0x%llx\n", rank + 1, hit.n,
+		     ReasonName(hit.reason), static_cast<unsigned long long>(hit.shader), hit.slot,
+		     static_cast<unsigned long long>(hit.addr));
+	}
+	for (uint32_t rank = 0; rank < walker_top.size(); rank++) {
+		const auto& hit = walker_top[rank];
+		LOGF("[nulldesc] walker-top rank=%u n=%u table=0x%llx\n", rank + 1, hit.n,
+		     static_cast<unsigned long long>(hit.addr));
+	}
+}
 
 } // namespace Libs::Graphics::NullDesc
 
