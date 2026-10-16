@@ -21,6 +21,7 @@
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
 #include "graphics/shader/shader.h"
+#include "kernel/guestDriverMemory.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
@@ -48,8 +49,11 @@ static RenderContext* g_renderer = nullptr;
 
 namespace Gen5Driver {
 
-static constexpr uint64_t DriverDmemBase = 0x0fe0000000ull;
 static constexpr uint32_t DriverDmemSize = 0x200000;
+// 0xfe0000000 is outside the guest address space on macOS x86_64 (Rosetta), so it is chosen per host.
+static constexpr uint64_t DriverDmemBase =
+    LibKernel::GuestLayout::ChooseDriverDmemBase(0x0fe0000000ull, DriverDmemSize,
+                                                 LibKernel::GuestLayout::SystemReservedMax);
 static constexpr uint32_t AgcDmemOffset  = 0x40000;
 
 struct DriverDmem {

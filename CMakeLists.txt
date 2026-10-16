@@ -500,6 +500,10 @@ add_executable(null_descriptor_policy_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(null_descriptor_policy_tests PRIVATE ${inc_headers})
 target_link_libraries(null_descriptor_policy_tests Vulkan::Headers)
+add_executable(guest_driver_memory_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/GuestDriverMemoryTests.cpp"
+)
+target_include_directories(guest_driver_memory_tests PRIVATE ${inc_headers})
 
 add_executable(scalar_provenance_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ScalarProvenanceTests.cpp"
@@ -1005,6 +1009,7 @@ target_include_directories(image_page_table_tests PRIVATE ${inc_headers})
 add_executable(gpu_keepwarm_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GpuKeepWarmTests.cpp")
 target_include_directories(gpu_keepwarm_tests PRIVATE ${inc_headers})
 include("${KYTY_TESTS_DIR}/GpuKeepWarmMutants.cmake")
+include("${KYTY_TESTS_DIR}/GuestDriverMemoryMutants.cmake")
 if(APPLE)
 	# Smoke on the real MTLDevice (opt-in, needs the GPU): spins 3 s, expects cb_n > 0, and that the spin pauses when idle and resumes.
 	add_executable(gpu_keepwarm_gpu_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GpuKeepWarmGpuTests.cpp" "${KYTY_KEEPWARM_MM}")
@@ -1072,6 +1077,11 @@ if(BUILD_TESTING)
 	add_test(NAME per_vertex_vsstore COMMAND $<TARGET_FILE:per_vertex_vsstore_tests>)
 	add_test(NAME push_descriptor_policy COMMAND $<TARGET_FILE:push_descriptor_policy_tests>)
 	add_test(NAME null_descriptor_policy COMMAND $<TARGET_FILE:null_descriptor_policy_tests>)
+	add_test(NAME guest_driver_memory COMMAND $<TARGET_FILE:guest_driver_memory_tests>)
+	foreach(mutant IN LISTS KYTY_GDM_MUTANTS)
+		add_test(NAME guest_driver_memory_mutant_${mutant} COMMAND $<TARGET_FILE:guest_driver_memory_mutant_${mutant}_tests>)
+		set_tests_properties(guest_driver_memory_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME scalar_provenance COMMAND $<TARGET_FILE:scalar_provenance_tests>)
 	add_test(NAME gpu_keepwarm COMMAND $<TARGET_FILE:gpu_keepwarm_tests>)
 	foreach(mutant IN LISTS KYTY_KW_MUTANTS)
@@ -1268,6 +1278,7 @@ if(BUILD_TESTING)
 		gpu_gap_mutant_clock_max_tests
 		push_descriptor_policy_tests
 		null_descriptor_policy_tests
+		guest_driver_memory_tests
 		pad_script_parser_tests
 		shader_vertex_metadata_tests
 		resource_materialization_tests
@@ -1403,6 +1414,9 @@ if(BUILD_TESTING)
 	)
 	foreach(mutant IN LISTS KYTY_KW_MUTANTS)
 		add_dependencies(kyty_tests gpu_keepwarm_mutant_${mutant}_tests)
+	endforeach()
+	foreach(mutant IN LISTS KYTY_GDM_MUTANTS)
+		add_dependencies(kyty_tests guest_driver_memory_mutant_${mutant}_tests)
 	endforeach()
 endif()
 
