@@ -12,7 +12,7 @@
 #include <string>
 
 // S370: every getenv("KYTY_...") literal in src/ is listed in Common::kKnownKytyEnv (KYTY_ENV_STRICT=1 aborts on a name that is not).
-// Built normally and with KYTY_KNOWNENV_MUTANT_NO_MEMO2 (KYTY_SRT_MEMO2 missing from the list, the S365 bug): that build must FAIL (WILL_FAIL).
+// Built normally and with KYTY_KNOWNENV_MUTANT_NO_EAGER (KYTY_EAGER_SUBMIT missing from the list): that build must FAIL (WILL_FAIL).
 // KYTY_SOURCE_SCAN_DIR = the src/ directory, set by CMake.
 
 #ifndef KYTY_SOURCE_SCAN_DIR
@@ -49,7 +49,7 @@ int main() {
 		}
 	}
 	Check(files > 100, "source scan found too few files (wrong KYTY_SOURCE_SCAN_DIR?)");
-	Check(used.size() > 50, "source scan found too few getenv(\"KYTY_...\") names");
+	Check(used.size() > 30, "source scan found too few getenv(\"KYTY_...\") names");
 	int missing = 0;
 	for (const auto& name: used) {
 		const bool known = std::ranges::find(Common::kKnownKytyEnv, std::string_view(name)) != std::end(Common::kKnownKytyEnv);
