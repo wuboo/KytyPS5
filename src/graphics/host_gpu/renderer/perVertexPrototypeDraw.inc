@@ -795,9 +795,12 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	cmd = buffer.Handle();
 	cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline.pipeline_layout, 1, 1,
 	                       &extra_set, 0, nullptr);
-	SetGraphicsDynamicParams(buffer, cmd, vs, state.depth_info, rendering);
-	if (graphics.attachment_feedback_loop_enabled)
-		cmd.setAttachmentFeedbackLoopEnableEXT(feedback_aspects);
+	{
+		auto& dynamic_state = scheduler.GetDynamicState();
+		UpdateGraphicsDynamicState(buffer, dynamic_state, vs, state.depth_info, rendering);
+		dynamic_state.SetAttachmentFeedbackLoopAspects(feedback_aspects);
+		dynamic_state.Commit(graphics, cmd);
+	}
 	scheduler.BeginRendering(rendering);
 	cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
 	cmd.draw(count, 1, 0, 0);
@@ -877,10 +880,13 @@ void RenderExecutor::FlushPendingPrototypeBatch(CommandBuffer& buffer) {
 		auto cmd = buffer.Handle();
 		cmd.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline.pipeline_layout, 1, 1,
 		                       &item.extra_set, 0, nullptr);
-		SetGraphicsDynamicParams(buffer, cmd, item.vs, batch.depth_info, rendering,
-		                         item.registers.get());
-		if (graphics.attachment_feedback_loop_enabled)
-			cmd.setAttachmentFeedbackLoopEnableEXT(feedback_aspects);
+		{
+			auto& dynamic_state = scheduler.GetDynamicState();
+			UpdateGraphicsDynamicState(buffer, dynamic_state, item.vs, batch.depth_info, rendering,
+			                           item.registers.get());
+			dynamic_state.SetAttachmentFeedbackLoopAspects(feedback_aspects);
+			dynamic_state.Commit(graphics, cmd);
+		}
 		cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
 		cmd.draw(item.count, 1, 0, 0);
 		if (batch.ps_active && HasShaderBufferWrites(batch.ps_input_info.stage))

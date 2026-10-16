@@ -733,8 +733,10 @@ void EmitBarrier(EmitterState& state) {
 	// not reached by every invocation and can hang the GPU. Log such shaders; the bench switch
 	// KYTY_BENCH_DROP_DIVERGENT_BARRIERS=1 leaves their barriers out (diagnosis only).
 	if (!tessellation && state.lane_count == 1) {
-		const bool divergent = std::ranges::any_of(state.program.block_info, [](const auto& info) {
-			switch (info.terminator.condition) {
+		const bool divergent = std::ranges::any_of(state.program.blocks, [](const IR::Block* block) {
+			const auto* condition = block->condition.IsEmpty() ? nullptr : block->condition.TryInstruction();
+			if (condition == nullptr || condition->GetOpcode() != IR::ValueOpcode::ConditionRef) return false;
+			switch (condition->Flags<CFG::BranchCondition>()) {
 				case CFG::BranchCondition::VccZero:
 				case CFG::BranchCondition::VccNonZero:
 				case CFG::BranchCondition::ExecZero:
@@ -747,7 +749,7 @@ void EmitBarrier(EmitterState& state) {
 			if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
 				LOGF("[bench-divergent-barrier] stage=%d blocks=%zu: barrier with per-invocation "
 				     "EXEC/VCC branches\n",
-				     static_cast<int>(state.program.stage), state.program.block_info.size());
+				     static_cast<int>(state.program.stage), state.program.blocks.size());
 			}
 			static const bool drop = std::getenv("KYTY_BENCH_DROP_DIVERGENT_BARRIERS") != nullptr;
 			if (drop) {

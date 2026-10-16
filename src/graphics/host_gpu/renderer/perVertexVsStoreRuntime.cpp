@@ -30,7 +30,7 @@ vk::DescriptorSetLayout                                            s_set_layout 
 
 } // namespace
 
-void RememberPvVsStoreShader(const ShaderProgram& program, const ShaderRecompiler::CompileResult& result,
+void RememberPvVsStoreShader(const ShaderProgram& program, ShaderRecompiler::CompileResult& result,
                              const ShaderRecompiler::CompileOptions& options) {
 	if (!PerVertexVsStoreEnabled()) return;
 	using Role = ShaderRecompiler::Spirv::PvStoreInfo::Role;
@@ -44,7 +44,7 @@ void RememberPvVsStoreShader(const ShaderProgram& program, const ShaderRecompile
 	info.role          = vertex ? Role::Vertex : Role::Pixel;
 	info.coherent      = true; // Coherent cap + a device barrier after the VS stores (the probe of RESULT-262 needs them)
 	info.location_mask = &entry.mask;
-	auto words         = ShaderRecompiler::Spirv::EmitProgram(result.program, options.input_info, nullptr, &info);
+	auto words         = ShaderRecompiler::Spirv::EmitProgram(result.program, options.input_info, 0, false, false, nullptr, &info);
 	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
 	tools.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t& position, const char* message) {
 		LOGF("PvVsStore: %s 0x%016llx SPIR-V word %zu: %s\n", vertex ? "VS" : "PS",

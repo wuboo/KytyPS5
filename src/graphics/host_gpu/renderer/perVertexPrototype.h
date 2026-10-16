@@ -25,7 +25,7 @@ bool DecodePerVertexPrototypeAttribute(Prospero::BufferFormat   format,
                                        std::span<const uint8_t> bytes,
                                        std::span<uint32_t, 4>   components);
 void RememberPerVertexPrototypeShader(const ShaderProgram&                    program,
-                                      const ShaderRecompiler::CompileResult&  result,
+                                      ShaderRecompiler::CompileResult&        result,
                                       const ShaderRecompiler::CompileOptions& options,
                                       uint32_t                                host_subgroup_size);
 

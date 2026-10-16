@@ -179,6 +179,19 @@ void CommandScheduler::EndRendering() {
 	}
 }
 
+bool CommandScheduler::RenderingOpen() const {
+	return Active() && !m_command.IsInvalid() && m_command.m_rendering;
+}
+
+bool CommandScheduler::RenderingAttaches(vk::ImageView view) const {
+	if (!RenderingOpen() || !view) return false;
+	const auto& state = m_command.m_render_state;
+	for (uint32_t i = 0; i < state.num_color_attachments; i++) {
+		if (state.color_attachments[i].image_view == view) return true;
+	}
+	return state.depth_stencil_attachment.image_view == view;
+}
+
 void CommandScheduler::Flush() {
 	// Submitting a command buffer nothing was recorded into still costs a Metal command buffer
 	// under MoltenVK. It only matters when something waits for the tick it would signal: a
@@ -614,7 +627,6 @@ bool CommandScheduler::EagerSplitNow(bool pass_closing, bool* closed_pass, bool 
 		m_command.EndRendering();
 		*closed_pass = true;
 	}
-	NoteSplit(Sync::SubmitReason::Other);
 	Flush();
 	return true;
 }

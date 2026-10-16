@@ -734,13 +734,13 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		info.max_mip       = max_mip;
 		info.min_lod       = descriptor.MinLod();
 		info.tile_mode     = static_cast<uint32_t>(tile);
-		info.pitch         = pitch;
+		info.pitch         = desc.info.pitch;
 		info.type          = static_cast<uint32_t>(type);
 		info.dimension     = static_cast<uint32_t>(resource.dimension);
 		info.dst_sel       = descriptor.DstSelXYZW();
 		info.image_levels  = image->info.resources.levels;
 		info.image_layers  = image->info.resources.layers;
-		info.byte_size     = size.size;
+		info.byte_size     = desc.info.data.size;
 		info.from_cache    = image->backing.image != nullptr;
 		info.host_image    = reinterpret_cast<uint64_t>(static_cast<VkImage>(image->backing.image));
 		info.gpu_modified  = image->IsGpuModified();
@@ -752,7 +752,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 			draw.info = info;
 			// BC7 T#: decode the first blocks of mip 0 straight from guest memory (no readback, no host image).
 			if (format == Prospero::BufferFormat::kBc7UNorm || format == Prospero::BufferFormat::kBc7Srgb) {
-				draw.bc7     = DiagDump::Bc7Summarize(reinterpret_cast<const uint8_t*>(address), size.size, 256);
+				draw.bc7     = DiagDump::Bc7Summarize(reinterpret_cast<const uint8_t*>(address), desc.info.data.size, 256);
 				draw.has_bc7 = true;
 			}
 			DiagDump::AddTexDraw(std::move(draw));
@@ -761,7 +761,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 			DiagDump::AddDumpTexRequest({id, info});
 		}
 		if (diag_watch) {
-			DiagDump::WatchTexTrigger(info, size.size);
+			DiagDump::WatchTexTrigger(info, desc.info.data.size);
 		}
 		if (diag_once) {
 			LOGF("%s\n", DiagDump::TexDescribe(info).c_str());

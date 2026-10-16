@@ -26,6 +26,23 @@ class BufferCache;
 class CommandBuffer;
 class CommandScheduler;
 class RenderExecutor;
+// S124 dump_tex (DIAG): per-surface tile description of the guest upload. main's tiler no longer builds such a list
+// (TileManager works on ImageInfo), so DiagUploadTiles() reports "unavailable" and dump_tex compares the host side only.
+struct GpuTileInfo {
+	TileBlockFamily family            = TileBlockFamily::Count;
+	uint32_t        bytes_per_element = 0;
+	uint64_t        tiled_offset      = 0;
+	uint64_t        tiled_size        = 0;
+	uint32_t        width             = 0;
+	uint32_t        height            = 0;
+	uint32_t        pitch             = 0;
+	uint32_t        tail_x            = 0;
+	uint32_t        tail_y            = 0;
+	bool            tail              = false;
+	uint32_t        tiled_width       = 0;
+	uint32_t        tiled_height      = 0;
+};
+
 class TextureCache;
 struct TextureCacheTestAccess;
 

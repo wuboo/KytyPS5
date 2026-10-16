@@ -23,7 +23,7 @@ struct CompileOptions;
 
 // Compile-time hook (next to RememberPerVertexPrototypeShader): emits the VS-store variant of a vertex
 // shader and of a pixel shader with PerVertexKHR inputs. No-op unless KYTY_PV_VSSTORE=1.
-void RememberPvVsStoreShader(const ShaderProgram& program, const ShaderRecompiler::CompileResult& result,
+void RememberPvVsStoreShader(const ShaderProgram& program, ShaderRecompiler::CompileResult& result,
                              const ShaderRecompiler::CompileOptions& options);
 
 struct PvVsStorePrograms {

@@ -18,7 +18,6 @@
 #include "graphics/host_gpu/renderer/perVertexVsStoreRuntime.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
-#include "graphics/host_gpu/renderer/tlasDiag.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/rtMiss.h"
@@ -867,9 +866,6 @@ ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs
 	    m_graphics.GetPhysicalDeviceProperties().limits.maxComputeSharedMemorySize;
 	uint32_t          push_data_cursor = 0;
 	auto              program = m_program_cache->Get(params, input_info, push_data_cursor);
-	if (input_info.stage.program != nullptr && input_info.stage.program->info.uses_bvh) {
-		TlasDiag::Report(params.hash, std::span(params.user_data).first(params.user_data_count));
-	}
 	return program;
 }
 
