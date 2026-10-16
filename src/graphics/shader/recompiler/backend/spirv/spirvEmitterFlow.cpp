@@ -824,10 +824,23 @@ uint32_t EmitConditionRef(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const bool zero = kind == CFG::BranchCondition::ExecZero ||
 	                  kind == CFG::BranchCondition::VccZero || kind == CFG::BranchCondition::SccZero;
 	// Zero-kind predicates are already inverted by translation.
-	auto predicate = ctx.Arg(inst, 0);
+	// A *Zero branch is taken when no lane fails: the native PerVertex capture masks out lanes
+	// without work (a wave past the vertex count), and those must not keep the wave in a loop.
+	const auto live = [&](uint32_t predicate, uint32_t half) {
+		if (ctx.state.vertex_capture == nullptr) {
+			return predicate;
+		}
+		if (!zero) {
+			return MaskCaptureExecution(ctx.state, predicate, half);
+		}
+		const auto inverted = Unary(ctx.state, spv::OpLogicalNot, TypeBool(ctx.state), predicate);
+		return Unary(ctx.state, spv::OpLogicalNot, TypeBool(ctx.state),
+		             MaskCaptureExecution(ctx.state, inverted, half));
+	};
+	auto predicate = live(ctx.Arg(inst, 0), 0);
 	if (ctx.other_half != nullptr) {
 		predicate = Binary(ctx.state, zero ? spv::OpLogicalAnd : spv::OpLogicalOr,
-		                   TypeBool(ctx.state), predicate, ctx.HalfArg(inst, 0, 1));
+		                   TypeBool(ctx.state), predicate, live(ctx.HalfArg(inst, 0, 1), 1));
 	}
 	const auto result = ctx.state.builder.AllocateId();
 	ctx.state.builder.AddFunction(zero ? spv::OpGroupNonUniformAll : spv::OpGroupNonUniformAny,
