@@ -16668,7 +16668,7 @@ void TestPvVsStoreEmission() {
                               EncodeExp0(0x20, 0xf), EncodeExp1(4, 5, 6, 7),
                               EncodeSopp(0x01)};
   const auto vs_options = MakeCompileOptions(ShaderType::Vertex);
-  const auto vs = RecompileForTest(vs_code, vs_options);
+  auto vs = RecompileForTest(vs_code, vs_options);
   Spirv::PvStoreInfo vs_info;
   vs_info.role = Spirv::PvStoreInfo::Role::Vertex;
   uint32_t parameters = 0;
@@ -16679,7 +16679,7 @@ void TestPvVsStoreEmission() {
   }
   Check(parameters == 1, "test VS must have one parameter output");
   vs_info.record_stride_vec4 = parameters;
-  const auto vs_words = Spirv::EmitProgram(vs.program, vs_options.input_info, nullptr, &vs_info);
+  const auto vs_words = Spirv::EmitProgram(vs.program, vs_options.input_info, 0, false, false, 0, false, false, nullptr, &vs_info);
   CheckSpirvBinaryValidates(vs_words);
   const auto vs_text = DisassembleSpirvBinary(vs_words);
   Check(count(vs_text, "OpAccessChain %_ptr_StorageBuffer_v4uint %pv_cap") == parameters,
@@ -16694,7 +16694,7 @@ void TestPvVsStoreEmission() {
         "VS push block lacks the VS-store parameters");
   vs_info.coherent = true;
   const auto vs_coherent_text = DisassembleSpirvBinary(
-      Spirv::EmitProgram(vs.program, vs_options.input_info, nullptr, &vs_info));
+      Spirv::EmitProgram(vs.program, vs_options.input_info, 0, false, false, 0, false, false, nullptr, &vs_info));
   Check(vs_coherent_text.find("OpDecorate %pv_cap Coherent") != std::string::npos &&
             vs_coherent_text.find("OpMemoryBarrier") != std::string::npos,
         "coherent flag did not reach the VS");
@@ -16707,7 +16707,7 @@ void TestPvVsStoreEmission() {
     Spirv::PvStoreInfo dynamic;
     dynamic.role = Spirv::PvStoreInfo::Role::Vertex;
     dynamic.location_mask = &vs_mask;
-    const auto dynamic_words = Spirv::EmitProgram(vs.program, vs_options.input_info, nullptr, &dynamic);
+    const auto dynamic_words = Spirv::EmitProgram(vs.program, vs_options.input_info, 0, false, false, nullptr, &dynamic);
     CheckSpirvBinaryValidates(dynamic_words);
     uint32_t expect_mask = 0;
     for (const auto &output : vs.program.info.outputs) {
@@ -16736,12 +16736,12 @@ void TestPvVsStoreEmission() {
   SetIdentityInterpolatorSettings(&ps_info);
   ps_info.interpolator_settings[0] = 0x00000420u;
   options.input_info.pixel = &ps_info;
-  const auto ps = RecompileForTest(ps_code, options);
+  auto ps = RecompileForTest(ps_code, options);
   Spirv::PvStoreInfo ps_pv;
   ps_pv.role = Spirv::PvStoreInfo::Role::Pixel;
   ps_pv.record_stride_vec4 = 1;
   ps_pv.parameter_slots[0] = 0;
-  const auto ps_words = Spirv::EmitProgram(ps.program, options.input_info, nullptr, &ps_pv);
+  const auto ps_words = Spirv::EmitProgram(ps.program, options.input_info, 0, false, false, nullptr, &ps_pv);
   CheckSpirvBinaryValidates(ps_words);
   const auto text = DisassembleSpirvBinary(ps_words);
   const auto legacy = DisassembleSpirvBinary(ps.spirv);
@@ -16769,7 +16769,7 @@ void TestPvVsStoreEmission() {
     Spirv::PvStoreInfo dynamic;
     dynamic.role = Spirv::PvStoreInfo::Role::Pixel;
     dynamic.location_mask = &ps_mask;
-    const auto dynamic_words = Spirv::EmitProgram(ps.program, options.input_info, nullptr, &dynamic);
+    const auto dynamic_words = Spirv::EmitProgram(ps.program, options.input_info, 0, false, false, nullptr, &dynamic);
     CheckSpirvBinaryValidates(dynamic_words);
     Check(ps_mask != 0 && (ps_mask & (1u << 31)) == 0,
           "dynamic-stride PS did not report its per-vertex locations");
@@ -17110,7 +17110,7 @@ void TestNewShaderRecompilerSpirvSizeBaselines() {
       EncodeSopp(0x02, 0xfffeu), // B -> C
       EncodeSopp(0x01),
   };
-  const auto dispatcher_result = compile("dispatcher", dispatcher,
+  auto dispatcher_result = compile("dispatcher", dispatcher,
                                          {.words = 255,
                                           .instructions = 70,
                                           .variables = 3,
