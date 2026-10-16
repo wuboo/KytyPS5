@@ -65,7 +65,7 @@ uint32_t CapComponentPointer(EmitterState& state, uint32_t record, uint32_t slot
 		    TypePointer(state, spv::StorageClassStorageBuffer, TypeU32Vector(state, 4)), pointer,
 		    state.pv_cap_buffer, C(state, 0), element);
 	} else {
-		state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state),
+		state.builder.AddFunction(spv::OpAccessChain, TypePointer(state, spv::StorageClassStorageBuffer, TypeU32(state)),
 		                          pointer, state.pv_cap_buffer, C(state, 0), element,
 		                          C(state, component));
 	}
@@ -96,7 +96,7 @@ uint32_t FetchIndex(EmitterState& state, uint32_t element) {
 	const auto clamped = EmitGlsl<GLSLstd450UMin, IR::Type::U32>(
 	    state, word, U(state, spv::OpISub, length, C(state, 1)));
 	const auto pointer = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpAccessChain, TypeStorageBufferElementPointer(state), pointer,
+	state.builder.AddFunction(spv::OpAccessChain, TypePointer(state, spv::StorageClassStorageBuffer, TypeU32(state)), pointer,
 	                          state.pv_index_buffer, C(state, 0), clamped);
 	const auto raw = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpLoad, TypeU32(state), raw, pointer);

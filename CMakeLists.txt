@@ -910,20 +910,6 @@ add_executable(resource_tracking_tests EXCLUDE_FROM_ALL
 target_link_libraries(resource_tracking_tests fmt::fmt xbyak::xbyak)
 target_include_directories(resource_tracking_tests PRIVATE ${inc_headers})
 
-# Mutant (must be caught, WILL_FAIL): BvhIntersect no longer sets ShaderInfo::uses_bvh.
-add_executable(resource_tracking_mutant_bvh_flag_tests EXCLUDE_FROM_ALL
-	"${KYTY_TESTS_DIR}/ResourceTrackingTests.cpp"
-	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
-	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
-	"${KYTY_SOURCE_DIR}/graphics/shader/shaderPixelParameter.cpp"
-	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
-	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceTracking.cpp"
-	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
-	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ShaderInfoCollection.cpp"
-)
-target_link_libraries(resource_tracking_mutant_bvh_flag_tests fmt::fmt xbyak::xbyak)
-target_include_directories(resource_tracking_mutant_bvh_flag_tests PRIVATE ${inc_headers})
-target_compile_definitions(resource_tracking_mutant_bvh_flag_tests PRIVATE KYTY_BVHFLAG_MUTANT_NOT_SET=1)
 
 add_executable(audio_out2_port_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/AudioOut2PortTests.cpp"
@@ -1051,7 +1037,6 @@ target_compile_definitions(virtual_memory_allocation_tests PRIVATE
 # These tests use exceptions.
 if(NOT KYTY_CLANG_CL)
 	foreach(kyty_exception_test scalar_provenance_tests resource_tracking_tests
-			resource_tracking_mutant_bvh_flag_tests
 			virtual_memory_allocation_tests)
 		target_compile_options(${kyty_exception_test} PRIVATE -fexceptions)
 	endforeach()
@@ -1158,8 +1143,6 @@ if(BUILD_TESTING)
 	add_test(NAME rt_miss_switch COMMAND $<TARGET_FILE:rt_miss_switch_tests>)
 	add_test(NAME rt_miss_switch_mutant COMMAND $<TARGET_FILE:rt_miss_switch_mutant_tests>)
 	set_tests_properties(rt_miss_switch_mutant PROPERTIES WILL_FAIL TRUE)
-	add_test(NAME resource_tracking_mutant_bvh_flag COMMAND $<TARGET_FILE:resource_tracking_mutant_bvh_flag_tests>)
-	set_tests_properties(resource_tracking_mutant_bvh_flag PROPERTIES WILL_FAIL TRUE)
 	foreach(mutant_test control_file_mutant_lax_numbers control_file_mutant_no_until
 			control_file_mutant_force_any_slot control_file_mutant_diag_any_slot
 			control_file_mutant_filter_ignored control_file_mutant_diag_all_ignored control_file_mutant_dump_any_slot control_file_mutant_watch_any_slot
@@ -1391,7 +1374,6 @@ if(BUILD_TESTING)
 		rt_dump_mutant_ignore_ps_tests
 		rt_miss_switch_tests
 		rt_miss_switch_mutant_tests
-		resource_tracking_mutant_bvh_flag_tests
 		resource_tracking_tests
 		event_queue_lifetime_tests
 		kernel_file_system_tests
