@@ -7,6 +7,7 @@
 #include "common/threads.h"
 #include "common/virtualMemory.h"
 #include "emulator.h"
+#include "graphics/shader/recompiler/srtReader.h"
 #include "kytyGitVersion.h"
 
 #include <charconv>
@@ -542,6 +543,8 @@ static int Main(int argc, char* argv[]) {
 		return 0;
 	}
 
+	std::printf("[srt-reader] mode=%s\n", Libs::Graphics::SrtReader::ModeName());
+	std::fflush(stdout);
 	Run(options);
 
 	return 0;

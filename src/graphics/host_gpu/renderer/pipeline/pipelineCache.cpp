@@ -21,6 +21,7 @@
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/rtMiss.h"
+#include "graphics/shader/recompiler/srtReader.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
 #include "loader/systemContent.h"
@@ -123,6 +124,15 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
 	return !values.empty() &&
 	       Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
+}
+
+bool ReadBackingForShader(void*, uint64_t address, void* data, uint64_t size, bool*) {
+	return Libs::LibKernel::Memory::TryReadBufferBacking(address, data, size);
+}
+
+// checked mode: a miss is zeros, never a failed read. MaterializeResources EXIT_IF's on false.
+bool ReadShaderGuestMemoryOrZero(void*, uint64_t address, std::span<uint32_t> values) {
+	return SrtReader::ReadOrZero(address, values, ReadBackingForShader, nullptr);
 }
 
 void DumpShaderSpirv(const char* stage_name, uint64_t shader_hash,
@@ -377,6 +387,10 @@ struct PipelineCache::ProgramCache {
 		    .read_specialization_memory = ReadShaderGuestMemory,
 		    .min_lod_remap              = graphics.min_lod_remap,
 		};
+		// RefreshCallSource feeds this same runtime to RefreshShaderSource, which walks through
+		// CleanRuntime. That replaces read_memory with read_specialization_memory, so call-target
+		// fetches stay on ReadShaderGuestMemory and are not zero-filled here.
+		SrtReader::Apply(runtime, ReadShaderGuestMemoryOrZero);
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 			runtime.workgroup_counts = input_info.workgroup_counts;
 			runtime.indirect_args_address = input_info.indirect_args_address;

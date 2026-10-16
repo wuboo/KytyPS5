@@ -509,6 +509,26 @@ add_executable(null_desc_diag_mutant_classify_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(null_desc_diag_mutant_classify_tests PRIVATE ${inc_headers})
 target_compile_definitions(null_desc_diag_mutant_classify_tests PRIVATE KYTY_NULLDESC_MUTANT_EMPTY_FOR_NULLTABLE=1)
+
+set(SRT_READER_TEST_SOURCES
+	"${KYTY_TESTS_DIR}/SrtReaderTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
+)
+add_executable(srt_reader_tests EXCLUDE_FROM_ALL ${SRT_READER_TEST_SOURCES})
+target_link_libraries(srt_reader_tests fmt::fmt xbyak::xbyak common)
+target_include_directories(srt_reader_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS no_checked fault_unmapped ignore_nojit)
+	add_executable(srt_reader_mutant_${mutant}_tests EXCLUDE_FROM_ALL ${SRT_READER_TEST_SOURCES})
+	target_link_libraries(srt_reader_mutant_${mutant}_tests fmt::fmt xbyak::xbyak common)
+	target_include_directories(srt_reader_mutant_${mutant}_tests PRIVATE ${inc_headers})
+endforeach()
+target_compile_definitions(srt_reader_mutant_no_checked_tests PRIVATE KYTY_SRT_MUTANT_NO_CHECKED=1)
+target_compile_definitions(srt_reader_mutant_fault_unmapped_tests PRIVATE KYTY_SRT_MUTANT_FAULT_UNMAPPED=1)
+target_compile_definitions(srt_reader_mutant_ignore_nojit_tests PRIVATE KYTY_SRT_MUTANT_IGNORE_NOJIT=1)
+
 add_executable(guest_driver_memory_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GuestDriverMemoryTests.cpp"
 )
@@ -1089,6 +1109,17 @@ if(BUILD_TESTING)
 	add_test(NAME null_desc_diag COMMAND $<TARGET_FILE:null_desc_diag_tests>)
 	add_test(NAME null_desc_diag_mutant_classify COMMAND $<TARGET_FILE:null_desc_diag_mutant_classify_tests>)
 	set_tests_properties(null_desc_diag_mutant_classify PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME srt_reader_main COMMAND $<TARGET_FILE:srt_reader_tests>)
+	add_test(NAME srt_reader_nojit COMMAND $<TARGET_FILE:srt_reader_tests>)
+	set_tests_properties(srt_reader_nojit PROPERTIES ENVIRONMENT "KYTY_SRT_READER=nojit")
+	add_test(NAME srt_reader_checked COMMAND $<TARGET_FILE:srt_reader_tests>)
+	set_tests_properties(srt_reader_checked PROPERTIES ENVIRONMENT "KYTY_SRT_READER=checked")
+	add_test(NAME srt_reader_mutant_no_checked COMMAND $<TARGET_FILE:srt_reader_mutant_no_checked_tests>)
+	set_tests_properties(srt_reader_mutant_no_checked PROPERTIES ENVIRONMENT "KYTY_SRT_READER=checked" WILL_FAIL TRUE)
+	add_test(NAME srt_reader_mutant_fault_unmapped COMMAND $<TARGET_FILE:srt_reader_mutant_fault_unmapped_tests>)
+	set_tests_properties(srt_reader_mutant_fault_unmapped PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME srt_reader_mutant_ignore_nojit COMMAND $<TARGET_FILE:srt_reader_mutant_ignore_nojit_tests>)
+	set_tests_properties(srt_reader_mutant_ignore_nojit PROPERTIES ENVIRONMENT "KYTY_SRT_READER=nojit" WILL_FAIL TRUE)
 	add_test(NAME guest_driver_memory COMMAND $<TARGET_FILE:guest_driver_memory_tests>)
 	foreach(mutant IN LISTS KYTY_GDM_MUTANTS)
 		add_test(NAME guest_driver_memory_mutant_${mutant} COMMAND $<TARGET_FILE:guest_driver_memory_mutant_${mutant}_tests>)
@@ -1292,6 +1323,10 @@ if(BUILD_TESTING)
 		null_descriptor_policy_tests
 		null_desc_diag_tests
 		null_desc_diag_mutant_classify_tests
+		srt_reader_tests
+		srt_reader_mutant_no_checked_tests
+		srt_reader_mutant_fault_unmapped_tests
+		srt_reader_mutant_ignore_nojit_tests
 		guest_driver_memory_tests
 		pad_script_parser_tests
 		shader_vertex_metadata_tests

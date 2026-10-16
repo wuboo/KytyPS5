@@ -2,6 +2,7 @@
 
 #include "common/abi.h"
 #include "graphics/shader/nullDescDiag.h"
+#include "graphics/shader/recompiler/srtReader.h"
 #include "common/assert.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
@@ -1197,7 +1198,8 @@ bool SrtWalker::EvaluateDescriptor(uint32_t source, DescriptorValue& result) {
 
 bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 	if (!m_program.srt_plan_complete) return false;
-	if (m_program.srt_code && m_runtime.read_memory == nullptr) {
+	// nojit keeps the interpreted memcpy walk so a bad compiled walker can be separated from the read itself.
+	if (m_program.srt_code && m_runtime.read_memory == nullptr && SrtReader::UseCompiledWalker()) {
 		flat.resize(m_program.srt_reads.size());
 		m_program.active_sources.clear();
 		m_context.values.resize(m_program.evaluation_value_count);
