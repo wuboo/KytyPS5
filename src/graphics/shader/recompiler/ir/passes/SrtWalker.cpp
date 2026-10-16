@@ -52,9 +52,11 @@ bool SrtReadCapture::ReadOrdinary(void* userdata, uint64_t address, std::span<ui
 	} else if (address < GUEST_MEMORY_MIN) {
 		NullDesc::NoteUnresolved(address);
 		std::ranges::fill(values, 0u);
+		NullDesc::NoteSrtRead(address, values, false);
 		return true;
 	} else {
 		std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
+		NullDesc::NoteSrtRead(address, values, false);
 	}
 	capture.m_ranges.emplace_back(address, values.size_bytes());
 	return true;
@@ -773,6 +775,7 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		} else {
 			NullDesc::NoteUnresolved(address);
 		}
+		NullDesc::NoteSrtRead(address, std::span<const uint32_t>(&word, 1), false);
 	}
 	result = word;
 	return true;

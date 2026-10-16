@@ -21,6 +21,7 @@
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/rtMiss.h"
+#include "graphics/shader/nullDescDiag.h"
 #include "graphics/shader/recompiler/srtReader.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
@@ -126,7 +127,10 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 	       Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
 }
 
-bool ReadBackingForShader(void*, uint64_t address, void* data, uint64_t size, bool*) {
+bool ReadBackingForShader(void*, uint64_t address, void* data, uint64_t size, bool* gpu_dirty) {
+	if (gpu_dirty != nullptr) {
+		*gpu_dirty = NullDesc::Enabled() && Libs::LibKernel::Memory::QueryShaderGpuDirty(address, size);
+	}
 	return Libs::LibKernel::Memory::TryReadBufferBacking(address, data, size);
 }
 
