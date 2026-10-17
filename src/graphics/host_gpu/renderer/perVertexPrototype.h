@@ -32,6 +32,9 @@ bool PerVertexVsStoreEnabled();
 PvVsStoreGpuIdxMode PerVertexVsStoreGpuIdxMode();
 // S388: KYTY_PV_VSSTORE_INSTANCED=1|0 (read once, default 1, logged as [pv-instanced] mode=).
 bool PerVertexVsStoreInstanced();
+// S388: KYTY_PV_VSSTORE_GUARD=0|1 (read once, default 0, logged as [pv-guard] mode=). 1: the VS-store VS skips records
+// outside the draw's range and counts them (pv_vsstore_oob), the PS paints a read outside it magenta.
+bool PerVertexVsStoreGuard();
 // S388: KYTY_PV_VSSTORE_PAIRS=all|VS:PS,...|first=N (read once, logged as [pv-pairs] mode=).
 const PvVsStorePairFilter& PerVertexVsStorePairs();
 bool HasPerVertexPrototypeInput(std::span<const uint32_t> words);

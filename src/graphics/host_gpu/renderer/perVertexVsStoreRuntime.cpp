@@ -6,9 +6,11 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/perVertexPrototype.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 
+#include <cstring>
 #include <map>
 #include <spirv-tools/libspirv.hpp>
 
@@ -18,6 +20,10 @@ namespace {
 // 4M vec4 = 64 MiB per slab; a frame of the game needs a few slabs at most (counted in pv_fallback_ring).
 constexpr uint64_t kSlabVec4s = uint64_t {1} << 22u;
 constexpr uint32_t kMaxSlabs  = 8;
+// S388: guard counters, one 16-byte slot (256 B apart, the storage offset alignment) per flip modulo kGuardSlots.
+constexpr uint32_t kGuardSlots  = 4;
+constexpr uint64_t kGuardStride = 256;
+constexpr uint64_t kPvGuardBytes = 16;
 
 struct StoreShader {
 	ShaderType            stage = ShaderType::Unknown;
@@ -61,6 +67,7 @@ void RememberPvVsStoreShader(const ShaderProgram& program, ShaderRecompiler::Com
 	entry.hash  = options.shader_hash;
 	ShaderRecompiler::Spirv::PvStoreInfo info;
 	info.role          = vertex ? Role::Vertex : Role::Pixel;
+	info.guard         = PerVertexVsStoreGuard();
 	info.coherent      = true; // Coherent cap + a device barrier after the VS stores (the probe of RESULT-262 needs them)
 	info.location_mask = &entry.mask;
 	auto words         = EmitPvVsStoreVariant(result.program, options, info, push_data_start_dword, maintenance8_enabled);
@@ -99,15 +106,52 @@ void RememberPerVertexVariants(const ShaderProgram& program, ShaderRecompiler::C
 
 vk::DescriptorSetLayout PvVsStoreSetLayout(GraphicContext& graphics) {
 	if (s_set_layout != nullptr) return s_set_layout;
+	// S388: binding 2 (the guard's counter) exists only with KYTY_PV_VSSTORE_GUARD=1.
 	const vk::DescriptorSetLayoutBinding bindings[] {
 	    {0, vk::DescriptorType::eStorageBuffer, 1,
 	     vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment},
-	    {1, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eFragment}};
+	    {1, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eFragment},
+	    {kPvGuardBinding, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eVertex}};
 	vk::DescriptorSetLayoutCreateInfo create {};
-	create.bindingCount = 2;
+	create.bindingCount = PerVertexVsStoreGuard() ? 3 : 2;
 	create.pBindings    = bindings;
 	EXIT_IF(graphics.device.createDescriptorSetLayout(&create, nullptr, &s_set_layout) != vk::Result::eSuccess);
 	return s_set_layout;
+}
+
+PvVsStoreRuntime::GuardSlot PvVsStoreRuntime::AcquireGuard(uint64_t flip) {
+	if (!m_guard) {
+		m_guard = std::make_unique<Buffer>(m_graphics, m_scheduler, MemoryUsage::Stream, 0, AllFlags,
+		                                   uint64_t {kGuardSlots} * kGuardStride);
+		EXIT_IF(m_guard->Mapped().empty());
+		std::memset(m_guard->Mapped().data(), 0, m_guard->Mapped().size());
+		m_guard->Flush(0, m_guard->Size());
+		m_guard_flip = flip;
+	}
+	auto* mapped = m_guard->Mapped().data();
+	const auto zero = [&](uint64_t slot) {
+		std::memset(mapped + slot * kGuardStride, 0, kPvGuardBytes);
+		m_guard->Flush(slot * kGuardStride, kPvGuardBytes);
+	};
+	if (flip > m_guard_flip + kGuardSlots) {
+		// A long gap: the draws of the missed flips are long finished and not reported.
+		for (uint32_t slot = 0; slot < kGuardSlots; ++slot) zero(slot);
+		m_guard_flip = flip;
+	}
+	// Flip g starts: report what the draws of flip g-2 counted (the GPU has had two flips to finish them; no wait),
+	// then clear the slot flip g will use. The counter is read, never waited for.
+	while (m_guard_flip < flip) {
+		++m_guard_flip;
+		if (m_guard_flip >= 2) {
+			const uint64_t slot = (m_guard_flip - 2) % kGuardSlots;
+			m_guard->Invalidate(slot * kGuardStride, kPvGuardBytes);
+			uint32_t count = 0;
+			std::memcpy(&count, mapped + slot * kGuardStride, sizeof(count));
+			if (count != 0) FrameTiming::Add(FrameTiming::Counter::PvVsStoreOob, count);
+		}
+		zero(m_guard_flip % kGuardSlots);
+	}
+	return {m_guard->Handle(), (flip % kGuardSlots) * kGuardStride, kPvGuardBytes};
 }
 
 uint32_t PvVsStorePushOffset() {

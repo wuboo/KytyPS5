@@ -430,6 +430,12 @@ add_kyty_full_emulator_test(shader_cfg_pvpush_mutant_zero_tests "${KYTY_TESTS_DI
 target_compile_definitions(shader_cfg_pvpush_mutant_zero_tests PRIVATE KYTY_PVPUSH_MUTANT_ZERO=1)
 add_kyty_full_emulator_test(shader_cfg_pvpush_mutant_no_check_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
 target_compile_definitions(shader_cfg_pvpush_mutant_no_check_tests PRIVATE KYTY_PVPUSH_MUTANT_NO_CHECK=1)
+# S388: the guard (KYTY_PV_VSSTORE_GUARD) in the emitter; each mutant must be caught by TestPvVsStoreEmission.
+foreach(mutant IN ITEMS GUARD_ALWAYS GUARD_NO_SKIP GUARD_NO_MAGENTA)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_kyty_full_emulator_test(shader_cfg_pv_vsstore_mutant_${mutant_lower}_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
+	target_compile_definitions(shader_cfg_pv_vsstore_mutant_${mutant_lower}_tests PRIVATE KYTY_PVVS_MUTANT_${mutant}=1)
+endforeach()
 
 add_executable(per_vertex_transform_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PerVertexTransformTests.cpp"
@@ -1114,6 +1120,12 @@ if(BUILD_TESTING)
 	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pvpush_mutant_zero_tests> 2>&1 | grep -q 'did not keep the push start of the regular VS'")
 	add_test(NAME shader_cfg_pvpush_mutant_no_check
 	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pvpush_mutant_no_check_tests> 2>&1 | grep -q 'another push start was accepted'")
+	add_test(NAME shader_cfg_pv_vsstore_mutant_guard_always
+	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pv_vsstore_mutant_guard_always_tests> 2>&1 | grep -q 'not byte for byte the pre-guard'")
+	add_test(NAME shader_cfg_pv_vsstore_mutant_guard_no_skip
+	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pv_vsstore_mutant_guard_no_skip_tests> 2>&1 | grep -q 'branch once for the counter'")
+	add_test(NAME shader_cfg_pv_vsstore_mutant_guard_no_magenta
+	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pv_vsstore_mutant_guard_no_magenta_tests> 2>&1 | grep -q 'select magenta'")
 	add_test(NAME per_vertex_transform COMMAND $<TARGET_FILE:per_vertex_transform_tests>)
 	add_test(NAME per_vertex_unique COMMAND $<TARGET_FILE:per_vertex_unique_tests>)
 	add_test(NAME per_vertex_vsstore COMMAND $<TARGET_FILE:per_vertex_vsstore_tests>)
@@ -1316,6 +1328,9 @@ if(BUILD_TESTING)
 		shader_cfg_pv_vsstore_mutant_stride_dword_tests
 		shader_cfg_pvpush_mutant_zero_tests
 		shader_cfg_pvpush_mutant_no_check_tests
+		shader_cfg_pv_vsstore_mutant_guard_always_tests
+		shader_cfg_pv_vsstore_mutant_guard_no_skip_tests
+		shader_cfg_pv_vsstore_mutant_guard_no_magenta_tests
 		scalar_provenance_tests
 		image_page_table_tests
 		memory_tracker_tests

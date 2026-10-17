@@ -1538,6 +1538,8 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 	setup.draw.first_index   = 0; // set once the index buffer is bound (alignment)
 	setup.draw.vertex_offset = emit.vertex_offset;
 	setup.draw.index32       = element_size == 4;
+	setup.draw.records       = static_cast<uint32_t>(plan.records);
+	if (PerVertexVsStoreGuard()) setup.guard = m_pv_vsstore->AcquireGuard(FrameTiming::GuestFlips());
 	return true;
 }
 
@@ -1551,24 +1553,31 @@ static void BindPvVsStore(RenderContext& context, vk::CommandBuffer vk_buffer, c
 	                                                  graphics.StorageMinAlignment(), index_source.size, index_binding.size);
 	EXIT_IF(!bind.ok || index_binding.buffer == nullptr);
 	setup.draw.first_index = bind.first_index;
+	const bool guard = PerVertexVsStoreGuard();
 	const vk::DescriptorBufferInfo infos[] {
 	    {setup.region.buffer, 0, setup.region.buffer_size},
 	    {index_binding.buffer, bind.offset, bind.range},
+	    {setup.guard.buffer, setup.guard.offset, setup.guard.range},
 	};
+	const uint32_t binding_count = guard ? 3u : 2u;
 	const auto set = context.GetDescriptorHeap().Commit(PvVsStoreSetLayout(graphics));
-	vk::WriteDescriptorSet writes[2] {};
-	for (uint32_t i = 0; i < 2; ++i) {
+	vk::WriteDescriptorSet writes[3] {};
+	for (uint32_t i = 0; i < binding_count; ++i) {
 		writes[i].dstSet          = set;
 		writes[i].dstBinding      = i;
 		writes[i].descriptorCount = 1;
 		writes[i].descriptorType  = vk::DescriptorType::eStorageBuffer;
 		writes[i].pBufferInfo     = &infos[i];
 	}
-	graphics.device.updateDescriptorSets(2, writes, 0, nullptr);
+	graphics.device.updateDescriptorSets(binding_count, writes, 0, nullptr);
 	vk_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline.pipeline_layout, 1, 1, &set, 0, nullptr);
 	const auto block = PvVsStorePushBlock(setup.draw, setup.programs->stride_vec4);
 	vk_buffer.pushConstants(pipeline.pipeline_layout, vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
 	                        PvVsStorePushOffset(), sizeof(block), block.data());
+	if (guard) {
+		vk_buffer.pushConstants(pipeline.pipeline_layout, vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
+		                        PvVsStorePushOffset() + kPvPushRecords * 4u, sizeof(uint32_t), &setup.draw.records);
+	}
 }
 
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
