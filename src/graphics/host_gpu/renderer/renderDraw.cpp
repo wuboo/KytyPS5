@@ -1565,7 +1565,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		FrameTiming::Add(FrameTiming::Counter::PvVsStoreDraws);
 		if (draw.instance_count > 1) FrameTiming::Add(FrameTiming::Counter::PvVsStoreInstanced);
 	}
-	if (!use_pv_store && state.vertex_info[0].logical_stage == ShaderType::Vertex) {
+	// The per-vertex prototype takes the draw when the VS store does not; true when it handled the draw (ran or skipped it).
+	const auto run_prototype = [&]() -> bool {
+		if (state.vertex_info[0].logical_stage != ShaderType::Vertex) return false;
 		if (const auto* prototype = GetPerVertexPrototypePrograms(
 		        m_context.GetGraphics(), state.programs, state.vertex_info[0],
 		        m_context.GetPipelineCache().DriverCache())) {
@@ -1587,10 +1589,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			// S132: KYTY_DIAG_PROTO_SKIP=1 drops supported prototype draws (tempo ablation only, the image is incomplete).
 			static const bool diag_skip = FrameTiming::DiagFlagOn(std::getenv("KYTY_DIAG_PROTO_SKIP"));
 			const auto action = FrameTiming::ProtoDrawDecision(verdict.run, diag_skip);
-			if (action == FrameTiming::ProtoDrawAction::Skip) return;
+			if (action == FrameTiming::ProtoDrawAction::Skip) return true;
 			if (action == FrameTiming::ProtoDrawAction::DiagSkipped) {
 				FrameTiming::Add(FrameTiming::Counter::ProtoSkippedDraws);
-				return;
+				return true;
 			}
 			DrawCallInfo adjusted = draw;
 			adjusted.index_count  = verdict.index_count;
@@ -1602,9 +1604,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 				ExecutePerVertexPrototype(submit_id, buffer, adjusted, state, topology, emit,
 				                          index_source, primitive_restart_enable);
 			}
-			return;
+			return true;
 		}
-	}
+		return false;
+	};
+	if (!use_pv_store && run_prototype()) return;
 	// This draw is not itself a (possibly batchable) per-vertex-prototype draw: flush any pending
 	// batch first, same reasoning as the PM4-interpreter-level flush in graphicsRun.cpp -- two
 	// consecutive IT_DRAW_INDEX_2 packets reach the same opcode check there, so only the check
@@ -1678,6 +1682,16 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		LogDrawPhase(draw.Name(), "PrepareVertexBuffers");
 		vertex_bindings = AcquireVertexBuffers(buffer, state.vertex_info[0]);
 		index_binding   = PrepareIndexBuffer(buffer, index_source);
+	}
+	// The index binding the draw really got (the cache may move or merge the range while the bindings above are
+	// prepared) decides the VS-store tail again; a tail that does not fit goes to the prototype, as in the early check.
+	if (use_pv_store && !mesh_active && draw.IsIndexed() && index_binding.buffer != nullptr &&
+	    !PvVsStoreIndexBindingFits(index_binding.offset, pv_store.index_element_size,
+	                               m_context.GetGraphics().StorageMinAlignment(), index_source.size,
+	                               index_binding.size)) {
+		CountPvFallback(PvVsStoreFallback::IndexTail);
+		use_pv_store = false;
+		if (run_prototype()) return;
 	}
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "CreatePipeline");

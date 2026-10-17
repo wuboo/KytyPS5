@@ -321,6 +321,20 @@ constexpr PvVsStoreIndexDescriptor PvVsStoreIndexDescriptorFor(uint64_t byte_off
 	return out;
 }
 
+// Whether the index binding the draw really got (offset and size of the buffer PrepareIndexBuffer
+// returned) can be bound as the descriptor: the offset is bindable and the last word the PS reads is
+// inside the buffer. The decision is taken on this binding, not on an earlier ObtainBuffer: the buffer
+// cache may merge or move the range while the other resources of the draw are prepared.
+constexpr bool PvVsStoreIndexBindingFits(uint64_t byte_offset, uint32_t element_size, uint64_t alignment,
+                                         uint64_t source_size, uint64_t buffer_size) {
+	const auto desc = PvVsStoreIndexDescriptorFor(byte_offset, element_size, alignment, source_size, buffer_size);
+#if defined(KYTY_PVVS_MUTANT_BINDING_FITS_NO_TAIL)
+	return desc.ok;
+#else
+	return desc.ok && desc.tail_fits;
+#endif
+}
+
 // Cap slabs of the renderer. A region lives until the command buffer of its draw has finished on the
 // GPU, so a slab is recycled only after the tick it was last used in is free; regions inside a slab
 // are never reused (PvVsStoreRing). The buffers themselves are the renderer's; this is the bookkeeping.
