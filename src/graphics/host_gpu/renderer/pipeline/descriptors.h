@@ -34,6 +34,9 @@ struct TextureDescription {
 	vk::Format              view_format       = vk::Format::eUndefined;
 	bool                    shader_conversion = false;
 	bool                    null              = false;
+	// FrameTiming counters of the MinLod fold, added by every ResolveTexture that uses this description.
+	enum : uint32_t { MinLodFrac = 1, MinLodRemapped = 2, MinLodResinfo = 4, MinLodDropped = 8 };
+	uint32_t minlod_notes = 0;
 };
 
 struct PreparedBindings {
