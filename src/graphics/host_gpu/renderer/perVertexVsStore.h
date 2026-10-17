@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <map>
 #include <span>
+#include <string_view>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -34,6 +35,36 @@ enum PvVsStorePush : uint32_t {
 	kPvPushStride        = 7, // vec4 slots per record (S150: slot == host parameter location, stride from the VS)
 };
 constexpr uint32_t kPvVsStorePushDwords = 8;
+// S388 (KYTY_PV_VSSTORE_GUARD=1): one more dword after the block, the record count of the draw (span * instances);
+// the VS skips records at or past it and the PS paints a read past it magenta. Default 0: the block has 8 dwords.
+constexpr uint32_t kPvPushRecords = 8;
+constexpr uint32_t PvVsStorePushDwords(bool guard) {
+	return kPvVsStorePushDwords + (guard ? 1u : 0u);
+}
+// Parameter locations of the guard counter: set 1 binding 2, 16 bytes of which the first dword counts.
+constexpr uint32_t kPvGuardBinding = 2;
+// `rel` = record - base. Out of the draw's record range (wraps for a vertex below `first`).
+constexpr bool PvVsStoreRecordOutOfRange(uint32_t record, uint32_t base, uint32_t records) {
+#if defined(KYTY_PVVS_MUTANT_OOB_OFF_BY_ONE)
+	return record - base > records;
+#elif defined(KYTY_PVVS_MUTANT_OOB_SIGNED)
+	return static_cast<int32_t>(record - base) >= static_cast<int32_t>(records);
+#else
+	return record - base >= records;
+#endif
+}
+// Parser of KYTY_PV_VSSTORE_GUARD (0|1, unset = 0).
+inline bool ParsePvVsStoreGuard(const char* text, bool& guard) {
+	guard = false;
+	if (text == nullptr) return true;
+	const std::string_view value {text};
+	if (value == "0") return true;
+	if (value == "1") {
+		guard = true;
+		return true;
+	}
+	return false;
+}
 
 // Which index element corner k of a triangle reads (the PerVertexKHR order of the guest PS).
 constexpr uint32_t PvVsStoreCornerElement(uint32_t k) {
@@ -82,6 +113,7 @@ struct PvVsStoreDraw {
 	uint32_t first_index    = 0;
 	int32_t  vertex_offset  = 0;
 	bool     index32        = true;
+	uint32_t records        = 0; // span * instances (the guard's dword, pushed apart from the block)
 };
 
 // Record the PS reads for corner k of `primitive` in `instance`.
@@ -116,6 +148,7 @@ enum class PvVsStoreVerdict : uint32_t {
 	Empty,            // nothing to draw
 	TooLarge,         // record count overflows the 32-bit math of the shaders
 	RingFull,         // the pass ring has no room for a new region
+	InstancedOff,     // S388: instance_count > 1 while KYTY_PV_VSSTORE_INSTANCED=0
 };
 
 struct PvVsStoreRequest {
@@ -131,6 +164,7 @@ struct PvVsStoreRequest {
 	uint32_t index_count       = 0;
 	uint32_t instance_count    = 0;
 	uint32_t record_stride_vec4 = 0;
+	bool     instanced_allowed  = true; // S388: KYTY_PV_VSSTORE_INSTANCED (default 1)
 };
 
 struct PvVsStorePlan {
@@ -160,6 +194,13 @@ constexpr PvVsStorePlan PlanPvVsStore(const PvVsStoreRequest& request) {
 	if (request.index_count < kPvVsStoreCorners || request.instance_count == 0 ||
 	    request.range_end <= request.range_first)
 		return reject(V::Empty);
+#if defined(KYTY_PVVS_MUTANT_INSTANCED_OFF_IGNORED)
+	// the switch is not consulted
+#elif defined(KYTY_PVVS_MUTANT_INSTANCED_OFF_ALL)
+	if (!request.instanced_allowed) return reject(V::InstancedOff);
+#else
+	if (request.instance_count > 1 && !request.instanced_allowed) return reject(V::InstancedOff);
+#endif
 	const uint64_t span    = request.range_end - request.range_first;
 	const uint64_t records = span * request.instance_count;
 	// Record * stride * 4 dwords must stay below 2^32 in the shaders.
@@ -253,12 +294,14 @@ constexpr std::array<uint32_t, kPvVsStorePushDwords> PvVsStorePushBlock(const Pv
 
 // Push constant range of a graphics pipeline layout: the native data, plus the VS-store block only for
 // the VS-store variants (every other pipeline keeps the layout it always had).
-constexpr uint32_t PvVsStorePushRangeBytes(uint32_t native_bytes, bool vs_store_variant) {
+constexpr uint32_t PvVsStorePushRangeBytes(uint32_t native_bytes, bool vs_store_variant, bool guard = false) {
 #if defined(KYTY_PVVS_MUTANT_PUSH_ALWAYS)
 	(void)vs_store_variant;
-	return native_bytes + kPvVsStorePushDwords * 4u;
+	return native_bytes + PvVsStorePushDwords(guard) * 4u;
+#elif defined(KYTY_PVVS_MUTANT_GUARD_PUSH_ALWAYS)
+	return native_bytes + (vs_store_variant ? PvVsStorePushDwords(true) * 4u : 0u);
 #else
-	return native_bytes + (vs_store_variant ? kPvVsStorePushDwords * 4u : 0u);
+	return native_bytes + (vs_store_variant ? PvVsStorePushDwords(guard) * 4u : 0u);
 #endif
 }
 
@@ -332,6 +375,150 @@ constexpr bool PvVsStoreIndexBindingFits(uint64_t byte_offset, uint32_t element_
 	return desc.ok;
 #else
 	return desc.ok && desc.tail_fits;
+#endif
+}
+
+// S388 (KYTY_PV_VSSTORE_PAIRS=all|<VS:PS,...>|first=N, default all): which VS/PS pairs may use the store; the
+// others stay on the prototype. A list token is `VS:PS`, each side a decimal program id or a 0x guest shader
+// hash (hashes are stable between runs, ids are not); `first=N` admits the first N candidate pairs in the order
+// they are first drawn.
+struct PvVsStorePairFilter {
+	enum class Kind : uint32_t { All, First, List };
+	struct Pair {
+		uint64_t vs = 0;
+		uint64_t ps = 0;
+	};
+	Kind              kind    = Kind::All;
+	uint32_t          first_n = 0;
+	std::vector<Pair> pairs;
+};
+
+inline bool ParsePvVsStorePairNumber(std::string_view text, uint64_t& value) {
+	if (text.empty()) return false;
+	int base = 10;
+	if (text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X')) {
+		base = 16;
+		text.remove_prefix(2);
+	}
+	value = 0;
+	for (const char c: text) {
+		uint64_t digit = 0;
+		if (c >= '0' && c <= '9') digit = static_cast<uint64_t>(c - '0');
+		else if (base == 16 && c >= 'a' && c <= 'f') digit = static_cast<uint64_t>(c - 'a' + 10);
+		else if (base == 16 && c >= 'A' && c <= 'F') digit = static_cast<uint64_t>(c - 'A' + 10);
+		else return false;
+		if (value > (UINT64_MAX - digit) / static_cast<uint64_t>(base)) return false;
+		value = value * static_cast<uint64_t>(base) + digit;
+	}
+	return true;
+}
+
+// nullptr = unset = all. False: not a valid value (the caller aborts at startup).
+inline bool ParsePvVsStorePairs(const char* text, PvVsStorePairFilter& filter) {
+	filter = {};
+	if (text == nullptr) return true;
+	std::string_view value {text};
+	if (value == "all") return true;
+	if (value.starts_with("first=")) {
+		uint64_t n = 0;
+		if (!ParsePvVsStorePairNumber(value.substr(6), n) || n > 0xffffffffull) return false;
+		filter.kind    = PvVsStorePairFilter::Kind::First;
+		filter.first_n = static_cast<uint32_t>(n);
+		return true;
+	}
+	filter.kind = PvVsStorePairFilter::Kind::List;
+	while (!value.empty()) {
+		const auto comma = value.find(',');
+		const auto token = value.substr(0, comma);
+		const auto colon = token.find(':');
+		PvVsStorePairFilter::Pair pair;
+		if (colon == std::string_view::npos || !ParsePvVsStorePairNumber(token.substr(0, colon), pair.vs) ||
+		    !ParsePvVsStorePairNumber(token.substr(colon + 1), pair.ps)) {
+			filter = {};
+			return false;
+		}
+		filter.pairs.push_back(pair);
+		if (comma == std::string_view::npos) break;
+		value.remove_prefix(comma + 1);
+		if (value.empty()) {
+			filter = {};
+			return false; // trailing comma
+		}
+	}
+	if (filter.pairs.empty()) {
+		filter = {};
+		return false;
+	}
+	return true;
+}
+
+// `ordinal` = how many candidate pairs were admitted before this one (first=N counts them).
+inline bool PvVsStorePairAllowed(const PvVsStorePairFilter& filter, uint64_t vs_id, uint64_t vs_hash, uint64_t ps_id,
+                                 uint64_t ps_hash, uint32_t ordinal) {
+	switch (filter.kind) {
+		case PvVsStorePairFilter::Kind::All: return true;
+		case PvVsStorePairFilter::Kind::First:
+#if defined(KYTY_PVVS_MUTANT_PAIRS_FIRST_OFF_BY_ONE)
+			return ordinal <= filter.first_n;
+#else
+			return ordinal < filter.first_n;
+#endif
+		case PvVsStorePairFilter::Kind::List:
+			for (const auto& pair: filter.pairs) {
+				const bool vs_ok = pair.vs == vs_id || pair.vs == vs_hash;
+#if defined(KYTY_PVVS_MUTANT_PAIRS_LIST_IGNORES_PS)
+				const bool ps_ok = true;
+#else
+				const bool ps_ok = pair.ps == ps_id || pair.ps == ps_hash;
+#endif
+				if (vs_ok && ps_ok) return true;
+			}
+			return false;
+	}
+	return false;
+}
+
+// S388 (KYTY_PV_VSSTORE_INSTANCED=1|0, default 1): 0 sends every draw with instance_count > 1 to the prototype.
+inline bool ParsePvVsStoreInstanced(const char* text, bool& allowed) {
+	allowed = true;
+	if (text == nullptr) return true;
+	const std::string_view value {text};
+	if (value == "1") return true;
+	if (value == "0") {
+		allowed = false;
+		return true;
+	}
+	return false;
+}
+
+// S388 (KYTY_PV_VSSTORE_GPUIDX=allow|fallback, default allow): the vertex range of a draw is scanned from the
+// index bytes the CPU sees; when the GPU wrote those indices (the guest memory is GPU-modified) the scan can be
+// stale, so `fallback` sends such a draw to the prototype (counted as a range fallback).
+enum class PvVsStoreGpuIdxMode : uint32_t { Allow, Fallback };
+
+// nullptr = unset = allow. False: not a mode name.
+inline bool ParsePvVsStoreGpuIdxMode(const char* text, PvVsStoreGpuIdxMode& mode) {
+	mode = PvVsStoreGpuIdxMode::Allow;
+	if (text == nullptr) return true;
+	const std::string_view value {text};
+	if (value == "allow") return true;
+	if (value == "fallback") {
+		mode = PvVsStoreGpuIdxMode::Fallback;
+		return true;
+	}
+	return false;
+}
+
+constexpr bool PvVsStoreGpuIndexFallback(PvVsStoreGpuIdxMode mode, bool gpu_modified) {
+#if defined(KYTY_PVVS_MUTANT_GPUIDX_ALLOW_ALWAYS)
+	(void)mode;
+	(void)gpu_modified;
+	return false;
+#elif defined(KYTY_PVVS_MUTANT_GPUIDX_IGNORES_GPU)
+	(void)gpu_modified;
+	return mode == PvVsStoreGpuIdxMode::Fallback;
+#else
+	return mode == PvVsStoreGpuIdxMode::Fallback && gpu_modified;
 #endif
 }
 
@@ -427,6 +614,7 @@ constexpr PvVsStoreFallback ClassifyPvVsStoreFallback(PvVsStoreVerdict verdict, 
 		case V::PrimitiveRestart:
 		case V::BadIndexSize: return F::Topology;
 		case V::RingFull: return instance_count > 1 ? F::Instanced : F::Ring;
+		case V::InstancedOff: return F::Instanced;
 		case V::NoRange:
 		case V::Dropped:
 		case V::Empty:

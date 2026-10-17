@@ -1443,6 +1443,7 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 	request.index_count        = draw.index_count;
 	request.instance_count     = draw.instance_count;
 	request.record_stride_vec4 = programs->stride_vec4;
+	request.instanced_allowed  = PerVertexVsStoreInstanced();
 	const bool scannable = request.triangle_list && request.indexed && !primitive_restart_enable &&
 	                       (element_size == 2 || element_size == 4) && index_source.size != 0;
 	if (scannable) {
@@ -1485,6 +1486,27 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 		    m_context.GetBufferCache().ObtainBuffer(index_source.address, index_source.size, false);
 		index_tail_fits = PvVsStoreIndexDescriptorFor(index_offset, element_size, graphics.StorageMinAlignment(),
 		                                              index_source.size, index_buffer->Size()).tail_fits;
+	}
+	// S388 (H1): the scan above read the index bytes on the CPU; indices the GPU wrote may differ by the time the draw runs.
+	if (draw.IsIndexed() && index_source.size != 0) {
+		const bool gpu_index =
+		    index_source.host_data == nullptr &&
+		    m_context.GetBufferCache().IsRegionGpuModified(index_source.address, index_source.size);
+		if (gpu_index) {
+			FrameTiming::Add(FrameTiming::Counter::PvVsStoreIdxGpu);
+			static std::atomic<uint32_t> gpuidx_logged {0};
+			if (gpuidx_logged.fetch_add(1, std::memory_order_relaxed) < 20) {
+				LOGF("[pv-gpuidx] vs=0x%016llx ps=0x%016llx addr=0x%llx bytes=%llu inst=%u\n",
+				     static_cast<unsigned long long>(state.programs.vertex[0].id),
+				     static_cast<unsigned long long>(state.programs.pixel.id),
+				     static_cast<unsigned long long>(index_source.address),
+				     static_cast<unsigned long long>(index_source.size), draw.instance_count);
+			}
+		}
+		if (PvVsStoreGpuIndexFallback(PerVertexVsStoreGpuIdxMode(), gpu_index)) {
+			CountPvFallback(PvVsStoreFallback::Range);
+			return false;
+		}
 	}
 	if (!m_pv_vsstore) m_pv_vsstore = std::make_shared<PvVsStoreRuntime>(graphics, m_context.GetCommandScheduler());
 	PvVsStoreRuntime::Region region;

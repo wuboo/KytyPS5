@@ -146,6 +146,38 @@ bool PerVertexVsStoreEnabled() {
 	return enabled;
 }
 
+const PvVsStorePairFilter& PerVertexVsStorePairs() {
+	static const PvVsStorePairFilter filter = [] {
+		PvVsStorePairFilter parsed;
+		const char*         value = std::getenv("KYTY_PV_VSSTORE_PAIRS");
+		EXIT_IF(!ParsePvVsStorePairs(value, parsed));
+		LOGF("[pv-pairs] mode=%s\n", value != nullptr ? value : "all");
+		return parsed;
+	}();
+	return filter;
+}
+
+bool PerVertexVsStoreInstanced() {
+	static const bool allowed = [] {
+		bool parsed = true;
+		EXIT_IF(!ParsePvVsStoreInstanced(std::getenv("KYTY_PV_VSSTORE_INSTANCED"), parsed));
+		LOGF("[pv-instanced] mode=%d\n", parsed ? 1 : 0);
+		return parsed;
+	}();
+	return allowed;
+}
+
+PvVsStoreGpuIdxMode PerVertexVsStoreGpuIdxMode() {
+	static const PvVsStoreGpuIdxMode mode = [] {
+		const char*         value = std::getenv("KYTY_PV_VSSTORE_GPUIDX");
+		PvVsStoreGpuIdxMode parsed;
+		EXIT_IF(!ParsePvVsStoreGpuIdxMode(value, parsed));
+		LOGF("[pv-gpuidx] mode=%s\n", parsed == PvVsStoreGpuIdxMode::Fallback ? "fallback" : "allow");
+		return parsed;
+	}();
+	return mode;
+}
+
 PerVertexDrawVerdict ClassifyPerVertexPrototypeDraw(bool ps_active, vk::PrimitiveTopology topology,
                                                     bool primitive_restart, uint32_t index_count) {
 	if (!ps_active) return {false, index_count, "no pixel shader"};
