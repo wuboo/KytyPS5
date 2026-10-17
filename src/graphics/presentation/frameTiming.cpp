@@ -105,6 +105,7 @@ constexpr const char* kCounterNames[] = {
     "pv_fallback_index_tail",
     "pv_vsstore_instanced",
     "pv_push_nonzero_programs",
+    "pv_vsstore_oob",
     "pv_vsstore_idx_gpu",
     "depth_ro_elided",
     "depth_ro_reject_dirty",

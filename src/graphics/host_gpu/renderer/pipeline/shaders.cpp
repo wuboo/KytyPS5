@@ -6,6 +6,7 @@
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/debug.h"
+#include "graphics/host_gpu/renderer/perVertexPrototype.h"
 #include "graphics/host_gpu/renderer/perVertexVsStore.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -487,7 +488,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	EXIT_IF(programs.prototype_extra_layout && programs.pv_store_layout);
 	const vk::PushConstantRange push_constants {
 	    graphics_stages, 0,
-	    PvVsStorePushRangeBytes(ShaderRecompiler::IR::NativePushConstantSize, programs.pv_store_layout != nullptr)};
+	    PvVsStorePushRangeBytes(ShaderRecompiler::IR::NativePushConstantSize, programs.pv_store_layout != nullptr,
+	                            PerVertexVsStoreGuard())};
 
 	vk::PipelineLayoutCreateInfo  pipeline_layout_info {};
 	const vk::DescriptorSetLayout layouts[] {

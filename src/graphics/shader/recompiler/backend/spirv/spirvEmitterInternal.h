@@ -120,6 +120,9 @@ struct EmitterState {
 	uint32_t                                         pv_index_buffer         = 0;
 	uint32_t                                         pv_instance_variable    = 0;
 	uint32_t                                         pv_vertex_record        = 0;
+	uint32_t                                         pv_guard_counter        = 0; // S388 VS: set 1 binding 2 (uint count)
+	uint32_t                                         pv_guard_ok             = 0; // S388 VS: bool, the record is inside the draw's range
+	uint32_t                                         pv_oob_flag             = 0; // S388 PS: Private uint, a corner read was outside
 	std::array<uint32_t, 3>                          capture_buffers {};
 	std::array<uint32_t, 2>                          capture_index {};
 	std::array<uint32_t, 2>                          capture_valid {};
@@ -300,6 +303,7 @@ void     DefinePvStore(EmitterState& state);
 void     InitializePvStore(EmitterState& state);
 void     EmitPvStoreParameter(EmitterState& state, uint32_t host_location, uint32_t value);
 uint32_t EmitPvLoadCorner(EmitterState& state, uint32_t host_location, uint32_t corner, uint32_t chan);
+uint32_t PvGuardColor(EmitterState& state, uint32_t value);
 void     InitializeVertexCapture(EmitterState& state);
 uint32_t CaptureInput(EmitterState& state, bool attribute, uint32_t location, uint32_t component);
 uint32_t CaptureOutputPointer(EmitterState& state, uint32_t slot, uint32_t component = UINT32_MAX);

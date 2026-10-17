@@ -56,7 +56,8 @@ struct PvVsStorePrograms {
 // PS without per-vertex input, a variant failed to emit or validate, geometry/tessellation stages).
 const PvVsStorePrograms* GetPvVsStorePrograms(GraphicContext& graphics, const PipelineCache::GraphicsPrograms& programs);
 
-// Set 1 of the VS-store pipelines: binding 0 = cap (VS write, PS read), binding 1 = guest indices (PS).
+// Set 1 of the VS-store pipelines: binding 0 = cap (VS write, PS read), binding 1 = guest indices (PS), and with
+// KYTY_PV_VSSTORE_GUARD=1 binding 2 = the guard's counter (VS).
 vk::DescriptorSetLayout PvVsStoreSetLayout(GraphicContext& graphics);
 
 // Push constant offset of the VS-store block (it follows the native push data).
@@ -82,6 +83,14 @@ public:
 	Region Place(uint64_t records, uint32_t stride_vec4);
 	// Call when the draw is recorded (after resource preparation, which may flush the scheduler).
 	void Touch(const Region& region);
+	// S388 (KYTY_PV_VSSTORE_GUARD=1): the counter slot of guest flip `flip`. The first call of a new flip reports the
+	// slot of flip-2 into pv_vsstore_oob and clears the new one; nothing is waited for.
+	struct GuardSlot {
+		vk::Buffer buffer = nullptr;
+		uint64_t   offset = 0;
+		uint64_t   range  = 0;
+	};
+	GuardSlot AcquireGuard(uint64_t flip);
 	// Largest region (in vec4s) a draw may take.
 	[[nodiscard]] static uint64_t SlabVec4s();
 
@@ -90,6 +99,8 @@ private:
 	CommandScheduler&                    m_scheduler;
 	PvVsStoreSlabs                       m_slabs;
 	std::vector<std::unique_ptr<Buffer>> m_buffers;
+	std::unique_ptr<Buffer>              m_guard;
+	uint64_t                             m_guard_flip = 0;
 };
 
 // A draw that was accepted for the VS-store path (decided before any resource of the draw is prepared).
@@ -98,6 +109,7 @@ struct PvVsStoreDrawSetup {
 	PvVsStoreDraw             draw;
 	uint32_t                  index_element_size = 0;
 	PvVsStoreRuntime::Region  region;
+	PvVsStoreRuntime::GuardSlot guard; // KYTY_PV_VSSTORE_GUARD=1 only
 };
 
 } // namespace Libs::Graphics

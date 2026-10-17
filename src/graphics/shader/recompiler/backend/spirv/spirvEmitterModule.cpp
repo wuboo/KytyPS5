@@ -189,7 +189,7 @@ uint32_t PushConstantBlockType(EmitterState& state) {
 		const auto fused = state.builder.DecoratedType(
 		    spv::OpTypeArray, {{spv::OpDecorate, {spv::DecorationArrayStride, sizeof(uint32_t)}}},
 		    TypeU32(state),
-		    ConstantU32(state, kPvVsStorePushDwords));
+		    ConstantU32(state, PvVsStorePushDwords(state.pv_store->guard)));
 		return state.builder.DecoratedType(
 		    spv::OpTypeStruct,
 		    {{spv::OpMemberDecorate, {0, spv::DecorationOffset, 0}},

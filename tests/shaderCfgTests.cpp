@@ -16654,6 +16654,17 @@ void TestSpirvConditionVotes() {
   }
 }
 
+// S388: FNV-1a over the words of a module (golden values of the unguarded VS-store emission).
+uint64_t PvWordsHash(const std::vector<uint32_t> &words) {
+  uint64_t hash = 1469598103934665603ull;
+  for (const auto word : words) {
+    for (uint32_t shift = 0; shift < 32; shift += 8) {
+      hash = (hash ^ ((word >> shift) & 0xffu)) * 1099511628211ull;
+    }
+  }
+  return hash;
+}
+
 // S149 (KYTY_PV_VSSTORE): the VS writes its PerVertex parameters to the cap buffer, the PS reads the
 // three corners of its primitive from it instead of PerVertexKHR.
 void TestPvVsStoreEmission() {
@@ -16746,6 +16757,31 @@ void TestPvVsStoreEmission() {
   ps_pv.parameter_slots[0] = 0;
   const auto ps_words = Spirv::EmitProgram(ps.program, options.input_info, 0, false, false, nullptr, &ps_pv);
   CheckSpirvBinaryValidates(ps_words);
+  // S388: the unguarded emission (the shipped one: dynamic stride, coherent) is byte for byte what it was before the
+  // guard existed. Golden FNV-1a hashes of the words, taken from the emitter of c307f63a.
+  {
+    uint32_t mask = 0;
+    Spirv::PvStoreInfo prod_vs, prod_ps;
+    prod_vs.role = Spirv::PvStoreInfo::Role::Vertex;
+    prod_vs.coherent = true;
+    prod_vs.location_mask = &mask;
+    prod_ps.role = Spirv::PvStoreInfo::Role::Pixel;
+    prod_ps.coherent = true;
+    prod_ps.location_mask = &mask;
+    const auto h_vs = PvWordsHash(vs_words);
+    const auto h_ps = PvWordsHash(ps_words);
+    const auto h_prod_vs = PvWordsHash(Spirv::EmitProgram(vs.program, vs_options.input_info, 0, false, false, nullptr, &prod_vs));
+    const auto h_prod_ps = PvWordsHash(Spirv::EmitProgram(ps.program, options.input_info, 0, false, false, nullptr, &prod_ps));
+    if (std::getenv("KYTY_X_PV_HASH") != nullptr) {
+      std::fprintf(stderr, "PVHASH vs=%016llx ps=%016llx prod_vs=%016llx prod_ps=%016llx\n",
+                   static_cast<unsigned long long>(h_vs), static_cast<unsigned long long>(h_ps),
+                   static_cast<unsigned long long>(h_prod_vs), static_cast<unsigned long long>(h_prod_ps));
+    }
+    Check(h_vs == 0xbe574a534b7a8238ull && h_prod_vs == 0x7a1daa33786abc75ull,
+          "unguarded VS-store VS SPIR-V is not byte for byte the pre-guard one");
+    Check(h_ps == 0xc23ba5c332444c67ull && h_prod_ps == 0x770aead41a3ad2daull,
+          "unguarded VS-store PS SPIR-V is not byte for byte the pre-guard one");
+  }
   const auto text = DisassembleSpirvBinary(ps_words);
   const auto legacy = DisassembleSpirvBinary(ps.spirv);
   if (std::getenv("KYTY_X_PV_DUMP") != nullptr) {
@@ -16767,6 +16803,39 @@ void TestPvVsStoreEmission() {
         "PS does not read the flat instance index");
   Check(Spirv::EmitProgram(ps.program, options.input_info) == ps.spirv,
         "PS SPIR-V changed without the VS-store switch");
+  // S388 (KYTY_PV_VSSTORE_GUARD=1): the VS counts and skips records outside the draw's range, the PS paints magenta.
+  {
+    Check(vs_text.find("pv_guard") == std::string::npos && vs_text.find("OpAtomicIAdd") == std::string::npos &&
+              text.find("pv_oob") == std::string::npos && text.find("OpSelect %v4float") == std::string::npos,
+          "unguarded VS-store modules contain guard code");
+    Check(vs_text.find("OpTypeArray %uint %uint_9") == std::string::npos,
+          "unguarded push block has more than 8 dwords");
+    auto guarded_vs_info = vs_info;
+    guarded_vs_info.guard = true;
+    const auto guarded_vs = Spirv::EmitProgram(vs.program, vs_options.input_info, 0, false, false, nullptr, &guarded_vs_info);
+    CheckSpirvBinaryValidates(guarded_vs);
+    const auto g_vs_text = DisassembleSpirvBinary(guarded_vs);
+    Check(g_vs_text.find("%pv_guard Binding 2") != std::string::npos && g_vs_text.find("%pv_guard DescriptorSet 1") != std::string::npos,
+          "guarded VS lacks the counter at set 1 binding 2");
+    Check(count(g_vs_text, "OpAtomicIAdd") == 1, "guarded VS must add to the counter exactly once");
+    Check(g_vs_text.find("OpTypeArray %uint %uint_9") != std::string::npos,
+          "guarded push block must have 9 dwords");
+    Check(count(g_vs_text, "OpSelectionMerge") == count(vs_text, "OpSelectionMerge") + 1 + parameters,
+          "guarded VS must branch once for the counter and once per parameter store");
+    const auto store_at = g_vs_text.find("OpStore %_ptr_StorageBuffer_v4uint");
+    (void)store_at;
+    auto guarded_ps_pv = ps_pv;
+    guarded_ps_pv.guard = true;
+    const auto guarded_ps = Spirv::EmitProgram(ps.program, options.input_info, 0, false, false, nullptr, &guarded_ps_pv);
+    CheckSpirvBinaryValidates(guarded_ps);
+    const auto g_ps_text = DisassembleSpirvBinary(guarded_ps);
+    Check(g_ps_text.find("%pv_oob") != std::string::npos && g_ps_text.find("OpTypeArray %uint %uint_9") != std::string::npos,
+          "guarded PS lacks the out-of-range flag or the 9-dword push block");
+    Check(g_ps_text.find("OpCompositeConstruct %v4float %float_1 %float_0 %float_1 %float_1") != std::string::npos &&
+              count(g_ps_text, "OpSelect %v4float") == 1,
+          "guarded PS must select magenta for a color export once the flag is set");
+    Check(g_ps_text.find("OpAtomicIAdd") == std::string::npos, "the PS must not touch the counter");
+  }
   {
     uint32_t ps_mask = 0;
     Spirv::PvStoreInfo dynamic;

@@ -157,6 +157,16 @@ const PvVsStorePairFilter& PerVertexVsStorePairs() {
 	return filter;
 }
 
+bool PerVertexVsStoreGuard() {
+	static const bool guard = [] {
+		bool parsed = false;
+		EXIT_IF(!ParsePvVsStoreGuard(std::getenv("KYTY_PV_VSSTORE_GUARD"), parsed));
+		LOGF("[pv-guard] mode=%d\n", parsed ? 1 : 0);
+		return parsed;
+	}();
+	return guard;
+}
+
 bool PerVertexVsStoreInstanced() {
 	static const bool allowed = [] {
 		bool parsed = true;

@@ -33,6 +33,9 @@ struct PvStoreInfo {
 	std::map<uint32_t, uint32_t> parameter_slots; // host parameter location -> slot in a record
 	uint32_t*                    location_mask      = nullptr;
 	bool                         coherent           = false; // Coherent cap + OpMemoryBarrier after the VS stores
+	// S388 (KYTY_PV_VSSTORE_GUARD=1): push dword kPvPushRecords (the draw's record count) bounds the records; the VS skips a
+	// store outside it and counts it in set 1 binding 2, the PS paints a read outside it magenta. Off: the module is unchanged.
+	bool                         guard              = false;
 };
 
 // Resets and writes backend IDs and descriptor indices; do not emit the same program concurrently.
