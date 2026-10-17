@@ -881,6 +881,16 @@ foreach(mutant IN ITEMS INVERT_CLIP ALWAYS_BOUNDS NATIVE_COUNTS BIAS_ABS)
 	target_compile_definitions(apple_drop_mutant_${mutant_lower}_tests PRIVATE KYTY_APPLEDROP_MUTANT_${mutant}=1)
 endforeach()
 
+add_executable(lod_stats_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/LodStatsTests.cpp")
+target_include_directories(lod_stats_tests PRIVATE ${inc_headers})
+# S393 mutants (each must be caught, WILL_FAIL): real mode reports every slot as sampled; the slot id is missing from counter dword 0.
+foreach(mutant IN ITEMS REAL_AS_FULL NO_SLOT)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(lod_stats_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/LodStatsTests.cpp")
+	target_include_directories(lod_stats_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(lod_stats_mutant_${mutant_lower}_tests PRIVATE KYTY_LODSTATS_MUTANT_${mutant}=1)
+endforeach()
+
 add_executable(cp_counters_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpCountersTests.cpp")
 target_include_directories(cp_counters_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): native/non-native capture swapped; clock step back not clamped; any KYTY_DIAG_PROTO_SKIP value turns it on; the switch is ignored.
@@ -1227,6 +1237,7 @@ if(BUILD_TESTING)
 	add_test(NAME min_lod_view COMMAND $<TARGET_FILE:min_lod_view_tests>)
 	add_test(NAME apple_drop COMMAND $<TARGET_FILE:apple_drop_tests>)
 	add_test(NAME cp_counters COMMAND $<TARGET_FILE:cp_counters_tests>)
+	add_test(NAME lod_stats COMMAND $<TARGET_FILE:lod_stats_tests>)
 	add_test(NAME depth_ro_union COMMAND $<TARGET_FILE:depth_ro_union_tests>)
 	add_test(NAME desc_dyn COMMAND $<TARGET_FILE:desc_dyn_tests>)
 	add_test(NAME desc_assert COMMAND $<TARGET_FILE:desc_assert_tests>)
@@ -1250,6 +1261,7 @@ if(BUILD_TESTING)
 			cp_phases_mutant_keep_children cp_phases_mutant_drop_parse
 			min_lod_view_mutant_floor min_lod_view_mutant_no_cap min_lod_view_mutant_resinfo
 			apple_drop_mutant_invert_clip apple_drop_mutant_always_bounds apple_drop_mutant_native_counts apple_drop_mutant_bias_abs
+			lod_stats_mutant_real_as_full lod_stats_mutant_no_slot
 			cp_counters_mutant_native_swap cp_counters_mutant_no_clamp cp_counters_mutant_flag_any cp_counters_mutant_skip_ignored
 			frame_dump_flips_mutant_keep_zero frame_dump_flips_mutant_off_by_one
 			depth_ro_union_mutant_ignore_dirty depth_ro_union_mutant_allow_general
@@ -1415,6 +1427,9 @@ if(BUILD_TESTING)
 		min_lod_view_mutant_floor_tests
 		min_lod_view_mutant_no_cap_tests
 		min_lod_view_mutant_resinfo_tests
+		lod_stats_tests
+		lod_stats_mutant_real_as_full_tests
+		lod_stats_mutant_no_slot_tests
 		apple_drop_tests
 		apple_drop_mutant_invert_clip_tests
 		apple_drop_mutant_always_bounds_tests

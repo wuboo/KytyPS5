@@ -78,6 +78,8 @@ struct ShaderTextureResource {
 	uint32_t fields[8] = {0};
 
 	[[nodiscard]] uint16_t           MinLod() const { return (fields[1] >> 8u) & 0xFFFu; }
+	[[nodiscard]] bool               MipStatsEnabled() const { return ((fields[5] >> 25u) & 0x1u) == 1; }
+	[[nodiscard]] uint8_t            MipStatsSlot() const { return fields[6] & 0xFFu; }
 	[[nodiscard]] uint8_t            DstSelX() const { return (fields[3] >> 0u) & 0x7u; }
 	[[nodiscard]] uint8_t            DstSelY() const { return (fields[3] >> 3u) & 0x7u; }
 	[[nodiscard]] uint8_t            DstSelZ() const { return (fields[3] >> 6u) & 0x7u; }
