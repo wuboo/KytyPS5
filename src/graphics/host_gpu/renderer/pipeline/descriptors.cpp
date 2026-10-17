@@ -558,8 +558,8 @@ static bool ForcedTextureBinding(TextureCache& texture_cache, const ShaderRecomp
 // Everything a texture binding needs before the cache lookup: a function of its inputs only.
 static TextureDescription DescribeTexture(const ShaderRecompiler::IR::ImageResource&   resource,
                                           const ShaderRecompiler::IR::DescriptorValue& value,
-                                          bool int64_atomics) {
-	if (resource.atomic64 && !int64_atomics) {
+                                          const GraphicContext& graphics) {
+	if (resource.atomic64 && !graphics.shader_image_int64_atomics_enabled) {
 		EXIT("64-bit image atomics require shaderImageInt64Atomics\n");
 	}
 	auto descriptor = DecodeNativeDescriptor<ShaderTextureResource>(value);
@@ -692,14 +692,15 @@ static TextureDescription DescribeTexture(const ShaderRecompiler::IR::ImageResou
 	desc.view_info = TextureViewInfo(resource, descriptor, view_format, surface_format, storage,
 	                                 view_levels, desc.info.resources.layers);
 	desc.view_info.base_level = view_base;
+	// The counters are added by ResolveTexture on every call, not once per memoized description.
+	uint32_t minlod_notes = 0;
 	// Without VK_EXT_image_view_min_lod (MoltenVK) the T# MinLod clamp cannot reach the view: fold it into a higher
 	// view base level (sampled, non-Dynamic only). KYTY_TSHARP_MINLOD_APPLE=0 turns that off for A/B.
 	if (desc.view_info.min_lod != 0 && !storage &&
 	    resource.mip_mode != ShaderRecompiler::IR::ImageMipMode::Dynamic) {
-		const auto& graphics = m_context.GetGraphics();
-		const auto  original = desc.view_info.min_lod;
+		const auto original = desc.view_info.min_lod;
 		if (MinLodIsFractional(original)) {
-			FrameTiming::Add(FrameTiming::Counter::MinLodFrac);
+			minlod_notes |= TextureDescription::MinLodFrac;
 		}
 		if (graphics.min_lod_remap) {
 			const auto mapped = MapMinLodToBaseLevel(desc.view_info.base_level,
@@ -707,13 +708,13 @@ static TextureDescription DescribeTexture(const ShaderRecompiler::IR::ImageResou
 			desc.view_info.base_level  = mapped.base_level;
 			desc.view_info.level_count = mapped.level_count;
 			desc.view_info.min_lod     = mapped.min_lod;
-			FrameTiming::Add(FrameTiming::Counter::MinLodRemapped);
+			minlod_notes |= TextureDescription::MinLodRemapped;
 			if (resource.queries_size) {
-				FrameTiming::Add(FrameTiming::Counter::MinLodResinfo);
+				minlod_notes |= TextureDescription::MinLodResinfo;
 			}
 		}
 		if (MinLodDropped(graphics.has_view_min_lod, graphics.min_lod_remap, false, false, original)) {
-			FrameTiming::Add(FrameTiming::Counter::MinLodDropped);
+			minlod_notes |= TextureDescription::MinLodDropped;
 		}
 	}
 	desc.type = storage ? TextureCache::BindingType::Storage : TextureCache::BindingType::Texture;
@@ -723,6 +724,7 @@ static TextureDescription DescribeTexture(const ShaderRecompiler::IR::ImageResou
 	result.pixel_format      = pixel_format;
 	result.view_format       = view_format;
 	result.shader_conversion = shader_conversion;
+	result.minlod_notes      = minlod_notes;
 	return result;
 }
 
@@ -742,6 +744,7 @@ TextureDescriptionInputs(const ShaderRecompiler::IR::ImageResource& resource) {
 	inputs.depth_compare  = resource.depth_compare;
 	inputs.cube           = resource.cube;
 	inputs.r128           = resource.r128;
+	inputs.queries_size   = resource.queries_size;
 	return inputs;
 }
 
@@ -762,7 +765,7 @@ static uint64_t TextureDescriptionKey(const ShaderRecompiler::IR::ImageResource&
 	mix(uint64_t {inputs.read} | (uint64_t {inputs.written} << 8u) |
 	    (uint64_t {inputs.atomic} << 16u) | (uint64_t {inputs.atomic64} << 24u) |
 	    (uint64_t {inputs.depth_compare} << 32u) | (uint64_t {inputs.cube} << 40u) |
-	    (uint64_t {inputs.r128} << 48u));
+	    (uint64_t {inputs.r128} << 48u) | (uint64_t {inputs.queries_size} << 56u));
 	return hash;
 }
 
@@ -783,8 +786,7 @@ RenderExecutor::FindTextureDescription(const ShaderRecompiler::IR::ImageResource
 	auto& entry  = m_texture_descriptions[key];
 	entry.inputs = inputs;
 	entry.value  = value;
-	entry.description =
-	    DescribeTexture(inputs, value, m_context.GetGraphics().shader_image_int64_atomics_enabled);
+	entry.description = DescribeTexture(inputs, value, m_context.GetGraphics());
 	return entry.description;
 }
 
@@ -834,6 +836,12 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		}
 		NullDesc::NoteStandin(shader, slot, addr, reason);
 		return {null_id, nullptr, std::move(null_desc)};
+	}
+	if (const auto notes = described.minlod_notes; notes != 0) {
+		if (notes & TextureDescription::MinLodFrac) FrameTiming::Add(FrameTiming::Counter::MinLodFrac);
+		if (notes & TextureDescription::MinLodRemapped) FrameTiming::Add(FrameTiming::Counter::MinLodRemapped);
+		if (notes & TextureDescription::MinLodResinfo) FrameTiming::Add(FrameTiming::Counter::MinLodResinfo);
+		if (notes & TextureDescription::MinLodDropped) FrameTiming::Add(FrameTiming::Counter::MinLodDropped);
 	}
 	const auto& descriptor          = described.descriptor;
 	const auto  address             = descriptor.Base40();
