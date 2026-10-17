@@ -19,12 +19,32 @@ struct GraphicContext;
 namespace ShaderRecompiler {
 struct CompileResult;
 struct CompileOptions;
+namespace IR {
+struct Program;
+} // namespace IR
+namespace Spirv {
+struct PvStoreInfo;
+} // namespace Spirv
 } // namespace ShaderRecompiler
 
 // Compile-time hook (next to RememberPerVertexPrototypeShader): emits the VS-store variant of a vertex
 // shader and of a pixel shader with PerVertexKHR inputs. No-op unless KYTY_PV_VSSTORE=1.
+// S384: push_data_start_dword / maintenance8_enabled are the values of the regular program's compilation
+// (after PerVertexReemitPushStart / PerVertexReemitMaintenance8); the variant starts its push data there.
 void RememberPvVsStoreShader(const ShaderProgram& program, ShaderRecompiler::CompileResult& result,
-                             const ShaderRecompiler::CompileOptions& options);
+                             const ShaderRecompiler::CompileOptions& options,
+                             uint32_t push_data_start_dword, bool maintenance8_enabled);
+// Re-emits `program` as the VS-store variant; leaves program.bindings as emitted.
+std::vector<uint32_t> EmitPvVsStoreVariant(ShaderRecompiler::IR::Program&          program,
+                                           const ShaderRecompiler::CompileOptions& options,
+                                           const ShaderRecompiler::Spirv::PvStoreInfo& info,
+                                           uint32_t push_data_start_dword, bool maintenance8_enabled);
+// Both re-emission hooks for a freshly compiled program: the variants take the regular program's push
+// start, each variant's start and shader-data size are checked against it, and program.bindings is
+// restored after each re-emission. push_data_start_dword is what CompileProgram received.
+void RememberPerVertexVariants(const ShaderProgram& program, ShaderRecompiler::CompileResult& result,
+                               const ShaderRecompiler::CompileOptions& options, uint32_t host_subgroup_size,
+                               uint32_t push_data_start_dword);
 
 struct PvVsStorePrograms {
 	PvVsStoreInterfaceVerdict       verdict     = PvVsStoreInterfaceVerdict::NoPerVertex;

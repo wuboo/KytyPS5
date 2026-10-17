@@ -13,6 +13,13 @@ namespace Libs::Graphics {
 namespace ShaderRecompiler {
 struct CompileResult;
 struct CompileOptions;
+namespace IR {
+struct Program;
+struct Bindings;
+} // namespace IR
+namespace Spirv {
+struct VertexCaptureInfo;
+} // namespace Spirv
 } // namespace ShaderRecompiler
 bool PerVertexPrototypeEnabled();
 // S134: KYTY_PV_UNIQUE=1 (value "1" only) captures once per unique vertex; default OFF.
@@ -24,10 +31,33 @@ bool HasPerVertexPrototypeInput(std::span<const uint32_t> words);
 bool DecodePerVertexPrototypeAttribute(Prospero::BufferFormat   format,
                                        std::span<const uint8_t> bytes,
                                        std::span<uint32_t, 4>   components);
+// S384: KYTY_PV_PUSH_START=fix|zero (read once, default fix). fix: the capture and VS-store re-emissions
+// start their push data where the regular program does (the CPU writes the push dwords under that
+// start); zero: the pre-S384 behaviour (start 0, maintenance8 off). The first query logs "[pv-push] mode=".
+bool     PerVertexPushStartFix();
+uint32_t PerVertexReemitPushStart(uint32_t push_data_start_dword);
+bool     PerVertexReemitMaintenance8(bool maintenance8_enabled);
+// A variant must read its shader data from where the regular program does.
+bool PvVariantPushMatches(const ShaderRecompiler::IR::Bindings& regular,
+                          const ShaderRecompiler::IR::Bindings& variant);
+// Logs "[pv-push] role=... hash=... start=... dwords=..." once per emitted variant and counts the
+// variants whose push data starts at a nonzero dword (pv_push_nonzero_programs).
+void NotePvPushVariant(const char* role, uint64_t shader_hash,
+                       const ShaderRecompiler::IR::Bindings& variant);
+// Re-emits `program` as the per-vertex capture compute shader; leaves program.bindings as emitted.
+std::vector<uint32_t> EmitPerVertexCaptureVariant(ShaderRecompiler::IR::Program&                program,
+                                                  const ShaderRecompiler::CompileOptions&       options,
+                                                  const ShaderRecompiler::Spirv::VertexCaptureInfo& capture,
+                                                  uint32_t push_data_start_dword,
+                                                  bool     maintenance8_enabled);
+// push_data_start_dword / maintenance8_enabled are the values the regular program was compiled with
+// (already passed through PerVertexReemitPushStart / PerVertexReemitMaintenance8).
 void RememberPerVertexPrototypeShader(const ShaderProgram&                    program,
                                       ShaderRecompiler::CompileResult&        result,
                                       const ShaderRecompiler::CompileOptions& options,
-                                      uint32_t                                host_subgroup_size);
+                                      uint32_t                                host_subgroup_size,
+                                      uint32_t                                push_data_start_dword,
+                                      bool                                    maintenance8_enabled);
 
 // What the prototype path does with a draw whose pixel shader needs PerVertexKHR (the host cannot
 // run those natively, so the draw either goes through the prototype or is skipped, never exits).

@@ -425,6 +425,11 @@ target_compile_definitions(shader_cfg_pv_vsstore_mutant_first_third_tests PRIVAT
 # S150: the dynamic record stride must come from push dword 7.
 add_kyty_full_emulator_test(shader_cfg_pv_vsstore_mutant_stride_dword_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
 target_compile_definitions(shader_cfg_pv_vsstore_mutant_stride_dword_tests PRIVATE KYTY_PVVS_MUTANT_STRIDE_DWORD=1)
+# S384: the capture / VS-store re-emissions take the regular program's push start (WILL_FAIL mutants: start 0 again; start/size check accepts anything).
+add_kyty_full_emulator_test(shader_cfg_pvpush_mutant_zero_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
+target_compile_definitions(shader_cfg_pvpush_mutant_zero_tests PRIVATE KYTY_PVPUSH_MUTANT_ZERO=1)
+add_kyty_full_emulator_test(shader_cfg_pvpush_mutant_no_check_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
+target_compile_definitions(shader_cfg_pvpush_mutant_no_check_tests PRIVATE KYTY_PVPUSH_MUTANT_NO_CHECK=1)
 
 add_executable(per_vertex_transform_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PerVertexTransformTests.cpp"
@@ -1105,6 +1110,10 @@ if(BUILD_TESTING)
 	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pv_vsstore_mutant_first_third_tests> 2>&1 | grep -q 'first/third swapped'")
 	add_test(NAME shader_cfg_pv_vsstore_mutant_stride_dword
 	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pv_vsstore_mutant_stride_dword_tests> 2>&1 | grep -q 'not read from push dword 7'")
+	add_test(NAME shader_cfg_pvpush_mutant_zero
+	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pvpush_mutant_zero_tests> 2>&1 | grep -q 'did not keep the push start of the regular VS'")
+	add_test(NAME shader_cfg_pvpush_mutant_no_check
+	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pvpush_mutant_no_check_tests> 2>&1 | grep -q 'another push start was accepted'")
 	add_test(NAME per_vertex_transform COMMAND $<TARGET_FILE:per_vertex_transform_tests>)
 	add_test(NAME per_vertex_unique COMMAND $<TARGET_FILE:per_vertex_unique_tests>)
 	add_test(NAME per_vertex_vsstore COMMAND $<TARGET_FILE:per_vertex_vsstore_tests>)
@@ -1305,6 +1314,8 @@ if(BUILD_TESTING)
 		shader_cfg_tests
 		shader_cfg_pv_vsstore_mutant_first_third_tests
 		shader_cfg_pv_vsstore_mutant_stride_dword_tests
+		shader_cfg_pvpush_mutant_zero_tests
+		shader_cfg_pvpush_mutant_no_check_tests
 		scalar_provenance_tests
 		image_page_table_tests
 		memory_tracker_tests

@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/renderer/pipeline/blendMapping.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/perVertexPrototype.h"
+#include "graphics/host_gpu/renderer/perVertexVsStoreRuntime.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
@@ -16819,6 +16820,141 @@ void TestPvVsStoreEmission() {
   }
 }
 
+// S384 (KYTY_PV_PUSH_START): the capture and VS-store re-emissions start their push data where the
+// regular program does. Mutants: KYTY_PVPUSH_MUTANT_ZERO (the variants get 0 again),
+// KYTY_PVPUSH_MUTANT_NO_CHECK (the start/size check accepts anything).
+void TestPvReemitPushStart() {
+  using namespace ShaderRecompiler;
+  using BindingKind = IR::DescriptorBindingKind;
+  const std::array<uint32_t, 4> user_data = {0x3e800000u, 0x3f000000u,
+                                             0x3f400000u, 0x3f800000u};
+  constexpr uint32_t Start = 3;
+
+  // --- VS-store, vertex role (parameters read from user data so the shader has push data)
+  const uint32_t vs_code[] = {
+      EncodeVop1(0x01, 0, 0), EncodeVop1(0x01, 1, 1), EncodeVop1(0x01, 2, 2),
+      EncodeVop1(0x01, 3, 3), EncodeExp0(0x0c, 0xf),  EncodeExp1(0, 1, 2, 3),
+      EncodeExp0(0x20, 0xf),  EncodeExp1(0, 1, 2, 3), EncodeSopp(0x01)};
+  auto vs_options = MakeCompileOptions(ShaderType::Vertex);
+  vs_options.user_data = user_data;
+  auto vs = RecompileForTest(vs_code, vs_options, nullptr, nullptr, Start);
+  Check(vs.program.bindings.UsesPushData() &&
+            vs.program.bindings.push_data_start_dword == Start &&
+            vs.program.bindings.ShaderDataDwords() != 0,
+        "regular VS did not place its shader data at the assigned push start");
+  Spirv::PvStoreInfo vs_info;
+  vs_info.role = Spirv::PvStoreInfo::Role::Vertex;
+  uint32_t parameters = 0;
+  for (const auto &output : vs.program.info.outputs) {
+    if (output.kind == IR::StageOutputKind::Parameter) {
+      vs_info.parameter_slots[output.location] = parameters++;
+    }
+  }
+  vs_info.record_stride_vec4 = parameters;
+  const auto regular_bindings = vs.program.bindings;
+  const auto vs_words =
+      EmitPvVsStoreVariant(vs.program, vs_options, vs_info, Start, false);
+  CheckSpirvBinaryValidates(vs_words);
+  Check(vs.program.bindings.push_data_start_dword == Start,
+        "VS-store variant did not keep the push start of the regular VS");
+  Check(PvVariantPushMatches(regular_bindings, vs.program.bindings),
+        "VS-store variant start/size differs from the regular VS");
+  Check(vs_words == Spirv::EmitProgram(vs.program, vs_options.input_info, Start,
+                                       false, false, nullptr, &vs_info),
+        "VS-store variant SPIR-V does not read push data from the regular start");
+  Check(vs_words != Spirv::EmitProgram(vs.program, vs_options.input_info, 0,
+                                       false, false, nullptr, &vs_info),
+        "VS-store fixture does not depend on the push start");
+
+  // --- VS-store, pixel role
+  auto ps_options = MakeCompileOptions(ShaderType::Pixel);
+  ps_options.user_data = user_data;
+  const uint32_t ps_code[] = {
+      EncodeVintrp(2, 12, 0, 3, 2), EncodeVintrp(2, 13, 0, 3, 0),
+      EncodeVintrp(2, 14, 0, 3, 1), EncodeVop2(0x03, 15, 0, 12),
+      EncodeVop2(0x03, 16, 1, 13), EncodeExp0(0x00, 0xf),
+      EncodeExp1(15, 16, 14, 12), 0xbf810000u};
+  ShaderPixelInputInfo ps_input{};
+  ps_input.input_num = 1;
+  ps_input.ps_system_input_base = 2;
+  ps_input.custom_interpolation_mask = 1;
+  ps_input.ps_perspective_center_vgpr = 0;
+  SetIdentityInterpolatorSettings(&ps_input);
+  ps_input.interpolator_settings[0] = 0x00000420u;
+  ps_options.input_info.pixel = &ps_input;
+  auto ps = RecompileForTest(ps_code, ps_options, nullptr, nullptr, Start);
+  Check(ps.program.bindings.UsesPushData() &&
+            ps.program.bindings.push_data_start_dword == Start,
+        "regular PS did not place its shader data at the assigned push start");
+  Spirv::PvStoreInfo ps_info;
+  ps_info.role = Spirv::PvStoreInfo::Role::Pixel;
+  ps_info.record_stride_vec4 = 1;
+  ps_info.parameter_slots[0] = 0;
+  const auto ps_regular = ps.program.bindings;
+  const auto ps_words =
+      EmitPvVsStoreVariant(ps.program, ps_options, ps_info, Start, false);
+  CheckSpirvBinaryValidates(ps_words);
+  Check(ps.program.bindings.push_data_start_dword == Start &&
+            PvVariantPushMatches(ps_regular, ps.program.bindings),
+        "VS-store PS variant start/size differs from the regular PS");
+  Check(ps_words == Spirv::EmitProgram(ps.program, ps_options.input_info, Start,
+                                       false, false, nullptr, &ps_info) &&
+            ps_words != Spirv::EmitProgram(ps.program, ps_options.input_info, 0,
+                                           false, false, nullptr, &ps_info),
+        "VS-store PS variant SPIR-V does not read push data from the regular start");
+
+  // --- capture variant
+  {
+    auto cap = RecompileForTest(vs_code, vs_options, nullptr, nullptr, Start);
+    const auto cap_regular = cap.program.bindings;
+    const Spirv::VertexCaptureInfo capture{.host_subgroup_size = 32,
+                                           .num_attributes = 1,
+                                           .record_stride_vec4 = 3,
+                                           .clip_slot = 2,
+                                           .parameter_slots = {{0, 1}}};
+    const auto words = EmitPerVertexCaptureVariant(cap.program, vs_options, capture, Start, false);
+    CheckSpirvBinaryValidates(words);
+    Check(cap.program.bindings.UsesPushData() &&
+              cap.program.bindings.push_data_start_dword == Start &&
+              PvVariantPushMatches(cap_regular, cap.program.bindings),
+          "capture variant did not keep the push start of the regular program");
+    Check(words == Spirv::EmitProgram(cap.program, vs_options.input_info, Start, false, false,
+                                      &capture),
+          "capture variant SPIR-V does not read push data from the regular start");
+    Check(words != Spirv::EmitProgram(cap.program, vs_options.input_info, 0, false, false,
+                                      &capture),
+          "capture fixture does not depend on the push start");
+  }
+
+  // --- NoStart: shader data does not fit in the push block, the variant keeps the storage binding
+  {
+    auto spill = RecompileForTest(vs_code, vs_options, nullptr, nullptr, 31);
+    Check(!spill.program.bindings.UsesPushData() &&
+              spill.program.bindings.descriptor_counts[static_cast<size_t>(BindingKind::ShaderData)] == 1,
+          "regular VS with a full push block did not spill to storage");
+    const auto spill_regular = spill.program.bindings;
+    EmitPvVsStoreVariant(spill.program, vs_options, vs_info, 31, false);
+    Check(spill.program.bindings.push_data_start_dword == IR::PushData::NoStart &&
+              spill.program.bindings.descriptor_counts[static_cast<size_t>(BindingKind::ShaderData)] == 1 &&
+              PvVariantPushMatches(spill_regular, spill.program.bindings),
+          "VS-store variant of a spilled VS lost the ShaderData binding");
+  }
+
+  // --- the check itself
+  {
+    IR::Bindings a, b;
+    a.push_data_start_dword = 3;
+    a.memory_offset_dword = 4;
+    b = a;
+    Check(PvVariantPushMatches(a, b), "equal push bindings were rejected");
+    b.push_data_start_dword = 0;
+    Check(!PvVariantPushMatches(a, b), "variant with another push start was accepted");
+    b = a;
+    b.memory_offset_dword = 5;
+    Check(!PvVariantPushMatches(a, b), "variant with another shader-data size was accepted");
+  }
+}
+
 void TestRepeatedExportsHaveOneInterface() {
   const uint32_t shader[] = {EncodeExp0(0x0c, 0xf), EncodeExp1(0, 1, 2, 3),
                              EncodeExp0(0x0c, 0xf), EncodeExp1(0, 1, 2, 3),
@@ -17210,6 +17346,7 @@ int main(int argc, char** argv) {
   TestSpvNoContractionModes();
   TestRayTracingInstructions();
   TestPvVsStoreEmission();
+  TestPvReemitPushStart();
   TestResourceDescriptorClassification();
   TestShaderBufferResourceSize();
   TestNativeShaderResourceDependencies();

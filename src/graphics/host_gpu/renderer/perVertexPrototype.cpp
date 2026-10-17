@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
@@ -17,6 +18,7 @@
 #include <atomic>
 #include <bit>
 #include <chrono>
+#include <cinttypes>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -68,6 +70,64 @@ bool                                                                s_unpack_ini
 
 bool PerVertexPrototypeEnabled() {
 	return std::getenv("KYTY_PER_VERTEX_PROTOTYPE") != nullptr;
+}
+
+bool PerVertexPushStartFix() {
+	static const bool fix = [] {
+		const char* value = std::getenv("KYTY_PV_PUSH_START");
+		const bool  zero  = value != nullptr && std::strcmp(value, "zero") == 0;
+		EXIT_IF(value != nullptr && !zero && std::strcmp(value, "fix") != 0);
+		LOGF("[pv-push] mode=%s\n", zero ? "zero" : "fix");
+		return !zero;
+	}();
+	return fix;
+}
+
+uint32_t PerVertexReemitPushStart(uint32_t push_data_start_dword) {
+	return PerVertexPushStartFix() ? push_data_start_dword : 0u;
+}
+
+bool PerVertexReemitMaintenance8(bool maintenance8_enabled) {
+	return PerVertexPushStartFix() ? maintenance8_enabled : false;
+}
+
+bool PvVariantPushMatches(const ShaderRecompiler::IR::Bindings& regular,
+                          const ShaderRecompiler::IR::Bindings& variant) {
+#if defined(KYTY_PVPUSH_MUTANT_NO_CHECK)
+	return true;
+#else
+	return regular.push_data_start_dword == variant.push_data_start_dword &&
+	       regular.ShaderDataDwords() == variant.ShaderDataDwords();
+#endif
+}
+
+void NotePvPushVariant(const char* role, uint64_t shader_hash,
+                       const ShaderRecompiler::IR::Bindings& variant) {
+	using ShaderRecompiler::IR::PushData;
+	const uint32_t start = variant.push_data_start_dword;
+	if (start != PushData::NoStart && start != 0) {
+		FrameTiming::Add(FrameTiming::Counter::PvPushNonzeroPrograms);
+	}
+	if (start == PushData::NoStart) {
+		LOGF("[pv-push] role=%s hash=0x%016" PRIx64 " start=none dwords=%u\n", role, shader_hash,
+		     variant.ShaderDataDwords());
+	} else {
+		LOGF("[pv-push] role=%s hash=0x%016" PRIx64 " start=%u dwords=%u\n", role, shader_hash,
+		     start, variant.ShaderDataDwords());
+	}
+}
+
+std::vector<uint32_t> EmitPerVertexCaptureVariant(ShaderRecompiler::IR::Program&                program,
+                                                  const ShaderRecompiler::CompileOptions&       options,
+                                                  const ShaderRecompiler::Spirv::VertexCaptureInfo& capture,
+                                                  uint32_t push_data_start_dword,
+                                                  bool     maintenance8_enabled) {
+#if defined(KYTY_PVPUSH_MUTANT_ZERO)
+	push_data_start_dword = 0;
+	maintenance8_enabled  = false;
+#endif
+	return ShaderRecompiler::Spirv::EmitProgram(program, options.input_info, push_data_start_dword,
+	                                            maintenance8_enabled, false, &capture);
 }
 
 bool PerVertexUniqueEnabled() {
@@ -174,7 +234,9 @@ bool DecodePerVertexPrototypeAttribute(Prospero::BufferFormat   format,
 void RememberPerVertexPrototypeShader(const ShaderProgram&                    program,
                                       ShaderRecompiler::CompileResult&        result,
                                       const ShaderRecompiler::CompileOptions& options,
-                                      uint32_t                                host_subgroup_size) {
+                                      uint32_t                                host_subgroup_size,
+                                      uint32_t                                push_data_start_dword,
+                                      bool                                    maintenance8_enabled) {
 	if (!PerVertexPrototypeEnabled()) return;
 	const auto  stage      = options.stage;
 	const auto& words      = result.spirv;
@@ -216,7 +278,9 @@ void RememberPerVertexPrototypeShader(const ShaderProgram&                    pr
 		const Spirv::VertexCaptureInfo capture {
 		    host_subgroup_size, static_cast<uint32_t>(vs.resources_num), layout.record_stride_vec4,
 		    layout.clip_slot, layout.location_to_slot};
-		it->second.capture_words = Spirv::EmitProgram(result.program, options.input_info, 0, false, false, &capture);
+		it->second.capture_words = EmitPerVertexCaptureVariant(result.program, options, capture,
+		                                                       push_data_start_dword, maintenance8_enabled);
+		NotePvPushVariant("capture", options.shader_hash, result.program.bindings);
 		// Validation of our own emitter output is ~30% of a vertex permutation's cost; bench-only
 		// switch KYTY_PV_SKIP_VALIDATE=1 skips it (the first draw would still be validated by Vulkan).
 		static const bool skip_validate = std::getenv("KYTY_PV_SKIP_VALIDATE") != nullptr;

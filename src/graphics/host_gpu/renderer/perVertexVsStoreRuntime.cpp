@@ -30,8 +30,21 @@ vk::DescriptorSetLayout                                            s_set_layout 
 
 } // namespace
 
+std::vector<uint32_t> EmitPvVsStoreVariant(ShaderRecompiler::IR::Program&          program,
+                                           const ShaderRecompiler::CompileOptions& options,
+                                           const ShaderRecompiler::Spirv::PvStoreInfo& info,
+                                           uint32_t push_data_start_dword, bool maintenance8_enabled) {
+#if defined(KYTY_PVPUSH_MUTANT_ZERO)
+	push_data_start_dword = 0;
+	maintenance8_enabled  = false;
+#endif
+	return ShaderRecompiler::Spirv::EmitProgram(program, options.input_info, push_data_start_dword,
+	                                            maintenance8_enabled, false, nullptr, &info);
+}
+
 void RememberPvVsStoreShader(const ShaderProgram& program, ShaderRecompiler::CompileResult& result,
-                             const ShaderRecompiler::CompileOptions& options) {
+                             const ShaderRecompiler::CompileOptions& options,
+                             uint32_t push_data_start_dword, bool maintenance8_enabled) {
 	if (!PerVertexVsStoreEnabled()) return;
 	using Role = ShaderRecompiler::Spirv::PvStoreInfo::Role;
 	const bool vertex = options.stage == ShaderType::Vertex && options.input_info.vertex != nullptr;
@@ -44,7 +57,8 @@ void RememberPvVsStoreShader(const ShaderProgram& program, ShaderRecompiler::Com
 	info.role          = vertex ? Role::Vertex : Role::Pixel;
 	info.coherent      = true; // Coherent cap + a device barrier after the VS stores (the probe of RESULT-262 needs them)
 	info.location_mask = &entry.mask;
-	auto words         = ShaderRecompiler::Spirv::EmitProgram(result.program, options.input_info, 0, false, false, nullptr, &info);
+	auto words         = EmitPvVsStoreVariant(result.program, options, info, push_data_start_dword, maintenance8_enabled);
+	NotePvPushVariant(vertex ? "vsstore-vs" : "vsstore-ps", options.shader_hash, result.program.bindings);
 	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
 	tools.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t& position, const char* message) {
 		LOGF("PvVsStore: %s 0x%016llx SPIR-V word %zu: %s\n", vertex ? "VS" : "PS",
@@ -57,6 +71,24 @@ void RememberPvVsStoreShader(const ShaderProgram& program, ShaderRecompiler::Com
 		     static_cast<unsigned long long>(program.id));
 	}
 	s_shaders.emplace(program.id, std::move(entry));
+}
+
+void RememberPerVertexVariants(const ShaderProgram& program, ShaderRecompiler::CompileResult& result,
+                               const ShaderRecompiler::CompileOptions& options, uint32_t host_subgroup_size,
+                               uint32_t push_data_start_dword) {
+	const uint32_t start = PerVertexReemitPushStart(push_data_start_dword);
+	const bool     m8    = PerVertexReemitMaintenance8(options.maintenance8_enabled);
+	// Each re-emission rewrites program.bindings; the first must not change the input of the second.
+	const auto emitted_bindings = result.program.bindings;
+	// A variant that does not read its shader data where the regular program does would see wrong dwords.
+	const bool check = PerVertexPushStartFix();
+	RememberPerVertexPrototypeShader(program, result, options, host_subgroup_size, start, m8);
+	EXIT_IF(check && !PvVariantPushMatches(emitted_bindings, result.program.bindings));
+	result.program.bindings = emitted_bindings;
+	RememberPvVsStoreShader(program, result, options, start, m8);
+	EXIT_IF(check && !PvVariantPushMatches(emitted_bindings, result.program.bindings));
+	EXIT_IF(result.program.bindings.descriptor_mask != emitted_bindings.descriptor_mask);
+	result.program.bindings = emitted_bindings;
 }
 
 vk::DescriptorSetLayout PvVsStoreSetLayout(GraphicContext& graphics) {
