@@ -5,6 +5,7 @@
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/guest_gpu/lodStats.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -1337,11 +1338,15 @@ KYTY_CP_OP_PARSER(CpOpGetLodStats) {
 	                                                 (static_cast<uint64_t>(buffer[2]) << 32u));
 
 	if (dst != nullptr && buffer_size != 0) {
-		memset(dst, 0, buffer_size);
-		// Hack?
-		if (buffer_size >= sizeof(uint32_t)) {
-			auto* label = static_cast<uint32_t*>(dst);
-			*label      = 1;
+		uint32_t uses[LodStats::kSlotCount] = {};
+		const auto mode = LodStats::CurrentMode();
+		if (mode == LodStats::Mode::Real) {
+			LodStats::Drain(uses);
+		}
+		const bool full = LodStats::WriteReport(mode, static_cast<uint8_t*>(dst), buffer_size, uses);
+		static std::atomic<uint32_t> logged {0};
+		if (mode != LodStats::Mode::Zero && logged.fetch_add(1) < 4) {
+			printf("[lod-stats] mode=%s size=%u full=%d\n", mode == LodStats::Mode::Full ? "full" : "real", buffer_size, full ? 1 : 0);
 		}
 	}
 

@@ -3,6 +3,7 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 #include "common/controlFile.h"
+#include "graphics/guest_gpu/lodStats.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -576,6 +577,10 @@ static TextureDescription DescribeTexture(const ShaderRecompiler::IR::ImageResou
 		TextureDescription result {};
 		result.null = true;
 		return result;
+	}
+
+	if (!storage && descriptor.MipStatsEnabled() && LodStats::CurrentMode() == LodStats::Mode::Real) {
+		LodStats::NoteSampled(descriptor.MipStatsSlot());
 	}
 
 	const auto address         = descriptor.Base40();
