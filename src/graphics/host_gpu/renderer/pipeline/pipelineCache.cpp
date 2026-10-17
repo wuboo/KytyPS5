@@ -347,11 +347,7 @@ struct PipelineCache::ProgramCache {
 		const ShaderProgram handle {.id = ++next_shader_id, .module = module};
 		// The per-vertex capture and VS-store variants re-emit the program, and EmitProgram rewrites
 		// program.bindings (push start, layout); the permutation keeps the bindings of its own emission.
-		const auto emitted_bindings = result.program.bindings;
-		RememberPerVertexPrototypeShader(handle, result, options, graphics.subgroup_size);
-		RememberPvVsStoreShader(handle, result, options);
-		EXIT_IF(result.program.bindings.descriptor_mask != emitted_bindings.descriptor_mask);
-		result.program.bindings = emitted_bindings;
+		RememberPerVertexVariants(handle, result, options, graphics.subgroup_size, push_data_start_dword);
 		return {
 		    .function_code  = {function_code.begin(), function_code.end()},
 		    .specialization = std::move(specialization),

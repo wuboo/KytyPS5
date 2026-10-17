@@ -104,6 +104,7 @@ enum class Counter : uint32_t {
 	PvFallbackInterface, // the PS reads a per-vertex location the VS does not write
 	PvFallbackIndexTail, // S151: the index buffer ends inside the last word the PS reads (descriptor would pass the buffer end)
 	PvVsStoreInstanced,  // S151: VS-store draws with instance_count > 1
+	PvPushNonzeroPrograms, // S384: capture / VS-store variants emitted with push data starting at a nonzero dword
 	DepthRoElided,              // S316: KYTY_DEPTH_RO_UNION=1|shadow: barriers skipped (shadow: that would have been skipped) on a read-only depth attachment
 	DepthRoRejectDirty,         // S316: ... rejected: the image was written since the last barrier
 	DepthRoRejectNotSubset,     // S316: ... rejected: the new access is not within the visible union

@@ -104,6 +104,7 @@ constexpr const char* kCounterNames[] = {
     "pv_fallback_interface",
     "pv_fallback_index_tail",
     "pv_vsstore_instanced",
+    "pv_push_nonzero_programs",
     "depth_ro_elided",
     "depth_ro_reject_dirty",
     "depth_ro_reject_not_subset",
