@@ -1039,6 +1039,7 @@ target_include_directories(event_queue_lifetime_tests PRIVATE ${inc_headers})
 add_kyty_full_emulator_test(kernel_file_system_tests
 	"${KYTY_TESTS_DIR}/KernelFileSystemTests.cpp")
 target_link_libraries(kernel_file_system_tests ZArchive::zarchive)
+target_compile_definitions(kernel_file_system_tests PRIVATE KYTY_FS_TEST_NO_GPU=1)
 
 add_executable(sync_on_address_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/SyncOnAddressTests.cpp"

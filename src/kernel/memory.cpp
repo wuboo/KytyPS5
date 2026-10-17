@@ -920,6 +920,12 @@ void InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	if (size == 0) {
 		return;
 	}
+#if defined(KYTY_FS_TEST_NO_GPU)
+	// S394: headless file-system test (FS_TEST_READ_GUARD_ONLY) runs without a RenderContext.
+	if (g_gpu_resources == nullptr) {
+		return;
+	}
+#endif
 	(void)GetGpuResources().InvalidateMemory(vaddr, size);
 }
 

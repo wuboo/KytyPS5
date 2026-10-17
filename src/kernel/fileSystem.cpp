@@ -19,14 +19,21 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cerrno>
 #include <climits>
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
 #include <optional>
 #include <random>
+#include <string>
 #include <system_error>
 #include <vector>
+
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 
 namespace Libs::LibKernel::FileSystem {
 
@@ -167,6 +174,105 @@ static void RecordGuestRead(const void* buf, uint64_t nbytes, uint64_t file_offs
 	char       tag[56];
 	std::snprintf(tag, sizeof(tag), "read got=%llu ..%s", static_cast<unsigned long long>(got), text.size() > 30 ? text.c_str() + text.size() - 30 : text.c_str());
 	Common::MemEvents::Record(Common::MemEvents::Kind::FileRead, reinterpret_cast<uint64_t>(buf), nbytes, file_offset, result, tag);
+}
+
+// S394: a guest buffer may be write-protected by the GPU resource tracker. The host files are
+// unbuffered (_IONBF), so read(2) then fails with EFAULT instead of faulting into HandleFault,
+// and the guest got a silent short read (0 bytes). Retry through a host bounce buffer: the
+// memcpy into the guest takes the SIGSEGV that unprotects the page.
+static std::atomic<uint64_t> g_read_efault_retry {0};
+
+static bool DiagReadShortEnabled() {
+	static const bool enabled = [] {
+		const char* v = std::getenv("KYTY_DIAG_READSHORT");
+		return v != nullptr && v[0] == '1';
+	}();
+	return enabled;
+}
+
+// Host protection of the page at addr (mach_vm_region): "unmapped" or r/w/x letters.
+static std::string DiagHostProt(const void* addr) {
+#if defined(__APPLE__)
+	auto                           query = reinterpret_cast<mach_vm_address_t>(addr);
+	mach_vm_address_t              start = query;
+	mach_vm_size_t                 size  = 0;
+	vm_region_basic_info_data_64_t info {};
+	mach_msg_type_number_t         count = VM_REGION_BASIC_INFO_COUNT_64;
+	mach_port_t                    obj   = MACH_PORT_NULL;
+	if (mach_vm_region(mach_task_self(), &start, &size, VM_REGION_BASIC_INFO_64,
+	                   reinterpret_cast<vm_region_info_t>(&info), &count, &obj) != KERN_SUCCESS ||
+	    start > query) {
+		return "unmapped";
+	}
+	std::string r;
+	r += (info.protection & VM_PROT_READ) != 0 ? 'r' : '-';
+	r += (info.protection & VM_PROT_WRITE) != 0 ? 'w' : '-';
+	r += (info.protection & VM_PROT_EXECUTE) != 0 ? 'x' : '-';
+	return r;
+#else
+	(void)addr;
+	return "n/a";
+#endif
+}
+
+static void DiagReadShort(const File* file, const void* buf, uint32_t want, uint32_t got, uint64_t pos, int err,
+                          bool retried) {
+	if (!DiagReadShortEnabled()) return;
+	LOGF("[read-short] file=%s buf=%p want=%u got=%u pos=%" PRIu64 " errno=%d host_prot=%s retried=%d\n",
+	     Common::PathToString(file->real_name).c_str(), buf, want, got, pos, err,
+	     DiagHostProt(buf).c_str(), retried ? 1 : 0);
+}
+
+// Reads `want` bytes of f (positioned at pos) into guest memory. *got = bytes delivered. Returns
+// false when the read failed with a host error that the retry could not resolve.
+static bool ReadIntoGuest(File* file, void* buf, uint32_t want, uint64_t pos, uint32_t* got) {
+	int err = 0;
+	file->f.ReadEx(buf, want, got, &err);
+	if (*got >= want || err == 0) {
+		if (*got < want) DiagReadShort(file, buf, want, *got, pos, 0, false);
+		return true;
+	}
+	const uint32_t direct_got = *got;
+	const int      direct_err = err;
+	if (err != EFAULT) {
+		DiagReadShort(file, buf, want, direct_got, pos, direct_err, false);
+		return true;
+	}
+
+	const auto n = g_read_efault_retry.fetch_add(1) + 1;
+	if ((n & (n - 1)) == 0) {
+		LOGF("[read-efault-retry] file=%s buf=%p want=%u got=%u n=%" PRIu64 "\n",
+		     Common::PathToString(file->real_name).c_str(), buf, want, direct_got, n);
+	}
+
+	constexpr uint32_t Chunk = 1u << 20;
+	std::vector<uint8_t> bounce;
+	uint32_t             done = direct_got;
+	if (!file->f.Seek(pos + done)) {
+		return false;
+	}
+	while (done < want) {
+		const uint32_t count = std::min<uint32_t>(want - done, Chunk);
+		bounce.resize(count);
+		uint32_t r  = 0;
+		int      e2 = 0;
+		file->f.ReadEx(bounce.data(), count, &r, &e2);
+		if (e2 != 0) {
+			*got = done;
+			DiagReadShort(file, buf, want, done, pos, e2, true);
+			return false;
+		}
+		if (r != 0) {
+			memcpy(static_cast<uint8_t*>(buf) + done, bounce.data(), r);
+		}
+		done += r;
+		if (r < count) {
+			break;
+		}
+	}
+	*got = done;
+	if (done < want) DiagReadShort(file, buf, want, done, pos, 0, true);
+	return true;
 }
 
 static uint64_t ReadDirectory(File* file, void* buf, uint64_t count) {
@@ -679,12 +785,16 @@ int64_t KYTY_SYSV_ABI KernelRead(int d, void* buf, size_t nbytes) {
 	Memory::InvalidateMemory(reinterpret_cast<uint64_t>(buf),
 	                         std::min<uint64_t>(nbytes, remaining));
 	uint32_t bytes_read = 0;
-	file->f.Read(buf, static_cast<uint32_t>(nbytes), &bytes_read);
+	const bool read_ok  = ReadIntoGuest(file, buf, static_cast<uint32_t>(nbytes), pos, &bytes_read);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::GuestFileReadBytes, bytes_read);
-	RecordGuestRead(buf, nbytes, pos, is_invalid ? KERNEL_ERROR_EIO : 0, bytes_read, file->real_name);
+	RecordGuestRead(buf, nbytes, pos, is_invalid || !read_ok ? KERNEL_ERROR_EIO : 0, bytes_read, file->real_name);
 
 	file->mutex.Unlock();
 
+	if (!read_ok) {
+		LOGF("\tread failed (EFAULT retry)\n");
+		return KERNEL_ERROR_EIO;
+	}
 	if (is_invalid) {
 		LOGF("\tfile is invalid\n");
 		return KERNEL_ERROR_EIO;
@@ -808,13 +918,17 @@ int64_t KYTY_SYSV_ABI KernelPread(int d, void* buf, size_t nbytes, int64_t offse
 	                         std::min<uint64_t>(nbytes, remaining));
 	uint32_t bytes_read = 0;
 	file->f.Seek(offset);
-	file->f.Read(buf, static_cast<uint32_t>(nbytes), &bytes_read);
+	const bool read_ok = ReadIntoGuest(file, buf, static_cast<uint32_t>(nbytes), static_cast<uint64_t>(offset), &bytes_read);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::GuestFileReadBytes, bytes_read);
-	RecordGuestRead(buf, nbytes, static_cast<uint64_t>(offset), is_invalid ? KERNEL_ERROR_EIO : 0, bytes_read, file->real_name);
+	RecordGuestRead(buf, nbytes, static_cast<uint64_t>(offset), is_invalid || !read_ok ? KERNEL_ERROR_EIO : 0, bytes_read, file->real_name);
 	file->f.Seek(pos);
 
 	file->mutex.Unlock();
 
+	if (!read_ok) {
+		LOGF("\tpread failed (EFAULT retry)\n");
+		return KERNEL_ERROR_EIO;
+	}
 	if (is_invalid) {
 		LOGF("\tfile is invalid\n");
 		return KERNEL_ERROR_EIO;
@@ -911,9 +1025,13 @@ int64_t KYTY_SYSV_ABI KernelPreadv(int d, const KernelIovec* iov, int iovcnt, in
 		const auto count = static_cast<uint32_t>(std::min<uint64_t>(buffer.iov_len, remaining));
 		Memory::InvalidateMemory(reinterpret_cast<uint64_t>(buffer.iov_base), count);
 		uint32_t bytes = 0;
-		file->f.Read(buffer.iov_base, count, &bytes);
+		const bool read_ok = ReadIntoGuest(file, buffer.iov_base, count, static_cast<uint64_t>(offset) + static_cast<uint64_t>(bytes_read), &bytes);
 		Common::DebugCounters::Add(Common::DebugCounters::Counter::GuestFileReadBytes, bytes);
-		RecordGuestRead(buffer.iov_base, count, static_cast<uint64_t>(offset) + static_cast<uint64_t>(bytes_read), 0, bytes, file->real_name);
+		RecordGuestRead(buffer.iov_base, count, static_cast<uint64_t>(offset) + static_cast<uint64_t>(bytes_read), read_ok ? 0 : KERNEL_ERROR_EIO, bytes, file->real_name);
+		if (!read_ok) {
+			file->f.Seek(position);
+			return KERNEL_ERROR_EIO;
+		}
 		bytes_read += bytes;
 		remaining -= bytes;
 		if (bytes < count) {
