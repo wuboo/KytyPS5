@@ -1140,7 +1140,10 @@ void ToggleGyroEmulation(int id) {
 }
 
 void SetMotionPose(int id, const float* accel_g, const float* orientation) {
-	g_controller->MotionPose(id, accel_g, orientation);
+	Common::LockGuard lock(g_router_mutex);
+	if (auto* player = PlayerForDevice(id)) {
+		player->MotionPose(id, accel_g, orientation);
+	}
 }
 
 void ResetInputState() {
