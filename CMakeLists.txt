@@ -883,8 +883,8 @@ endforeach()
 
 add_executable(lod_stats_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/LodStatsTests.cpp")
 target_include_directories(lod_stats_tests PRIVATE ${inc_headers})
-# S393 mutants (each must be caught, WILL_FAIL): real mode reports every slot as sampled; the slot id is missing from counter dword 0.
-foreach(mutant IN ITEMS REAL_AS_FULL NO_SLOT)
+# S393 mutants (each must be caught, WILL_FAIL): real mode reports every slot as sampled; the slot id is missing from counter dword 0; unset KYTY_LOD_STATS falls back to zero (S396: default is real).
+foreach(mutant IN ITEMS REAL_AS_FULL NO_SLOT UNSET_ZERO)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(lod_stats_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/LodStatsTests.cpp")
 	target_include_directories(lod_stats_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
@@ -1261,7 +1261,7 @@ if(BUILD_TESTING)
 			cp_phases_mutant_keep_children cp_phases_mutant_drop_parse
 			min_lod_view_mutant_floor min_lod_view_mutant_no_cap min_lod_view_mutant_resinfo
 			apple_drop_mutant_invert_clip apple_drop_mutant_always_bounds apple_drop_mutant_native_counts apple_drop_mutant_bias_abs
-			lod_stats_mutant_real_as_full lod_stats_mutant_no_slot
+			lod_stats_mutant_real_as_full lod_stats_mutant_no_slot lod_stats_mutant_unset_zero
 			cp_counters_mutant_native_swap cp_counters_mutant_no_clamp cp_counters_mutant_flag_any cp_counters_mutant_skip_ignored
 			frame_dump_flips_mutant_keep_zero frame_dump_flips_mutant_off_by_one
 			depth_ro_union_mutant_ignore_dirty depth_ro_union_mutant_allow_general
@@ -1430,6 +1430,7 @@ if(BUILD_TESTING)
 		lod_stats_tests
 		lod_stats_mutant_real_as_full_tests
 		lod_stats_mutant_no_slot_tests
+		lod_stats_mutant_unset_zero_tests
 		apple_drop_tests
 		apple_drop_mutant_invert_clip_tests
 		apple_drop_mutant_always_bounds_tests

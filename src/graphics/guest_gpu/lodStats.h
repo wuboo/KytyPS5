@@ -6,8 +6,8 @@
 // first counter (64); 256 slots of 8 bytes follow. Slot = T# word6[7:0], enabled by T# word5[25].
 //   counter dword 0 = samples[23:0] | slot << 24
 //   counter dword 1 = samples[23:0] | finest_mip_sampled << 24   (0 = finest, 15 = nothing sampled)
-// KYTY_LOD_STATS=zero (default, the old stub) | full (every slot asks for mip 0) | real (slots sampled since the
-// last report ask for mip 0, the rest report 15).
+// KYTY_LOD_STATS=real (default when unset: slots sampled since the last report ask for mip 0, the rest report 15)
+// | zero (the old stub) | full (every slot asks for mip 0). Any other value = zero.
 
 #include <algorithm>
 #include <atomic>
@@ -29,7 +29,11 @@ enum class Mode : uint8_t { Zero, Full, Real };
 
 constexpr Mode ParseMode(const char* value) {
 	if (value == nullptr) {
+#ifdef KYTY_LODSTATS_MUTANT_UNSET_ZERO
 		return Mode::Zero;
+#else
+		return Mode::Real;
+#endif
 	}
 	const auto is = [value](const char* name) {
 		uint32_t i = 0;

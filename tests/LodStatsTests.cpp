@@ -27,7 +27,7 @@ uint32_t Counter(const std::vector<uint8_t>& b, uint32_t slot, uint32_t which) {
 }
 
 void TestMode() {
-	Check(ParseMode(nullptr) == Mode::Zero, "unset = zero");
+	Check(ParseMode(nullptr) == Mode::Real, "unset = real (default)");
 	Check(ParseMode("zero") == Mode::Zero, "zero");
 	Check(ParseMode("full") == Mode::Full, "full");
 	Check(ParseMode("real") == Mode::Real, "real");
