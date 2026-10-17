@@ -16598,31 +16598,6 @@ void TestPvVsStoreEmission() {
   ps_pv.parameter_slots[0] = 0;
   const auto ps_words = Spirv::EmitProgram(ps.program, options.input_info, 0, false, false, nullptr, &ps_pv);
   CheckSpirvBinaryValidates(ps_words);
-  // S388: the unguarded emission (the shipped one: dynamic stride, coherent) is byte for byte what it was before the
-  // guard existed. Golden FNV-1a hashes of the words, taken from the emitter of c307f63a.
-  {
-    uint32_t mask = 0;
-    Spirv::PvStoreInfo prod_vs, prod_ps;
-    prod_vs.role = Spirv::PvStoreInfo::Role::Vertex;
-    prod_vs.coherent = true;
-    prod_vs.location_mask = &mask;
-    prod_ps.role = Spirv::PvStoreInfo::Role::Pixel;
-    prod_ps.coherent = true;
-    prod_ps.location_mask = &mask;
-    const auto h_vs = PvWordsHash(vs_words);
-    const auto h_ps = PvWordsHash(ps_words);
-    const auto h_prod_vs = PvWordsHash(Spirv::EmitProgram(vs.program, vs_options.input_info, 0, false, false, nullptr, &prod_vs));
-    const auto h_prod_ps = PvWordsHash(Spirv::EmitProgram(ps.program, options.input_info, 0, false, false, nullptr, &prod_ps));
-    if (std::getenv("KYTY_X_PV_HASH") != nullptr) {
-      std::fprintf(stderr, "PVHASH vs=%016llx ps=%016llx prod_vs=%016llx prod_ps=%016llx\n",
-                   static_cast<unsigned long long>(h_vs), static_cast<unsigned long long>(h_ps),
-                   static_cast<unsigned long long>(h_prod_vs), static_cast<unsigned long long>(h_prod_ps));
-    }
-    Check(h_vs == 0xbe574a534b7a8238ull && h_prod_vs == 0x7a1daa33786abc75ull,
-          "unguarded VS-store VS SPIR-V is not byte for byte the pre-guard one");
-    Check(h_ps == 0xc23ba5c332444c67ull && h_prod_ps == 0x770aead41a3ad2daull,
-          "unguarded VS-store PS SPIR-V is not byte for byte the pre-guard one");
-  }
   const auto text = DisassembleSpirvBinary(ps_words);
   const auto legacy = DisassembleSpirvBinary(ps.spirv);
   if (std::getenv("KYTY_X_PV_DUMP") != nullptr) {
@@ -16727,6 +16702,31 @@ void TestPvVsStoreEmission() {
   for (size_t i = 0; i < pv_corners.size() && i < legacy_vertices.size(); i++) {
     Check(pv_corners[i] == legacy_vertices[i],
           "VS-store PS reads another corner than the PerVertexKHR PS (first/third swapped?)");
+  }
+  // S388: the unguarded emission (the shipped one: dynamic stride, coherent) is byte for byte what it was before the
+  // guard existed. Golden FNV-1a hashes of the words, taken from the emitter of c307f63a.
+  {
+    uint32_t mask = 0;
+    Spirv::PvStoreInfo prod_vs, prod_ps;
+    prod_vs.role = Spirv::PvStoreInfo::Role::Vertex;
+    prod_vs.coherent = true;
+    prod_vs.location_mask = &mask;
+    prod_ps.role = Spirv::PvStoreInfo::Role::Pixel;
+    prod_ps.coherent = true;
+    prod_ps.location_mask = &mask;
+    const auto h_vs = PvWordsHash(vs_words);
+    const auto h_ps = PvWordsHash(ps_words);
+    const auto h_prod_vs = PvWordsHash(Spirv::EmitProgram(vs.program, vs_options.input_info, 0, false, false, nullptr, &prod_vs));
+    const auto h_prod_ps = PvWordsHash(Spirv::EmitProgram(ps.program, options.input_info, 0, false, false, nullptr, &prod_ps));
+    if (std::getenv("KYTY_X_PV_HASH") != nullptr) {
+      std::fprintf(stderr, "PVHASH vs=%016llx ps=%016llx prod_vs=%016llx prod_ps=%016llx\n",
+                   static_cast<unsigned long long>(h_vs), static_cast<unsigned long long>(h_ps),
+                   static_cast<unsigned long long>(h_prod_vs), static_cast<unsigned long long>(h_prod_ps));
+    }
+    Check(h_vs == 0xbe574a534b7a8238ull && h_prod_vs == 0x7a1daa33786abc75ull,
+          "unguarded VS-store VS SPIR-V is not byte for byte the pre-guard one");
+    Check(h_ps == 0xc23ba5c332444c67ull && h_prod_ps == 0x770aead41a3ad2daull,
+          "unguarded VS-store PS SPIR-V is not byte for byte the pre-guard one");
   }
 }
 

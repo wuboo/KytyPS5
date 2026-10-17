@@ -1121,7 +1121,7 @@ if(BUILD_TESTING)
 	add_test(NAME shader_cfg_pvpush_mutant_no_check
 	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pvpush_mutant_no_check_tests> 2>&1 | grep -q 'another push start was accepted'")
 	add_test(NAME shader_cfg_pv_vsstore_mutant_guard_always
-	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pv_vsstore_mutant_guard_always_tests> 2>&1 | grep -q 'not byte for byte the pre-guard'")
+	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pv_vsstore_mutant_guard_always_tests> 2>&1 | grep -q 'contain guard code'")
 	add_test(NAME shader_cfg_pv_vsstore_mutant_guard_no_skip
 	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pv_vsstore_mutant_guard_no_skip_tests> 2>&1 | grep -q 'branch once for the counter'")
 	add_test(NAME shader_cfg_pv_vsstore_mutant_guard_no_magenta
