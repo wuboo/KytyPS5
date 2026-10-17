@@ -425,6 +425,9 @@ target_compile_definitions(shader_cfg_pv_vsstore_mutant_first_third_tests PRIVAT
 # S150: the dynamic record stride must come from push dword 7.
 add_kyty_full_emulator_test(shader_cfg_pv_vsstore_mutant_stride_dword_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
 target_compile_definitions(shader_cfg_pv_vsstore_mutant_stride_dword_tests PRIVATE KYTY_PVVS_MUTANT_STRIDE_DWORD=1)
+# S390: NGG vertex count in s3 (KYTY_NGG_VCOUNT); the mutant forces the "active" count, TestNggVertexCount must catch it (WILL_FAIL).
+add_kyty_full_emulator_test(shader_cfg_ngg_mutant_active_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
+target_compile_definitions(shader_cfg_ngg_mutant_active_tests PRIVATE KYTY_NGG_MUTANT_ACTIVE=1)
 # S384: the capture / VS-store re-emissions take the regular program's push start (WILL_FAIL mutants: start 0 again; start/size check accepts anything).
 add_kyty_full_emulator_test(shader_cfg_pvpush_mutant_zero_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
 target_compile_definitions(shader_cfg_pvpush_mutant_zero_tests PRIVATE KYTY_PVPUSH_MUTANT_ZERO=1)
@@ -1126,6 +1129,8 @@ if(BUILD_TESTING)
 	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pv_vsstore_mutant_guard_no_skip_tests> 2>&1 | grep -q 'branch once for the counter'")
 	add_test(NAME shader_cfg_pv_vsstore_mutant_guard_no_magenta
 	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pv_vsstore_mutant_guard_no_magenta_tests> 2>&1 | grep -q 'select magenta'")
+	add_test(NAME shader_cfg_ngg_mutant_active
+	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_ngg_mutant_active_tests> 2>&1 | grep -q 'synthetic lanes must default to the full wave'")
 	add_test(NAME per_vertex_transform COMMAND $<TARGET_FILE:per_vertex_transform_tests>)
 	add_test(NAME per_vertex_unique COMMAND $<TARGET_FILE:per_vertex_unique_tests>)
 	add_test(NAME per_vertex_vsstore COMMAND $<TARGET_FILE:per_vertex_vsstore_tests>)
@@ -1331,6 +1336,7 @@ if(BUILD_TESTING)
 		shader_cfg_pv_vsstore_mutant_guard_always_tests
 		shader_cfg_pv_vsstore_mutant_guard_no_skip_tests
 		shader_cfg_pv_vsstore_mutant_guard_no_magenta_tests
+		shader_cfg_ngg_mutant_active_tests
 		scalar_provenance_tests
 		image_page_table_tests
 		memory_tracker_tests

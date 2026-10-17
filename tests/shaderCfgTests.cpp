@@ -18,6 +18,7 @@
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/recompiler/frontend/translate/Translate.h"
 #include "graphics/shader/recompiler/frontend/translate/Translator.h"
+#include "graphics/shader/recompiler/nggVertexCount.h"
 #include "graphics/shader/recompiler/ir/IREmitter.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ConstantPropagation.h"
@@ -2139,6 +2140,65 @@ void TestSopkCompareImmediateExtension() {
     const auto condition = (*branch)->condition.Resolve();
     Check(condition.IsImmediate() && condition.U1() == (counts != 6u),
           "captured LUT unsigned compare suppressed a live parameter export");
+  }
+}
+
+// S390: NGG vertex count in s3 of a vertex shader. With lanes made up from gl_VertexIndex (Apple) the
+// guest-rebuilt EXEC must cover the whole wave; with real lanes the count of active invocations stays.
+// Mutant KYTY_NGG_MUTANT_ACTIVE forces the "active" decision everywhere; both T1 and T2 must catch it.
+void TestNggVertexCount() {
+  using namespace ShaderRecompiler;
+  // T1: pure decision and the EXEC the guest rebuilds from s3.
+  Check(!NggVertexCountFromActive(true, nullptr), "synthetic lanes must default to the full wave");
+  Check(NggVertexCountFromActive(false, nullptr), "real lanes keep the active count");
+  Check(NggVertexCountFromActive(true, "active") && !NggVertexCountFromActive(false, "wave"),
+        "KYTY_NGG_VCOUNT overrides the default");
+  for (const uint32_t wave : {32u, 64u}) {
+    for (uint32_t n = 1; n <= 32; n++) {
+      for (uint32_t index = 0; index < 4096; index++) {
+        const uint32_t lane = index & 31u;
+        Check(NggExecLaneActive(NggPackedS3(false, wave, n), lane),
+              "wave mode switched off a vertex lane of a partial group");
+      }
+    }
+  }
+  // The documented defect of the "active" mode: n = 20, vertex index 29 has EXEC = 0.
+  Check(!NggExecLaneActive(NggPackedS3(true, 64, 20), 29) && NggExecLaneActive(NggPackedS3(true, 64, 20), 19),
+        "active mode no longer reproduces the partial-group EXEC");
+  Check(NggPackedS3(false, 64, 20) == 0x10000040u, "wave mode s3 must be (1<<28)|wave_size");
+
+  // T2: translation of the ISA 06c0 prologue idea: a branch on s3 folds only when s3 is the constant.
+  const std::array shader = {
+      0xb583ffffu,              // s_cmpk_gt_u32 s3, 0xffff
+      EncodeSopp(0x04, 2),      // s_cbranch_scc0 past exp param0
+      0xf800020fu, 0x06060504u, // exp param0 v4, v5, v6, v6
+      EncodeSopp(0x01),
+  };
+  const char *saved = std::getenv("KYTY_NGG_VCOUNT");
+  const std::string saved_copy = saved != nullptr ? saved : "";
+  for (const char *mode : {"wave", "active", ""}) {
+    if (mode[0] != '\0') {
+      setenv("KYTY_NGG_VCOUNT", mode, 1);
+    } else {
+      unsetenv("KYTY_NGG_VCOUNT");
+    }
+    auto translated = TranslateProgram(shader, MakeCompileOptions(ShaderType::Vertex));
+    const auto branch =
+        std::ranges::find_if(translated.program.blocks, [](const auto *block) {
+          return block->terminator.kind == CFG::TerminatorKind::ConditionalBranch;
+        });
+    Check(branch != translated.program.blocks.end(), "NGG s3 branch was lost");
+    const auto condition = (*branch)->condition.Resolve();
+    const bool folded = condition.IsImmediate() && condition.U1();
+    const bool expect_wave = mode[0] == '\0' ? !NggVertexCountFromActive(VertexLanesFromIndex())
+                                              : std::string_view(mode) == "wave";
+    Check(folded == expect_wave,
+          "s3 of a vertex shader is not the constant (1<<28)|wave_size exactly in wave mode");
+  }
+  if (saved != nullptr) {
+    setenv("KYTY_NGG_VCOUNT", saved_copy.c_str(), 1);
+  } else {
+    unsetenv("KYTY_NGG_VCOUNT");
   }
 }
 
@@ -17256,6 +17316,7 @@ int main(int argc, char** argv) {
   TestSpvNoContractionModes();
   TestRayTracingInstructions();
   TestPvVsStoreEmission();
+  TestNggVertexCount();
   TestPvReemitPushStart();
   TestResourceDescriptorClassification();
   TestShaderBufferResourceSize();

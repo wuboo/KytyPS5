@@ -1,5 +1,7 @@
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "graphics/shader/recompiler/frontend/translate/Translator.h"
+#include "graphics/shader/recompiler/nggVertexCount.h"
 #include "graphics/shader/shader.h"
 
 #include <algorithm>
@@ -1391,11 +1393,21 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 			}
 		} else if (options.stage == ShaderType::Vertex) {
 			// Vulkan owns primitive assembly; each vertex subgroup is one NGG wave.
-			// ESVertCount describes input vertices, independently of lane ordinals.
-			auto vertex_count = IR::U32(entry_ir.Emit(IR::ValueOpcode::BitCount32, {initial_lo}));
-			if (options.wave_size == 64u) {
-				vertex_count = entry_ir.IAdd(vertex_count, IR::U32(entry_ir.Emit(
-				    IR::ValueOpcode::BitCount32, {initial_hi})));
+			// ESVertCount describes input vertices, independently of lane ordinals. With lanes made up from
+			// gl_VertexIndex (Apple) a lane ordinal can exceed the active count: keep the full wave there.
+			const bool count_active = NggVertexCountFromActive(VertexLanesFromIndex());
+			static const bool logged = [&] {
+				LOGF("[ngg-vcount] mode=%s\n", count_active ? "active" : "wave");
+				return true;
+			}();
+			(void)logged;
+			auto vertex_count = IR::U32(IR::Value(options.wave_size));
+			if (count_active) {
+				vertex_count = IR::U32(entry_ir.Emit(IR::ValueOpcode::BitCount32, {initial_lo}));
+				if (options.wave_size == 64u) {
+					vertex_count = entry_ir.IAdd(vertex_count, IR::U32(entry_ir.Emit(
+					    IR::ValueOpcode::BitCount32, {initial_hi})));
+				}
 			}
 			entry_ir.SetScalarReg(static_cast<IR::ScalarReg>(2),
 			                      IR::U32(IR::Value(options.wave_size << 12u)));
