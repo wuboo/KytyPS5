@@ -48614,6 +48614,7 @@ int main(int argc, char **argv) {
   std::setvbuf(stdout, nullptr, _IONBF, 0);
   EnsureConfigInitialized();
   CheckLeastRecentlyUsedCacheOrdering();
+  CheckScalarReadOverlap();
   if (argc == 2 && std::strcmp(argv[1], "--cvt-pkrtz-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, CvtPkrtzF16F32SubnormalRoundsTowardZero());
