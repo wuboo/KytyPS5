@@ -82,8 +82,23 @@ static void apply_cache_hint(FILE* f, sys_file_cache_type_t cache_type) {
 }
 
 void SysFileRead(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read) {
+	SysFileReadEx(data, size, f, bytes_read, nullptr);
+}
+
+// Same as SysFileRead, but reports the errno of a failed host read (0 when fread ended on EOF).
+// Files are unbuffered (_IONBF), so a protected destination makes read(2) fail with EFAULT
+// instead of raising SIGSEGV, and fread then returns 0 bytes.
+void SysFileReadEx(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read, int* err) {
+	if (err != nullptr) {
+		*err = 0;
+	}
 	if (f.type == SYS_FILE_FILE) {
+		clearerr(f.f);
+		errno    = 0;
 		size_t w = fread(data, 1, size, f.f);
+		if (err != nullptr && w < size && ferror(f.f) != 0) {
+			*err = errno;
+		}
 		if (bytes_read != nullptr) {
 			*bytes_read = w;
 		}

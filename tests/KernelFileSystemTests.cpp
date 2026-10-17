@@ -35,6 +35,9 @@
 #include <thread>
 #include <vector>
 
+#include <sys/mman.h>
+#include <csignal>
+#include <unistd.h>
 #if defined(__linux__)
 #include <arpa/inet.h>
 #include <ifaddrs.h>
@@ -611,6 +614,105 @@ void TestSaveWritev() {
         "append writes retain the original contents and ordered segments");
   Check(FileSystem::KernelClose(append) == OK && FileSystem::KernelClose(fd) == OK,
         "close vectored write fixtures");
+}
+
+// S394: reads into a write-protected guest buffer (GPU resource tracker) must not return 0 bytes.
+std::atomic<int> g_read_guard_faults {0};
+uint8_t*         g_read_guard_page = nullptr;
+size_t           g_read_guard_size = 0;
+
+void ReadGuardHandler(int, siginfo_t* info, void*) {
+  auto addr = reinterpret_cast<uintptr_t>(info->si_addr);
+  auto base = reinterpret_cast<uintptr_t>(g_read_guard_page);
+  if (addr < base || addr >= base + g_read_guard_size) {
+    _exit(99);
+  }
+  g_read_guard_faults.fetch_add(1);
+  mprotect(g_read_guard_page, g_read_guard_size, PROT_READ | PROT_WRITE);
+}
+
+void TestReadProtectedGuest() {
+  constexpr size_t PageSize = 16384;
+  struct sigaction action {};
+  action.sa_sigaction = ReadGuardHandler;
+  action.sa_flags     = SA_SIGINFO;
+  sigemptyset(&action.sa_mask);
+  struct sigaction previous_segv {};
+  struct sigaction previous_bus {};
+  Check(sigaction(SIGSEGV, &action, &previous_segv) == 0 &&
+            sigaction(SIGBUS, &action, &previous_bus) == 0,
+        "install read-guard fault handler");
+
+  auto* page = static_cast<uint8_t*>(mmap(nullptr, PageSize, PROT_READ | PROT_WRITE,
+                                          MAP_ANON | MAP_PRIVATE, -1, 0));
+  Check(page != MAP_FAILED, "map guest read buffer");
+  g_read_guard_page = page;
+  g_read_guard_size = PageSize;
+
+  for (const size_t size : {size_t {288}, size_t {9000}}) {
+    std::string payload(size, '\0');
+    for (size_t i = 0; i < size; i++) payload[i] = static_cast<char>('A' + i % 23);
+    const std::string path = "/savedata0/read-guard-" + std::to_string(size) + ".bin";
+    const int         wfd  = FileSystem::KernelOpen(path.c_str(), 0x602, 0777);
+    Check(wfd >= 3 && FileSystem::KernelWrite(wfd, payload.data(), size) ==
+                          static_cast<int64_t>(size) && FileSystem::KernelClose(wfd) == OK,
+          "populate read-guard fixture");
+    const int fd = FileSystem::KernelOpen(path.c_str(), 0, 0);
+    Check(fd >= 3, "open read-guard fixture");
+
+    // KernelRead
+    std::memset(page, 0, PageSize);
+    mprotect(page, PageSize, PROT_READ);
+    g_read_guard_faults = 0;
+    Check(FileSystem::KernelRead(fd, page, size) == static_cast<int64_t>(size) &&
+              std::memcmp(page, payload.data(), size) == 0 && g_read_guard_faults.load() >= 1,
+          "read into protected guest buffer returns the full file");
+    Check(FileSystem::KernelRead(fd, page, size) == 0, "read at EOF returns 0");
+
+    // KernelPread
+    std::memset(page, 0, PageSize);
+    mprotect(page, PageSize, PROT_READ);
+    g_read_guard_faults = 0;
+    Check(FileSystem::KernelPread(fd, page, size, 0) == static_cast<int64_t>(size) &&
+              std::memcmp(page, payload.data(), size) == 0 && g_read_guard_faults.load() >= 1,
+          "pread into protected guest buffer returns the full file");
+
+    // KernelPreadv, two iovecs
+    std::memset(page, 0, PageSize);
+    mprotect(page, PageSize, PROT_READ);
+    g_read_guard_faults = 0;
+    const size_t first = size / 2;
+    FileSystem::KernelIovec iov[2] = {{page, first}, {page + 8192, size - first}};
+    const int64_t preadv_result = FileSystem::KernelPreadv(fd, iov, 2, 0);
+    Check(preadv_result == static_cast<int64_t>(size) &&
+              std::memcmp(page, payload.data(), first) == 0 &&
+              std::memcmp(page + 8192, payload.data() + first, size - first) == 0 &&
+              g_read_guard_faults.load() >= 1,
+          "preadv into protected guest buffer returns the full file");
+    Check(FileSystem::KernelClose(fd) == OK, "close read-guard fixture");
+
+    // Raw pattern (no fix involved): an unbuffered fread into a protected page yields 0 bytes.
+    const auto host_path = (std::filesystem::temp_directory_path() /
+                            ("kyty_read_guard_raw_" + std::to_string(size))).string();
+    FILE* raw = std::fopen(host_path.c_str(), "wb");
+    Check(raw != nullptr && std::fwrite(payload.data(), 1, size, raw) == size, "raw fixture");
+    std::fclose(raw);
+    raw = std::fopen(host_path.c_str(), "rb");
+    std::setvbuf(raw, nullptr, _IONBF, 0);
+    mprotect(page, PageSize, PROT_READ);
+    g_read_guard_faults = 0;
+    errno               = 0;
+    const size_t raw_n  = std::fread(page, 1, size, raw);
+    Check(raw_n == 0 && errno == EFAULT && g_read_guard_faults.load() == 0,
+          "unbuffered fread into a protected page returns 0 with EFAULT (the bug pattern)");
+    std::fclose(raw);
+    std::remove(host_path.c_str());
+  }
+
+  munmap(page, PageSize);
+  g_read_guard_page = nullptr;
+  sigaction(SIGSEGV, &previous_segv, nullptr);
+  sigaction(SIGBUS, &previous_bus, nullptr);
 }
 
 void TestAioBatches() {
@@ -2245,6 +2347,18 @@ int main(int, char**) {
   Config::Load(options);
   subsystems.Initialize<Log::Lifecycle>();
 
+  // Headless hosts cannot create the Vulkan window; READ_GUARD_ONLY runs just the S394 case.
+  if (const char* only = std::getenv("FS_TEST_READ_GUARD_ONLY"); only != nullptr && only[0] == '1') {
+    TempDirectory only_temporary;
+    FileSystem::Initialize();
+    FileSystem::Mount(only_temporary.Path(), "/savedata0");
+    TestReadProtectedGuest();
+    FileSystem::Shutdown();
+    subsystems.Destroy();
+    std::printf("KernelFileSystemTests: read-guard case passed\n");
+    return 0;
+  }
+
   Check(SDL_InitSubSystem(SDL_INIT_VIDEO), "initialize Vulkan test video");
   auto graphics = std::make_unique<Libs::Graphics::WindowContext>();
   graphics->graphic_ctx.screen_width = 64;
@@ -2273,6 +2387,7 @@ int main(int, char**) {
   TestSaveOpenVisibility();
   TestSaveTruncate();
   TestSaveWritev();
+  TestReadProtectedGuest();
   TestAioBatches();
   CheckSaveRename(temporary.Path(), "first-save");
   CheckSaveRename(temporary.Path(), "replacement-save");
