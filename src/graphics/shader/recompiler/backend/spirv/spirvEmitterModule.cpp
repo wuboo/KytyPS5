@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
+#include "graphics/shader/recompiler/nggVertexCount.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -611,11 +612,7 @@ void DefineInputs(EmitterState& state) {
 #if defined(__APPLE__)
 	// Bench bring-up: MoltenVK rejects SubgroupLocalInvocationId in vertex functions.
 	// KYTY_VS_LANE_FROM_INDEX=0 restores the builtin (for tests that check lane selection).
-	static const bool lane_from_index = [] {
-		const char* value = std::getenv("KYTY_VS_LANE_FROM_INDEX");
-		return value == nullptr || value[0] != '0';
-	}();
-	if (lane_from_index && state.program.info.subgroup_local_invocation_id &&
+	if (VertexLanesFromIndex() && state.program.info.subgroup_local_invocation_id &&
 	    state.program.stage == ShaderType::Vertex) {
 		state.vertex_lane_from_index = true;
 	} else
