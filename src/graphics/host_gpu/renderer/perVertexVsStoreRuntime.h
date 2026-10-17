@@ -50,11 +50,23 @@ struct PvVsStorePrograms {
 	PvVsStoreInterfaceVerdict       verdict     = PvVsStoreInterfaceVerdict::NoPerVertex;
 	uint32_t                        stride_vec4 = 0;
 	PipelineCache::GraphicsPrograms graphics; // valid when verdict == Use
+	// S389 (diag): what the first-use log line says about the pair.
+	uint32_t                        index   = 0; // among the candidate pairs, in the order they are first drawn
+	uint64_t                        vs_hash = 0;
+	uint64_t                        ps_hash = 0;
+	uint32_t                        vs_mask = 0; // host locations the VS stores
+	uint32_t                        ps_mask = 0; // host locations the PS reads per vertex
+	uint32_t                        corners = 0; // bit k: the PS reads corner k (P0 / P10 / P20), i.e. uses gl_PrimitiveID
+	mutable bool                    first_use_logged = false;
 };
 
 // The VS-store programs of a VS/PS pair; nullptr when the pair is not a candidate at all (switch off,
 // PS without per-vertex input, a variant failed to emit or validate, geometry/tessellation stages).
 const PvVsStorePrograms* GetPvVsStorePrograms(GraphicContext& graphics, const PipelineCache::GraphicsPrograms& programs);
+
+// S389: one `[pv-pairs] first use` line per pair (at most 200 pair lines in all): hashes, stride, slots the VS stores and
+// the PS reads, the corners the PS reads, gl_PrimitiveID, topology, instancing. Call for every draw that reaches the pair.
+void LogPvPairFirstUse(const PvVsStorePrograms& programs, uint32_t topology, bool indexed, uint32_t instance_count);
 
 // Set 1 of the VS-store pipelines: binding 0 = cap (VS write, PS read), binding 1 = guest indices (PS), and with
 // KYTY_PV_VSSTORE_GUARD=1 binding 2 = the guard's counter (VS).

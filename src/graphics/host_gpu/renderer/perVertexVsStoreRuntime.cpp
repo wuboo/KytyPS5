@@ -29,12 +29,17 @@ struct StoreShader {
 	ShaderType            stage = ShaderType::Unknown;
 	std::vector<uint32_t> words;       // empty: emission or validation failed
 	uint32_t              mask = 0;    // host locations the stage stores (VS) / reads per vertex (PS)
+	uint32_t              corners = 0; // PS: corners (P0/P10/P20) it reads, bit k = corner k
 	uint64_t              hash = 0;    // guest shader hash (stable between runs)
 };
 std::map<uint64_t, StoreShader>                                    s_shaders;
 std::map<std::pair<uint64_t, uint64_t>, PvVsStorePrograms>         s_pairs;
 vk::DescriptorSetLayout                                            s_set_layout = nullptr;
 uint32_t                                                           s_pairs_admitted = 0;
+uint32_t                                                           s_pairs_candidates = 0;
+uint32_t                                                           s_pair_lines = 0;
+// S389: the pair-use lines (`[pv-pairs]` index lines and first-use lines) share this budget.
+constexpr uint32_t kMaxPairLines = 200;
 
 } // namespace
 
@@ -70,6 +75,7 @@ void RememberPvVsStoreShader(const ShaderProgram& program, ShaderRecompiler::Com
 	info.guard         = PerVertexVsStoreGuard();
 	info.coherent      = true; // Coherent cap + a device barrier after the VS stores (the probe of RESULT-262 needs them)
 	info.location_mask = &entry.mask;
+	info.corner_mask   = &entry.corners;
 	auto words         = EmitPvVsStoreVariant(result.program, options, info, push_data_start_dword, maintenance8_enabled);
 	NotePvPushVariant(vertex ? "vsstore-vs" : "vsstore-ps", options.shader_hash, result.program.bindings);
 	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
@@ -121,8 +127,10 @@ vk::DescriptorSetLayout PvVsStoreSetLayout(GraphicContext& graphics) {
 
 PvVsStoreRuntime::GuardSlot PvVsStoreRuntime::AcquireGuard(uint64_t flip) {
 	if (!m_guard) {
-		m_guard = std::make_unique<Buffer>(m_graphics, m_scheduler, MemoryUsage::Stream, 0, AllFlags,
-		                                   uint64_t {kGuardSlots} * kGuardStride);
+		// The counters are read on the CPU (Invalidate below): host memory, MemoryUsage::Download.
+		m_guard = std::make_unique<Buffer>(m_graphics, m_scheduler,
+		                                   kPvGuardMemory == PvGuardMemory::Download ? MemoryUsage::Download : MemoryUsage::Stream,
+		                                   0, AllFlags, uint64_t {kGuardSlots} * kGuardStride);
 		EXIT_IF(m_guard->Mapped().empty());
 		std::memset(m_guard->Mapped().data(), 0, m_guard->Mapped().size());
 		m_guard->Flush(0, m_guard->Size());
@@ -154,6 +162,18 @@ PvVsStoreRuntime::GuardSlot PvVsStoreRuntime::AcquireGuard(uint64_t flip) {
 	return {m_guard->Handle(), (flip % kGuardSlots) * kGuardStride, kPvGuardBytes};
 }
 
+void LogPvPairFirstUse(const PvVsStorePrograms& programs, uint32_t topology, bool indexed, uint32_t instance_count) {
+	if (programs.first_use_logged || s_pair_lines >= kMaxPairLines) return;
+	programs.first_use_logged = true;
+	s_pair_lines++;
+	LOGF("[pv-pairs] first use #%u VS=0x%016llx PS=0x%016llx stride=%u slots_vs=0x%x slots_ps=0x%x "
+	     "corners=P0:%u/P10:%u/P20:%u primitive_id=%d topology=%u indexed=%d instanced=%d (instances=%u)\n",
+	     programs.index, static_cast<unsigned long long>(programs.vs_hash),
+	     static_cast<unsigned long long>(programs.ps_hash), programs.stride_vec4, programs.vs_mask, programs.ps_mask,
+	     programs.corners & 1u, (programs.corners >> 1u) & 1u, (programs.corners >> 2u) & 1u,
+	     programs.corners != 0 ? 1 : 0, topology, indexed ? 1 : 0, instance_count > 1 ? 1 : 0, instance_count);
+}
+
 uint32_t PvVsStorePushOffset() {
 	return ShaderRecompiler::IR::NativePushConstantSize;
 }
@@ -174,12 +194,21 @@ const PvVsStorePrograms* GetPvVsStorePrograms(GraphicContext& graphics, const Pi
 	}
 	value.verdict = ClassifyPvVsStoreInterface(vs->second.mask, ps->second.mask);
 	if (value.verdict == PvVsStoreInterfaceVerdict::Use) {
-		const bool allowed = PvVsStorePairAllowed(PerVertexVsStorePairs(), key.first, vs->second.hash, key.second,
-		                                          ps->second.hash, s_pairs_admitted);
-		LOGF("PvVsStore: pair VS=%llu/0x%016llx PS=%llu/0x%016llx stride=%u vec4 %s\n",
-		     static_cast<unsigned long long>(key.first), static_cast<unsigned long long>(vs->second.hash),
-		     static_cast<unsigned long long>(key.second), static_cast<unsigned long long>(ps->second.hash),
-		     PvVsStoreStrideFor(vs->second.mask), allowed ? "admitted" : "skipped (KYTY_PV_VSSTORE_PAIRS)");
+		const uint32_t index   = s_pairs_candidates++;
+		const bool     allowed = PvVsStorePairAllowed(PerVertexVsStorePairs(), key.first, vs->second.hash, key.second,
+		                                              ps->second.hash, index);
+		value.index   = index;
+		value.vs_hash = vs->second.hash;
+		value.ps_hash = ps->second.hash;
+		value.vs_mask = vs->second.mask;
+		value.ps_mask = ps->second.mask;
+		value.corners = ps->second.corners;
+		if (s_pair_lines++ < kMaxPairLines) {
+			LOGF("[pv-pairs] #%u VS=%llu/0x%016llx PS=%llu/0x%016llx stride=%u vec4 %s\n", index,
+			     static_cast<unsigned long long>(key.first), static_cast<unsigned long long>(vs->second.hash),
+			     static_cast<unsigned long long>(key.second), static_cast<unsigned long long>(ps->second.hash),
+			     PvVsStoreStrideFor(vs->second.mask), allowed ? "admitted" : "skipped (KYTY_PV_VSSTORE_PAIRS)");
+		}
 		if (!allowed) {
 			value.stride_vec4 = UINT32_MAX; // negative cache: this pair stays on the prototype
 			s_pairs.emplace(key, value);

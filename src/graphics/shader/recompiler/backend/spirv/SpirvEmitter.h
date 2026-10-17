@@ -32,6 +32,8 @@ struct PvStoreInfo {
 	// block, and `location_mask` (when set) collects the host locations the stage stores / reads.
 	std::map<uint32_t, uint32_t> parameter_slots; // host parameter location -> slot in a record
 	uint32_t*                    location_mask      = nullptr;
+	// S389 (diag): bit k set when the PS reads corner k (P0 / P10 / P20) of its primitive.
+	uint32_t*                    corner_mask        = nullptr;
 	bool                         coherent           = false; // Coherent cap + OpMemoryBarrier after the VS stores
 	// S388 (KYTY_PV_VSSTORE_GUARD=1): push dword kPvPushRecords (the draw's record count) bounds the records; the VS skips a
 	// store outside it and counts it in set 1 binding 2, the PS paints a read outside it magenta. Off: the module is unchanged.

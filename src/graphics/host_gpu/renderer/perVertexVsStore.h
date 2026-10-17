@@ -23,6 +23,15 @@ namespace Libs::Graphics {
 constexpr uint32_t kPvVsStoreInstanceLocation = 31;
 constexpr uint32_t kPvVsStoreCorners          = 3;
 
+// S389: the guard's counter is read back by the CPU (Buffer::Invalidate needs MemoryUsage::Download); a Stream buffer
+// made the first read abort in streamBuffer.cpp (RESULT-389).
+enum class PvGuardMemory : uint32_t { Stream, Download };
+#if defined(KYTY_PVVS_MUTANT_GUARD_STREAM)
+constexpr PvGuardMemory kPvGuardMemory = PvGuardMemory::Stream;
+#else
+constexpr PvGuardMemory kPvGuardMemory = PvGuardMemory::Download;
+#endif
+
 // Dword layout of the push block that follows the native push data in both stages.
 enum PvVsStorePush : uint32_t {
 	kPvPushBase          = 0, // record of (instance 0, vertex `first`) in the pass ring
@@ -381,15 +390,19 @@ constexpr bool PvVsStoreIndexBindingFits(uint64_t byte_offset, uint32_t element_
 // S388 (KYTY_PV_VSSTORE_PAIRS=all|<VS:PS,...>|first=N, default all): which VS/PS pairs may use the store; the
 // others stay on the prototype. A list token is `VS:PS`, each side a decimal program id or a 0x guest shader
 // hash (hashes are stable between runs, ids are not); `first=N` admits the first N candidate pairs in the order
-// they are first drawn.
+// they are first drawn. S389: `only=VSHASH:PSHASH,...` is the list form that matches guest shader hashes only (ids
+// change between runs); `range=a-b` admits the candidate pairs whose index (the `#N` of the `[pv-pairs]` log line,
+// counted in the order the pairs are first drawn) lies in a..b inclusive.
 struct PvVsStorePairFilter {
-	enum class Kind : uint32_t { All, First, List };
+	enum class Kind : uint32_t { All, First, List, Only, Range };
 	struct Pair {
 		uint64_t vs = 0;
 		uint64_t ps = 0;
 	};
 	Kind              kind    = Kind::All;
 	uint32_t          first_n = 0;
+	uint32_t          range_a = 0; // Range: candidate pair indices a..b, inclusive
+	uint32_t          range_b = 0;
 	std::vector<Pair> pairs;
 };
 
@@ -426,7 +439,25 @@ inline bool ParsePvVsStorePairs(const char* text, PvVsStorePairFilter& filter) {
 		filter.first_n = static_cast<uint32_t>(n);
 		return true;
 	}
+	if (value.starts_with("range=")) {
+		value.remove_prefix(6);
+		const auto dash = value.find('-');
+		uint64_t   a = 0;
+		uint64_t   b = 0;
+		if (dash == std::string_view::npos || !ParsePvVsStorePairNumber(value.substr(0, dash), a) ||
+		    !ParsePvVsStorePairNumber(value.substr(dash + 1), b) || a > b || b > 0xffffffffull) {
+			return false;
+		}
+		filter.kind    = PvVsStorePairFilter::Kind::Range;
+		filter.range_a = static_cast<uint32_t>(a);
+		filter.range_b = static_cast<uint32_t>(b);
+		return true;
+	}
 	filter.kind = PvVsStorePairFilter::Kind::List;
+	if (value.starts_with("only=")) {
+		filter.kind = PvVsStorePairFilter::Kind::Only;
+		value.remove_prefix(5);
+	}
 	while (!value.empty()) {
 		const auto comma = value.find(',');
 		const auto token = value.substr(0, comma);
@@ -452,7 +483,8 @@ inline bool ParsePvVsStorePairs(const char* text, PvVsStorePairFilter& filter) {
 	return true;
 }
 
-// `ordinal` = how many candidate pairs were admitted before this one (first=N counts them).
+// `ordinal` = the index of this pair among the candidate pairs, in the order they are first drawn (S389: it was the
+// admitted count, which is the same for first=N).
 inline bool PvVsStorePairAllowed(const PvVsStorePairFilter& filter, uint64_t vs_id, uint64_t vs_hash, uint64_t ps_id,
                                  uint64_t ps_hash, uint32_t ordinal) {
 	switch (filter.kind) {
@@ -463,6 +495,21 @@ inline bool PvVsStorePairAllowed(const PvVsStorePairFilter& filter, uint64_t vs_
 #else
 			return ordinal < filter.first_n;
 #endif
+		case PvVsStorePairFilter::Kind::Range:
+#if defined(KYTY_PVVS_MUTANT_PAIRS_RANGE_EXCLUSIVE)
+			return ordinal >= filter.range_a && ordinal < filter.range_b;
+#else
+			return ordinal >= filter.range_a && ordinal <= filter.range_b;
+#endif
+		case PvVsStorePairFilter::Kind::Only:
+			for (const auto& pair: filter.pairs) {
+#if defined(KYTY_PVVS_MUTANT_PAIRS_ONLY_USES_IDS)
+				if (pair.vs == vs_id && pair.ps == ps_id) return true;
+#else
+				if (pair.vs == vs_hash && pair.ps == ps_hash) return true;
+#endif
+			}
+			return false;
 		case PvVsStorePairFilter::Kind::List:
 			for (const auto& pair: filter.pairs) {
 				const bool vs_ok = pair.vs == vs_id || pair.vs == vs_hash;
