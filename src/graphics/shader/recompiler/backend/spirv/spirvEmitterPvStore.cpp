@@ -240,6 +240,7 @@ void EmitPvStoreParameter(EmitterState& state, uint32_t host_location, uint32_t 
 uint32_t EmitPvLoadCorner(EmitterState& state, uint32_t host_location, uint32_t corner,
                           uint32_t chan) {
 	EXIT_IF(state.pv_store == nullptr || IsVertex(state) || corner >= kPvVsStoreCorners);
+	if (state.pv_store->corner_mask != nullptr) *state.pv_store->corner_mask |= 1u << corner;
 	const auto primitive = LoadSigned(state, InputVariableForKind(state, IR::StageInputKind::PrimitiveId));
 	const auto instance  = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpLoad, TypeU32(state), instance, state.pv_instance_variable);

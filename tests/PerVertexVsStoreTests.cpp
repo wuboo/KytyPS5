@@ -386,6 +386,29 @@ void TestPairFilter() {
 	Check(!ParsePvVsStorePairs("1:z", f), "non-numeric side");
 	Check(!ParsePvVsStorePairs("0x:1", f), "0x without digits");
 	Check(!ParsePvVsStorePairs("99999999999999999999:1", f), "overflow");
+
+	// S389: only=<hash>:<hash>,... matches guest hashes only.
+	Check(ParsePvVsStorePairs("only=0xabc:0xdef,0x1:0x2", f) && f.kind == PvVsStorePairFilter::Kind::Only && f.pairs.size() == 2,
+	      "only= with two hash pairs");
+	Check(PvVsStorePairAllowed(f, 5, 0xabc, 6, 0xdef, 0) && PvVsStorePairAllowed(f, 5, 0x1, 6, 0x2, 7), "only= by hashes, any ordinal");
+	Check(!PvVsStorePairAllowed(f, 0xabc, 77, 0xdef, 88, 0), "only= does not match program ids");
+	Check(!PvVsStorePairAllowed(f, 5, 0xabc, 6, 0x2, 0), "only=: the VS of one pair and the PS of another do not match");
+	Check(!ParsePvVsStorePairs("only=", f) && !ParsePvVsStorePairs("only=1", f) && !ParsePvVsStorePairs("only=1:2,", f), "only= malformed");
+	// S389: range=a-b is inclusive over the candidate index.
+	Check(ParsePvVsStorePairs("range=2-4", f) && f.kind == PvVsStorePairFilter::Kind::Range && f.range_a == 2 && f.range_b == 4, "range=2-4");
+	Check(!PvVsStorePairAllowed(f, 1, 2, 3, 4, 1) && PvVsStorePairAllowed(f, 1, 2, 3, 4, 2) && PvVsStorePairAllowed(f, 1, 2, 3, 4, 3) &&
+	          PvVsStorePairAllowed(f, 1, 2, 3, 4, 4) && !PvVsStorePairAllowed(f, 1, 2, 3, 4, 5),
+	      "range=2-4 admits indices 2, 3, 4");
+	Check(ParsePvVsStorePairs("range=0x10-0x10", f) && PvVsStorePairAllowed(f, 0, 0, 0, 0, 16) && !PvVsStorePairAllowed(f, 0, 0, 0, 0, 17),
+	      "range=a-a admits one index (hex)");
+	Check(!ParsePvVsStorePairs("range=4-2", f) && !ParsePvVsStorePairs("range=3", f) && !ParsePvVsStorePairs("range=-3", f) &&
+	          !ParsePvVsStorePairs("range=3-", f) && !ParsePvVsStorePairs("range=a-b", f),
+	      "range= malformed");
+}
+
+// S389: the guard's counter is read on the CPU, so its buffer must be host memory (MemoryUsage::Download).
+void TestGuardMemory() {
+	Check(kPvGuardMemory == PvGuardMemory::Download, "the guard's counter buffer is a Download buffer");
 }
 
 // S388 (H1): the guard's out-of-range rule (VS: skip the store and count; PS: magenta) and the switch parser.
@@ -530,6 +553,7 @@ int main() {
 	TestInstancedSwitch();
 	TestPairFilter();
 	TestGuardRule();
+	TestGuardMemory();
 	TestIndexTailDecision();
 	TestSlabs();
 	TestFallbackClass();

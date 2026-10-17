@@ -1431,6 +1431,7 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 		CountPvFallback(ClassifyPvVsStoreFallback(programs->verdict));
 		return false;
 	}
+	LogPvPairFirstUse(*programs, static_cast<uint32_t>(topology), draw.IsIndexed(), draw.instance_count);
 	const uint32_t element_size =
 	    index_source.host_data != nullptr ? sizeof(uint16_t) : index_source.guest_element_size;
 
