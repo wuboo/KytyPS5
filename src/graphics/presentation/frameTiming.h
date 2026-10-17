@@ -105,6 +105,7 @@ enum class Counter : uint32_t {
 	PvFallbackIndexTail, // S151: the index buffer ends inside the last word the PS reads (descriptor would pass the buffer end)
 	PvVsStoreInstanced,  // S151: VS-store draws with instance_count > 1
 	PvPushNonzeroPrograms, // S384: capture / VS-store variants emitted with push data starting at a nonzero dword
+	PvVsStoreIdxGpu,       // S388: VS-store candidates whose index bytes are GPU-modified guest memory (both KYTY_PV_VSSTORE_GPUIDX modes)
 	DepthRoElided,              // S316: KYTY_DEPTH_RO_UNION=1|shadow: barriers skipped (shadow: that would have been skipped) on a read-only depth attachment
 	DepthRoRejectDirty,         // S316: ... rejected: the image was written since the last barrier
 	DepthRoRejectNotSubset,     // S316: ... rejected: the new access is not within the visible union

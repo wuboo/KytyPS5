@@ -311,6 +311,106 @@ void TestIndexBindingFits() {
 	Check(PvVsStoreIndexBindingFits(0, 2, 16, 10, 12), "a word-padded buffer fits");
 }
 
+// S388 (H1): KYTY_PV_VSSTORE_GPUIDX decides a draw whose index bytes the GPU wrote.
+void TestGpuIdxMode() {
+	PvVsStoreGpuIdxMode mode = PvVsStoreGpuIdxMode::Fallback;
+	Check(ParsePvVsStoreGpuIdxMode(nullptr, mode) && mode == PvVsStoreGpuIdxMode::Allow, "unset = allow");
+	Check(ParsePvVsStoreGpuIdxMode("allow", mode) && mode == PvVsStoreGpuIdxMode::Allow, "allow");
+	Check(ParsePvVsStoreGpuIdxMode("fallback", mode) && mode == PvVsStoreGpuIdxMode::Fallback, "fallback");
+	Check(!ParsePvVsStoreGpuIdxMode("Fallback", mode), "case matters");
+	Check(!ParsePvVsStoreGpuIdxMode("", mode), "empty is invalid");
+	Check(PvVsStoreGpuIndexFallback(PvVsStoreGpuIdxMode::Fallback, true), "fallback + GPU-written indices falls back");
+	Check(!PvVsStoreGpuIndexFallback(PvVsStoreGpuIdxMode::Fallback, false), "fallback + CPU indices stays on the store");
+	Check(!PvVsStoreGpuIndexFallback(PvVsStoreGpuIdxMode::Allow, true), "allow keeps GPU-written indices on the store");
+	Check(!PvVsStoreGpuIndexFallback(PvVsStoreGpuIdxMode::Allow, false), "allow + CPU indices");
+}
+
+// S388 (H2): KYTY_PV_VSSTORE_INSTANCED=0 sends instanced draws to the prototype and only those.
+void TestInstancedSwitch() {
+	bool allowed = false;
+	Check(ParsePvVsStoreInstanced(nullptr, allowed) && allowed, "unset = 1");
+	Check(ParsePvVsStoreInstanced("1", allowed) && allowed, "1");
+	Check(ParsePvVsStoreInstanced("0", allowed) && !allowed, "0");
+	Check(!ParsePvVsStoreInstanced("2", allowed), "2 is invalid");
+	Check(!ParsePvVsStoreInstanced("", allowed), "empty is invalid");
+	PvVsStoreRequest r;
+	r.enabled = true;
+	r.triangle_list = true;
+	r.indexed = true;
+	r.index_size = 2;
+	r.range_known = true;
+	r.range_first = 0;
+	r.range_end = 8;
+	r.index_count = 12;
+	r.record_stride_vec4 = 2;
+	r.instance_count = 3;
+	r.instanced_allowed = false;
+	const auto place_ok = [](const PvVsStorePlan&) { return true; };
+	auto decision = DecidePvVsStore(PvVsStoreInterfaceVerdict::Use, r, true, place_ok);
+	Check(!decision.use && decision.fallback == PvVsStoreFallback::Instanced, "instanced draw with the switch at 0 falls back as Instanced");
+	r.instance_count = 1;
+	decision = DecidePvVsStore(PvVsStoreInterfaceVerdict::Use, r, true, place_ok);
+	Check(decision.use, "a single-instance draw is unaffected by the switch at 0");
+	r.instance_count = 3;
+	r.instanced_allowed = true;
+	decision = DecidePvVsStore(PvVsStoreInterfaceVerdict::Use, r, true, place_ok);
+	Check(decision.use, "instanced draw with the switch at 1 takes the store");
+	r.instanced_allowed = false;
+	r.triangle_list = false;
+	decision = DecidePvVsStore(PvVsStoreInterfaceVerdict::Use, r, true, place_ok);
+	Check(decision.fallback == PvVsStoreFallback::Topology, "a topology reject keeps its own class under the switch");
+}
+
+// S388 (H3): KYTY_PV_VSSTORE_PAIRS parser and filter.
+void TestPairFilter() {
+	PvVsStorePairFilter f;
+	Check(ParsePvVsStorePairs(nullptr, f) && f.kind == PvVsStorePairFilter::Kind::All, "unset = all");
+	Check(ParsePvVsStorePairs("all", f) && f.kind == PvVsStorePairFilter::Kind::All, "all");
+	Check(PvVsStorePairAllowed(f, 1, 2, 3, 4, 99), "all admits everything");
+	Check(ParsePvVsStorePairs("first=3", f) && f.kind == PvVsStorePairFilter::Kind::First && f.first_n == 3, "first=3");
+	Check(PvVsStorePairAllowed(f, 1, 2, 3, 4, 0) && PvVsStorePairAllowed(f, 1, 2, 3, 4, 2), "first=3 admits ordinals 0..2");
+	Check(!PvVsStorePairAllowed(f, 1, 2, 3, 4, 3), "first=3 refuses ordinal 3");
+	Check(ParsePvVsStorePairs("first=0", f) && !PvVsStorePairAllowed(f, 1, 2, 3, 4, 0), "first=0 admits none");
+	Check(ParsePvVsStorePairs("12:34,0xAbC:0xdef", f) && f.kind == PvVsStorePairFilter::Kind::List && f.pairs.size() == 2 &&
+	          f.pairs[1].vs == 0xabc && f.pairs[1].ps == 0xdef,
+	      "list of two pairs, decimal and hex");
+	Check(PvVsStorePairAllowed(f, 12, 777, 34, 888, 0), "pair by ids");
+	Check(PvVsStorePairAllowed(f, 5, 0xabc, 6, 0xdef, 0), "pair by hashes");
+	Check(PvVsStorePairAllowed(f, 12, 777, 6, 0xdef, 0) == false, "the VS of one pair and the PS of another do not match");
+	Check(!PvVsStorePairAllowed(f, 12, 777, 35, 888, 0), "right VS, wrong PS");
+	Check(!ParsePvVsStorePairs("", f), "empty is invalid");
+	Check(!ParsePvVsStorePairs("first=", f), "first= without a number");
+	Check(!ParsePvVsStorePairs("first=x", f), "first=x");
+	Check(!ParsePvVsStorePairs("12", f), "a token without a colon");
+	Check(!ParsePvVsStorePairs("1:2,", f), "trailing comma");
+	Check(!ParsePvVsStorePairs("1:z", f), "non-numeric side");
+	Check(!ParsePvVsStorePairs("0x:1", f), "0x without digits");
+	Check(!ParsePvVsStorePairs("99999999999999999999:1", f), "overflow");
+}
+
+// S388 (H1): the guard's out-of-range rule (VS: skip the store and count; PS: magenta) and the switch parser.
+void TestGuardRule() {
+	bool guard = true;
+	Check(ParsePvVsStoreGuard(nullptr, guard) && !guard, "unset = 0");
+	Check(ParsePvVsStoreGuard("0", guard) && !guard, "0");
+	Check(ParsePvVsStoreGuard("1", guard) && guard, "1");
+	Check(!ParsePvVsStoreGuard("2", guard) && !ParsePvVsStoreGuard("", guard) && !ParsePvVsStoreGuard("on", guard), "other values are invalid");
+	Check(!PvVsStoreRecordOutOfRange(100, 100, 12), "first record of the draw is in range");
+	Check(!PvVsStoreRecordOutOfRange(111, 100, 12), "last record (base + records - 1) is in range");
+	Check(PvVsStoreRecordOutOfRange(112, 100, 12), "base + records is out of range");
+	Check(PvVsStoreRecordOutOfRange(99, 100, 12), "a record below base wraps and is out of range");
+	Check(PvVsStoreRecordOutOfRange(100u + 0x80000000u, 100, 12), "a far record is out of range (unsigned compare)");
+	// The same rule on the model's own record numbering: a vertex past the scanned range is out, one inside is not.
+	PvVsStoreDraw d;
+	d.base = 40; d.span = 6; d.first = 10; d.first_instance = 2; d.records = 18; // 3 instances
+	Check(!PvVsStoreRecordOutOfRange(PvVsStoreVertexRecord(d.base, d.span, d.first, d.first_instance, 4, 15), d.base, d.records),
+	      "last vertex of the last instance is in range");
+	Check(PvVsStoreRecordOutOfRange(PvVsStoreVertexRecord(d.base, d.span, d.first, d.first_instance, 4, 16), d.base, d.records),
+	      "one vertex past the scanned range of the last instance is out");
+	Check(PvVsStoreRecordOutOfRange(PvVsStoreVertexRecord(d.base, d.span, d.first, d.first_instance, 2, 9), d.base, d.records),
+	      "a vertex below the scanned range is out");
+}
+
 void TestIndexTailDecision() {
 	const auto place_ok = [](const PvVsStorePlan&) { return true; };
 	PvVsStoreRequest r;
@@ -372,6 +472,11 @@ void TestFallbackClass() {
 void TestPushRange() {
 	Check(PvVsStorePushRangeBytes(128, false) == 128, "default pipelines keep the native push range");
 	Check(PvVsStorePushRangeBytes(128, true) == 128 + kPvVsStorePushDwords * 4, "VS-store variants add the block");
+	// S388: the guard adds one dword to the VS-store variants only.
+	Check(PvVsStorePushRangeBytes(128, true, true) == 128 + 9 * 4, "guarded VS-store variants add the block and the record count");
+	Check(PvVsStorePushRangeBytes(128, true, false) == 128 + 8 * 4, "unguarded VS-store variants keep 8 dwords");
+	Check(PvVsStorePushRangeBytes(128, false, true) == 128, "the guard does not touch the other pipelines");
+	Check(PvVsStorePushDwords(false) == 8 && PvVsStorePushDwords(true) == 9 && kPvPushRecords == 8, "dword counts");
 }
 
 void TestDecision() {
@@ -421,6 +526,10 @@ int main() {
 	TestIndexRange();
 	TestIndexDescriptor();
 	TestIndexBindingFits();
+	TestGpuIdxMode();
+	TestInstancedSwitch();
+	TestPairFilter();
+	TestGuardRule();
 	TestIndexTailDecision();
 	TestSlabs();
 	TestFallbackClass();

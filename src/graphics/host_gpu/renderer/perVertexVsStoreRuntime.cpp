@@ -23,10 +23,12 @@ struct StoreShader {
 	ShaderType            stage = ShaderType::Unknown;
 	std::vector<uint32_t> words;       // empty: emission or validation failed
 	uint32_t              mask = 0;    // host locations the stage stores (VS) / reads per vertex (PS)
+	uint64_t              hash = 0;    // guest shader hash (stable between runs)
 };
 std::map<uint64_t, StoreShader>                                    s_shaders;
 std::map<std::pair<uint64_t, uint64_t>, PvVsStorePrograms>         s_pairs;
 vk::DescriptorSetLayout                                            s_set_layout = nullptr;
+uint32_t                                                           s_pairs_admitted = 0;
 
 } // namespace
 
@@ -46,6 +48,9 @@ void RememberPvVsStoreShader(const ShaderProgram& program, ShaderRecompiler::Com
                              const ShaderRecompiler::CompileOptions& options,
                              uint32_t push_data_start_dword, bool maintenance8_enabled) {
 	if (!PerVertexVsStoreEnabled()) return;
+	(void)PerVertexVsStoreGpuIdxMode(); // read and logged once, at the first compile
+	(void)PerVertexVsStoreInstanced();
+	(void)PerVertexVsStorePairs();
 	using Role = ShaderRecompiler::Spirv::PvStoreInfo::Role;
 	const bool vertex = options.stage == ShaderType::Vertex && options.input_info.vertex != nullptr;
 	const bool pixel  = options.stage == ShaderType::Pixel && options.input_info.pixel != nullptr &&
@@ -53,6 +58,7 @@ void RememberPvVsStoreShader(const ShaderProgram& program, ShaderRecompiler::Com
 	if (!vertex && !pixel) return;
 	StoreShader entry;
 	entry.stage = options.stage;
+	entry.hash  = options.shader_hash;
 	ShaderRecompiler::Spirv::PvStoreInfo info;
 	info.role          = vertex ? Role::Vertex : Role::Pixel;
 	info.coherent      = true; // Coherent cap + a device barrier after the VS stores (the probe of RESULT-262 needs them)
@@ -124,6 +130,18 @@ const PvVsStorePrograms* GetPvVsStorePrograms(GraphicContext& graphics, const Pi
 	}
 	value.verdict = ClassifyPvVsStoreInterface(vs->second.mask, ps->second.mask);
 	if (value.verdict == PvVsStoreInterfaceVerdict::Use) {
+		const bool allowed = PvVsStorePairAllowed(PerVertexVsStorePairs(), key.first, vs->second.hash, key.second,
+		                                          ps->second.hash, s_pairs_admitted);
+		LOGF("PvVsStore: pair VS=%llu/0x%016llx PS=%llu/0x%016llx stride=%u vec4 %s\n",
+		     static_cast<unsigned long long>(key.first), static_cast<unsigned long long>(vs->second.hash),
+		     static_cast<unsigned long long>(key.second), static_cast<unsigned long long>(ps->second.hash),
+		     PvVsStoreStrideFor(vs->second.mask), allowed ? "admitted" : "skipped (KYTY_PV_VSSTORE_PAIRS)");
+		if (!allowed) {
+			value.stride_vec4 = UINT32_MAX; // negative cache: this pair stays on the prototype
+			s_pairs.emplace(key, value);
+			return nullptr;
+		}
+		s_pairs_admitted++;
 		value.stride_vec4               = PvVsStoreStrideFor(vs->second.mask);
 		value.graphics                  = programs;
 		value.graphics.vertex[0].module = CompileSPV(vs->second.words, graphics.device);
@@ -131,8 +149,6 @@ const PvVsStorePrograms* GetPvVsStorePrograms(GraphicContext& graphics, const Pi
 		value.graphics.vertex[0].id |= 1ull << 61;
 		value.graphics.pixel.id |= 1ull << 61;
 		value.graphics.pv_store_layout = PvVsStoreSetLayout(graphics);
-		LOGF("PvVsStore: pair VS=%llu PS=%llu stride=%u vec4\n", static_cast<unsigned long long>(key.first),
-		     static_cast<unsigned long long>(key.second), value.stride_vec4);
 	}
 	return &s_pairs.emplace(key, std::move(value)).first->second;
 }

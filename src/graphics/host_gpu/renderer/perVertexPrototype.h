@@ -2,6 +2,7 @@
 
 #include "graphics/host_gpu/renderer/perVertexTransform.h"
 #include "graphics/host_gpu/renderer/perVertexUnique.h"
+#include "graphics/host_gpu/renderer/perVertexVsStore.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 
 #include <cstddef>
@@ -27,6 +28,12 @@ bool PerVertexUniqueEnabled();
 // S149: KYTY_PV_VSSTORE=1 (value "1" only) lets the VS write PerVertex values to an SSBO that the PS
 // reads back (perVertexVsStore.h); default OFF. The emitter side exists, the draw path is not wired yet.
 bool PerVertexVsStoreEnabled();
+// S388: KYTY_PV_VSSTORE_GPUIDX (read once, logged as [pv-gpuidx] mode=).
+PvVsStoreGpuIdxMode PerVertexVsStoreGpuIdxMode();
+// S388: KYTY_PV_VSSTORE_INSTANCED=1|0 (read once, default 1, logged as [pv-instanced] mode=).
+bool PerVertexVsStoreInstanced();
+// S388: KYTY_PV_VSSTORE_PAIRS=all|VS:PS,...|first=N (read once, logged as [pv-pairs] mode=).
+const PvVsStorePairFilter& PerVertexVsStorePairs();
 bool HasPerVertexPrototypeInput(std::span<const uint32_t> words);
 bool DecodePerVertexPrototypeAttribute(Prospero::BufferFormat   format,
                                        std::span<const uint8_t> bytes,
