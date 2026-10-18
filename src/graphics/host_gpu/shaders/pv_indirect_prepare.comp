@@ -2,11 +2,16 @@
 // (src/graphics/host_gpu/renderer/pvIndirect.h, pinned by tests/PvIndirectTests.cpp).
 //   in      the 5 dwords the guest wrote (VkDrawIndexedIndirectCommand layout), read from the buffer cache
 //   out     the draw to record: fields as learned and instanceCount clamped to cap, or all zero when a field differs
-//   status  per flip and entry (16 dwords): [0] mismatch, [1] overflow, [2] max instance, [3] draws, [4..8] in, [9..13] out of the last draw
+//   status  per flip and entry (16 dwords): [0] mismatch, [1] overflow, [2] max instance, [3] draws, [4..8] in, [9..13] out of the last draw,
+//           [14] range violations
+// S413 (KYTY_PV_IND_RANGE=1): with push.flags bit 0 set, the 64 invocations check the indices of the draw (binding 3, the same range the
+// VS-store reads) against the vertex range [range_first, range_end) the CPU remembered: vertex = int(index + vertex_offset) (32-bit wrap, as
+// the VS adds it); one outside the range (or negative) zeroes the draw and counts a range violation instead of a match. Same arithmetic as
+// PvIndirect::RangeCheck (pvIndirect.h). Without the bit the invocations do nothing but wait for lane 0 (the old behavior).
 
 #version 450
 
-layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
 
 layout(std430, set = 0, binding = 0) readonly buffer InArgs {
 	uint in_args[];
@@ -16,6 +21,9 @@ layout(std430, set = 0, binding = 1) writeonly buffer OutArgs {
 };
 layout(std430, set = 0, binding = 2) buffer Status {
 	uint status[];
+};
+layout(std430, set = 0, binding = 3) readonly buffer Indices {
+	uint idx[];
 };
 
 layout(push_constant) uniform Push {
@@ -27,19 +35,57 @@ layout(push_constant) uniform Push {
 	uint in_word;     // first dword of the args inside the bound range (the descriptor offset is aligned down)
 	uint out_word;    // first dword of the slot in the host ring
 	uint status_word; // first dword of the status entry
+	uint range_first; // S413: remembered vertex range [range_first, range_end)
+	uint range_end;
+	uint idx_first;   // index of the first element of the draw inside the bound index range (the descriptor offset is aligned down)
+	uint idx_count;   // indices to check (the learned index count)
+	uint flags;       // bit 0: check the indices; bit 1: 32-bit indices
 }
 push;
+
+shared uint s_violation;
 
 void main() {
 	const uint i = push.in_word;
 	const uint s = push.status_word;
 	const uint o = push.out_word;
+	const uint lane = gl_LocalInvocationID.x;
 
 	const uint index_count    = in_args[i + 0u];
 	const uint instance_count = in_args[i + 1u];
 	const uint first_index    = in_args[i + 2u];
 	const uint vertex_offset  = in_args[i + 3u];
 	const uint first_instance = in_args[i + 4u];
+
+	const bool fields_match = index_count == push.exp_index_count && first_index == push.exp_first_index &&
+	                          vertex_offset == push.exp_vertex_offset && first_instance == push.exp_first_instance;
+
+	if (lane == 0u) {
+		s_violation = 0u;
+	}
+	barrier();
+	if ((push.flags & 1u) != 0u && fields_match) {
+		const uint count = min(index_count, push.idx_count);
+		for (uint k = lane; k < count; k += 64u) {
+			const uint pos = push.idx_first + k;
+			uint raw;
+			if ((push.flags & 2u) != 0u) {
+				raw = idx[pos];
+			} else {
+				raw = (idx[pos >> 1u] >> ((pos & 1u) * 16u)) & 0xffffu;
+			}
+			const int vertex = int(raw + push.exp_vertex_offset);
+			if (vertex < 0 || uint(vertex) < push.range_first || uint(vertex) >= push.range_end) {
+				atomicOr(s_violation, 1u);
+				break;
+			}
+		}
+	}
+	memoryBarrierShared();
+	barrier();
+	if (lane != 0u) {
+		return;
+	}
 
 	atomicAdd(status[s + 3u], 1u);
 	status[s + 4u] = index_count;
@@ -48,11 +94,12 @@ void main() {
 	status[s + 7u] = vertex_offset;
 	status[s + 8u] = first_instance;
 
-	const bool match = index_count == push.exp_index_count && first_index == push.exp_first_index &&
-	                   vertex_offset == push.exp_vertex_offset && first_instance == push.exp_first_instance;
 	uint out_value[5];
-	if (!match) {
+	if (!fields_match) {
 		atomicAdd(status[s + 0u], 1u);
+		out_value = uint[5](0u, 0u, 0u, 0u, 0u);
+	} else if (s_violation != 0u) {
+		atomicAdd(status[s + 14u], 1u);
 		out_value = uint[5](0u, 0u, 0u, 0u, 0u);
 	} else {
 		if (instance_count > push.cap) {

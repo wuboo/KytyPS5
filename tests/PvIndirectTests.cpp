@@ -1,11 +1,13 @@
 // S408: KYTY_PV_INDIRECT (pvIndirect.h): the prepared args, the entry life cycle, the cap limit and the order of the recorded commands.
 // Mutants (each must fail): CLAMP_OFF (the instance count is not clamped to cap), IGNORE_FIELDS (a draw whose fields differ is not
-// zeroed), NO_COOLDOWN (a mismatch does not send the entry back to the CPU read), CAP_NO_GROW (an overflow does not grow cap).
+// zeroed), RANGE_REUSE_IGNORES_KEY (S413: a remembered range is reused for another index_count), RANGECHECK_OFF_BY_ONE (S413: the end of the
+// range is inclusive), NO_COOLDOWN (a mismatch does not send the entry back to the CPU read), CAP_NO_GROW (an overflow does not grow cap).
 
 #include "graphics/host_gpu/renderer/pvIndirect.h"
 
 #include <cstdio>
 #include <string>
+#include <vector>
 
 using namespace Libs::Graphics;
 using namespace Libs::Graphics::PvIndirect;
@@ -141,6 +143,98 @@ int main() {
 		FakeRecorder closed;
 		Check(!RecordPrepare(closed, false) && closed.log == "BPDX", "pass closed: no pass break");
 		Check(open.log.find('X') > open.log.find('D'), "the barrier follows the dispatch");
+	}
+
+
+	// ---- S413: KYTY_PV_IND_RANGE ----
+	Check(ParseRangeMode(nullptr) == RangeMode::Off && ParseRangeMode("0") == RangeMode::Off && ParseRangeMode("1") == RangeMode::On &&
+	          ParseRangeMode("shadow") == RangeMode::Shadow && ParseRangeMode("on") == RangeMode::Off,
+	      "range mode parse: unset = 0");
+	Check(EnvRangeMode() == RangeMode::Off, "without the variable the range mode is 0");
+	{
+		const RangeKey key {0x571b2da60ull, 192 * 2, 2, 192, 0};
+		RangeEntry     entry;
+		Check(DecideRangeReuse(RangeMode::On, true, true, entry, key) == RangeDecision::Miss, "nothing remembered: miss");
+		Check(!RangeRecordable(false, false, 0, 10) && !RangeRecordable(true, true, 0, 10) && !RangeRecordable(true, false, 5, 5) &&
+		          !RangeRecordable(true, false, 0, 0x100000000ull) && RangeRecordable(true, false, 0, 10),
+		      "only a derivable, undropped, non-empty range that fits 32 bits is remembered");
+		RecordRange(entry, key, 100, 400);
+		Check(DecideRangeReuse(RangeMode::On, true, true, entry, key) == RangeDecision::Reuse, "same key, dirty indices: reuse");
+		Check(DecideRangeReuse(RangeMode::Off, true, true, entry, key) == RangeDecision::NotApplicable, "mode 0: never");
+		Check(DecideRangeReuse(RangeMode::Shadow, true, true, entry, key) == RangeDecision::NotApplicable, "shadow never reuses");
+		Check(DecideRangeReuse(RangeMode::On, false, true, entry, key) == RangeDecision::NotApplicable, "not an On draw: never");
+		Check(DecideRangeReuse(RangeMode::On, true, false, entry, key) == RangeDecision::NotApplicable, "indices not GPU-dirty: the CPU scan");
+		RangeKey other = key;
+		other.index_count = 193;
+		Check(DecideRangeReuse(RangeMode::On, true, true, entry, other) == RangeDecision::Miss, "another index_count: miss");
+		other = key;
+		other.vertex_offset = 4;
+		Check(DecideRangeReuse(RangeMode::On, true, true, entry, other) == RangeDecision::Miss, "another vertex_offset: miss");
+		other = key;
+		other.index_addr += 2;
+		Check(DecideRangeReuse(RangeMode::On, true, true, entry, other) == RangeDecision::Miss, "another address: miss");
+		other = key;
+		other.index_bytes += 2;
+		other.element_size = 4;
+		Check(DecideRangeReuse(RangeMode::On, true, true, entry, other) == RangeDecision::Miss, "another size / element: miss");
+
+		Check(CompareRange(RangeEntry {}, key, {100, 400}) == RangeCompare::NoEntry, "shadow: nothing remembered yet");
+		Check(CompareRange(entry, other, {100, 400}) == RangeCompare::KeyDiffers, "shadow: another key");
+		Check(CompareRange(entry, key, {100, 400}) == RangeCompare::Equal, "shadow: same range");
+		Check(CompareRange(entry, key, {120, 380}) == RangeCompare::NotEqualWithin, "shadow: scan inside the remembered range");
+		Check(CompareRange(entry, key, {100, 401}) == RangeCompare::NotEqual && CompareRange(entry, key, {99, 400}) == RangeCompare::NotEqual,
+		      "shadow: scan wider than the remembered range");
+	}
+	{
+		// RangeCheck: the arithmetic of the shader. 16-bit and 32-bit indices, the vertex offset added in 32 bits.
+		const std::vector<uint16_t> idx16 = {10, 11, 12, 12, 11, 399};
+		const Range                 range {10, 400};
+		Check(RangeCheck(idx16.data(), 6, 2, 0, range), "all indices inside [first, end)");
+		Check(!RangeCheck(idx16.data(), 6, 2, 1, range), "index 399 + 1 = 400 is the exclusive end: violation");
+		Check(RangeCheck(idx16.data(), 5, 2, 1, range), "the first five +1 are inside");
+		Check(!RangeCheck(idx16.data(), 6, 2, 0xffffffffu, range), "offset -1: 10 - 1 = 9 is below first");
+		Check(RangeCheck(idx16.data(), 6, 2, 0xfffffff6u, {0, 400}), "offset -10 with first 0: 0..389 inside");
+		Check(RangeCheck(idx16.data(), 0, 2, 0, range), "no indices: nothing to violate");
+		const std::vector<uint32_t> idx32 = {100000, 100001, 100399};
+		Check(RangeCheck(idx32.data(), 3, 4, 0, {100000, 100400}), "32-bit indices inside");
+		Check(!RangeCheck(idx32.data(), 3, 4, 0, {100000, 100399}), "32-bit: last index equals the exclusive end");
+		Check(!RangeCheck(idx32.data(), 3, 4, 0xfffe0000u, {0, 100400}), "negative vertex number is a violation");
+		// only the first `count` indices matter (the draw reads index_count of them)
+		Check(RangeCheck(idx16.data(), 5, 2, 0, {10, 13}) && !RangeCheck(idx16.data(), 6, 2, 0, {10, 13}), "count limits the check");
+
+		// PrepareArgsChecked = PrepareArgs + the check
+		const Fields   fields {6, 0, 0, 0};
+		const Args     in {6, 483, 0, 0, 0};
+		const auto     ok = PrepareArgsChecked(in, fields, 8192, idx16.data(), 2, &range);
+		Check(ok.out == PrepareArgs(in, fields, 8192).out && ok.status.range_violation == 0, "inside the range: the same as PrepareArgs");
+		const std::vector<uint16_t> bad = {10, 11, 400, 12, 11, 12};
+		const auto violated = PrepareArgsChecked(in, fields, 8192, bad.data(), 2, &range);
+		Check(violated.out == std::array<uint32_t, 5> {0, 0, 0, 0, 0} && violated.status.range_violation == 1 && violated.status.mismatch == 0 &&
+		          violated.status.overflow == 0 && violated.status.draws == 1,
+		      "an index at the exclusive end zeroes the draw and counts range_violation only");
+		const auto unchecked = PrepareArgsChecked(in, fields, 8192, bad.data(), 2, nullptr);
+		Check(unchecked.out[0] == 6 && unchecked.status.range_violation == 0, "no range: no check (draws without reuse)");
+		const auto mismatch = PrepareArgsChecked({7, 1, 0, 0, 0}, fields, 8192, bad.data(), 2, &range);
+		Check(mismatch.status.mismatch == 1 && mismatch.status.range_violation == 0, "a field mismatch is reported as a mismatch");
+		// the draw has fewer indices than the learned count: only those are checked
+		const auto shorter = PrepareArgsChecked({3, 1, 0, 0, 0}, {6, 0, 0, 0}, 8192, bad.data(), 2, &range);
+		Check(shorter.status.mismatch == 1, "index_count is a learned field: a shorter draw is a mismatch");
+	}
+	{
+		// A violation (read two flips later) forgets the range and sends the entry to the CPU read for 64 flips.
+		Entry entry;
+		Learn(entry, {192, 10, 0, 0, 0}, 192, 8192);
+		RecordRange(entry.range, {0x1000, 384, 2, 192, 0}, 5, 300);
+		Status violation;
+		violation.draws           = 1;
+		violation.range_violation = 1;
+		const auto effect         = OnStatus(entry, violation, 7000, 100000);
+		Check(effect.range_violation && effect.cooldown && !entry.range.known, "range violation: range forgotten, cooldown");
+		Check(Decide(entry, 7001) == Verdict::Cooldown && Decide(entry, 7000 + kCooldownFlips) == Verdict::Use, "the cooldown is the 64 flips of a mismatch");
+		Status clean;
+		clean.draws = 1;
+		RecordRange(entry.range, {0x1000, 384, 2, 192, 0}, 5, 300);
+		Check(!OnStatus(entry, clean, 7100, 100000).range_violation && entry.range.known, "a clean status keeps the range");
 	}
 
 	if (g_failures != 0) return 1;

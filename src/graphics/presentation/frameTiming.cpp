@@ -349,6 +349,12 @@ constexpr const char* kCounterNames[] = {
     "cp_wait_cause_stream_ns",
     "cp_wait_cause_desc_heap_ns",
     "cp_wait_cause_other_ns",
+    "pv_ind_range_reuse_n",
+    "pv_ind_range_miss_n",
+    "pv_ind_range_violation_n",
+    "pv_ind_range_eq_n",
+    "pv_ind_range_ne_n",
+    "pv_ind_range_ne_within_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

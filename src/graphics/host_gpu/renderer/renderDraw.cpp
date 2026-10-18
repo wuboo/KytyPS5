@@ -1511,6 +1511,7 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 	request.instanced_allowed  = PerVertexVsStoreInstanced();
 	const bool scannable = request.triangle_list && request.indexed && !primitive_restart_enable &&
 	                       (element_size == 2 || element_size == 4) && index_source.size != 0;
+	bool range_reused = false; // S413 (KYTY_PV_IND_RANGE=1)
 	if (scannable) {
 		const void* idx_bytes = index_source.host_data != nullptr
 		                            ? index_source.host_data
@@ -1546,7 +1547,30 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 		}
 		PerVertexRecordRange range;
 		bool                 known = false;
-		if (gen_mode == PvRangeGen::Mode::On && gen_outcome == PvRangeGen::Outcome::Hit) {
+		// S413 (KYTY_PV_IND_RANGE): an On draw whose indices the GPU wrote takes the vertex range remembered for its key and does not read them
+		// (the hash below drains the queue); the draws that hold the entry on the old path remember the range their scan finds.
+		const auto              range_mode = PvIndirect::EnvRangeMode();
+		PvIndirect::RangeEntry* range_entry = nullptr;
+		PvIndirect::RangeKey    range_key;
+		auto                    range_decision = PvIndirect::RangeDecision::NotApplicable;
+		if (range_mode != PvIndirect::RangeMode::Off && pv_indirect != nullptr && (pvi_on || pv_indirect->range_record) &&
+		    index_source.host_data == nullptr) {
+			range_entry = PvIndirectRangeEntry(pv_indirect->entry_id);
+			range_key   = {index_source.address, index_source.size, element_size, draw.index_count,
+			               static_cast<uint32_t>(emit.vertex_offset)};
+			if (range_entry != nullptr) {
+				const bool dirty =
+				    pvi_on && m_context.GetBufferCache().HasGpuDirtyBytes(index_source.address, index_source.size);
+				range_decision = PvIndirect::DecideRangeReuse(range_mode, pvi_on, dirty, *range_entry, range_key);
+			}
+		}
+		if (range_decision == PvIndirect::RangeDecision::Reuse) {
+			range        = {range_entry->range.first, range_entry->range.end, false};
+			known        = true;
+			range_reused = true;
+			FrameTiming::Add(FrameTiming::Counter::PvHashBytesSkipped, index_source.size);
+			FrameTiming::Add(FrameTiming::Counter::PvIndRangeReuseN);
+		} else if (gen_mode == PvRangeGen::Mode::On && gen_outcome == PvRangeGen::Outcome::Hit) {
 			range = {gen_entry->range.first, gen_entry->range.end, gen_entry->range.dropped};
 			known = gen_entry->derivable;
 			FrameTiming::Add(FrameTiming::Counter::PvHashBytesSkipped, index_source.size);
@@ -1592,6 +1616,34 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 					// The stamp was read before the bytes were hashed: a write in between only makes the entry miss later.
 					m_pv_range_gen.Insert(gen_key, {gen_probe.max_stamp, index_hash, known, current});
 				}
+			}
+		}
+		if (range_entry != nullptr && !range_reused) {
+			// S413: the CPU scan ran. shadow: against what is remembered; then remember it (an unusable scan forgets the entry's range).
+			if (range_decision == PvIndirect::RangeDecision::Miss) FrameTiming::Add(FrameTiming::Counter::PvIndRangeMissN);
+			const bool recordable = PvIndirect::RangeRecordable(known, range.dropped, range.first, range.end);
+			if (range_mode == PvIndirect::RangeMode::Shadow && recordable) {
+				const PvIndirect::Range scanned {range.first, range.end};
+				const auto              comparison = PvIndirect::CompareRange(*range_entry, range_key, scanned);
+				if (comparison == PvIndirect::RangeCompare::Equal) {
+					FrameTiming::Add(FrameTiming::Counter::PvIndRangeEqN);
+				} else if (comparison == PvIndirect::RangeCompare::NotEqual || comparison == PvIndirect::RangeCompare::NotEqualWithin) {
+					FrameTiming::Add(FrameTiming::Counter::PvIndRangeNeN);
+					if (comparison == PvIndirect::RangeCompare::NotEqualWithin) FrameTiming::Add(FrameTiming::Counter::PvIndRangeNeWithinN);
+					static std::atomic<uint32_t> ne_logged {0};
+					if (ne_logged.fetch_add(1, std::memory_order_relaxed) < 20) {
+						LOGF("[pv-ind-range-ne] flip=%" PRIu64 " addr=0x%" PRIx64 " index_addr=0x%" PRIx64 " index_count=%u entry=%" PRIu64 "..%" PRIu64
+						     " scan=%" PRIu64 "..%" PRIu64 " within=%d\n",
+						     FrameTiming::GuestFlips(), pv_indirect->args_addr, index_source.address, draw.index_count, range_entry->range.first,
+						     range_entry->range.end, scanned.first, scanned.end,
+						     comparison == PvIndirect::RangeCompare::NotEqualWithin ? 1 : 0);
+					}
+				}
+			}
+			if (recordable) {
+				PvIndirect::RecordRange(*range_entry, range_key, range.first, range.end);
+			} else {
+				range_entry->known = false;
 			}
 		}
 		request.range_known   = known;
@@ -1684,6 +1736,9 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 	setup.draw.vertex_offset = emit.vertex_offset;
 	setup.draw.index32       = element_size == 4;
 	setup.draw.records       = static_cast<uint32_t>(plan.records);
+	setup.range_reused       = range_reused;
+	setup.range_first        = request.range_first;
+	setup.range_end          = request.range_end;
 	if (pv_indirect != nullptr && pv_indirect->mode != PvIndirect::Mode::Off) {
 		// S408: the plan with cap instances is the plan of the prepared draw (mode On: `plan` is it); a shadow draw compares it with the real one.
 		auto cap_request           = request;
@@ -2005,7 +2060,23 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		EXIT_IF(pvi_args_buffer == nullptr);
 		auto& runtime = PvIndirectRt();
 		PvIndirectAdvance();
-		pvi_prepared = runtime.Reserve({pvi_args_buffer, pvi_args_offset, pvi->expected, pvi->cap, pvi->entry_id, FrameTiming::GuestFlips()});
+		PvIndirectRuntime::Job job {pvi_args_buffer, pvi_args_offset, pvi->expected, pvi->cap, pvi->entry_id, FrameTiming::GuestFlips()};
+		if (pvi_on && pv_store.range_reused) {
+			// S413: the prepare compute checks the draw's indices against the remembered range (the binding the VS-store reads).
+			const auto bind = PvVsStoreIndexDescriptorFor(index_binding.offset, pv_store.index_element_size,
+			                                              m_context.GetGraphics().StorageMinAlignment(), index_source.size,
+			                                              index_binding.size);
+			EXIT_IF(!bind.ok || index_binding.buffer == nullptr);
+			job.range_check  = true;
+			job.range        = {pv_store.range_first, pv_store.range_end};
+			job.index_buffer = index_binding.buffer;
+			job.index_offset = bind.offset;
+			job.index_range  = bind.range;
+			job.index_first  = bind.first_index;
+			job.index_count  = pvi->expected.index_count;
+			job.index32      = pv_store.index_element_size == 4;
+		}
+		pvi_prepared = runtime.Reserve(job);
 		if (!pvi_prepared.ok && pvi_on) {
 			pvi->declined = true;
 			pvi->why      = PvIndirect::Decline::Ring;
@@ -2285,7 +2356,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	emit.first_instance = native_indirect ? 0 : instance_offset;
 
 	ExecutePreparedDraw(submit_id, buffer, draw_to_run, state, topology, emit, index_source,
-	                    primitive_restart, pvi.mode != PvIndirect::Mode::Off ? &pvi : nullptr);
+	                    primitive_restart, (pvi.mode != PvIndirect::Mode::Off || pvi.range_record) ? &pvi : nullptr);
 	if (pvi.declined) {
 		// S408: the prepared draw was given up before anything of it was recorded: the caller reads the args and draws the old way.
 		using C = FrameTiming::Counter;

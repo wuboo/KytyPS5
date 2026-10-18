@@ -28,6 +28,7 @@ PvIndirectRuntime::PvIndirectRuntime(GraphicContext& graphics, CommandScheduler&
 	    {0, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute, nullptr},
 	    {1, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute, nullptr},
 	    {2, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute, nullptr},
+	    {3, vk::DescriptorType::eStorageBuffer, 1, vk::ShaderStageFlagBits::eCompute, nullptr},
 	};
 	vk::DescriptorSetLayoutCreateInfo layout_info {};
 	layout_info.flags        = vk::DescriptorSetLayoutCreateFlagBits::ePushDescriptorKHR;
@@ -99,7 +100,7 @@ void PvIndirectRuntime::AdvanceFlip(uint64_t flip, const Reporter& report) {
 					Report r;
 					r.entry_id = entry;
 					r.flip     = reported_flip;
-					r.status   = {words[0], words[1], words[2], words[3]};
+					r.status   = {words[0], words[1], words[2], words[3], words[14]};
 					r.last_in  = {words[4], words[5], words[6], words[7], words[8]};
 					for (uint32_t k = 0; k < 5; ++k) r.last_out[k] = words[9 + k];
 					if (report) report(r);
@@ -134,6 +135,17 @@ PvIndirectRuntime::Prepared PvIndirectRuntime::Reserve(const Job& job) {
 	prepared.infos[0]   = {job.args_buffer, aligned, in_bytes + sizeof(vk::DrawIndexedIndirectCommand)};
 	prepared.infos[1]   = {m_ring->Handle(), 0, m_ring->Size()};
 	prepared.infos[2]   = {m_status->Handle(), 0, m_status->Size()};
+	if (job.range_check) {
+		EXIT_IF(job.index_buffer == nullptr || job.index_range == 0);
+		prepared.push[8]  = static_cast<uint32_t>(job.range.first);
+		prepared.push[9]  = static_cast<uint32_t>(job.range.end);
+		prepared.push[10] = job.index_first;
+		prepared.push[11] = job.index_count;
+		prepared.push[12] = 1u | (job.index32 ? 2u : 0u);
+		prepared.infos[3] = {job.index_buffer, job.index_offset, job.index_range};
+	} else {
+		prepared.infos[3] = prepared.infos[0]; // a valid descriptor the shader does not read (flags bit 0 clear)
+	}
 	return prepared;
 }
 
@@ -142,7 +154,7 @@ void PvIndirectRuntime::Bind(vk::CommandBuffer command) {
 }
 
 void PvIndirectRuntime::Push(vk::CommandBuffer command, const Prepared& prepared) {
-	std::array<vk::WriteDescriptorSet, 3> writes {};
+	std::array<vk::WriteDescriptorSet, 4> writes {};
 	for (uint32_t index = 0; index < writes.size(); ++index) {
 		writes[index].dstBinding      = index;
 		writes[index].descriptorCount = 1;

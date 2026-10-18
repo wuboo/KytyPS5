@@ -128,6 +128,10 @@ struct PvVsStoreDrawSetup {
 	uint32_t                  index_element_size = 0;
 	PvVsStoreRuntime::Region  region;
 	PvVsStoreRuntime::GuardSlot guard; // KYTY_PV_VSSTORE_GUARD=1 only
+	// S413 (KYTY_PV_IND_RANGE=1): the draw took the remembered vertex range instead of reading its indices; the prepare compute checks them.
+	bool     range_reused = false;
+	uint64_t range_first  = 0;
+	uint64_t range_end    = 0;
 };
 
 } // namespace Libs::Graphics
