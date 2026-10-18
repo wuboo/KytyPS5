@@ -209,6 +209,12 @@ constexpr const char* kCounterNames[] = {
     "dcc_fallback_newer_write_n",
     "dcc_fallback_pending_download_n",
     "dcc_fallback_other_n",
+    "indirect_gpu_candidate_n",
+    "indirect_gpu_eligible_n",
+    "indirect_gpu_host_eligible_n",
+    "indirect_gpu_n",
+    "indirect_gpu_fallback_n",
+    "indirect_gpu_clamp_risk_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

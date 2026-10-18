@@ -192,6 +192,10 @@ enum class Counter : uint32_t {
 	SyncLambdaNs,            // sum over drains: the lambda
 	// S404: why a piece took the old path in PlanKnownFill (DccFillPublish::Why order), counted always.
 	DccFallbackNoFillN, DccFallbackPartialN, DccFallbackNewerWriteN, DccFallbackPendingN, DccFallbackOtherN,
+	// S404 (KYTY_INDIRECT_GPU=shadow|1): indexed indirect draws seen / qualified by the command processor / qualified by the executor too
+	// (shadow) / recorded as vkCmdDrawIndexedIndirect (1) / taken on the CPU although the mode was 1 / whose index count exceeded
+	// INDEX_BUFFER_SIZE (the CPU path clamps it, the GPU path cannot).
+	IndirectGpuCandidateN, IndirectGpuEligibleN, IndirectGpuHostEligibleN, IndirectGpuN, IndirectGpuFallbackN, IndirectGpuClampRiskN,
 	Count,
 };
 
