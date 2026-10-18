@@ -1,11 +1,15 @@
 // S406: purpose tags of the spec reads and the stale / superset shadow runs (specShadow.h) on a plan with a conditional block.
 // Mutants (each must fail): KYTY_SPECSHADOW_MUTANT_TAG_IGNORED (the purpose scope sets nothing), SHADOW_FRESH (the stale shadow is
 // taken from the fresh run), SUPERSET_READS_STALE (the superset reader does not fail a dirty condition read).
+// S408 (specCond.h, the production KYTY_SPEC_COND=superset reader): SPECCOND_MUTANT_SUPERSET_ALL_PURPOSES (a dirty slot read fails
+// too), SPECCOND_MUTANT_SUPERSET_CLEAN (a clean condition read fails too).
 
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+#include "graphics/shader/recompiler/ir/passes/specCond.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <cstdlib>
@@ -16,6 +20,7 @@ namespace {
 
 using namespace Libs::Graphics::ShaderRecompiler::IR;
 namespace SS = Libs::Graphics::ShaderRecompiler::IR::SpecShadow;
+namespace SC = Libs::Graphics::ShaderRecompiler::IR::SpecCond;
 
 void Check(bool value, const char* text) {
 	if (!value) {
@@ -195,6 +200,153 @@ void TestStaleEqualWhenBranchUnchanged() {
 	Check(verdict.StaleEqual() && verdict.super_ok, "same bytes: eq = 1");
 }
 
+// ---- S408: the production reader of KYTY_SPEC_COND ----
+SC::Mode g_cond_mode = SC::Mode::Off;
+bool     g_cond_miss = false;
+uint32_t g_read_calls = 0;
+
+bool CondBacking(uint64_t address, void* data, uint64_t size) {
+	if (Covers(address, size) && g_root[3] != kFreshBranch) {
+		g_drains++;
+		g_root[3] = kFreshBranch;
+	}
+	g_read_calls++;
+	std::memcpy(data, reinterpret_cast<const void*>(address), size);
+	return true;
+}
+const SC::Hooks kCondHooks {.dirty = TestDirty, .read = CondBacking};
+
+bool CondRead(void*, uint64_t address, std::span<uint32_t> out) {
+	return SC::Read(g_cond_mode, g_cond_miss, kCondHooks, address, out);
+}
+// What SrtReader::Apply installs in checked mode (ReadShaderGuestMemoryOrZero): a failed read becomes zeros and success.
+bool OrZeroRead(void*, uint64_t address, std::span<uint32_t> out) {
+	if (!CondRead(nullptr, address, out)) std::fill(out.begin(), out.end(), 0u);
+	return true;
+}
+
+void TestCondParse() {
+	Check(SC::ParseMode(nullptr) == SC::Mode::Off, "KYTY_SPEC_COND unset = 0");
+	Check(SC::ParseMode("0") == SC::Mode::Off, "0");
+	Check(SC::ParseMode("superset") == SC::Mode::Superset, "superset");
+	Check(SC::ParseMode("stale") == SC::Mode::Stale, "stale");
+	Check(SC::ParseMode("1") == SC::Mode::Off, "anything else = 0");
+	Check(SC::EnvMode() == SC::Mode::Off, "without the variable the mode is 0");
+	Check(SC::IsMissPath("miss") && !SC::IsMissPath("hit") && !SC::IsMissPath("refresh") && !SC::IsMissPath(nullptr), "miss path names");
+}
+
+// The reader fails (without reading, so without a drain) a condition read of GPU-dirty bytes on the hit / refresh path, and nothing else.
+void TestCondDecision() {
+	uint32_t word[1] = {0};
+	const auto read  = [&](SC::Mode mode, SS::Purpose purpose, bool dirty, bool miss, SC::Result& result) {
+		static bool s_dirty;
+		s_dirty = dirty;
+		const SC::Hooks hooks {.dirty = +[](uint64_t, uint64_t) { return s_dirty; }, .read = +[](uint64_t, void* data, uint64_t size) {
+			                       g_read_calls++;
+			                       std::memset(data, 0x5a, size);
+			                       return true;
+		                       }};
+		SS::PurposeScope scope(purpose);
+		g_read_calls = 0;
+		word[0]      = 0;
+		return SC::Read(mode, miss, hooks, 0x100000, word, &result);
+	};
+	SC::Result result;
+	Check(!read(SC::Mode::Superset, SS::Purpose::Cond, true, false, result) && result.fail && !result.skip_miss && g_read_calls == 0,
+	      "superset: dirty cond read on the hit path fails and reads nothing");
+	Check(read(SC::Mode::Superset, SS::Purpose::Cond, false, false, result) && !result.fail && g_read_calls == 1 && word[0] == 0x5a5a5a5au,
+	      "superset: a clean cond read is the old read");
+	for (const auto purpose: {SS::Purpose::Slot, SS::Purpose::Desc, SS::Purpose::Fill, SS::Purpose::Wg, SS::Purpose::Call, SS::Purpose::Other}) {
+		Check(read(SC::Mode::Superset, purpose, true, false, result) && !result.fail && g_read_calls == 1,
+		      "superset: a dirty read of any other purpose is the old read (it drains)");
+	}
+	Check(read(SC::Mode::Superset, SS::Purpose::Cond, true, true, result) && !result.fail && result.skip_miss && g_read_calls == 1,
+	      "superset: on the miss path the old read, counted as skipped");
+	Check(read(SC::Mode::Off, SS::Purpose::Cond, true, false, result) && !result.fail && !result.skip_miss && g_read_calls == 1,
+	      "mode 0: the old read");
+	Check(!read(SC::Mode::Superset, SS::Purpose::Cond, true, false, result), "(repeat) deterministic");
+}
+
+// The walker follows both sides of a condition whose read failed, and the failure is not turned into zeros on the way.
+void TestSupersetWalker() {
+	auto plan = MakePlan();
+
+	// Mode 0: the old reader drains once and takes the fresh edge.
+	g_root[3]    = kStaleBranch;
+	g_drains     = 0;
+	g_cond_mode  = SC::Mode::Off;
+	g_cond_miss  = false;
+	SS::Outcome off;
+	SS::Materialize(plan, Runtime(CondRead, nullptr), off);
+	Check(off.ok && g_drains == 1 && off.snapshot.flattened_srt[0] == 0u && off.snapshot.flattened_srt[1] == g_child[1],
+	      "mode 0 drains and follows the fresh edge only");
+
+	// Superset: no drain, both edges active (the sum of the two sides), also with the checked-mode read_memory installed.
+	for (const bool checked: {false, true}) {
+		g_root[3]   = kStaleBranch;
+		g_drains    = 0;
+		g_cond_mode = SC::Mode::Superset;
+		auto runtime = Runtime(CondRead, nullptr);
+		if (checked) runtime.read_memory = OrZeroRead;
+		SS::Outcome super;
+		SS::Materialize(plan, runtime, super);
+		Check(super.ok, "superset: materialization succeeds");
+		Check(g_drains == 0, "superset: the cond read did not drain");
+		Check(g_root[3] == kStaleBranch, "superset: memory untouched");
+		Check(super.snapshot.flattened_srt[0] == g_child[2] && super.snapshot.flattened_srt[1] == g_child[1],
+		      "superset: the true and the false edge are both followed (a zeroed read would pick one)");
+		Check(super.snapshot.flattened_srt == [&] {
+			g_root[3]   = kStaleBranch;
+			SS::ShadowReader reader {.mode = SS::ReadMode::Superset, .backing = TestBacking, .dirty = TestDirty};
+			SS::Outcome      shadow;
+			SS::Materialize(plan, Runtime(SS::ShadowRead, &reader), shadow);
+			return shadow.snapshot.flattened_srt;
+		}(), "superset: the production reader equals the S406 superset shadow");
+	}
+
+	// The miss path keeps the old read.
+	g_root[3]   = kStaleBranch;
+	g_drains    = 0;
+	g_cond_miss = true;
+	SS::Outcome miss;
+	SS::Materialize(plan, Runtime(CondRead, nullptr), miss);
+	Check(miss.ok && g_drains == 1 && miss.snapshot.flattened_srt[1] == g_child[1] && miss.snapshot.flattened_srt[0] == 0u,
+	      "superset on the miss path: drains and takes the fresh edge");
+	g_cond_miss = false;
+	g_cond_mode = SC::Mode::Off;
+}
+
+void TestExtraSources() {
+	using namespace Libs::Graphics::ShaderRecompiler::IR;
+	ResourcePlan plan;
+	plan.info.buffers.resize(2);
+	plan.info.buffers[0].source = 0;
+	plan.info.buffers[1].source = 1;
+	plan.info.buffers[1].written = true;
+	plan.info.images.resize(1);
+	plan.info.images[0].source = 2;
+	plan.info.samplers.resize(1);
+	plan.info.samplers[0].source = 3;
+	SS::Outcome superset, fresh;
+	superset.ok = fresh.ok = true;
+	superset.active = {1, 1, 1, 1};
+	fresh.active    = {1, 0, 0, 0};
+	superset.snapshot.buffers.resize(2);
+	superset.snapshot.buffers[0].dwords = {0x1000, 0, 0, 0};
+	superset.snapshot.buffers[1].dwords = {0x20, 0, 64, 0}; // below guest memory
+	superset.snapshot.images.resize(1);
+	superset.snapshot.images[0].dwords = {0x00ffffff, 0, 0, 0}; // 0x...ffffff00: not backed
+	superset.snapshot.samplers.resize(1);
+	const auto summary = SS::ClassifyExtra(plan, superset, fresh, +[](uint64_t address) { return address < 0x80000000ull; });
+	Check(summary.buffers == 1 && summary.images == 1 && summary.samplers == 1, "extra sources by kind: the fresh source is not extra");
+	Check(summary.written == 1, "extra written buffer counted");
+	Check(summary.bad_addr == 2, "bad addresses: the buffer below guest memory and the unbacked image");
+	Check(summary.list.size() == 3 && summary.list[0].kind == 'b' && summary.list[0].source == 1 && summary.list[0].bad, "list of extras");
+	const auto none = SS::ClassifyExtra(plan, fresh, fresh, nullptr);
+	Check(none.buffers + none.images + none.samplers == 0, "no extra sources when the run equals the fresh one");
+	Check(SS::DirtyNonCondAdded(5, 3) == 2 && SS::DirtyNonCondAdded(3, 5) == 0 && SS::DirtyNonCondAdded(4, 4) == 0, "dirty non-cond difference saturates");
+}
+
 } // namespace
 
 namespace Common {
@@ -218,6 +370,10 @@ int main() {
 	TestPurposeScopes();
 	TestShadowDecision();
 	TestStaleEqualWhenBranchUnchanged();
+	TestCondParse();
+	TestCondDecision();
+	TestSupersetWalker();
+	TestExtraSources();
 	std::fprintf(stderr, "SpecShadowTests: ok\n");
 	return 0;
 }

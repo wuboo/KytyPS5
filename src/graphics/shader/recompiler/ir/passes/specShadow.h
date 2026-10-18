@@ -93,7 +93,14 @@ struct ShadowReader {
 		for (const auto n: dirty_reads) sum += n;
 		return sum;
 	}
+	// S408: dirty reads for every purpose but the condition (they drain in the real superset mode too).
+	[[nodiscard]] uint32_t DirtyNonCond() const { return DirtyTotal() - dirty_reads[static_cast<size_t>(Purpose::Cond)]; }
 };
+
+// S408: dirty non-condition reads the superset run makes and the stale run does not (new drains in the blocks the superset adds).
+constexpr uint32_t DirtyNonCondAdded(uint32_t super_noncond, uint32_t stale_noncond) {
+	return super_noncond > stale_noncond ? super_noncond - stale_noncond : 0u;
+}
 
 // SrtMemoryReader for the shadow runtimes; `userdata` is a ShadowReader.
 inline bool ShadowRead(void* userdata, uint64_t address, std::span<uint32_t> values) {
@@ -202,6 +209,64 @@ inline Verdict Compare(const Outcome& stale, const Outcome& superset, const Outc
 		}
 	}
 	return verdict;
+}
+
+// ---- S408: what the sources added by the superset are ----
+// A source is "extra" when the superset run activates it and the fresh run does not. The kinds are the resources that use it.
+struct ExtraSource {
+	uint32_t source  = 0;
+	char     kind    = '?'; // b buffer, i image, s sampler
+	uint32_t index   = 0;   // resource index in plan.info
+	bool     written = false;
+	uint64_t address = 0;   // base of the V# / T# (0: null descriptor or a sampler)
+	bool     bad     = false; // not null, and below guest memory or not backed
+};
+struct ExtraSummary {
+	uint32_t                 buffers = 0, images = 0, samplers = 0, written = 0, bad_addr = 0;
+	std::vector<ExtraSource> list;
+};
+
+inline constexpr uint64_t kGuestMemoryMin = 0x40000;
+
+// `readable(address)`: the address is backed guest memory (may be null: then only the lower bound is checked).
+inline ExtraSummary ClassifyExtra(const ResourcePlan& plan, const Outcome& superset, const Outcome& fresh, bool (*readable)(uint64_t)) {
+	ExtraSummary summary;
+	if (!superset.ok) return summary;
+	const auto extra = [&](uint32_t source) {
+		const bool in_super = source < superset.active.size() && superset.active[source] != 0;
+		const bool in_fresh = source < fresh.active.size() ? fresh.active[source] != 0 : true;
+		return in_super && !in_fresh;
+	};
+	const auto bad_address = [&](uint64_t address) {
+		if (address == 0) return false;
+		return address < kGuestMemoryMin || (readable != nullptr && !readable(address));
+	};
+	const auto add = [&](ExtraSource item) {
+		item.bad = bad_address(item.address);
+		if (item.kind == 'b') summary.buffers++;
+		if (item.kind == 'i') summary.images++;
+		if (item.kind == 's') summary.samplers++;
+		if (item.written) summary.written++;
+		if (item.bad) summary.bad_addr++;
+		summary.list.push_back(item);
+	};
+	for (uint32_t i = 0; i < plan.info.buffers.size() && i < superset.snapshot.buffers.size(); i++) {
+		const auto& resource = plan.info.buffers[i];
+		if (!extra(resource.source)) continue;
+		const auto& dwords = superset.snapshot.buffers[i].dwords;
+		add({resource.source, 'b', i, resource.written, uint64_t {dwords[0]} | (uint64_t {dwords[1] & 0xffffu} << 32u), false});
+	}
+	for (uint32_t i = 0; i < plan.info.images.size() && i < superset.snapshot.images.size(); i++) {
+		const auto& resource = plan.info.images[i];
+		if (!extra(resource.source)) continue;
+		const auto& dwords = superset.snapshot.images[i].dwords;
+		add({resource.source, 'i', i, resource.written, ((uint64_t {dwords[0]} | (uint64_t {dwords[1]} << 32u)) & 0xffffffffffull) << 8u, false});
+	}
+	for (uint32_t i = 0; i < plan.info.samplers.size(); i++) {
+		if (!extra(plan.info.samplers[i].source)) continue;
+		add({plan.info.samplers[i].source, 's', i, false, 0, false});
+	}
+	return summary;
 }
 
 // First differing dword of the stale and the fresh outcome in `part`, for the log: index, stale word, fresh word.

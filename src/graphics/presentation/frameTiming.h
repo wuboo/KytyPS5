@@ -216,6 +216,15 @@ enum class Counter : uint32_t {
 	// ... draws that could not use the generation at all: host copy of the indices / range not registered in the tracker / range CPU- or
 	// GPU-modified (dirty) at the time of the draw. Hit + miss + these three = VS-store scans seen with the switch on.
 	PvGenIneligibleHostN, PvGenIneligibleUnregN, PvGenIneligibleDirtyN,
+	// S408 (KYTY_SPEC_COND=superset): condition reads of GPU-dirty bytes failed without a drain (the walker follows both sides) /
+	// ... that would have been failed but belong to a program being compiled (old read).
+	SpecCondSupersetN, SpecCondSupersetSkipMissN,
+	// S408 (KYTY_DIAG_SYNC=1, SPEC_COND=0): what the superset shadow adds over the fresh run. Permutation of the superset
+	// specialization is the one of the fresh run / the specialization is equal; sources active only in the superset by kind;
+	// ... of which the buffer is written by the shader / has an address outside guest memory; dirty reads of purposes other than cond
+	// that the superset run makes and the stale run does not (new drains in the added blocks).
+	SpecSuperPermSameN, SpecSuperSpecEqN, SpecSuperExtraBufferN, SpecSuperExtraImageN, SpecSuperExtraSamplerN,
+	SpecSuperExtraWrittenN, SpecSuperExtraBadAddrN, SpecSuperDirtyNoncondN,
 	Count,
 };
 
