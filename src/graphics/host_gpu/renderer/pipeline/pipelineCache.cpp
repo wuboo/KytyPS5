@@ -1037,10 +1037,27 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 		EXIT("KYTY_SPEC_COND=stale is not implemented (it needs the GPU-done verification of the stale bytes); use 0 or superset\n");
 	}
 	InitializeDriverCache();
+	// S433 (S440): KYTY_PIPELINE_SAVE_ASYNC=0|1 (default 0): fetch, hash and write the driver cache on a worker thread instead of the CP thread.
+	m_saver = std::make_unique<PipelineCacheSaver>(
+	    PipelineCacheSaver::ParseAsync(std::getenv("KYTY_PIPELINE_SAVE_ASYNC")),
+	    [this](uint64_t ns, uint64_t bytes, bool ok) {
+		    FrameTiming::Add(FrameTiming::Counter::PipelineSaveNs, ns);
+		    if (ok) {
+			    FrameTiming::Add(FrameTiming::Counter::PipelineSaveN);
+			    FrameTiming::Add(FrameTiming::Counter::PipelineSaveBytes, bytes);
+			    PipelineCacheLog("Vulkan pipeline cache: saved {:.2f} MB ({:.1f} ms)",
+			                     static_cast<double>(bytes) / 1'000'000.0, static_cast<double>(ns) / 1e6);
+		    } else {
+			    FrameTiming::Add(FrameTiming::Counter::PipelineSaveFailN);
+			    m_driver_cache_dirty = true;
+		    }
+	    });
+	PipelineCacheLog("Vulkan pipeline cache: save {}", m_saver->Async() ? "async (worker thread)" : "inline (CP thread)");
 }
 
 PipelineCache::~PipelineCache() {
 	Save();
+	m_saver->Flush(); // the worker reads m_driver_cache: nothing may run past this point
 	auto destroy = [this](const auto& pipelines) {
 		for (const auto& [key, pipeline]: pipelines) {
 			(void)key;
@@ -1146,64 +1163,42 @@ void PipelineCache::Save() {
 		return;
 	}
 	m_next_driver_cache_save = std::chrono::steady_clock::now() + DriverCacheSaveInterval;
-
-	size_t               size = 0;
-	vk::Result           result;
-	std::vector<uint8_t> payload;
-	for (uint32_t attempt = 0; attempt < 3; attempt++) {
-		size   = 0;
-		result = m_graphics.device.getPipelineCacheData(m_driver_cache, &size, nullptr);
-		if (result != vk::Result::eSuccess || size == 0 || size > 256 * 1024 * 1024) {
-			break;
-		}
-		payload.resize(size);
-		result = m_graphics.device.getPipelineCacheData(m_driver_cache, &size, payload.data());
-		if (result != vk::Result::eIncomplete) {
-			break;
-		}
-	}
-	if (result != vk::Result::eSuccess || size == 0 || size > 256 * 1024 * 1024) {
-		PipelineCacheLog("Vulkan pipeline cache: save failed ({}, {:.2f} MB)",
-		                 vk::to_string(result), static_cast<double>(size) / 1'000'000.0);
-		return;
-	}
-	payload.resize(size);
-	auto       prefix       = DriverCacheSignature(m_graphics.GetPhysicalDeviceProperties());
-	const auto payload_hash = XXH3_64bits(payload.data(), payload.size());
-	prefix.append(reinterpret_cast<const char*>(&payload_hash), sizeof(payload_hash));
-	if (!Common::File::CreateDirectories(m_driver_cache_path.parent_path())) {
-		PipelineCacheLog("Vulkan pipeline cache: failed to create cache directory");
-		return;
-	}
-	static std::atomic<uint64_t> s_save_counter = 0;
-	const auto                   temp_path      = std::filesystem::path(
-	    m_driver_cache_path.string() +
-	    fmt::format(".tmp.{}.{}", Common::Thread::GetProcessId(), s_save_counter++));
-	Common::File file;
-	uint32_t     prefix_written  = 0;
-	uint32_t     payload_written = 0;
-	if (file.Create(temp_path)) {
-		file.Write(prefix.data(), static_cast<uint32_t>(prefix.size()), &prefix_written);
-		file.Write(payload.data(), static_cast<uint32_t>(payload.size()), &payload_written);
-	}
-	const bool flushed = !file.IsInvalid() && file.Flush();
-	file.Close();
-	const bool written = prefix_written == prefix.size() && payload_written == payload.size() && flushed;
-	std::error_code error;
-	if (written) {
-		std::filesystem::rename(temp_path, m_driver_cache_path, error);
-	}
-	if (!written || error) {
-		PipelineCacheLog("Vulkan pipeline cache: failed to write {}",
-		                 Common::PathToString(m_driver_cache_path));
-		std::error_code remove_error;
-		std::filesystem::remove(temp_path, remove_error);
-		return;
-	}
-	PipelineCacheLog("Vulkan pipeline cache: saved {:.2f} MB to {}",
-	                 static_cast<double>(payload.size()) / 1'000'000.0,
-	                 Common::PathToString(m_driver_cache_path));
+	// S433: the dirty flag is cleared when the job is handed over, so a pipeline created while the job runs sets it again; a failed job sets it back.
 	m_driver_cache_dirty = false;
+
+	const auto cp_begin  = std::chrono::steady_clock::now();
+	auto       signature = DriverCacheSignature(m_graphics.GetPhysicalDeviceProperties());
+	m_saver->Request(m_driver_cache_path,
+	                 [device = m_graphics.device, cache = m_driver_cache, signature = std::move(signature)](std::string& prefix, std::vector<uint8_t>& payload) {
+		                 size_t     size = 0;
+		                 vk::Result result;
+		                 for (uint32_t attempt = 0; attempt < 3; attempt++) {
+			                 size   = 0;
+			                 result = device.getPipelineCacheData(cache, &size, nullptr);
+			                 if (result != vk::Result::eSuccess || size == 0 || size > 256 * 1024 * 1024) {
+				                 break;
+			                 }
+			                 payload.resize(size);
+			                 result = device.getPipelineCacheData(cache, &size, payload.data());
+			                 if (result != vk::Result::eIncomplete) {
+				                 break;
+			                 }
+		                 }
+		                 if (result != vk::Result::eSuccess || size == 0 || size > 256 * 1024 * 1024) {
+			                 PipelineCacheLog("Vulkan pipeline cache: save failed ({}, {:.2f} MB)",
+			                                  vk::to_string(result), static_cast<double>(size) / 1'000'000.0);
+			                 return false;
+		                 }
+		                 payload.resize(size);
+		                 prefix                  = signature;
+		                 const auto payload_hash = XXH3_64bits(payload.data(), payload.size());
+		                 prefix.append(reinterpret_cast<const char*>(&payload_hash), sizeof(payload_hash));
+		                 return true;
+	                 });
+	FrameTiming::Add(FrameTiming::Counter::PipelineSaveCpNs,
+	                 static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                                           std::chrono::steady_clock::now() - cp_begin)
+	                                           .count()));
 }
 
 PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(

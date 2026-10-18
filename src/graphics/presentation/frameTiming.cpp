@@ -418,6 +418,11 @@ constexpr const char* kCounterNames[] = {
     "pv_layout_ne_n",
     "pv_validate_skipped_n",
     "pv_validate_ne_n",
+    "pipeline_save_n",
+    "pipeline_save_ns",
+    "pipeline_save_bytes",
+    "pipeline_save_fail_n",
+    "pipeline_save_cp_ns",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
