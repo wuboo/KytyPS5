@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cinttypes>
+#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <utility>
@@ -451,6 +452,12 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 
 		if (census) {
+			if (site == SyncCensus::Site::Spec) {
+				probe.write_seq = m_sync_seq.MaxTick(vaddr, size);
+				auto& last      = m_spec_last_seq[vaddr * 1000003ull ^ size];
+				probe.written_since = last != probe.write_seq;
+				last                = probe.write_seq;
+			}
 			probe.writer  = m_sync_ticks.MaxTick(vaddr, size);
 			probe.current = m_scheduler.CurrentTick();
 			m_scheduler.GetMasterSemaphore().Refresh();
@@ -543,10 +550,16 @@ void BufferCache::LogSyncReadback(SyncCensus::Site site, uint64_t vaddr, uint64_
 	const auto commands = FrameTiming::Get(FrameTiming::Counter::Draws) +
 	                      FrameTiming::Get(FrameTiming::Counter::Dispatches) -
 	                      SyncCensus::CommandsAtSubmit().load(std::memory_order_relaxed);
+	char reader[96] = "";
+	if (site == SyncCensus::Site::Spec) {
+		const auto& tag = SyncCensus::CurrentReaderRef();
+		std::snprintf(reader, sizeof(reader), " reader=%016" PRIx64 "/%s wseq=%" PRIu64 " wsince=%d", tag.hash, tag.stage,
+		              probe.write_seq, probe.written_since ? 1 : 0);
+	}
 	LOGF("[sync] flip=%" PRIu64 " site=%s addr=0x%016" PRIx64 " size=0x%" PRIx64 " wait_us=%" PRIu64
 	     " dl=%d lag=%" PRIu64 " done=%d eager=%d cmds_since_submit=%" PRIu64 "%s\n",
 	     flip, SyncCensus::SiteName(site), vaddr, size, wait_ns / 1000, probe.downloaded ? 1 : 0,
-	     SyncCensus::Lag(probe.current, probe.writer), probe.done ? 1 : 0, eager ? 1 : 0, commands);
+	     SyncCensus::Lag(probe.current, probe.writer), probe.done ? 1 : 0, eager ? 1 : 0, commands, reader);
 }
 
 namespace {
@@ -948,6 +961,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		}
 		if (SyncCensus::Enabled()) {
 			m_sync_ticks.Note(vaddr, size, m_scheduler.CurrentTick());
+			m_sync_seq.Note(vaddr, size, ++m_sync_seq_next);
 		}
 	}
 	return {&buffer, buffer.Offset(vaddr)};

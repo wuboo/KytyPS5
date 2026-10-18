@@ -74,6 +74,27 @@ private:
 	Site m_previous;
 };
 
+// S402: the shader program being specialized on this thread (hash + stage name), set by PipelineCache around Get(); the
+// readbacks tagged Site::Spec log it, so the reader of the spec drain is named.
+struct Reader {
+	uint64_t    hash  = 0;
+	const char* stage = "?";
+};
+inline Reader& CurrentReaderRef() {
+	static thread_local Reader reader;
+	return reader;
+}
+class ReaderScope {
+public:
+	ReaderScope(uint64_t hash, const char* stage): m_previous(CurrentReaderRef()) { CurrentReaderRef() = Reader {hash, stage}; }
+	~ReaderScope() { CurrentReaderRef() = m_previous; }
+	ReaderScope(const ReaderScope&)            = delete;
+	ReaderScope& operator=(const ReaderScope&) = delete;
+
+private:
+	Reader m_previous;
+};
+
 // Last tick (the command buffer being recorded) at which each 4 KiB page was marked GPU-written.
 class TickPages {
 public:
@@ -138,6 +159,8 @@ struct Probe {
 	bool     done       = false;
 	bool     repeat     = false;
 	bool     same       = false;
+	uint64_t write_seq     = 0;     // S402 (spec): newest write sequence number over the range (0 = none seen)
+	bool     written_since = false; // S402 (spec): the range was written since the previous spec read of it
 };
 
 // draws + dispatches recorded when the last command buffer was submitted (for the [sync] log).
