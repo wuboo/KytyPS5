@@ -1,6 +1,6 @@
 // S408: KYTY_PV_INDIRECT (pvIndirect.h): the prepared args, the entry life cycle, the cap limit and the order of the recorded commands.
 // Mutants (each must fail): CLAMP_OFF (the instance count is not clamped to cap), IGNORE_FIELDS (a draw whose fields differ is not
-// zeroed), RANGE_REUSE_IGNORES_KEY (S413: a remembered range is reused for another index_count), RANGECHECK_OFF_BY_ONE (S413: the end of the
+// zeroed), RANGE_REUSE_IGNORES_KEY (S413: a remembered range is reused for another index_count), REUSE_IGNORES_PAGE (S417: a protected page with clean bytes does not count as dirty), RANGECHECK_OFF_BY_ONE (S413: the end of the
 // range is inclusive), NO_COOLDOWN (a mismatch does not send the entry back to the CPU read), CAP_NO_GROW (an overflow does not grow cap).
 
 #include "graphics/host_gpu/renderer/pvIndirect.h"
@@ -235,6 +235,17 @@ int main() {
 		clean.draws = 1;
 		RecordRange(entry.range, {0x1000, 384, 2, 192, 0}, 5, 300);
 		Check(!OnStatus(entry, clean, 7100, 100000).range_violation && entry.range.known, "a clean status keeps the range");
+	}
+
+	{
+		// S417: the reuse gate follows the fault, not only the bytes.
+		Check(RangeReuseDirty(true, false) && RangeReuseDirty(false, true) && RangeReuseDirty(true, true), "bytes or page dirty: reuse gate open");
+		Check(!RangeReuseDirty(false, false), "clean bytes on a clean page: the gate stays closed");
+		RangeEntry entry;
+		const RangeKey key {0x1000, 384, 2, 192, 0};
+		RecordRange(entry, key, 5, 300);
+		const bool dirty = RangeReuseDirty(/*bytes*/ false, /*page*/ true);
+		Check(DecideRangeReuse(RangeMode::On, true, dirty, entry, key) == RangeDecision::Reuse, "clean bytes on a GPU-owned page: the range is reused");
 	}
 
 	if (g_failures != 0) return 1;

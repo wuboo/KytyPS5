@@ -1560,8 +1560,10 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 			range_key   = {index_source.address, index_source.size, element_size, draw.index_count,
 			               static_cast<uint32_t>(emit.vertex_offset)};
 			if (range_entry != nullptr) {
-				const bool dirty =
-				    pvi_on && m_context.GetBufferCache().HasGpuDirtyBytes(index_source.address, index_source.size);
+				// S417: bytes the GPU wrote OR a page of the range the GPU owns (the read would fault although the bytes are clean).
+				const bool dirty = pvi_on && PvIndirect::RangeReuseDirty(
+				                                 m_context.GetBufferCache().HasGpuDirtyBytes(index_source.address, index_source.size),
+				                                 m_context.GetBufferCache().IsRegionGpuModified(index_source.address, index_source.size));
 				range_decision = PvIndirect::DecideRangeReuse(range_mode, pvi_on, dirty, *range_entry, range_key);
 			}
 		}

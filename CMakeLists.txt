@@ -727,7 +727,7 @@ endforeach()
 # no cooldown after a mismatch, no cap growth after an overflow.
 add_executable(pv_indirect_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PvIndirectTests.cpp")
 target_include_directories(pv_indirect_tests PRIVATE ${inc_headers})
-foreach(mutant IN ITEMS CLAMP_OFF IGNORE_FIELDS NO_COOLDOWN CAP_NO_GROW RANGE_REUSE_IGNORES_KEY RANGECHECK_OFF_BY_ONE)
+foreach(mutant IN ITEMS CLAMP_OFF IGNORE_FIELDS NO_COOLDOWN CAP_NO_GROW RANGE_REUSE_IGNORES_KEY RANGECHECK_OFF_BY_ONE REUSE_IGNORES_PAGE)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(pv_indirect_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PvIndirectTests.cpp")
 	target_include_directories(pv_indirect_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
@@ -1388,7 +1388,7 @@ if(BUILD_TESTING)
 		set_tests_properties(memory_tracker_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
 	add_test(NAME pv_indirect COMMAND $<TARGET_FILE:pv_indirect_tests>)
-	foreach(mutant IN ITEMS clamp_off ignore_fields no_cooldown cap_no_grow range_reuse_ignores_key rangecheck_off_by_one)
+	foreach(mutant IN ITEMS clamp_off ignore_fields no_cooldown cap_no_grow range_reuse_ignores_key rangecheck_off_by_one reuse_ignores_page)
 		add_test(NAME pv_indirect_mutant_${mutant} COMMAND $<TARGET_FILE:pv_indirect_mutant_${mutant}_tests>)
 		set_tests_properties(pv_indirect_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
@@ -1616,6 +1616,7 @@ if(BUILD_TESTING)
 		pv_indirect_mutant_cap_no_grow_tests
 		pv_indirect_mutant_range_reuse_ignores_key_tests
 		pv_indirect_mutant_rangecheck_off_by_one_tests
+		pv_indirect_mutant_reuse_ignores_page_tests
 		pv_range_gen_tests
 		pv_range_gen_mutant_ignore_stamp_tests
 		pv_range_gen_mutant_default_off_tests
