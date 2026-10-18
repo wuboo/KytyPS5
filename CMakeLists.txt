@@ -1997,6 +1997,29 @@ foreach(mutant IN ITEMS NO_GATE)
 	endif()
 endforeach()
 
+# S430: KYTY_SPEC_READ_FAST page cache of the strict shader reader (pure CPU, real GpuDirtyRanges / InflightRanges). Mutants (WILL_FAIL):
+# FAST_IGNORES_DIRTY, FAST_NO_INVALIDATE_ON_WRITE, NO_INFLIGHT_INVALIDATE, NO_MAP_SEQ, CACHE_BYTES, CROSS_PAGE.
+add_executable(spec_page_cache_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SpecPageCacheTests.cpp")
+target_link_libraries(spec_page_cache_tests common fmt::fmt)
+target_include_directories(spec_page_cache_tests PRIVATE ${inc_headers})
+if(BUILD_TESTING)
+	add_test(NAME spec_page_cache COMMAND $<TARGET_FILE:spec_page_cache_tests>)
+	set_tests_properties(spec_page_cache PROPERTIES TIMEOUT 30)
+	add_dependencies(kyty_tests spec_page_cache_tests)
+endif()
+foreach(mutant IN ITEMS FAST_IGNORES_DIRTY FAST_NO_INVALIDATE_ON_WRITE NO_INFLIGHT_INVALIDATE NO_MAP_SEQ CACHE_BYTES CROSS_PAGE)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(spec_page_cache_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SpecPageCacheTests.cpp")
+	target_link_libraries(spec_page_cache_mutant_${mutant_lower}_tests common fmt::fmt)
+	target_include_directories(spec_page_cache_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(spec_page_cache_mutant_${mutant_lower}_tests PRIVATE KYTY_SPECFAST_MUTANT_${mutant}=1)
+	if(BUILD_TESTING)
+		add_test(NAME spec_page_cache_mutant_${mutant_lower} COMMAND $<TARGET_FILE:spec_page_cache_mutant_${mutant_lower}_tests>)
+		set_tests_properties(spec_page_cache_mutant_${mutant_lower} PROPERTIES TIMEOUT 30 WILL_FAIL TRUE)
+		add_dependencies(kyty_tests spec_page_cache_mutant_${mutant_lower}_tests)
+	endif()
+endforeach()
+
 # S426: KYTY_GF_EMULATE, the guest read fault emulator (real SIGSEGVs on a PROT_NONE page). Mutants (WILL_FAIL): EMU_IGNORES_DIRTY, EMU_WRONG_RIP, S427: VEX_NO_ZERO_UPPER, VEX_IGNORE_VVVV.
 if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 		(NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")))

@@ -299,6 +299,9 @@ enum class Counter : uint32_t {
 	EopIrqDeferredN, EopIrqCoalescedN, EopCoalesceWouldN,
 	// S430 DIAG (only with KYTY_DIAG_CP_SAMPLE / KYTY_DIAG_CP_PHASES): SrtWalker::RefreshFlatBuffer paths (srtWalkPaths.h) and strict spec reads
 	// (ReadShaderGuestMemory calls / of those spanning a 4 KiB page).
+	// S430 (KYTY_SPEC_READ_FAST=1|shadow): strict reads served from a remembered quiet page / that had to ask (and maybe drain); shadow: hits whose range
+	// is GPU-dirty or in flight now (stale, must be 0) / reads whose ok or bytes differ from the full read (mismatch, must be 0).
+	SpecFastHitN, SpecFastMissN, SpecFastStaleN, SpecFastMismatchN,
 	SrtWalkTreeN, SrtWalkTreeFailN, SrtWalkCaptureN, SrtWalkSlotJitN, SrtWalkInterpN, SrtInterpSlotsN, SpecReadN, SpecReadXpageN,
 	Count,
 };
