@@ -1957,6 +1957,26 @@ if(BUILD_TESTING)
 	endforeach()
 endif()
 
+# S429: KYTY_EOP_COALESCE tracker (pure CPU). Mutants (WILL_FAIL): COALESCE_ACROSS_TICKS, DROP_CONTEXT.
+add_executable(eop_coalesce_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/EopCoalesceTests.cpp")
+target_include_directories(eop_coalesce_tests PRIVATE ${inc_headers})
+if(BUILD_TESTING)
+	add_test(NAME eop_coalesce COMMAND $<TARGET_FILE:eop_coalesce_tests>)
+	set_tests_properties(eop_coalesce PROPERTIES TIMEOUT 30)
+	add_dependencies(kyty_tests eop_coalesce_tests)
+endif()
+foreach(mutant IN ITEMS COALESCE_ACROSS_TICKS DROP_CONTEXT)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(eop_coalesce_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/EopCoalesceTests.cpp")
+	target_include_directories(eop_coalesce_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(eop_coalesce_mutant_${mutant_lower}_tests PRIVATE KYTY_EOPCOALESCE_MUTANT_${mutant}=1)
+	if(BUILD_TESTING)
+		add_test(NAME eop_coalesce_mutant_${mutant_lower} COMMAND $<TARGET_FILE:eop_coalesce_mutant_${mutant_lower}_tests>)
+		set_tests_properties(eop_coalesce_mutant_${mutant_lower} PROPERTIES TIMEOUT 30 WILL_FAIL TRUE)
+		add_dependencies(kyty_tests eop_coalesce_mutant_${mutant_lower}_tests)
+	endif()
+endforeach()
+
 # S426: KYTY_GF_EMULATE, the guest read fault emulator (real SIGSEGVs on a PROT_NONE page). Mutants (WILL_FAIL): EMU_IGNORES_DIRTY, EMU_WRONG_RIP, S427: VEX_NO_ZERO_UPPER, VEX_IGNORE_VVVV.
 if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 		(NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")))

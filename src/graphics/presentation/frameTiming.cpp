@@ -399,6 +399,9 @@ constexpr const char* kCounterNames[] = {
     "gf_emu_fb_form_n",
     "gf_emu_fb_lockbusy_n",
     "gf_emu_page_max",
+    "eop_irq_deferred_n",
+    "eop_irq_coalesced_n",
+    "eop_coalesce_would_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

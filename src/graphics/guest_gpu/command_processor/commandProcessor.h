@@ -2,6 +2,7 @@
 #define GRAPHICS_GUEST_GPU_COMMAND_PROCESSOR_COMMAND_PROCESSOR_H
 
 #include "common/assert.h"
+#include "graphics/guest_gpu/command_processor/eopCoalesce.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -184,6 +185,7 @@ private:
 	uint32_t m_const_ram[0x3000] = {0};
 
 	FlipInfo  m_flip;
+	EopCoalesce::Tracker m_eop_tracker; // S429
 	const int m_interrupt_event_id;
 	uint64_t  m_submit_id                   = 0;
 	uint64_t  m_synthetic_occlusion_counter = 0;

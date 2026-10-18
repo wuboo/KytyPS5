@@ -294,6 +294,9 @@ enum class Counter : uint32_t {
 	// any other form / address the decoder refuses, the buffer cache lock held by the command processor; and the most emulated loads on one 4 KiB
 	// page in one flip so far (a running maximum).
 	GfEmuFbDirtyN, GfEmuFbInflightN, GfEmuFbVexN, GfEmuFbFormN, GfEmuFbLockbusyN, GfEmuPageMax,
+	// S429 (KYTY_EOP_COALESCE=0|1|shadow): EOP interrupts deferred as priority operations / dropped because the same (event, context) was already deferred in
+	// the tick; shadow: how many would have been dropped.
+	EopIrqDeferredN, EopIrqCoalescedN, EopCoalesceWouldN,
 	Count,
 };
 
