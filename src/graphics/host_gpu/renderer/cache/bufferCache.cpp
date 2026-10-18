@@ -409,6 +409,8 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	FrameTiming::Add(FrameTiming::Counter::Readbacks);
 	const bool census = SyncCensus::Enabled();
 	const auto site   = census ? SyncCensus::CurrentSite() : SyncCensus::Site::Other;
+	// KYTY_DCC_EAGER: the requesting thread's tag says whether this is a DCC metadata read (the GPU-thread lambda below has its own).
+	const bool eager_dcc = EagerPages::EagerEnv() && SyncCensus::CurrentSite() == SyncCensus::Site::Dcc;
 	const auto wait_begin = std::chrono::steady_clock::now();
 	const auto add_wait   = [&] {
 		const auto ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
@@ -421,8 +423,11 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		}
 		return ns;
 	};
-	if (!is_write && WaitEagerReadback(vaddr, size)) {
+	if (!is_write && WaitEagerReadback(vaddr, size, eager_dcc)) {
 		FrameTiming::Add(FrameTiming::Counter::ReadbackEagerHits);
+		if (eager_dcc) {
+			FrameTiming::Add(FrameTiming::Counter::DccEagerHitN);
+		}
 		if (census) {
 			FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncEagerHitDccN, site));
 		}
@@ -434,11 +439,11 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	}
 	bool       downloaded = true;
 	SyncCensus::Probe  probe;
-	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, &downloaded, &probe, census, site] {
+	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, &downloaded, &probe, census, site, eager_dcc] {
 		// A download already queued for this page must land before this one decides anything.
-		(void)WaitEagerReadback(vaddr, size);
+		(void)WaitEagerReadback(vaddr, size, eager_dcc);
 		if (!is_write) {
-			NoteReadbackFault(vaddr);
+			NoteReadbackFault(vaddr, size, eager_dcc);
 		}
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
@@ -501,6 +506,9 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		}
 	});
 	const auto ns = add_wait();
+	if (eager_dcc) {
+		FrameTiming::Add(FrameTiming::Counter::DccEagerMissN);
+	}
 	if (census) {
 		if (probe.downloaded) {
 			const auto lag = SyncCensus::Lag(probe.current, probe.writer);
@@ -536,7 +544,7 @@ void BufferCache::LogSyncReadback(SyncCensus::Site site, uint64_t vaddr, uint64_
 	                      FrameTiming::Get(FrameTiming::Counter::Dispatches) -
 	                      SyncCensus::CommandsAtSubmit().load(std::memory_order_relaxed);
 	LOGF("[sync] flip=%" PRIu64 " site=%s addr=0x%016" PRIx64 " size=0x%" PRIx64 " wait_us=%" PRIu64
-	     " dl=%d lag=%" PRIu64 " done=%d eager=%d cmds_since_submit=%" PRIu64 "\n",
+	     " dl=%d lag=%" PRIu64 " done=%d eager=%d cmds_since_submit=%" PRIu64 "%s\n",
 	     flip, SyncCensus::SiteName(site), vaddr, size, wait_ns / 1000, probe.downloaded ? 1 : 0,
 	     SyncCensus::Lag(probe.current, probe.writer), probe.done ? 1 : 0, eager ? 1 : 0, commands);
 }
@@ -548,19 +556,28 @@ bool EagerReadbackEnabled() {
 }
 constexpr uint32_t EagerHotFaults = 4;   // faults on one tracker page before it counts as hot
 constexpr size_t   EagerMaxPages  = 256; // hot pages tracked at most
+constexpr size_t   EagerMaxPagesDcc = 1024; // ... with KYTY_DCC_EAGER=1 (DCC metadata ranges are 2..72 pages)
 } // namespace
 
-void BufferCache::NoteReadbackFault(uint64_t vaddr) {
+void BufferCache::NoteReadbackFault(uint64_t vaddr, uint64_t size, bool dcc) {
 	if (!EagerReadbackEnabled()) {
 		return;
 	}
-	const auto page = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
-	if (++m_readback_fault_counts[page] < EagerHotFaults) {
-		return;
-	}
-	std::lock_guard lock(m_eager_mutex);
-	if (m_eager_pages.size() < EagerMaxPages) {
-		m_eager_pages.try_emplace(page);
+	// A DCC metadata read counts every page of its range; any other fault only the first (a range read is one fault).
+	const auto first = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+	const auto last  = dcc && size != 0 ? Common::AlignDown(vaddr + size - 1, TRACKER_PAGE_SIZE) : first;
+	const auto limit = EagerPages::EagerEnv() ? EagerMaxPagesDcc : EagerMaxPages;
+	for (auto page = first; page <= last; page += TRACKER_PAGE_SIZE) {
+		if (++m_readback_fault_counts[page] < EagerHotFaults) {
+			continue;
+		}
+		std::lock_guard lock(m_eager_mutex);
+		if (m_eager_pages.size() < limit) {
+			m_eager_pages.try_emplace(page);
+			if (dcc) {
+				FrameTiming::Set(FrameTiming::Counter::EagerPagesN, m_eager_pages.size());
+			}
+		}
 	}
 }
 
@@ -592,15 +609,33 @@ void BufferCache::FlushEagerReadbacks() {
 		return;
 	}
 	const auto tick = m_scheduler.CurrentTick();
-	for (const auto page: m_eager_pending) {
-		if (!m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE)) {
+	// A run is one page, or with KYTY_DCC_EAGER=1 the adjacent pending pages (one copy instead of one barrier per page).
+	std::vector<EagerPages::Run> runs;
+	if (EagerPages::EagerEnv()) {
+		runs = EagerPages::MergePages(m_eager_pending, TRACKER_PAGE_SIZE);
+	} else {
+		for (const auto page: m_eager_pending) {
+			runs.push_back({page, page + TRACKER_PAGE_SIZE});
+		}
+	}
+	for (const auto& run: runs) {
+		const auto run_size = run.end - run.begin;
+		if (!m_gpu_modified_ranges.Intersects(run.begin, run_size)) {
 			continue;
 		}
-		// Download every GPU-written range of the page, owner by owner, as ReadMemory does.
-		for (int guard = 0; guard < 8 && m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE);
+		// Pages that carried no GPU write get no download entry (a page the synchronous path cleaned meanwhile).
+		std::vector<uint64_t> dirty_pages;
+		for (auto page = run.begin; page < run.end; page += TRACKER_PAGE_SIZE) {
+			if (m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE)) {
+				dirty_pages.push_back(page);
+			}
+		}
+		// Download every GPU-written range of the run, owner by owner, as ReadMemory does.
+		const int guards = std::max<int>(8, static_cast<int>(run_size / TRACKER_PAGE_SIZE));
+		for (int guard = 0; guard < guards && m_gpu_modified_ranges.Intersects(run.begin, run_size);
 		     guard++) {
 			uint64_t first = 0;
-			m_gpu_modified_ranges.ForEachInRange(page, TRACKER_PAGE_SIZE,
+			m_gpu_modified_ranges.ForEachInRange(run.begin, run_size,
 			                                     [&](uint64_t start, uint64_t) {
 				                                     if (first == 0) {
 					                                     first = start;
@@ -610,46 +645,48 @@ void BufferCache::FlushEagerReadbacks() {
 				break;
 			}
 			auto&      buffer = m_slot_buffers[FindBuffer(first, 1)];
-			const auto begin  = std::max(page, buffer.CpuAddress());
-			const auto end = std::min(page + TRACKER_PAGE_SIZE, buffer.CpuAddress() + buffer.Size());
+			const auto begin  = std::max(run.begin, buffer.CpuAddress());
+			const auto end = std::min(run.end, buffer.CpuAddress() + buffer.Size());
 			if (!DownloadBufferMemory<true>(buffer, begin, end - begin)) {
 				break;
 			}
 		}
-		if (m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE)) {
-			continue; // left to the synchronous path
-		}
-		uint64_t seq = 0;
-		{
-			std::lock_guard lock(m_eager_mutex);
-			auto&           entry = m_eager_pages[page];
-			entry.tick            = tick;
-			seq                   = entry.seq;
-		}
-		FrameTiming::Add(FrameTiming::Counter::ReadbackEagerDownloads);
-		// Queued after DownloadBufferMemory's own publication, so the bytes are in place.
-		m_scheduler.DeferPriorityOperation([this, page, tick, seq] {
-			std::lock_guard lock(m_eager_mutex);
-			auto&           entry = m_eager_pages[page];
-			if (entry.tick != tick) {
-				return;
+		for (const auto page: dirty_pages) {
+			if (m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE)) {
+				continue; // left to the synchronous path
 			}
-			entry.tick = 0;
-			if (entry.seq == seq) {
-				m_memory_tracker.UnmarkRegionAsGpuModified(page, TRACKER_PAGE_SIZE);
+			uint64_t seq = 0;
+			{
+				std::lock_guard lock(m_eager_mutex);
+				auto&           entry = m_eager_pages[page];
+				entry.tick            = tick;
+				seq                   = entry.seq;
 			}
-		});
+			FrameTiming::Add(FrameTiming::Counter::ReadbackEagerDownloads);
+			// Queued after DownloadBufferMemory's own publication, so the bytes are in place.
+			m_scheduler.DeferPriorityOperation([this, page, tick, seq] {
+				std::lock_guard lock(m_eager_mutex);
+				auto&           entry = m_eager_pages[page];
+				if (entry.tick != tick) {
+					return;
+				}
+				entry.tick = 0;
+				if (entry.seq == seq) {
+					m_memory_tracker.UnmarkRegionAsGpuModified(page, TRACKER_PAGE_SIZE);
+				}
+			});
+		}
 	}
 	m_eager_pending.clear();
 }
 
-bool BufferCache::WaitEagerReadback(uint64_t vaddr, uint64_t size) {
+bool BufferCache::WaitEagerReadback(uint64_t vaddr, uint64_t size, bool dcc) {
 	if (!EagerReadbackEnabled() || CommandScheduler::InDeferredOperation()) {
 		return false;
 	}
 	const auto page = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 	if (Common::AlignDown(vaddr + size - 1, TRACKER_PAGE_SIZE) != page) {
-		return false;
+		return dcc && WaitEagerReadbackPages(vaddr, size);
 	}
 	uint64_t tick = 0;
 	{
@@ -665,6 +702,37 @@ bool BufferCache::WaitEagerReadback(uint64_t vaddr, uint64_t size) {
 	m_scheduler.GetMasterSemaphore().Wait(tick);
 	m_scheduler.WaitPriorityOperations(tick);
 	return !m_memory_tracker.IsRegionGpuModified(page, TRACKER_PAGE_SIZE);
+}
+
+// KYTY_DCC_EAGER=1: a DCC metadata range of several pages is served when every page is clean or has an eager download in
+// flight, and no page is GPU-modified again once the newest of those downloads has landed (a GPU write after the download
+// keeps its page marked; that range takes the synchronous path).
+bool BufferCache::WaitEagerReadbackPages(uint64_t vaddr, uint64_t size) {
+	const auto first = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+	const auto last  = Common::AlignDown(vaddr + size - 1, TRACKER_PAGE_SIZE);
+	std::vector<EagerPages::PageState> pages;
+	{
+		std::lock_guard lock(m_eager_mutex);
+		for (auto page = first; page <= last; page += TRACKER_PAGE_SIZE) {
+			const auto found = m_eager_pages.find(page);
+			pages.push_back({false, found == m_eager_pages.end() ? 0 : found->second.tick});
+		}
+	}
+	size_t index = 0;
+	for (auto page = first; page <= last; page += TRACKER_PAGE_SIZE, index++) {
+		pages[index].gpu_modified = m_memory_tracker.IsRegionGpuModified(page, TRACKER_PAGE_SIZE);
+	}
+	const auto plan = EagerPages::MakePlan(pages);
+	if (!plan.wait) {
+		return false;
+	}
+	m_scheduler.GetMasterSemaphore().Wait(plan.max_tick);
+	m_scheduler.WaitPriorityOperations(plan.max_tick);
+	index = 0;
+	for (auto page = first; page <= last; page += TRACKER_PAGE_SIZE, index++) {
+		pages[index].gpu_modified = m_memory_tracker.IsRegionGpuModified(page, TRACKER_PAGE_SIZE);
+	}
+	return EagerPages::Served(pages);
 }
 
 BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size) {

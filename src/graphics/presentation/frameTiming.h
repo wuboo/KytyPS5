@@ -178,6 +178,10 @@ enum class Counter : uint32_t {
 	DccPublishFallbackN,     // ranges whose GPU-modified content was not one known fill (old path)
 	DccKnownWouldHitN,       // shadow: readbacks of DCC ranges the ledger predicted as one known fill
 	DccKnownMismatchN,       // shadow: ... of which the downloaded bytes differ from the prediction
+	// S402 (KYTY_DCC_EAGER=1): multi-page eager readbacks of DCC metadata.
+	DccEagerHitN,            // DCC readbacks served by queued eager downloads
+	DccEagerMissN,           // DCC readbacks that wanted eager and took the synchronous path
+	EagerPagesN,             // gauge: hot tracker pages tracked for eager readback
 	Count,
 };
 
