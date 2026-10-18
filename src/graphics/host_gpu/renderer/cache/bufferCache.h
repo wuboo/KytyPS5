@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/dccFillPublish.h"
+#include "graphics/host_gpu/renderer/cache/eagerPages.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
 #include "graphics/host_gpu/renderer/cache/gpuWriteLedger.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
@@ -147,10 +148,11 @@ private:
 	// queues its download right before the submit that carries the write; the page stays
 	// protected until that download has landed, and then its completion unprotects it. A fault
 	// in between waits for that one submission only.
-	void NoteReadbackFault(uint64_t vaddr);
+	void NoteReadbackFault(uint64_t vaddr, uint64_t size, bool dcc);
 	void NoteGpuWrite(uint64_t vaddr, uint64_t size);
 	void FlushEagerReadbacks();
-	[[nodiscard]] bool WaitEagerReadback(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool WaitEagerReadback(uint64_t vaddr, uint64_t size, bool dcc = false);
+	[[nodiscard]] bool WaitEagerReadbackPages(uint64_t vaddr, uint64_t size);
 	// KYTY_DCC_KNOWN: the GPU-modified pieces of a range, each with the fill value that describes all of it.
 	struct KnownFillPiece {
 		uint64_t address;

@@ -192,6 +192,9 @@ constexpr const char* kCounterNames[] = {
     "dcc_publish_fallback_n",
     "dcc_known_would_hit_n",
     "dcc_known_mismatch_n",
+    "dcc_eager_hit_n",
+    "dcc_eager_miss_n",
+    "eager_pages_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
