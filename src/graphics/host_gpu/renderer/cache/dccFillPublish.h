@@ -10,7 +10,7 @@
 
 namespace Libs::Graphics::DccFillPublish {
 
-// KYTY_DCC_KNOWN=0|1|shadow. A guest range whose whole GPU-modified content is one remembered fill (the ledger says the newest
+// KYTY_DCC_KNOWN=0|1|shadow (unset = 1). A guest range whose whole GPU-modified content is one remembered fill (the ledger says the newest
 // GPU write to it was a FillBuffer) is handed to the guest by writing the pattern into its backing and dropping the GPU-modified
 // state, instead of copyBuffer + Wait (a drain of the queue) on a write fault or a read. A range that is only partly known, or
 // touched by a later GPU write, takes the old path. shadow = the old path runs and its result stands; the bytes it downloaded are
@@ -20,7 +20,11 @@ enum class Mode : uint32_t { Off, On, Shadow };
 
 inline Mode ParseMode(const char* text) {
 	if (text == nullptr) {
+#ifdef KYTY_DCCPUBLISH_MUTANT_DEFAULT_OFF
 		return Mode::Off;
+#else
+		return Mode::On; // S403: on by default; KYTY_DCC_KNOWN=0 restores the drain
+#endif
 	}
 	if (std::strcmp(text, "1") == 0) {
 		return Mode::On;
