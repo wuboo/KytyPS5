@@ -13,7 +13,9 @@
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
+#include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/shaderCompiler.h"
+#include "graphics/shader/shaderCost.h"
 #include "graphics/shader/shaderVertexMetadata.h"
 #include "kernel/memory.h"
 #include "libs/errno.h"
@@ -49,6 +51,8 @@ struct ShaderMapEntry {
 
 static std::unique_ptr<std::unordered_map<uint64_t, ShaderMapEntry>> g_shader_map;
 static std::mutex                                                      g_shader_map_mutex;
+// S433 (S441): beside the map, not in the entry (the entry is destructured at the call sites). Guarded by g_shader_map_mutex.
+static std::unordered_map<uint64_t, ShaderCost::LeadState> g_shader_lead;
 
 void ShaderInit() {
 	EXIT_IF(g_shader_map != nullptr);
@@ -65,6 +69,11 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	}
 	const auto hash = XXH3_64bits(reinterpret_cast<const void*>(addr), data.code_size_bytes);
 	std::scoped_lock lock(g_shader_map_mutex);
+	const auto       previous = g_shader_map->find(addr);
+	const auto       lead     = g_shader_lead.find(addr);
+	g_shader_lead[addr]       = ShaderCost::LeadOnMapped(lead != g_shader_lead.end() && previous != g_shader_map->end() ? &lead->second : nullptr,
+	                                                     previous != g_shader_map->end() ? previous->second.hash : 0, hash,
+	                                                     static_cast<uint64_t>(FrameTiming::SteadyNowNs()));
 	(*g_shader_map)[addr] = {data, hash};
 }
 
@@ -74,6 +83,10 @@ static ShaderMapEntry ShaderGetMappedData(uint64_t addr, const char* label) {
 	std::scoped_lock lock(g_shader_map_mutex);
 
 	if (auto iter = g_shader_map->find(addr); iter != g_shader_map->end()) {
+		if (const auto lead = ShaderCost::LeadOnUse(g_shader_lead[addr], static_cast<uint64_t>(FrameTiming::SteadyNowNs()))) {
+			FrameTiming::Add(static_cast<FrameTiming::Counter>(
+			    static_cast<uint32_t>(FrameTiming::Counter::ShaderLeadB0) + static_cast<uint32_t>(ShaderCost::LeadBucket(*lead))));
+		}
 		return iter->second;
 	}
 
