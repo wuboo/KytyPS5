@@ -191,16 +191,34 @@ bool RenderExecutor::TryConsumeComputeFill(const ShaderComputeInputInfo& input,
 	const bool image_clear =
 	    cache.ClearImageFromBuffer(command, descriptor.Base48(), size, packed_clear);
 	if (!image_clear) {
-		// CPU fills invalidate overlapping cached images. Preserve the native dispatch for
-		// partial or ambiguous image backings, including pooled metadata aliases.
-		if ((descriptor.Base48() & 3u) != 0 ||
+		// No image lives there (DCC metadata, for one). KYTY_DCC_KNOWN=1: the dispatch only stores one value over the whole
+		// buffer, which a transfer fill does without a compute pass, and the buffer cache then knows the bytes: reading DCC
+		// clear codes needs no GPU drain. shadow: the dispatch stays; the buffer cache records the prediction.
+		const auto known = DccFillPublish::EnvMode();
+		auto& buffer_cache = command.GetContext().GetBufferCache();
+		if (known != DccFillPublish::Mode::Off) {
+			if ((descriptor.Base48() & 3u) != 0 || (size & 3u) != 0) {
+				return false;
+			}
+			if (known == DccFillPublish::Mode::Shadow) {
+				buffer_cache.NoteShadowFill(descriptor.Base48(), size, packed_clear);
+				return false;
+			}
+			// Like the shader it replaces, write on the GPU: a CPU fill of a tracked range takes a write fault per page.
+			buffer_cache.FillBuffer(descriptor.Base48(), size, packed_clear, false, true);
+			FrameTiming::Add(FrameTiming::Counter::ComputeFillsReplaced);
+			return true;
+		}
+		// Upstream (#1628), only for ranges our DCC_KNOWN path did not take (DCC_KNOWN=0). Preserve the native
+		// dispatch for partial or ambiguous image backings, including pooled metadata aliases. The fill goes
+		// through the GPU as well: a CPU fill of a range the guest tracks is a write fault per page.
+		if ((descriptor.Base48() & 3u) != 0 || (size & 3u) != 0 ||
 		    !m_context.IsMapped(descriptor.Base48(), size) ||
 		    cache.IsRegionRegistered(descriptor.Base48(), size)) {
 			return false;
 		}
-		// Metadata need not have an image backing yet. Keep proven fills in guest memory
-		// when CPU-owned, so color-clear discovery can read them without a GPU download.
-		m_context.GetBufferCache().FillBuffer(descriptor.Base48(), size, packed_clear, false);
+		buffer_cache.FillBuffer(descriptor.Base48(), size, packed_clear, false, true);
+		FrameTiming::Add(FrameTiming::Counter::ComputeFillsReplaced);
 	}
 	static std::atomic<uint32_t> logged_clears {0};
 	if (logged_clears.fetch_add(1, std::memory_order_relaxed) < 32) {

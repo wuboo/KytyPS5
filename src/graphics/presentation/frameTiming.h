@@ -173,6 +173,11 @@ enum class Counter : uint32_t {
 	IndirectN, IndirectDirtyN, IndirectDirtyWaitNs, IndirectRegsPatchedN, IndirectPvN, IndirectArgsChangedN,
 	// S398: largest color target of the current flip.
 	RtMaxW, RtMaxH,
+	// S402 (KYTY_DCC_KNOWN=1|shadow): known-fill ranges handed to the guest without a drain; shadow compare of the prediction.
+	DccPublishN,             // pieces published (KNOWN=1)
+	DccPublishFallbackN,     // ranges whose GPU-modified content was not one known fill (old path)
+	DccKnownWouldHitN,       // shadow: readbacks of DCC ranges the ledger predicted as one known fill
+	DccKnownMismatchN,       // shadow: ... of which the downloaded bytes differ from the prediction
 	Count,
 };
 
