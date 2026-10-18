@@ -52,6 +52,19 @@ inline void StripClearsOnReopen(S& state) {
 #endif
 }
 
+// S410 (DIAG): the first reason ShouldEagerSplit says no for a buffer on an idle GPU (None = it says yes), in the order it checks them.
+enum class EagerDecline : uint8_t { None, NoWork, PassOpen, FirstCbOnly, MidLimit, Age };
+inline EagerDecline EagerDeclineReason(const EagerQuery& q) {
+	if (!q.enabled || !q.has_work) return EagerDecline::NoWork;
+	if (q.pass_open && !q.pass_closing) {
+		if (!q.mid_mode) return EagerDecline::PassOpen;
+		if (!q.first_cb_after_drain) return EagerDecline::FirstCbOnly;
+		if (q.mid_splits >= q.mid_max) return EagerDecline::MidLimit;
+	}
+	if (q.age_us < q.min_age_us) return EagerDecline::Age;
+	return EagerDecline::None;
+}
+
 inline bool ShouldEagerSplit(const EagerQuery& q) {
 	if (!q.enabled || !q.has_work) return false;
 #ifndef KYTY_EAGER_MUTANT_PASS_OPEN

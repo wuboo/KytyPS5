@@ -199,6 +199,7 @@ private:
 	// S327: the scheduler arms this at a drain end; the next real EndRendering stamps the time (seg_first_pass_end_ns).
 	mutable bool        m_strip_clears = false; // S328
 	mutable bool        m_note_pass_end = false;
+	mutable int64_t     m_t_first_rec   = 0;      // S410 (KYTY_DIAG_STARVE=1): steady clock at the first command recorded into this buffer
 	mutable int64_t     m_pass_end_ns   = 0;
 	// Set by Handle(): something (possibly) recorded since Begin(). Over-reporting is harmless.
 	mutable bool        m_recorded    = false;

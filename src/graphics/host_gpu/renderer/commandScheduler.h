@@ -56,6 +56,10 @@ public:
 	// binary semaphore drain the thread and are submitted inline. Only for the renderer's
 	// scheduler (the presenter's waits on swapchain binary semaphores).
 	void EnableAsyncSubmit();
+	// S410 (KYTY_DIAG_STARVE=1, needs KYTY_DIAG_GPU_DONE=1): the renderer's scheduler counts gpu_starve_* (the presenter's does not).
+	void EnableStarveDiag();
+	// S410: why the next Flush/Submit happens (consumed by it; GpuDone::SubmitReason). Callers outside the scheduler: the flip flushes.
+	void SetSubmitReason(GpuDone::SubmitReason reason) { m_next_reason = reason; }
 	// Returns once every submission handed to the submit thread is on the Vulkan queue.
 	void WaitSubmitted() { DrainAsyncSubmits(); }
 	// Deferred callbacks can observe an externally owned drain, but cannot initiate shutdown:
@@ -96,6 +100,8 @@ private:
 		uint32_t          debug_args[4]   = {};
 		uint64_t          debug_arg4      = 0;
 		bool              first_seg       = false; // S328: first submit with work after a drain
+		int64_t           t_first_rec     = 0;     // S410: first command recorded into the buffer (steady clock; DIAG_STARVE)
+		GpuDone::SubmitReason reason      = GpuDone::SubmitReason::Other; // S410
 		int64_t           queued_ns       = 0; // S132: steady clock at push (async_submit queue wait)
 	};
 	void SubmitThread(std::stop_token stop);
@@ -147,8 +153,10 @@ private:
 	uint32_t m_drain_depth = 0;
 	uint64_t m_seg_wait_base = 0;     // cp_wait_guest_ns + cp_wait_gpu_ns at the segment start
 	void ConsumeSegPassEnd();
-	bool     EagerSplitNow(bool pass_closing, bool* closed_pass, bool mid_pass = false);
+	bool     EagerSplitNow(bool pass_closing, bool* closed_pass, bool mid_pass, GpuDone::SubmitReason reason);
 	uint32_t m_seg_mid_splits = 0;    // S328: mid-pass eager splits in this segment
+	GpuDone::SubmitReason m_next_reason = GpuDone::SubmitReason::Other; // S410
+	bool     m_starve_diag    = false;  // S410
 	int64_t  m_open_since_ns = 0;     // when the open buffer began (eager policy age)
 	bool HasOperationsAtCurrentTick();
 	uint32_t                              m_flush_requests = 0;

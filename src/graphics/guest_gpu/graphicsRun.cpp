@@ -1675,6 +1675,7 @@ void CommandProcessor::Flip() {
 	(void)command.Handle();
 	GetScheduler().DeferPriorityOperation(
 	    [&renderer = m_renderer, request] { renderer.GetVideoOut().CompleteFlip(request); });
+	GetScheduler().SetSubmitReason(GpuDone::SubmitReason::Flip); // S410
 	GetScheduler().Flush();
 }
 
@@ -1695,6 +1696,7 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 	(void)command.Handle();
 	GetScheduler().DeferPriorityOperation(
 	    [&renderer = m_renderer, request] { renderer.GetVideoOut().CompleteFlip(request); });
+	GetScheduler().SetSubmitReason(GpuDone::SubmitReason::Flip); // S410
 	GetScheduler().Flush();
 }
 
@@ -1724,6 +1726,7 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 		    renderer.GetVideoOut().CompleteFlip(request);
 		    renderer.TriggerInterrupt(event_id, 0);
 	    });
+	GetScheduler().SetSubmitReason(GpuDone::SubmitReason::Flip); // S410
 	GetScheduler().Flush();
 }
 
@@ -1741,6 +1744,7 @@ void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
 	m_renderer.GetVideoOut().PrepareFlip(request_id, command);
 	GetScheduler().DeferPriorityOperation(
 	    [this, request_id] { m_renderer.GetVideoOut().CompleteFlip(request_id); });
+	GetScheduler().SetSubmitReason(GpuDone::SubmitReason::Flip); // S410
 	GetScheduler().Flush();
 }
 

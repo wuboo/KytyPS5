@@ -5,6 +5,7 @@
 
 // S326: policy of the eager submit (ShouldEagerSplit). Built four times: normally and with KYTY_EAGER_MUTANT_PASS_OPEN / _BUSY / _NO_AGE / _NO_CLOSING (S327).
 // S328: + mid-pass split (MidPassAllowed) and the reopen without clears; mutants KYTY_EAGER_MUTANT_MID_ANY_CB / _MID_NO_LIMIT / _CLEAR_REOPEN.
+// S410: EagerDeclineReason (DIAG: why the policy declined on an idle GPU).
 // The mutant builds must FAIL (ctest WILL_FAIL).
 
 namespace {
@@ -137,6 +138,27 @@ int main() {
 		Check(!s.depth_stencil_attachment.depth_clear, "S328: reopen: depth loads");
 		Check(!s.depth_stencil_attachment.stencil_clear, "S328: reopen: stencil loads");
 		Check(s.num_color_attachments == 2, "S328: reopen keeps the attachment count");
+	}
+	// S410 DIAG: the reason of a decline on an idle GPU.
+	{
+		using Libs::Graphics::Sync::EagerDecline;
+		using Libs::Graphics::Sync::EagerDeclineReason;
+		auto q = Ready();
+		q.has_work = false;
+		Check(EagerDeclineReason(q) == EagerDecline::NoWork, "S410 decline: no work");
+		q = Ready();
+		q.pass_open = true;
+		Check(EagerDeclineReason(q) == EagerDecline::PassOpen, "S410 decline: pass open, no mid-pass site");
+		q = MidReady();
+		q.first_cb_after_drain = false;
+		Check(EagerDeclineReason(q) == EagerDecline::FirstCbOnly, "S410 decline: mode 2, not the first buffer");
+		q = MidReady();
+		q.mid_splits = 1;
+		Check(EagerDeclineReason(q) == EagerDecline::MidLimit, "S410 decline: mode 2, limit");
+		q = Ready();
+		q.age_us = 10;
+		Check(EagerDeclineReason(q) == EagerDecline::Age, "S410 decline: closed pass, young");
+		Check(EagerDeclineReason(Ready()) == EagerDecline::None, "S410 decline: nothing to decline");
 	}
 	std::printf("EagerSubmitTests: ok\n");
 	return 0;

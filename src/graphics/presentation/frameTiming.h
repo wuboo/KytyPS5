@@ -237,6 +237,13 @@ enum class Counter : uint32_t {
 	// the VS-store / flips with more than one draw of the entry (no args comparison).
 	PvIndShadowN, PvIndShadowArgsEqN, PvIndShadowArgsNeN, PvIndShadowFieldsOkN, PvIndShadowFieldsMismatchN, PvIndShadowOverflowN,
 	PvIndShadowPlanEqN, PvIndShadowPlanNeN, PvIndShadowNoStoreN, PvIndShadowMultiN,
+	// S410 (KYTY_DIAG_STARVE=1, needs KYTY_DIAG_GPU_DONE=1): GPU queue empty before a buffer was submitted: sum of max(0, t_submit(v) - t_done(v-1)),
+	// the same without the part before the CP recorded anything for v (work), buffers with starve >= 20 us / >= 1 ms, and `work` split by why
+	// the buffer was submitted (order of GpuDone::SubmitReason).
+	GpuStarveNs, GpuStarveWorkNs, GpuStarveN, GpuStarveGe1msN,
+	GpuStarveWorkDrainNs, GpuStarveWorkLazyMaxNs, GpuStarveWorkLazy1msNs, GpuStarveWorkLazyIdleNs, GpuStarveWorkEagerNs, GpuStarveWorkEagerPassNs, GpuStarveWorkEagerMidNs, GpuStarveWorkEager3MidNs, GpuStarveWorkEager3FlushNs, GpuStarveWorkLowwaterNs, GpuStarveWorkFlipNs, GpuStarveWorkOtherNs,
+	// S410 (KYTY_DIAG_STARVE=1): why the eager policy did not split although KnownGpuTick said idle (no extra Refresh).
+	EagerDeclinePassOpenN, EagerDeclineAgeN, EagerDeclineNoWorkN, EagerDeclineMidLimitN, EagerDeclineFirstCbOnlyN,
 	Count,
 };
 
