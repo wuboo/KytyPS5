@@ -2,6 +2,7 @@
 #include <SDL3/SDL_vulkan.h>
 
 #include "common/assert.h"
+#include "graphics/host_gpu/renderer/indirectGpu.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
@@ -674,6 +675,12 @@ static vk::Device VulkanCreateDevice(GraphicContext&                 graphics,
 	device_features.vertexPipelineStoresAndAtomics       = VK_TRUE;
 	graphics.sample_rate_shading_enabled                 = true;
 	device_features.shaderInt64 = VK_TRUE;
+	// S404: an indirect draw takes its first instance from the args; without the feature that field must be zero. Requested only
+	// when KYTY_INDIRECT_GPU is 1 or shadow, so the device of a default run is created exactly as before.
+	if (IndirectGpu::EnvMode() != IndirectGpu::Mode::Off && supported_features2.features.drawIndirectFirstInstance == VK_TRUE) {
+		device_features.drawIndirectFirstInstance = VK_TRUE;
+		graphics.draw_indirect_first_instance     = true;
+	}
 	device_features.shaderFloat64 =
 	    supported_features2.features.shaderFloat64 &&
 	    float_controls.shaderSignedZeroInfNanPreserveFloat64;

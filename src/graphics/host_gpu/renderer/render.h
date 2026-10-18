@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/perVertexTransform.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
+#include "graphics/host_gpu/renderer/indirectGpu.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -61,6 +62,17 @@ enum class DrawOffsetSource : uint8_t {
 	IndirectArgs,
 };
 
+// S404 (KYTY_INDIRECT_GPU): one indexed indirect draw handed to the executor without its args being read.
+//   On      index_count / instance_count of the DrawIndexArgs are placeholders. The executor records vkCmdDrawIndexedIndirect(args_addr)
+//           or sets `declined` (before recording anything) and the caller takes the CPU path.
+//   Shadow  the DrawIndexArgs are the real ones; the executor only reports what it would have decided (host_reason).
+struct IndirectGpuRequest {
+	IndirectGpu::Mode   mode         = IndirectGpu::Mode::Off;
+	uint64_t            args_addr    = 0;
+	bool                declined     = false;
+	IndirectGpu::Reason host_reason  = IndirectGpu::Reason::Eligible;
+};
+
 struct DrawIndexArgs {
 	uint32_t         index_count                = 0;
 	const void*      index_addr                 = nullptr;
@@ -70,6 +82,7 @@ struct DrawIndexArgs {
 	uint32_t         first_instance             = 0;
 	DrawOffsetSource offset_source              = DrawOffsetSource::DrawState;
 	uint32_t         render_target_slice_offset = 0;
+	IndirectGpuRequest* indirect_gpu            = nullptr; // S404
 };
 
 struct DrawAutoArgs {

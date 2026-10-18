@@ -38,6 +38,8 @@ struct GraphicContext {
 	// bool fp64_denorm_preserve = false; // Temporarily disabled.
 	bool                               device_address_destruction_waits_for_queue = false;
 	bool                               attachment_feedback_loop_enabled      = false;
+	// S404: drawIndirectFirstInstance is enabled (only with KYTY_INDIRECT_GPU != 0 and a device that has it).
+	bool                               draw_indirect_first_instance          = false;
 	bool                               provoking_vertex_last_enabled         = false;
 	bool                               maintenance8_enabled                  = false;
 	// robustness2.nullDescriptor enabled: unbound textures bind VK_NULL_HANDLE; otherwise a 1x1 stand-in image.

@@ -15,6 +15,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/gpuKeepWarm.h"
+#include "graphics/host_gpu/renderer/indirectGpu.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
@@ -1059,6 +1060,28 @@ void LogIndirectDiag(const IndirectDiag& probe, bool indexed, bool has_count, ui
 	     probe.args_dirty ? 1 : 0, probe.wait_ns / 1000, probe.regs_patched, index_type, index_buffer_size, probe.clamped,
 	     probe.pv_draws, probe.args_changed);
 }
+
+// S404 (KYTY_INDIRECT_GPU=shadow|1): one line per indexed indirect draw (the first 200 and flips 6300..6310), with the running count of
+// its reason so the histogram can be read from the last line of each reason.
+void LogIndirectGpu(const char* what, uint64_t args_addr, IndirectGpu::Reason cmd_reason, IndirectGpu::Reason host_reason,
+                    uint32_t index_buffer_size, bool have_args, uint32_t index_count, bool clamp_risk) {
+	static std::array<std::atomic<uint64_t>, static_cast<size_t>(IndirectGpu::Reason::Count)> by_reason {};
+	const auto reason = cmd_reason != IndirectGpu::Reason::Eligible ? cmd_reason : host_reason;
+	const auto n      = by_reason[static_cast<size_t>(reason)].fetch_add(1, std::memory_order_relaxed) + 1;
+	static std::atomic<uint64_t> logged {0};
+	const auto                   flip = FrameTiming::GuestFlips();
+	if (logged.fetch_add(1, std::memory_order_relaxed) >= 200 && !(flip >= 6300 && flip <= 6310)) {
+		return;
+	}
+	char count_text[16] = "?";
+	if (have_args) {
+		std::snprintf(count_text, sizeof(count_text), "%u", index_count);
+	}
+	LOGF("[indirect-gpu] flip=%" PRIu64 " %s args=0x%016" PRIx64 " cmd_reason=%s host_reason=%s n_reason=%" PRIu64
+	     " index_buffer_size=%u index_count=%s clamp_risk=%d\n",
+	     flip, what, args_addr, IndirectGpu::ReasonName(cmd_reason), IndirectGpu::ReasonName(host_reason), n, index_buffer_size,
+	     count_text, clamp_risk ? 1 : 0);
+}
 } // namespace
 
 void CommandProcessor::DrawIndirect(uint32_t data_offset, IndirectDrawRegisters registers,
@@ -1128,6 +1151,51 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		}
 	}
 
+	// S404 (KYTY_INDIRECT_GPU): an indexed one-draw indirect without count or register patches may be recorded as
+	// vkCmdDrawIndexedIndirect without reading the args. Mode 0 never gets here (the whole block is skipped).
+	const auto           ig_mode = IndirectGpu::EnvMode();
+	IndirectGpuRequest   ig_request;
+	auto                 ig_cmd_reason = IndirectGpu::Reason::NotIndexed;
+	if (ig_mode != IndirectGpu::Mode::Off && indexed) {
+		IndirectGpu::Candidate candidate;
+		candidate.indexed           = indexed;
+		candidate.has_count_addr    = count_addr != nullptr;
+		candidate.draw_count        = draw_count;
+		candidate.registers_patched = registers.vertex_offset != Pm4::SH_NOP || registers.instance_offset != Pm4::SH_NOP ||
+		                              registers.index_offset != Pm4::SH_NOP;
+		candidate.index_buffer_size = m_index_buffer_size;
+		candidate.index_element     = static_cast<uint32_t>(index_size);
+		candidate.first_instance_ok = m_renderer.GetGraphics().draw_indirect_first_instance;
+		ig_cmd_reason               = IndirectGpu::Qualify(candidate);
+		FrameTiming::Add(FrameTiming::Counter::IndirectGpuCandidateN);
+		ig_request.mode      = ig_mode;
+		ig_request.args_addr = m_draw_indirect_args_base_addr + data_offset;
+		if (ig_cmd_reason == IndirectGpu::Reason::Eligible) {
+			FrameTiming::Add(FrameTiming::Counter::IndirectGpuEligibleN);
+			if (ig_mode == IndirectGpu::Mode::On) {
+				// The counts are unknown: placeholders that keep the executor's early-outs quiet. The index binding covers
+				// INDEX_BUFFER_SIZE indices from the base; the args' start index is relative to it (firstIndex).
+				DrawIndex({.index_count    = m_index_buffer_size,
+				           .index_addr     = reinterpret_cast<const void*>(m_index_base_addr),
+				           .instance_count = 1,
+				           .offset_source  = DrawOffsetSource::IndirectArgs,
+				           .indirect_gpu   = &ig_request});
+				if (!ig_request.declined) {
+					FrameTiming::Add(FrameTiming::Counter::IndirectGpuN);
+					LogIndirectGpu("gpu", ig_request.args_addr, ig_cmd_reason, ig_request.host_reason, m_index_buffer_size, false, 0,
+					               false);
+					return;
+				}
+			}
+		}
+		if (ig_mode == IndirectGpu::Mode::On) {
+			// Mode 1 and the draw takes the CPU path: say why.
+			FrameTiming::Add(FrameTiming::Counter::IndirectGpuFallbackN);
+			LogIndirectGpu("fallback", ig_request.args_addr, ig_cmd_reason, ig_request.host_reason, m_index_buffer_size, false, 0,
+			               false);
+		}
+	}
+
 	for (uint32_t i = 0; i < draw_count; i++) {
 		const auto args_addr = m_draw_indirect_args_base_addr + data_offset +
 		                       static_cast<uint64_t>(i) * stride_in_bytes;
@@ -1172,12 +1240,27 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 			probe.clamped++;
 		}
 		m_num_instances = args->instance_count;
+		// S404 shadow: the real draw, with the executor reporting what it would have decided.
+		const bool ig_shadow = ig_mode == IndirectGpu::Mode::Shadow && i == 0 && draw_count == 1 &&
+		                       ig_cmd_reason == IndirectGpu::Reason::Eligible;
 		DrawIndex({.index_count    = index_count,
 		           .index_addr     = index_addr,
 		           .instance_count = args->instance_count,
 		           .base_vertex    = static_cast<int32_t>(args->base_vertex_location),
 		           .first_instance = args->start_instance_location,
-		           .offset_source  = DrawOffsetSource::IndirectArgs});
+		           .offset_source  = DrawOffsetSource::IndirectArgs,
+		           .indirect_gpu   = ig_shadow ? &ig_request : nullptr});
+		if (ig_mode == IndirectGpu::Mode::Shadow && i == 0) {
+			const bool clamp_risk = IndirectGpu::ClampRisk(args->index_count_per_instance, m_index_buffer_size);
+			if (ig_cmd_reason == IndirectGpu::Reason::Eligible && ig_request.host_reason == IndirectGpu::Reason::Eligible) {
+				FrameTiming::Add(FrameTiming::Counter::IndirectGpuHostEligibleN);
+			}
+			if (clamp_risk) {
+				FrameTiming::Add(FrameTiming::Counter::IndirectGpuClampRiskN);
+			}
+			LogIndirectGpu("shadow", ig_request.args_addr, ig_cmd_reason, ig_request.host_reason, m_index_buffer_size, true,
+			               args->index_count_per_instance, clamp_risk);
+		}
 	}
 	if (diag) {
 		probe.pv_draws = FrameTiming::Get(FrameTiming::Counter::PvVsStoreDraws) +

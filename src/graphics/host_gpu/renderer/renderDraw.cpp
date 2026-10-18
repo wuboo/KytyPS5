@@ -512,6 +512,10 @@ struct DrawCallInfo {
 	uint32_t             index_count    = 0;
 	uint32_t             instance_count = 0;
 	uint32_t             first_instance = 0;
+	// S404 (KYTY_INDIRECT_GPU=1): the draw is recorded from the args in this buffer; index_count / instance_count are placeholders.
+	uint64_t             indirect_addr   = 0; // guest address of the DrawIndexedIndirectArgs; 0 = a direct draw
+	vk::Buffer           indirect_buffer = nullptr;
+	vk::DeviceSize       indirect_offset = 0;
 
 	[[nodiscard]] bool IsIndexed() const { return debug_op == CommandBufferDebugOp::DrawIndex; }
 	[[nodiscard]] const char* Name() const { return IsIndexed() ? "DrawIndex" : "DrawIndexAuto"; }
@@ -1097,8 +1101,27 @@ static void LogDrawStateIfNeeded(const CommandBuffer& buffer, const DrawCallInfo
 	                  draw.index_count, index_addr);
 }
 
+// S404: primitive restart is on for a strip / fan topology (ResolvePrimitiveRestart then looks at the indices).
+static bool PrimitiveRestartControlOn(const CommandBuffer& buffer) {
+	if ((buffer.GetUserConfig().GetPrimitiveResetControl() & 0x1u) == 0) {
+		return false;
+	}
+	switch (buffer.GetUserConfig().GetPrimType()) {
+		case Prospero::PrimitiveType::kLineStrip:
+		case Prospero::PrimitiveType::kTriFan:
+		case Prospero::PrimitiveType::kTriStrip: return true;
+		default: return false;
+	}
+}
+
 static void EmitDrawPrimitives(const HW::UserConfig& ucfg, vk::CommandBuffer vk_buffer,
                                const DrawCallInfo& draw, const DrawEmitInfo& emit) {
+	if (draw.indirect_addr != 0) {
+		// S404: the host path of a qualified draw is one of the plain topologies (QuadListLegacy declined).
+		EXIT_IF(!draw.IsIndexed() || draw.indirect_buffer == nullptr || ucfg.GetPrimType() == Prospero::PrimitiveType::kQuadListLegacy);
+		vk_buffer.drawIndexedIndirect(draw.indirect_buffer, draw.indirect_offset, 1, sizeof(vk::DrawIndexedIndirectCommand));
+		return;
+	}
 	switch (ucfg.GetPrimType()) {
 		case Prospero::PrimitiveType::kPointList:
 		case Prospero::PrimitiveType::kLineList:
@@ -1610,10 +1633,11 @@ static void BindPvVsStore(RenderContext& context, vk::CommandBuffer vk_buffer, c
 }
 
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
-                                         const DrawCallInfo& draw, DrawRenderState& state,
+                                         const DrawCallInfo& draw_in, DrawRenderState& state,
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
 	                                     bool primitive_restart_enable) {
+	DrawCallInfo       draw = draw_in; // S404: the indirect buffer is filled in below
 	PvVsStoreDrawSetup pv_store;
 	bool               use_pv_store = false;
 	if (PerVertexVsStoreEnabled()) {
@@ -1741,8 +1765,22 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!mesh_active) {
 		LogDrawPhase(draw.Name(), "PrepareVertexBuffers");
 		vertex_bindings = AcquireVertexBuffers(buffer, state.vertex_info[0]);
+		if (draw.indirect_addr != 0) {
+			// S404: the args are a GPU-read buffer of the cache like the index buffer; obtaining one can merge the other, so the
+			// index binding is taken between two lookups of the args and the last lookup is the one that is used.
+			EXIT_IF(use_pv_store);
+			(void)m_context.GetBufferCache().ObtainBuffer(draw.indirect_addr, sizeof(vk::DrawIndexedIndirectCommand), false);
+		}
 		index_binding   = PrepareIndexBuffer(buffer, index_source);
+		if (draw.indirect_addr != 0) {
+			const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
+			    draw.indirect_addr, sizeof(vk::DrawIndexedIndirectCommand), false);
+			EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
+			draw.indirect_buffer = args_buffer->Handle();
+			draw.indirect_offset = args_offset;
+		}
 	}
+	EXIT_IF(draw.indirect_addr != 0 && (mesh_active || use_pv_store));
 	// The index binding the draw really got (the cache may move or merge the range while the bindings above are
 	// prepared) decides the VS-store tail again; a tail that does not fit goes to the prototype, as in the early check.
 	if (use_pv_store && !mesh_active && draw.IsIndexed() && index_binding.buffer != nullptr &&
@@ -1870,6 +1908,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
                                const DrawIndexArgs& args) {
 	KYTY_PROFILER_FUNCTION();
+	auto* const igpu = args.indirect_gpu; // S404: KYTY_INDIRECT_GPU request (placeholder counts with mode On)
+	const bool  igpu_on = igpu != nullptr && igpu->mode == IndirectGpu::Mode::On;
 	FrameTiming::Add(FrameTiming::Counter::Draws);
 	m_context.GetCommandScheduler().MaybeEagerSplit();
 
@@ -1940,7 +1980,9 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		default: EXIT("unknown index_type_and_size: %u\n", args.index_type_and_size);
 	}
 	index_source.size = static_cast<uint64_t>(args.index_count) * index_source.guest_element_size;
-	const bool primitive_restart = ResolvePrimitiveRestart(buffer, index_source);
+	// S404: a candidate's index range is the whole INDEX_BUFFER_SIZE: scanning it for a restart value would read indices the
+	// draw may never fetch, so restart control on a strip / fan declines (below) instead of being resolved.
+	const bool primitive_restart = igpu_on ? false : ResolvePrimitiveRestart(buffer, index_source);
 
 	std::vector<uint16_t> expanded_indices;
 	if (index_source.guest_element_size == 1) {
@@ -1964,6 +2006,35 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	LogDrawStateIfNeeded(buffer, draw, state, args.index_type_and_size, args.index_addr);
 
+	DrawCallInfo draw_to_run = draw;
+	if (igpu != nullptr) {
+		// S404: what the host path of this draw is, without looking at index_count / instance_count (nothing below may).
+		IndirectGpu::HostPath host;
+		const auto&           first_stage = state.vertex_info[0];
+		const bool            vertex_stage = first_stage.logical_stage == ShaderType::Vertex;
+		host.pv_store_possible = PerVertexVsStoreEnabled() && state.ps_active && vertex_stage &&
+		                         first_stage.stage.program->stage != ShaderType::Mesh &&
+		                         GetPvVsStorePrograms(m_context.GetGraphics(), state.programs) != nullptr;
+		host.proto_possible = vertex_stage && GetPerVertexPrototypePrograms(m_context.GetGraphics(), state.programs, first_stage,
+		                                                                    m_context.GetPipelineCache().DriverCache()) != nullptr;
+		host.mesh              = first_stage.stage.program->stage == ShaderType::Mesh;
+		host.copy_depth        = buffer.GetRegisters().GetRenderControl().copy_depth_to_color;
+		host.quad_list_legacy  = ucfg.GetPrimType() == Prospero::PrimitiveType::kQuadListLegacy;
+		host.restart           = PrimitiveRestartControlOn(buffer);
+		host.native_fetch      = !first_stage.fetch_embedded;
+		igpu->host_reason      = IndirectGpu::QualifyHost(host);
+		if (igpu_on) {
+			if (igpu->host_reason != IndirectGpu::Reason::Eligible) {
+				// Nothing has been recorded: the caller reads the args and draws the old way. The draw is counted by that second call.
+				igpu->declined = true;
+				ResetBindings();
+				FrameTiming::Add(FrameTiming::Counter::Draws, ~uint64_t {0});
+				return;
+			}
+			draw_to_run.indirect_addr = igpu->args_addr;
+		}
+	}
+
 	const bool indirect = args.offset_source == DrawOffsetSource::IndirectArgs;
 	const auto [vertex_offset, instance_offset] =
 	    indirect ? std::pair<int32_t, uint32_t> {0, args.first_instance}
@@ -1975,7 +2046,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	emit.vertex_offset  = native_indirect ? 0 : vertex_offset + args.base_vertex;
 	emit.first_instance = native_indirect ? 0 : instance_offset;
 
-	ExecutePreparedDraw(submit_id, buffer, draw, state, topology, emit, index_source,
+	ExecutePreparedDraw(submit_id, buffer, draw_to_run, state, topology, emit, index_source,
 	                    primitive_restart);
 	ResetBindings();
 }
