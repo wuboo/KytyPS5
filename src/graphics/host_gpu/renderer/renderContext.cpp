@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
+#include "kernel/memory.h"
 #include "graphics/presentation/cpPhaseScope.h"
 
 #include "common/assert.h"
@@ -110,7 +112,27 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		FrameTiming::Add(on_gpu_thread ? FrameTiming::Counter::ReadbackReadFaultGpu
 		                               : FrameTiming::Counter::ReadbackReadFault);
 		const SyncCensus::SiteScope site_tag(on_gpu_thread ? SyncCensus::Site::RfGpu : SyncCensus::Site::RfGuest);
+		// S412 (KYTY_DIAG_RFOP): who on the command processor thread reads the page, and what it would have seen before the drain.
+		const bool rf_op = on_gpu_thread && RfOp::Enabled();
+		RfOp::Event rf_event;
+		if (rf_op) {
+			rf_event.stale.ok = LibKernel::Memory::TryReadBacking(fault_vaddr, rf_event.stale.data, sizeof(rf_event.stale.data));
+		}
 		const bool downloaded = m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		if (rf_op) {
+			rf_event.fresh.ok = LibKernel::Memory::TryReadBacking(fault_vaddr, rf_event.fresh.data, sizeof(rf_event.fresh.data));
+			rf_event.flip      = FrameTiming::GuestFlips();
+			rf_event.packet    = RfOp::CurrentPacket();
+			rf_event.addr      = fault_vaddr;
+			rf_event.writer_op = m_buffer_cache.RfOpWriter(fault_vaddr, fault_size);
+			FrameTiming::Add(static_cast<FrameTiming::Counter>(static_cast<uint32_t>(FrameTiming::Counter::RfOpWaitRegMemN) +
+			                                                   RfOp::SlotOf(rf_event.packet.opcode)));
+			static std::atomic<uint64_t> logged {0};
+			if (RfOp::ShouldLog(logged.fetch_add(1, std::memory_order_relaxed), rf_event.flip)) {
+				rf_event.pc_text = RfOp::ResolvePc(RfOp::FaultPcRef());
+				LOGF("%s\n", RfOp::FormatLine(rf_event).c_str());
+			}
+		}
 		if (!downloaded && access != PageFaultAccess::Execute) {
 			// Nothing to download and the tracker wants the page readable, yet it faulted:
 			// the protection was lost outside the tracker. Put back what the tracker expects

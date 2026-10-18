@@ -250,6 +250,11 @@ enum class Counter : uint32_t {
 	// S409 (both KYTY_PV_VSSTORE_COMPACT modes): bytes of the VS-store records bound by the draws of the flip (records * stride * 16) /
 	// draws that used the compact record (stride = locations the PS reads).
 	PvVsstoreRecordBytes, PvCompactDrawsN,
+	// S412 (KYTY_DIAG_RFOP=1): page read faults on the GPU thread by the PM4 opcode being handled (slots of RfOp::SlotOf, in order:
+	// wait_reg_mem, cond_exec, draw_indirect_multi, draw_index_indirect_multi, dispatch_indirect, set_predication, event_write_eop,
+	// indirect_buffer, other opcode, none = outside a handler).
+	RfOpWaitRegMemN, RfOpCondExecN, RfOpDrawIndirectMultiN, RfOpDrawIndexIndirectMultiN, RfOpDispatchIndirectN, RfOpSetPredicationN,
+	RfOpEventWriteEopN, RfOpIndirectBufferN, RfOpOtherN, RfOpNoneN,
 	Count,
 };
 

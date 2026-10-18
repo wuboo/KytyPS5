@@ -16,6 +16,7 @@
 #include "common/threads.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/pageManager.h"
+#include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
@@ -700,6 +701,9 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			case CoreAccess::Unknown:
 				Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultUnhandled);
 				return false;
+		}
+		if (Libs::Graphics::RfOp::Enabled()) {
+			Libs::Graphics::RfOp::FaultPcRef() = info->exception_address; // S412 (KYTY_DIAG_RFOP)
 		}
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);

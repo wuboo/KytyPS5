@@ -1099,6 +1099,9 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 				m_shadow_fill = {};
 			}
 		}
+		if (RfOp::Enabled()) {
+			m_rfop_writers.Note(vaddr, size, RfOp::CurrentPacket().opcode);
+		}
 		if (SyncCensus::Enabled()) {
 			m_sync_ticks.Note(vaddr, size, m_scheduler.CurrentTick());
 			m_sync_seq.Note(vaddr, size, ++m_sync_seq_next);

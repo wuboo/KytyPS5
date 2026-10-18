@@ -1,6 +1,7 @@
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/presentation/cpPhases.h"
 #include "graphics/presentation/cpSampler.h"
+#include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/shader/nullDescDiag.h"
 
 #include "common/memEvents.h"
@@ -18,6 +19,7 @@
 #include <iterator>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace Libs::Graphics::FrameTiming {
@@ -323,10 +325,30 @@ constexpr const char* kCounterNames[] = {
     "eager_decline_first_cb_only_n",
     "pv_vsstore_record_bytes",
     "pv_compact_draws_n",
+    "rf_op_wait_reg_mem_n",
+    "rf_op_cond_exec_n",
+    "rf_op_draw_indirect_multi_n",
+    "rf_op_draw_index_indirect_multi_n",
+    "rf_op_dispatch_indirect_n",
+    "rf_op_set_predication_n",
+    "rf_op_event_write_eop_n",
+    "rf_op_indirect_buffer_n",
+    "rf_op_other_n",
+    "rf_op_none_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
 static_assert(std::size(kCounterNames) == static_cast<size_t>(Counter::Count));
+static_assert(static_cast<uint32_t>(Counter::RfOpNoneN) - static_cast<uint32_t>(Counter::RfOpWaitRegMemN) + 1 == RfOp::kSlotCount);
+constexpr bool RfOpColumnsMatch() {
+	for (uint32_t slot = 0; slot < RfOp::kSlotCount; slot++) {
+		if (std::string_view(kCounterNames[static_cast<uint32_t>(Counter::RfOpWaitRegMemN) + slot]) != RfOp::ColumnName(slot)) {
+			return false;
+		}
+	}
+	return true;
+}
+static_assert(RfOpColumnsMatch(), "frames.csv rf_op columns out of step with RfOp::SlotOf");
 static_assert(static_cast<uint32_t>(Counter::DispOther) - static_cast<uint32_t>(Counter::DispGuest) ==
               static_cast<uint32_t>(DispatchClass::Other));
 
