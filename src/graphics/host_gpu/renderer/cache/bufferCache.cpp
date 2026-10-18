@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -187,6 +188,13 @@ BufferCache::KnownFillPlan BufferCache::PlanKnownFill(uint64_t vaddr, uint64_t s
 		                                             HasPendingDownload(piece.address, piece.size));
 		if (!decision.publish) {
 			FrameTiming::Add(FrameTiming::Counter::DccPublishFallbackN);
+			const auto query = m_write_ledger.QueryFill(piece.address, piece.size);
+			const auto why   = DccFillPublish::Explain(query, HasPendingDownload(piece.address, piece.size));
+			FrameTiming::Add(static_cast<FrameTiming::Counter>(static_cast<uint32_t>(FrameTiming::Counter::DccFallbackNoFillN) +
+			                                                   static_cast<uint32_t>(why)));
+			if (SyncCensus::Enabled()) {
+				LogDccFallback(piece.address, piece.size, why);
+			}
 			plan.pieces.clear();
 			return plan;
 		}
@@ -424,7 +432,17 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		}
 		return ns;
 	};
-	if (!is_write && WaitEagerReadback(vaddr, size, eager_dcc)) {
+	SyncCensus::Probe probe;
+	if (census) {
+		probe.thread_id  = SyncCensus::ThreadId();
+		probe.gpu_thread = GuestGpu::IsGpuThread();
+		// Snapshots BEFORE any wait or drain (a drain submits and resets them).
+		probe.cmds_since_submit = SyncCensus::Diff(FrameTiming::Get(FrameTiming::Counter::Draws) +
+		                                               FrameTiming::Get(FrameTiming::Counter::Dispatches),
+		                                           SyncCensus::CommandsAtSubmit().load(std::memory_order_relaxed));
+		probe.has_snapshot = true;
+	}
+	if (!is_write && WaitEagerReadback(vaddr, size, eager_dcc, census ? &probe : nullptr)) {
 		FrameTiming::Add(FrameTiming::Counter::ReadbackEagerHits);
 		if (eager_dcc) {
 			FrameTiming::Add(FrameTiming::Counter::DccEagerHitN);
@@ -434,13 +452,19 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		}
 		const auto ns = add_wait();
 		if (census) {
-			LogSyncReadback(site, vaddr, size, ns, SyncCensus::Probe {}, true);
+			NoteEagerProbe(probe);
+			LogSyncReadback(site, vaddr, size, ns, probe, true);
 		}
 		return true;
 	}
-	bool       downloaded = true;
-	SyncCensus::Probe  probe;
-	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, &downloaded, &probe, census, site, eager_dcc] {
+	bool downloaded = true;
+	const auto send_time = std::chrono::steady_clock::now();
+	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, &downloaded, &probe, census, site, eager_dcc, send_time] {
+		const auto lambda_begin = std::chrono::steady_clock::now();
+		if (census) {
+			probe.queue_ns = static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(lambda_begin - send_time).count());
+		}
 		// A download already queued for this page must land before this one decides anything.
 		(void)WaitEagerReadback(vaddr, size, eager_dcc);
 		if (!is_write) {
@@ -462,6 +486,16 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			probe.current = m_scheduler.CurrentTick();
 			m_scheduler.GetMasterSemaphore().Refresh();
 			probe.done = SyncCensus::WriterDone(probe.writer, m_scheduler.GetMasterSemaphore().KnownGpuTick());
+			// S404: snapshots before the drain (the Submit inside the download resets cmds_since_submit).
+			const auto commands = FrameTiming::Get(FrameTiming::Counter::Draws) + FrameTiming::Get(FrameTiming::Counter::Dispatches);
+			probe.cmds_since_submit = SyncCensus::Diff(commands, SyncCensus::CommandsAtSubmit().load(std::memory_order_relaxed));
+			probe.backlog           = SyncCensus::Backlog(probe.current, m_scheduler.GetMasterSemaphore().KnownGpuTick());
+			probe.cmds_since_writer = probe.writer == 0 ? 0 : SyncCensus::Diff(commands, m_sync_cmds.MaxTick(vaddr, size));
+			probe.has_snapshot      = true;
+			if (SyncCensus::StaleFreshSite(site, size) && !is_write) {
+				probe.stale_fresh.size = size;
+				probe.stale_fresh.ok   = LibKernel::Memory::TryReadBacking(vaddr, probe.stale_fresh.stale, size);
+			}
 		}
 		const auto    known_mode = DccFillPublish::EnvMode();
 		KnownFillPlan fill_plan;
@@ -511,12 +545,31 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		if (is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 		}
+		if (census) {
+			if (probe.stale_fresh.size != 0 && probe.stale_fresh.ok) {
+				probe.stale_fresh.ok = LibKernel::Memory::TryReadBacking(vaddr, probe.stale_fresh.fresh, size);
+			}
+			probe.lambda_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+			                                            std::chrono::steady_clock::now() - lambda_begin)
+			                                            .count());
+		}
 	});
 	const auto ns = add_wait();
 	if (eager_dcc) {
 		FrameTiming::Add(FrameTiming::Counter::DccEagerMissN);
 	}
 	if (census) {
+		NoteEagerProbe(probe);
+		FrameTiming::Add(FrameTiming::Counter::SyncQueueNs, probe.queue_ns);
+		FrameTiming::Add(FrameTiming::Counter::SyncLambdaNs, probe.lambda_ns);
+		if (probe.downloaded && probe.stale_fresh.size != 0 && probe.stale_fresh.ok) {
+			const bool equal = probe.stale_fresh.Equal();
+			if (site == SyncCensus::Site::Spec) {
+				FrameTiming::Add(equal ? FrameTiming::Counter::SyncStaleEqSpecN : FrameTiming::Counter::SyncStaleNeSpecN);
+			} else {
+				FrameTiming::Add(equal ? FrameTiming::Counter::SyncStaleEqRfGpuN : FrameTiming::Counter::SyncStaleNeRfGpuN);
+			}
+		}
 		if (probe.downloaded) {
 			const auto lag = SyncCensus::Lag(probe.current, probe.writer);
 			FrameTiming::Add(FrameTiming::Counter::SyncLagSum, lag);
@@ -539,6 +592,27 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	return downloaded;
 }
 
+// S404: why a DCC piece took the old path, once per (addr, flip) inside the same log window as [sync].
+void BufferCache::LogDccFallback(uint64_t address, uint64_t size, DccFillPublish::Why why) {
+	static std::atomic<uint64_t> logged {0};
+	static uint64_t              last_flip = ~0ull;
+	static std::unordered_set<uint64_t> seen; // GPU thread only
+	const auto                   flip = FrameTiming::GuestFlips();
+	if (flip != last_flip) {
+		seen.clear();
+		last_flip = flip;
+	}
+	if (!seen.insert(address).second) {
+		return;
+	}
+	const auto n = logged.fetch_add(1, std::memory_order_relaxed);
+	if (n >= 300 && !(flip >= 6300 && flip <= 6310)) {
+		return;
+	}
+	LOGF("[dcc-fallback] flip=%" PRIu64 " addr=0x%016" PRIx64 " size=0x%" PRIx64 " why=%s\n", flip, address, size,
+	     DccFillPublish::WhyName(why));
+}
+
 void BufferCache::LogSyncReadback(SyncCensus::Site site, uint64_t vaddr, uint64_t size, uint64_t wait_ns,
                                   const SyncCensus::Probe& probe, bool eager) {
 	static std::atomic<uint64_t> logged {0};
@@ -547,19 +621,36 @@ void BufferCache::LogSyncReadback(SyncCensus::Site site, uint64_t vaddr, uint64_
 	if (n >= 300 && !(flip >= 6300 && flip <= 6310)) {
 		return;
 	}
-	const auto commands = FrameTiming::Get(FrameTiming::Counter::Draws) +
-	                      FrameTiming::Get(FrameTiming::Counter::Dispatches) -
-	                      SyncCensus::CommandsAtSubmit().load(std::memory_order_relaxed);
-	char reader[96] = "";
+	// S404: cmds_since_submit is the snapshot taken before the drain; the live difference would count from the drain's own Submit.
+	const auto commands = probe.has_snapshot
+	                          ? probe.cmds_since_submit
+	                          : SyncCensus::Diff(FrameTiming::Get(FrameTiming::Counter::Draws) +
+	                                                 FrameTiming::Get(FrameTiming::Counter::Dispatches),
+	                                             SyncCensus::CommandsAtSubmit().load(std::memory_order_relaxed));
+	char reader[160] = "";
 	if (site == SyncCensus::Site::Spec) {
 		const auto& tag = SyncCensus::CurrentReaderRef();
-		std::snprintf(reader, sizeof(reader), " reader=%016" PRIx64 "/%s wseq=%" PRIu64 " wsince=%d", tag.hash, tag.stage,
-		              probe.write_seq, probe.written_since ? 1 : 0);
+		std::snprintf(reader, sizeof(reader), " reader=%016" PRIx64 "/%s path=%s wseq=%" PRIu64 " wsince=%d", tag.hash, tag.stage,
+		              tag.path, probe.write_seq, probe.written_since ? 1 : 0);
+	}
+	char stale[2 * SyncCensus::StaleFresh::kMaxSize * 2 + 48] = "";
+	if (probe.stale_fresh.size != 0 && probe.stale_fresh.ok) {
+		std::snprintf(stale, sizeof(stale), " stale=%s fresh=%s eq=%d",
+		              SyncCensus::ToHex(probe.stale_fresh.stale, probe.stale_fresh.size).c_str(),
+		              SyncCensus::ToHex(probe.stale_fresh.fresh, probe.stale_fresh.size).c_str(), probe.stale_fresh.Equal() ? 1 : 0);
+	}
+	char eager_text[160] = "";
+	if (probe.eager_seen) {
+		std::snprintf(eager_text, sizeof(eager_text), " etick=%" PRIu64 " elag=%" PRIu64 " edone=%d ewait_us=%" PRIu64,
+		              probe.eager_tick, probe.eager_lag, probe.eager_already_done ? 1 : 0, probe.eager_wait_ns / 1000);
 	}
 	LOGF("[sync] flip=%" PRIu64 " site=%s addr=0x%016" PRIx64 " size=0x%" PRIx64 " wait_us=%" PRIu64
-	     " dl=%d lag=%" PRIu64 " done=%d eager=%d cmds_since_submit=%" PRIu64 "%s\n",
+	     " dl=%d lag=%" PRIu64 " done=%d eager=%d cmds_since_submit=%" PRIu64 " backlog=%" PRIu64 " cmds_since_writer=%" PRIu64
+	     " tid=%u gpu_thread=%d queue_us=%" PRIu64 " lambda_us=%" PRIu64 "%s%s%s\n",
 	     flip, SyncCensus::SiteName(site), vaddr, size, wait_ns / 1000, probe.downloaded ? 1 : 0,
-	     SyncCensus::Lag(probe.current, probe.writer), probe.done ? 1 : 0, eager ? 1 : 0, commands, reader);
+	     SyncCensus::Lag(probe.current, probe.writer), probe.done ? 1 : 0, eager ? 1 : 0, commands, probe.backlog,
+	     probe.cmds_since_writer, probe.thread_id, probe.gpu_thread ? 1 : 0, probe.queue_ns / 1000, probe.lambda_ns / 1000, reader,
+	     stale, eager_text);
 }
 
 namespace {
@@ -693,13 +784,25 @@ void BufferCache::FlushEagerReadbacks() {
 	m_eager_pending.clear();
 }
 
-bool BufferCache::WaitEagerReadback(uint64_t vaddr, uint64_t size, bool dcc) {
+// S404: counters for an eager wait the probe saw (the requesting thread's side of an rf_guest fault).
+void BufferCache::NoteEagerProbe(const SyncCensus::Probe& probe) {
+	if (!probe.eager_seen) {
+		return;
+	}
+	if (probe.eager_already_done) {
+		FrameTiming::Add(FrameTiming::Counter::SyncEagerAlreadyDoneN);
+	}
+	FrameTiming::Add(FrameTiming::Counter::SyncEagerLagSum, probe.eager_lag);
+	FrameTiming::Add(FrameTiming::Counter::SyncEagerWaitNs, probe.eager_wait_ns);
+}
+
+bool BufferCache::WaitEagerReadback(uint64_t vaddr, uint64_t size, bool dcc, SyncCensus::Probe* probe) {
 	if (!EagerReadbackEnabled() || CommandScheduler::InDeferredOperation()) {
 		return false;
 	}
 	const auto page = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 	if (Common::AlignDown(vaddr + size - 1, TRACKER_PAGE_SIZE) != page) {
-		return dcc && WaitEagerReadbackPages(vaddr, size);
+		return dcc && WaitEagerReadbackPages(vaddr, size, probe);
 	}
 	uint64_t tick = 0;
 	{
@@ -712,15 +815,33 @@ bool BufferCache::WaitEagerReadback(uint64_t vaddr, uint64_t size, bool dcc) {
 	}
 	// The tick was taken while its command buffer was being submitted, so it is (or is about
 	// to be) in flight; a timeline wait may precede the signal operation.
+	const auto wait_begin = probe != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+	if (probe != nullptr) {
+		NoteEagerWait(*probe, tick);
+	}
 	m_scheduler.GetMasterSemaphore().Wait(tick);
 	m_scheduler.WaitPriorityOperations(tick);
+	if (probe != nullptr) {
+		probe->eager_wait_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                                                 std::chrono::steady_clock::now() - wait_begin)
+		                                                 .count());
+	}
 	return !m_memory_tracker.IsRegionGpuModified(page, TRACKER_PAGE_SIZE);
+}
+
+void BufferCache::NoteEagerWait(SyncCensus::Probe& probe, uint64_t tick) {
+	probe.eager_seen         = true;
+	probe.eager_tick         = tick;
+	probe.current            = m_scheduler.CurrentTick();
+	probe.eager_lag          = SyncCensus::Diff(probe.current, tick);
+	probe.eager_already_done = m_scheduler.GetMasterSemaphore().KnownGpuTick() >= tick; // before the Wait
+	probe.backlog            = SyncCensus::Backlog(probe.current, m_scheduler.GetMasterSemaphore().KnownGpuTick());
 }
 
 // KYTY_DCC_EAGER=1: a DCC metadata range of several pages is served when every page is clean or has an eager download in
 // flight, and no page is GPU-modified again once the newest of those downloads has landed (a GPU write after the download
 // keeps its page marked; that range takes the synchronous path).
-bool BufferCache::WaitEagerReadbackPages(uint64_t vaddr, uint64_t size) {
+bool BufferCache::WaitEagerReadbackPages(uint64_t vaddr, uint64_t size, SyncCensus::Probe* probe) {
 	const auto first = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 	const auto last  = Common::AlignDown(vaddr + size - 1, TRACKER_PAGE_SIZE);
 	std::vector<EagerPages::PageState> pages;
@@ -739,8 +860,17 @@ bool BufferCache::WaitEagerReadbackPages(uint64_t vaddr, uint64_t size) {
 	if (!plan.wait) {
 		return false;
 	}
+	const auto wait_begin = probe != nullptr ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point {};
+	if (probe != nullptr) {
+		NoteEagerWait(*probe, plan.max_tick);
+	}
 	m_scheduler.GetMasterSemaphore().Wait(plan.max_tick);
 	m_scheduler.WaitPriorityOperations(plan.max_tick);
+	if (probe != nullptr) {
+		probe->eager_wait_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                                                 std::chrono::steady_clock::now() - wait_begin)
+		                                                 .count());
+	}
 	index = 0;
 	for (auto page = first; page <= last; page += TRACKER_PAGE_SIZE, index++) {
 		pages[index].gpu_modified = m_memory_tracker.IsRegionGpuModified(page, TRACKER_PAGE_SIZE);
@@ -962,6 +1092,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		if (SyncCensus::Enabled()) {
 			m_sync_ticks.Note(vaddr, size, m_scheduler.CurrentTick());
 			m_sync_seq.Note(vaddr, size, ++m_sync_seq_next);
+			m_sync_cmds.Note(vaddr, size, FrameTiming::Get(FrameTiming::Counter::Draws) + FrameTiming::Get(FrameTiming::Counter::Dispatches));
 		}
 	}
 	return {&buffer, buffer.Offset(vaddr)};

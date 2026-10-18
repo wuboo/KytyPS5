@@ -8,7 +8,10 @@
 
 #include <atomic>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <string>
 #include <unordered_map>
 
 namespace Libs::Graphics::SyncCensus {
@@ -76,9 +79,12 @@ private:
 
 // S402: the shader program being specialized on this thread (hash + stage name), set by PipelineCache around Get(); the
 // readbacks tagged Site::Spec log it, so the reader of the spec drain is named.
+// S404: path = how Get() found the program: "hit" (cached program, no call source), "refresh" (cached program with a call source:
+// RefreshCallSource + FindPermutation), "miss" (compile). The scope covers the whole lookup, not only the compile.
 struct Reader {
 	uint64_t    hash  = 0;
 	const char* stage = "?";
+	const char* path  = "?";
 };
 inline Reader& CurrentReaderRef() {
 	static thread_local Reader reader;
@@ -86,7 +92,15 @@ inline Reader& CurrentReaderRef() {
 }
 class ReaderScope {
 public:
-	ReaderScope(uint64_t hash, const char* stage): m_previous(CurrentReaderRef()) { CurrentReaderRef() = Reader {hash, stage}; }
+	ReaderScope(uint64_t hash, const char* stage, const char* path = "miss"): m_previous(CurrentReaderRef()) {
+#if defined(KYTY_SYNCCENSUS_MUTANT_READER_MISS_ONLY)
+		// Mutant: only the compile path names its reader (the S402 behavior), a cache hit reads as nobody.
+		if (std::strcmp(path, "miss") != 0) {
+			return;
+		}
+#endif
+		CurrentReaderRef() = Reader {hash, stage, path};
+	}
 	~ReaderScope() { CurrentReaderRef() = m_previous; }
 	ReaderScope(const ReaderScope&)            = delete;
 	ReaderScope& operator=(const ReaderScope&) = delete;
@@ -94,6 +108,13 @@ public:
 private:
 	Reader m_previous;
 };
+// Called by the owner of the scope when the lookup moves on to the next path.
+inline void SetReaderPath(const char* path) {
+	auto& reader = CurrentReaderRef();
+	if (reader.hash != 0) {
+		reader.path = path;
+	}
+}
 
 // Last tick (the command buffer being recorded) at which each 4 KiB page was marked GPU-written.
 class TickPages {
@@ -151,7 +172,56 @@ constexpr bool WriterDone(uint64_t writer_tick, uint64_t known_gpu_tick) {
 	return writer_tick == 0 || known_gpu_tick >= writer_tick;
 }
 
-// What one served readback saw (filled on the GPU thread).
+// Small sequential id of the calling thread (log readability; 1 = first thread that asked).
+inline uint32_t ThreadId() {
+	static std::atomic<uint32_t> next {1};
+	static thread_local uint32_t id = next.fetch_add(1, std::memory_order_relaxed);
+	return id;
+}
+
+// Saturating differences (counters read from different threads may be a step apart).
+constexpr uint64_t Diff(uint64_t newer, uint64_t older) {
+	return newer > older ? newer - older : 0;
+}
+// Ticks the GPU is behind the buffer being recorded.
+constexpr uint64_t Backlog(uint64_t current_tick, uint64_t known_gpu_tick) {
+	return Diff(current_tick, known_gpu_tick);
+}
+
+// Lower-case hex of up to 64 bytes ("-" for none).
+inline std::string ToHex(const uint8_t* data, uint64_t size) {
+	if (size == 0) {
+		return "-";
+	}
+	std::string text;
+	char        pair[3];
+	for (uint64_t i = 0; i < size && i < 64; i++) {
+		std::snprintf(pair, sizeof(pair), "%02x", data[i]);
+		text += pair;
+	}
+	return text;
+}
+
+// S404: the bytes the CPU would have seen before the drain (stale) and after it (fresh); small ranges only.
+struct StaleFresh {
+	static constexpr uint64_t kMaxSize = 64;
+	bool                      ok       = false; // both reads succeeded
+	uint64_t                  size     = 0;
+	uint8_t                   stale[kMaxSize] {};
+	uint8_t                   fresh[kMaxSize] {};
+	[[nodiscard]] bool        Equal() const {
+#if defined(KYTY_SYNCCENSUS_MUTANT_STALE_ALWAYS_EQUAL)
+		return true;
+#else
+		return ok && std::memcmp(stale, fresh, static_cast<size_t>(size)) == 0;
+#endif
+	}
+};
+constexpr bool StaleFreshSite(Site site, uint64_t size) {
+	return (site == Site::Spec || site == Site::RfGpu) && size != 0 && size <= StaleFresh::kMaxSize;
+}
+
+// What one served readback saw (filled on the GPU thread, the eager part on the requesting thread).
 struct Probe {
 	bool     downloaded = false;
 	uint64_t writer     = 0; // newest GPU write tick over the range, 0 = unknown
@@ -161,6 +231,23 @@ struct Probe {
 	bool     same       = false;
 	uint64_t write_seq     = 0;     // S402 (spec): newest write sequence number over the range (0 = none seen)
 	bool     written_since = false; // S402 (spec): the range was written since the previous spec read of it
+	// S404: snapshots taken BEFORE the drain (the drain itself submits and would reset them).
+	uint64_t cmds_since_submit = 0; // draws + dispatches recorded since the last submit
+	uint64_t backlog           = 0; // CurrentTick - KnownGpuTick (after Refresh)
+	uint64_t cmds_since_writer = 0; // draws + dispatches recorded since the newest writer of the range (0 = none known)
+	bool     has_snapshot      = false;
+	StaleFresh stale_fresh;
+	// S404: where the time went on the guest-thread path.
+	uint32_t thread_id    = 0;
+	bool     gpu_thread   = false;
+	uint64_t queue_ns     = 0; // SendCommandSync: sent -> lambda starts on the GPU thread
+	uint64_t lambda_ns    = 0; // the lambda itself
+	// S404 (rf_guest eager): the page had an eager download in flight.
+	bool     eager_seen         = false;
+	uint64_t eager_tick         = 0;
+	uint64_t eager_lag          = 0; // CurrentTick - eager_tick when the fault arrived
+	bool     eager_already_done = false; // KnownGpuTick >= eager_tick before the Wait
+	uint64_t eager_wait_ns      = 0;
 };
 
 // draws + dispatches recorded when the last command buffer was submitted (for the [sync] log).
