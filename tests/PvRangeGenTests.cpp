@@ -1,5 +1,5 @@
 // S406: KYTY_PV_RANGE_GEN memo decisions (pvRangeGen.h).
-// Mutants (each must fail): IGNORE_STAMP (a hit although the page stamp moved), DEFAULT_ON (the switch is on without the variable).
+// Mutants (each must fail): IGNORE_STAMP (a hit although the page stamp moved), DEFAULT_OFF (the switch is off without the variable).
 // The page stamps themselves (bumped on CPU and GPU modification) are pinned in MemoryTrackerTests.cpp (mutants NO_BUMP_CPU / NO_BUMP_GPU).
 
 #include "graphics/host_gpu/renderer/pvRangeGen.h"
@@ -17,12 +17,12 @@ static void Check(bool ok, const char* what) {
 }
 
 int main() {
-	Check(ParseMode(nullptr) == Mode::Off, "unset = off");
+	Check(ParseMode(nullptr) == Mode::On, "unset = on (S408 default)");
 	Check(ParseMode("0") == Mode::Off, "0 = off");
 	Check(ParseMode("1") == Mode::On, "1 = on");
 	Check(ParseMode("shadow") == Mode::Shadow, "shadow");
 	Check(ParseMode("yes") == Mode::Off, "anything else = off");
-	Check(EnvMode() == Mode::Off, "without the variable the switch is off (default 0)");
+	Check(EnvMode() == Mode::On, "without the variable the switch is on (default 1)");
 
 	const Key   key {0x571b2da7c, 768, 2, 192, 0, 0x7fffffff};
 	Entry       entry {/*max_stamp*/ 41, /*index_hash*/ 0xabc, /*derivable*/ true, {10, 200, false}};

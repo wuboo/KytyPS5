@@ -8,7 +8,7 @@
 //   - the whole range is registered in the tracker and clean (neither CPU- nor GPU-modified, i.e. write-protected), and
 //   - the largest page stamp of the range is the one seen when the result was made (any write to a protected page faults and takes a
 //     newer stamp; see PageStampClock in regionManager.h).
-//   0       the old path only (bit for bit as before)
+//   0       the old path only (bit for bit as before); S408: unset = 1
 //   1       a generation hit is served from the memo (no hash, no scan); everything else takes the old path and refreshes the memo
 //   shadow  the old path always; a generation hit is compared with what the old path computed (hash and range): mismatch counted
 // Pure part; tests/PvRangeGenTests.cpp pins it.
@@ -23,18 +23,20 @@ namespace Libs::Graphics::PvRangeGen {
 enum class Mode : uint8_t { Off, On, Shadow };
 
 inline Mode ParseMode(const char* text) {
-	if (text == nullptr) return Mode::Off;
+	if (text == nullptr) {
+#ifdef KYTY_PVRANGEGEN_MUTANT_DEFAULT_OFF
+		return Mode::Off;
+#else
+		return Mode::On; // S408: on by default; KYTY_PV_RANGE_GEN=0 restores the XXH3 of the index bytes
+#endif
+	}
 	if (std::strcmp(text, "1") == 0) return Mode::On;
 	if (std::strcmp(text, "shadow") == 0) return Mode::Shadow;
 	return Mode::Off;
 }
 inline Mode EnvMode() {
 	static const Mode mode = ParseMode(std::getenv("KYTY_PV_RANGE_GEN"));
-#if defined(KYTY_PVRANGEGEN_MUTANT_DEFAULT_ON)
-	return mode == Mode::Off ? Mode::On : mode;
-#else
 	return mode;
-#endif
 }
 
 struct Key {
