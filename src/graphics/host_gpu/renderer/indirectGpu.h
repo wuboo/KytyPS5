@@ -1,10 +1,10 @@
 #ifndef KYTY_GRAPHICS_HOST_GPU_RENDERER_INDIRECTGPU_H_
 #define KYTY_GRAPHICS_HOST_GPU_RENDERER_INDIRECTGPU_H_
 
-// S404: KYTY_INDIRECT_GPU=0|1|shadow (unset or unknown = 0). An indexed indirect draw of one draw, without a count buffer, whose
+// S404: KYTY_INDIRECT_GPU=0|1|shadow (unset = 1, unknown = 0). An indexed indirect draw of one draw, without a count buffer, whose
 // registers need no patching (all SH_NOP) and whose index buffer size is known is recorded as vkCmdDrawIndexedIndirect(args) instead
 // of reading the args on the CPU first. The CPU read of GPU-written args drains the queue (the S401 census: draw B, args pv=0, regs=0).
-//   0       the old path, bit for bit.
+//   0       the old path, bit for bit (KYTY_INDIRECT_GPU=0).
 //   shadow  the old path; every candidate is counted and logged ([indirect-gpu]) with the reason it would not qualify.
 //   1       qualified draws go to the GPU; the others take the old path (and say why).
 // The decision is made in two steps, because the host path of a draw is only known after its shader state is built:
@@ -22,7 +22,11 @@ enum class Mode : uint32_t { Off, On, Shadow };
 
 inline Mode ParseMode(const char* text) {
 	if (text == nullptr) {
+#ifdef KYTY_INDIRECTGPU_MUTANT_DEFAULT_OFF
 		return Mode::Off;
+#else
+		return Mode::On; // S405: on by default; KYTY_INDIRECT_GPU=0 restores the CPU read of the args
+#endif
 	}
 	if (std::strcmp(text, "1") == 0) {
 		return Mode::On;

@@ -26,7 +26,7 @@ Candidate Good() {
 }
 
 void TestParseMode() {
-	Check(ParseMode(nullptr) == Mode::Off, "unset = off");
+	Check(ParseMode(nullptr) == Mode::On, "unset = on (default)");
 	Check(ParseMode("0") == Mode::Off, "0 = off");
 	Check(ParseMode("1") == Mode::On, "1 = on");
 	Check(ParseMode("shadow") == Mode::Shadow, "shadow");

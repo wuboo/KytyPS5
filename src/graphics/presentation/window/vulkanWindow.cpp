@@ -676,7 +676,7 @@ static vk::Device VulkanCreateDevice(GraphicContext&                 graphics,
 	graphics.sample_rate_shading_enabled                 = true;
 	device_features.shaderInt64 = VK_TRUE;
 	// S404: an indirect draw takes its first instance from the args; without the feature that field must be zero. Requested only
-	// when KYTY_INDIRECT_GPU is 1 or shadow, so the device of a default run is created exactly as before.
+	// unless KYTY_INDIRECT_GPU=0 (on by default since S405); with 0 the device is created exactly as before.
 	if (IndirectGpu::EnvMode() != IndirectGpu::Mode::Off && supported_features2.features.drawIndirectFirstInstance == VK_TRUE) {
 		device_features.drawIndirectFirstInstance = VK_TRUE;
 		graphics.draw_indirect_first_instance     = true;
