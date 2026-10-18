@@ -11,6 +11,7 @@
 #include "graphics/host_gpu/renderer/cache/inflightRanges.h"
 #include "graphics/host_gpu/renderer/cache/eagerPages.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
+#include "graphics/host_gpu/renderer/cache/gpuDirtyRanges.h"
 #include "graphics/host_gpu/renderer/cache/gpuWriteLedger.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
@@ -98,6 +99,9 @@ public:
 	[[nodiscard]] bool HasGpuDirtyBytes(uint64_t vaddr, uint64_t size);
 	// S418: a recorded GPU->host copy of the range has not reached the backing yet (the tracker no longer lists it as GPU-modified).
 	[[nodiscard]] bool HasInflightDownloadBytes(uint64_t vaddr, uint64_t size) const;
+	// S428: HasGpuDirtyBytes + HasInflightDownloadBytes for a signal handler of a guest thread; never waits, false when a lock is held by the
+	// command processor (the caller takes the ordinary drain).
+	[[nodiscard]] bool TryQueryGuestFault(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight) const;
 	// S419: blocks until every recorded GPU->host copy is published to the backing (GPU thread only).
 	void WaitInflightDownloads();
 	// S418: the physical backing holds the current bytes: no GPU write and no copy in flight. `reason` (optional): 1 = GPU-dirty, 2 = in flight.
@@ -194,7 +198,7 @@ private:
 	Common::LeastRecentlyUsedCache<BufferId, uint64_t> m_lru_cache;
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
-	RangeSet                                          m_gpu_modified_ranges;
+	GpuDirtyRanges                                    m_gpu_modified_ranges;
 	InflightRanges                                    m_inflight_download_ranges;
 	MemoryTracker                                     m_memory_tracker;
 	StreamBuffer                                      m_staging_buffer;

@@ -4,6 +4,9 @@
 //  - with real SIGSEGVs on a PROT_NONE page: the handler serves the load from a separate "backing" buffer (value in the register == backing,
 //    not the page), the page stays protected (the second run faults again), dirty bytes and unsupported forms take the ordinary path.
 // Mutants (WILL_FAIL): EMU_IGNORES_DIRTY (emulates GPU-dirty bytes), EMU_WRONG_RIP (RIP skips one byte too many).
+// S428: B1 (the 8-bit destinations SPL/BPL/SIL/DIL/R8B..R15B: Zydis ids 8..19 are encoding numbers 4..15) with all 16 REX byte registers on a fabricated
+// context and on a real SIGSEGV, the reasons of a fallback (ClassifyFallback, BackingResult -> Why), and a parity check of every form against the
+// native instruction on the same bytes. Mutant (WILL_FAIL): GPR8_RAW_ID.
 // S427: the VEX.128 forms (vmovss/sd/d/q/ups/upd/dqu/aps/apd/dqa). Bits 128..255 of the YMM register are zeroed (legacy SSE leaves them), vvvv must be
 // 1111b, L = 1 / EVEX are fallbacks, a context without the AVX layout is a fallback. Mutants (WILL_FAIL): VEX_NO_ZERO_UPPER, VEX_IGNORE_VVVV.
 
@@ -19,6 +22,7 @@
 #include <sys/mman.h>
 #include <sys/ucontext.h>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -44,13 +48,16 @@ uint64_t                g_base = 0;
 std::atomic<bool>       g_dirty {false};
 std::atomic<bool>       g_inflight {false};
 
-bool TestRead(uint64_t address, uint64_t size, void* dst) {
+BackingResult TestRead(uint64_t address, uint64_t size, void* dst) {
 	const Gate gate {Mode::On, true, false, g_dirty.load(), g_inflight.load()};
-	if (!MayEmulate(gate) || address < g_base || address + size > g_base + g_backing.size()) {
-		return false;
+	if (address < g_base || address + size > g_base + g_backing.size()) {
+		return BackingResult::Unavailable;
+	}
+	if (!MayEmulate(gate)) {
+		return g_dirty.load() ? BackingResult::Dirty : BackingResult::Inflight;
 	}
 	std::memcpy(dst, g_backing.data() + (address - g_base), size);
-	return true;
+	return BackingResult::Ok;
 }
 
 void FillBacking() {
@@ -589,6 +596,244 @@ void TestRealVexFaults() {
 	}
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------------------
+// S428 (B1): `mov <byte reg>,[rdi]` with a REX prefix for every encoding number 0..15: AL CL DL BL SPL BPL SIL DIL R8B..R15B.
+std::vector<uint8_t> MovByteRegInsn(unsigned n) {
+	return {static_cast<uint8_t>(0x40 | (n >= 8 ? 0x04 : 0x00)), 0x8a, static_cast<uint8_t>(((n & 7u) << 3) | 0x07)};
+}
+
+uint64_t Pattern(unsigned r) {
+	return 0x5a5a5a5a5a5a5a00ull + (r * 3u + 1u);
+}
+
+void TestGpr8Fake() {
+	for (unsigned n = 0; n < 16; ++n) {
+		FillBacking();
+		std::vector<uint8_t> code = MovByteRegInsn(n);
+		code.resize(code.size() + 16, 0x90);
+		Fake fake;
+		fake.mc.__ss.__rip = reinterpret_cast<uint64_t>(code.data());
+		g_base             = 0x100000;
+		uint64_t before[16];
+		for (unsigned r = 0; r < 16; ++r) {
+			fake.Reg(static_cast<uint8_t>(r)) = Pattern(r);
+		}
+		fake.Reg(7) = g_base; // rdi is the base register
+		for (unsigned r = 0; r < 16; ++r) {
+			before[r] = fake.Reg(static_cast<uint8_t>(r));
+		}
+		Attempt attempt;
+		char    text[160];
+		const bool ok = Prepare(&fake.uc, g_base, TestRead, &attempt);
+		std::snprintf(text, sizeof(text), "mov byte reg #%u: Prepare accepts (why=%d)", n, static_cast<int>(attempt.plan.why));
+		Check(ok, text);
+		std::snprintf(text, sizeof(text), "mov byte reg #%u: the destination is register %u (got %u)", n, n, attempt.plan.dst);
+		Check(attempt.plan.dst == n && attempt.plan.dst_bytes == 1 && attempt.plan.size == 1, text);
+		Commit(&fake.uc, attempt.plan, attempt.bytes);
+		for (unsigned r = 0; r < 16; ++r) {
+			const uint64_t expect = r == n ? ((before[r] & ~uint64_t {0xff}) | g_backing[0]) : before[r];
+			std::snprintf(text, sizeof(text), "mov byte reg #%u: r%u == 0x%llx (got 0x%llx)", n, r, static_cast<unsigned long long>(expect),
+			              static_cast<unsigned long long>(fake.Reg(static_cast<uint8_t>(r))));
+			Check(fake.Reg(static_cast<uint8_t>(r)) == expect, text);
+		}
+		Check(fake.mc.__ss.__rip == reinterpret_cast<uint64_t>(code.data()) + 3, "mov byte reg: RIP moves by the instruction length");
+	}
+	// Without REX the numbers 4..7 are AH..BH: still a fallback.
+	{
+		std::vector<uint8_t> code = {0x8a, 0x27, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+		Fake                 fake;
+		fake.mc.__ss.__rip = reinterpret_cast<uint64_t>(code.data());
+		fake.mc.__ss.__rdi = 0x100000;
+		g_base             = 0x100000;
+		Attempt attempt;
+		Check(!Prepare(&fake.uc, g_base, TestRead, &attempt) && attempt.plan.why == Why::HighByteReg, "mov ah,[rdi] stays a fallback");
+	}
+}
+
+// A function that saves all 16 registers, loads a pattern into all but rsp (rdi = the protected page), runs `insn`, stores all 16, restores the
+// callee-saved ones and rsp. Two pages: the code, then the data (A = saved at entry, B = after `insn`).
+struct RegProbe {
+	uint8_t*  mem = nullptr;
+	uint64_t* a   = nullptr;
+	uint64_t* b   = nullptr;
+	void (*fn)() = nullptr;
+};
+
+void Emit32(std::vector<uint8_t>& c, int32_t v) {
+	for (int i = 0; i < 4; ++i) {
+		c.push_back(static_cast<uint8_t>(static_cast<uint32_t>(v) >> (8 * i)));
+	}
+}
+
+RegProbe BuildRegProbe(const std::vector<uint8_t>& insn, uint64_t rdi_value) {
+	RegProbe probe;
+	void*    mem = ::mmap(nullptr, 2 * kPageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+	Check(mem != MAP_FAILED, "map probe");
+	probe.mem = static_cast<uint8_t*>(mem);
+	probe.a   = reinterpret_cast<uint64_t*>(probe.mem + kPageSize);
+	probe.b   = probe.a + 16;
+	std::vector<uint8_t> c;
+	const auto           rip_rel = [&](uint8_t rex, uint8_t opcode, unsigned reg, uint64_t* slot) {
+        c.push_back(static_cast<uint8_t>(rex | (reg >= 8 ? 0x04 : 0x00)));
+        c.push_back(opcode);
+        c.push_back(static_cast<uint8_t>(((reg & 7u) << 3) | 0x05));
+        const int64_t disp = reinterpret_cast<uint8_t*>(slot) - (probe.mem + c.size() + 4);
+        Emit32(c, static_cast<int32_t>(disp));
+	};
+	for (unsigned r = 0; r < 16; ++r) {
+		rip_rel(0x48, 0x89, r, probe.a + r); // mov [A+r],reg
+	}
+	for (unsigned r = 0; r < 16; ++r) {
+		if (r == 4) {
+			continue; // rsp keeps the real stack: a signal handler runs on it
+		}
+		c.push_back(static_cast<uint8_t>(0x48 | (r >= 8 ? 0x01 : 0x00)));
+		c.push_back(static_cast<uint8_t>(0xb8 + (r & 7u)));
+		const uint64_t value = r == 7 ? rdi_value : Pattern(r);
+		for (int i = 0; i < 8; ++i) {
+			c.push_back(static_cast<uint8_t>(value >> (8 * i)));
+		}
+	}
+	c.insert(c.end(), insn.begin(), insn.end());
+	for (unsigned r = 0; r < 16; ++r) {
+		rip_rel(0x48, 0x89, r, probe.b + r); // mov [B+r],reg
+	}
+	for (const unsigned r: {4u, 3u, 5u, 12u, 13u, 14u, 15u}) {
+		rip_rel(0x48, 0x8b, r, probe.a + r); // mov reg,[A+r]: rsp first, then the callee-saved registers
+	}
+	c.push_back(0xc3);
+	Check(c.size() < kPageSize, "probe fits a page");
+	std::memcpy(probe.mem, c.data(), c.size());
+	Check(::mprotect(probe.mem, kPageSize, PROT_READ | PROT_EXEC) == 0, "probe code executable");
+	probe.fn = reinterpret_cast<void (*)()>(probe.mem);
+	return probe;
+}
+
+void TestGpr8Real() {
+	FillBacking();
+	g_base = reinterpret_cast<uint64_t>(g_page);
+	for (unsigned n = 0; n < 16; ++n) {
+		const RegProbe probe = BuildRegProbe(MovByteRegInsn(n), reinterpret_cast<uint64_t>(g_page));
+		for (const bool protect: {true, false}) {
+			if (protect) {
+				ArmPage();
+			} else { // native: the page holds the backing bytes, no fault
+				Check(::mprotect(g_page, kPageSize, PROT_READ | PROT_WRITE) == 0, "page writable");
+				std::memcpy(g_page, g_backing.data(), g_backing.size());
+				Check(::mprotect(g_page, kPageSize, PROT_READ) == 0, "page readable");
+			}
+			g_emulated = 0;
+			g_fallback = 0;
+			probe.fn();
+			char text[200];
+			std::snprintf(text, sizeof(text), "register #%u %s: served by the emulator (emulated=%d fallback=%d)", n, protect ? "emulated" : "native",
+			              g_emulated.load(), g_fallback.load());
+			Check(protect ? (g_emulated == 1 && g_fallback == 0) : (g_emulated == 0 && g_fallback == 0), text);
+			for (unsigned r = 0; r < 16; ++r) {
+				uint64_t start = r == 4 ? probe.a[4] : (r == 7 ? reinterpret_cast<uint64_t>(g_page) : Pattern(r));
+				uint64_t expect = r == n ? ((start & ~uint64_t {0xff}) | g_backing[0]) : start;
+				std::snprintf(text, sizeof(text), "register #%u %s: r%u == 0x%llx (got 0x%llx)", n, protect ? "emulated" : "native", r,
+				              static_cast<unsigned long long>(expect), static_cast<unsigned long long>(probe.b[r]));
+				Check(probe.b[r] == expect, text);
+			}
+		}
+		::munmap(probe.mem, 2 * kPageSize);
+	}
+}
+
+// S428: the reasons of a fallback, and the mapping of the backing result onto them.
+void TestFallbackReasons() {
+	Check(ClassifyFallback(Why::BackingDirty) == Fallback::Dirty, "dirty bytes -> dirty");
+	Check(ClassifyFallback(Why::BackingInflight) == Fallback::Inflight, "in-flight bytes -> inflight");
+	Check(ClassifyFallback(Why::LockBusy) == Fallback::LockBusy, "busy lock -> lockbusy");
+	Check(ClassifyFallback(Why::Vex) == Fallback::Vex, "VEX.L = 1 / EVEX -> vex");
+	for (const Why why : {Why::NotALoad, Why::Prefix, Why::HighByteReg, Why::Size, Why::Misaligned, Why::PageCross, Why::WrongAddress, Why::DecodeFailed,
+	                      Why::BackingRefused, Why::VexNoAvx, Why::NoContext, Why::CodeUnreadable}) {
+		Check(ClassifyFallback(why) == Fallback::Form, "everything else -> form");
+	}
+	static BackingResult g_result;
+	g_result = BackingResult::Ok;
+	const auto fake_read = [](uint64_t, uint64_t, void* dst) {
+		std::memset(dst, 0, 1);
+		return g_result;
+	};
+	const std::pair<BackingResult, Why> expectations[] = {{BackingResult::Dirty, Why::BackingDirty},       {BackingResult::Inflight, Why::BackingInflight},
+	                                                      {BackingResult::LockBusy, Why::LockBusy},         {BackingResult::Unavailable, Why::BackingRefused}};
+	for (const auto& [result, why]: expectations) {
+		std::vector<uint8_t> code = MovByteRegInsn(0);
+		code.resize(code.size() + 16, 0x90);
+		Fake fake;
+		fake.mc.__ss.__rip = reinterpret_cast<uint64_t>(code.data());
+		fake.mc.__ss.__rdi = 0x100000;
+		g_result           = result;
+		Attempt attempt;
+		Check(!Prepare(&fake.uc, 0x100000, fake_read, &attempt) && attempt.plan.why == why, "a backing result maps onto its reason");
+		Check(fake.mc.__ss.__rip == reinterpret_cast<uint64_t>(code.data()), "a refused backing read leaves RIP alone");
+	}
+	Attempt attempt;
+	Check(!Prepare(nullptr, 0, nullptr, &attempt) && attempt.plan.why == Why::NoContext, "no context");
+}
+
+// S428: every form gives the same result as the native instruction on the same bytes (no protection, the page holds the backing).
+void TestNativeParity() {
+	FillBacking();
+	g_base = reinterpret_cast<uint64_t>(g_page);
+	struct Item {
+		const char*          name;
+		std::vector<uint8_t> insn;
+		bool                 ymm;
+	};
+	const std::vector<Item> items = {
+	    {"mov eax,[rdi]", {0x8b, 0x07}, false},
+	    {"mov rax,[rdi]", {0x48, 0x8b, 0x07}, false},
+	    {"mov ax,[rdi]", {0x66, 0x8b, 0x07}, false},
+	    {"mov al,[rdi]", {0x8a, 0x07}, false},
+	    {"movzx eax,byte [rdi]", {0x0f, 0xb6, 0x07}, false},
+	    {"movzx rax,word [rdi]", {0x48, 0x0f, 0xb7, 0x07}, false},
+	    {"movzx ax,byte [rdi]", {0x66, 0x0f, 0xb6, 0x07}, false},
+	    {"movsx eax,byte [rdi]", {0x0f, 0xbe, 0x07}, false},
+	    {"movsx rax,word [rdi]", {0x48, 0x0f, 0xbf, 0x07}, false},
+	    {"movsxd rax,dword [rdi]", {0x48, 0x63, 0x07}, false},
+	    {"movss xmm0,[rdi]", {0xf3, 0x0f, 0x10, 0x07}, false},
+	    {"movsd xmm0,[rdi]", {0xf2, 0x0f, 0x10, 0x07}, false},
+	    {"movd xmm0,[rdi]", {0x66, 0x0f, 0x6e, 0x07}, false},
+	    {"movq xmm0,[rdi]", {0xf3, 0x0f, 0x7e, 0x07}, false},
+	    {"movups xmm0,[rdi]", {0x0f, 0x10, 0x07}, false},
+	    {"movupd xmm0,[rdi]", {0x66, 0x0f, 0x10, 0x07}, false},
+	    {"movdqu xmm0,[rdi]", {0xf3, 0x0f, 0x6f, 0x07}, false},
+	    {"movaps xmm0,[rdi]", {0x0f, 0x28, 0x07}, false},
+	    {"movapd xmm0,[rdi]", {0x66, 0x0f, 0x28, 0x07}, false},
+	    {"movdqa xmm0,[rdi]", {0x66, 0x0f, 0x6f, 0x07}, false},
+	    {"vmovss xmm0,[rdi]", {0xc5, 0xfa, 0x10, 0x07}, true},
+	    {"vmovsd xmm0,[rdi]", {0xc5, 0xfb, 0x10, 0x07}, true},
+	    {"vmovd xmm0,[rdi]", {0xc5, 0xf9, 0x6e, 0x07}, true},
+	    {"vmovq xmm0,[rdi]", {0xc5, 0xfa, 0x7e, 0x07}, true},
+	    {"vmovups xmm0,[rdi]", {0xc5, 0xf8, 0x10, 0x07}, true},
+	    {"vmovupd xmm0,[rdi]", {0xc5, 0xf9, 0x10, 0x07}, true},
+	    {"vmovdqu xmm0,[rdi]", {0xc5, 0xfa, 0x6f, 0x07}, true},
+	    {"vmovaps xmm0,[rdi]", {0xc5, 0xf8, 0x28, 0x07}, true},
+	    {"vmovapd xmm0,[rdi]", {0xc5, 0xf9, 0x28, 0x07}, true},
+	    {"vmovdqa xmm0,[rdi]", {0xc5, 0xf9, 0x6f, 0x07}, true},
+	};
+	for (const auto& item: items) {
+		Fn fn = MapCode(item.ymm ? WrapYmm(item.insn) : Wrap(item.insn));
+		alignas(32) uint8_t native[64] = {};
+		alignas(32) uint8_t emulated[64] = {};
+		Check(::mprotect(g_page, kPageSize, PROT_READ | PROT_WRITE) == 0, "page writable");
+		std::memcpy(g_page, g_backing.data(), g_backing.size());
+		Check(::mprotect(g_page, kPageSize, PROT_READ) == 0, "page readable");
+		g_emulated = 0;
+		g_fallback = 0;
+		fn(g_page, native);
+		Check(g_emulated == 0 && g_fallback == 0, "native run does not fault");
+		ArmPage();
+		fn(g_page, emulated);
+		char text[160];
+		std::snprintf(text, sizeof(text), "%s: emulated registers == native (emulated=%d fallback=%d)", item.name, g_emulated.load(), g_fallback.load());
+		Check(g_emulated == 1 && g_fallback == 0 && std::memcmp(native, emulated, sizeof(native)) == 0, text);
+	}
+}
+
 void TestRealFallbacks() {
 	FillBacking();
 	g_base = reinterpret_cast<uint64_t>(g_page);
@@ -653,12 +898,16 @@ int main() {
 	TestRefusals();
 	TestVexNeedsAvxContext();
 	TestDiagText();
+	TestGpr8Fake();
+	TestFallbackReasons();
 	void* page = ::mmap(nullptr, kPageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
 	Check(page != MAP_FAILED, "map data page");
 	g_page = static_cast<uint8_t*>(page);
 	Check(Common::HostException::InstallHandler(Handler), "install host exception handler");
 	TestRealFaults();
 	TestRealVexFaults();
+	TestGpr8Real();
+	TestNativeParity();
 	TestRealFallbacks();
 	std::printf("GuestReadEmulatorTests: all passed\n");
 	return 0;
