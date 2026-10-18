@@ -1,4 +1,5 @@
 #include "graphics/presentation/frameTiming.h"
+#include "kernel/eventQueue.h"
 #include "graphics/presentation/cpPhases.h"
 #include "graphics/presentation/cpSampler.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
@@ -375,6 +376,10 @@ constexpr const char* kCounterNames[] = {
     "spec_backing_inflight_n",
     "equeue_coalesced_n",
     "equeue_pending_max",
+    "equeue_received_n",
+    "equeue_recv_graphics_n",
+    "equeue_recv_ampr_n",
+    "equeue_recv_videoout_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
@@ -434,6 +439,11 @@ void OnFramePresented() {
 
 	const auto frame = g_presented_frames.fetch_add(1, std::memory_order_relaxed) + 1;
 	if (log != nullptr) {
+		namespace Eq = Libs::LibKernel::EventQueue; // S421
+		Set(Counter::EqueueReceivedN, Eq::ReceivedCount(Eq::ReceivedKind::All));
+		Set(Counter::EqueueRecvGraphicsN, Eq::ReceivedCount(Eq::ReceivedKind::Graphics));
+		Set(Counter::EqueueRecvAmprN, Eq::ReceivedCount(Eq::ReceivedKind::Ampr));
+		Set(Counter::EqueueRecvVideoOutN, Eq::ReceivedCount(Eq::ReceivedKind::VideoOut));
 		const auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
 		                    std::chrono::steady_clock::now().time_since_epoch())
 		                    .count();

@@ -5,6 +5,8 @@
 #include "common/common.h"
 #include "kernel/pthread.h"
 
+#include <array>
+#include <atomic>
 #include <deque>
 #include <memory>
 
@@ -76,6 +78,34 @@ inline bool PushPendingEvent(KernelEqueueEvent& event, const KernelEvent& trigge
 	event.pending_events.back() = triggered;
 	return true;
 #endif
+}
+
+// S421: events handed to the guest by KernelWaitEqueue, process-wide (FrameTiming reads them once per presented frame).
+enum class ReceivedKind : uint8_t { All, Graphics, Ampr, VideoOut, Count };
+
+inline std::array<std::atomic<uint64_t>, static_cast<size_t>(ReceivedKind::Count)>& ReceivedCounters() {
+	static std::array<std::atomic<uint64_t>, static_cast<size_t>(ReceivedKind::Count)> counters {};
+	return counters;
+}
+
+inline void NoteReceived(int16_t filter) {
+#if !defined(KYTY_EQUEUE_MUTANT_NO_RECV_COUNT)
+	auto& counters = ReceivedCounters();
+	counters[static_cast<size_t>(ReceivedKind::All)].fetch_add(1, std::memory_order_relaxed);
+	const auto kind = filter == KERNEL_EVFILT_GRAPHICS  ? ReceivedKind::Graphics :
+	                  filter == KERNEL_EVFILT_AMPR      ? ReceivedKind::Ampr :
+	                  filter == KERNEL_EVFILT_VIDEO_OUT ? ReceivedKind::VideoOut :
+	                                                      ReceivedKind::All;
+	if (kind != ReceivedKind::All) {
+		counters[static_cast<size_t>(kind)].fetch_add(1, std::memory_order_relaxed);
+	}
+#else
+	(void)filter;
+#endif
+}
+
+inline uint64_t ReceivedCount(ReceivedKind kind) {
+	return ReceivedCounters()[static_cast<size_t>(kind)].load(std::memory_order_relaxed);
 }
 
 [[nodiscard]] KernelEqueueRef KernelPinEqueue(KernelEqueue eq);

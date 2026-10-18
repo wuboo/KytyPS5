@@ -1,10 +1,14 @@
 // S420: a GRAPHICS-style equeue event that nobody waits for keeps a bounded pending queue.
+#include "graphics/host_gpu/renderer/interruptEvent.h"
 #include "kernel/eventQueue.h"
 #include "libs/errno.h"
 
 #include <cstdint>
 #include <cstdio>
+#include <atomic>
+#include <chrono>
 #include <cstdlib>
+#include <thread>
 
 namespace {
 
@@ -20,27 +24,20 @@ void Check(bool value, const char* text) {
 	}
 }
 
-// Same shape as Sync::InterruptEventTriggerFunc / InterruptEventResetFunc.
+// The real trigger/reset of the GRAPHICS event (what sync.cpp installs); the counters are what sync.cpp feeds to FrameTiming.
 void ResetFunc(EventQueue::KernelEqueueEvent* event) {
-	event->triggered    = false;
-	event->event.fflags = 0;
-	event->event.data   = 0;
+	Libs::Graphics::Interrupt::Reset(event);
 }
 
 void TriggerFunc(EventQueue::KernelEqueueEvent* event, void* trigger_data) {
-	auto triggered_event = event->event;
-	triggered_event.fflags++;
-	triggered_event.data = reinterpret_cast<intptr_t>(trigger_data);
-	if (event->triggered) {
-		if (EventQueue::PushPendingEvent(*event, triggered_event)) {
+	const auto result = Libs::Graphics::Interrupt::Trigger(event, trigger_data);
+	if (result.queued) {
+		if (result.coalesced) {
 			g_coalesced++;
 		}
-		if (event->pending_events.size() > g_max) {
-			g_max = event->pending_events.size();
+		if (result.pending > g_max) {
+			g_max = result.pending;
 		}
-	} else {
-		event->event     = triggered_event;
-		event->triggered = true;
 	}
 }
 
@@ -53,10 +50,8 @@ void AddGraphics(EventQueue::KernelEqueue queue, int id) {
 	Check(EventQueue::KernelAddEvent(queue, event) == OK, "add graphics event");
 }
 
-void Trigger(EventQueue::KernelEqueue queue, int id, uintptr_t data) {
-	Check(EventQueue::KernelTriggerEvent(queue, static_cast<uintptr_t>(id),
-	                                     EventQueue::KERNEL_EVFILT_GRAPHICS,
-	                                     reinterpret_cast<void*>(data)) == OK, "trigger");
+void Trigger(EventQueue::KernelEqueue queue, int id, uintptr_t data, int16_t filter = EventQueue::KERNEL_EVFILT_GRAPHICS) {
+	Check(EventQueue::KernelTriggerEvent(queue, static_cast<uintptr_t>(id), filter, reinterpret_cast<void*>(data)) == OK, "trigger");
 }
 
 // Drains the queue with zero timeout; returns the number of entries and the data of the last one.
@@ -128,12 +123,84 @@ void TestDistinctIdentsAndWake() {
 	Check(EventQueue::KernelDeleteEqueue(queue) == OK, "delete");
 }
 
+void TestAmprFloodIsBounded() {
+	EventQueue::KernelEqueue queue = EventQueue::KERNEL_EQUEUE_INVALID;
+	Check(EventQueue::KernelCreateEqueue(&queue, "coalesce-ampr") == OK, "create");
+	Check(EventQueue::KernelAddAmprEvent(queue, 5, nullptr) == OK, "add ampr event (real AmprEventTriggerFunc)");
+	const size_t flood = EventQueue::kMaxPendingEvents * 10;
+	for (size_t i = 1; i <= flood; ++i)
+		Trigger(queue, 5, i, EventQueue::KERNEL_EVFILT_AMPR);
+	intptr_t last = 0;
+	const int delivered = Drain(queue, &last);
+	Check(delivered == static_cast<int>(1 + EventQueue::kMaxPendingEvents), "ampr: head plus capped pending delivered");
+	Check(last == static_cast<intptr_t>(flood), "ampr: the latest trigger data survives coalescing");
+	Check(EventQueue::KernelDeleteEqueue(queue) == OK, "delete");
+}
+
+void TestReceivedCounters() {
+	using Kind = EventQueue::ReceivedKind;
+	EventQueue::KernelEqueue queue = EventQueue::KERNEL_EQUEUE_INVALID;
+	Check(EventQueue::KernelCreateEqueue(&queue, "coalesce-recv") == OK, "create");
+	AddGraphics(queue, 3);
+	Check(EventQueue::KernelAddAmprEvent(queue, 4, nullptr) == OK, "add ampr");
+	const auto all0 = EventQueue::ReceivedCount(Kind::All);
+	const auto gfx0 = EventQueue::ReceivedCount(Kind::Graphics);
+	const auto amp0 = EventQueue::ReceivedCount(Kind::Ampr);
+	const auto vo0  = EventQueue::ReceivedCount(Kind::VideoOut);
+	for (uintptr_t i = 1; i <= 7; ++i)
+		Trigger(queue, 3, i);
+	for (uintptr_t i = 1; i <= 3; ++i)
+		Trigger(queue, 4, i, EventQueue::KERNEL_EVFILT_AMPR);
+	intptr_t last = 0;
+	Check(Drain(queue, &last) == 10, "ten entries delivered");
+	Check(EventQueue::ReceivedCount(Kind::Graphics) - gfx0 == 7, "graphics receive counter counts what the guest received");
+	Check(EventQueue::ReceivedCount(Kind::Ampr) - amp0 == 3, "ampr receive counter");
+	Check(EventQueue::ReceivedCount(Kind::VideoOut) - vo0 == 0, "videoout receive counter untouched");
+	Check(EventQueue::ReceivedCount(Kind::All) - all0 == 10, "total receive counter");
+	Check(EventQueue::KernelDeleteEqueue(queue) == OK, "delete");
+}
+
+// A waiter that blocks on an emptied queue is woken by a trigger after the queue had been at its cap.
+void TestWaiterWokenAfterFullQueue() {
+	EventQueue::KernelEqueue queue = EventQueue::KERNEL_EQUEUE_INVALID;
+	Check(EventQueue::KernelCreateEqueue(&queue, "coalesce-wake") == OK, "create");
+	AddGraphics(queue, 9);
+	for (uintptr_t i = 1; i <= EventQueue::kMaxPendingEvents * 4; ++i)
+		Trigger(queue, 9, i);
+	intptr_t last = 0;
+	(void)Drain(queue, &last);
+	int          out    = 0;
+	int          result = -1;
+	intptr_t     got    = 0;
+	std::atomic<bool> waiting {false};
+	std::thread waiter([&] {
+		EventQueue::KernelEvent         event {};
+		Libs::LibKernel::KernelUseconds timeout = 10'000'000; // 10 s
+		waiting = true;
+		result  = EventQueue::KernelWaitEqueue(queue, &event, 1, &out, &timeout);
+		got     = event.data;
+	});
+	while (!waiting)
+		std::this_thread::yield();
+	std::this_thread::sleep_for(std::chrono::milliseconds(100));
+	const auto begin = std::chrono::steady_clock::now();
+	Trigger(queue, 9, 4242);
+	waiter.join();
+	const auto waited = std::chrono::steady_clock::now() - begin;
+	Check(result == OK && out == 1 && got == 4242, "the waiter received the trigger made after the queue had been full");
+	Check(waited < std::chrono::seconds(2), "the waiter was woken by the trigger, not by its timeout");
+	Check(EventQueue::KernelDeleteEqueue(queue) == OK, "delete");
+}
+
 } // namespace
 
 int main() {
 	TestFloodIsBounded();
 	TestBelowCapKeepsEveryEntry();
 	TestDistinctIdentsAndWake();
+	TestAmprFloodIsBounded();
+	TestReceivedCounters();
+	TestWaiterWokenAfterFullQueue();
 	std::puts("EventQueueCoalesceTests: ok");
 	return 0;
 }
