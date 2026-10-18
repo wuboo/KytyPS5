@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
+#include "graphics/shader/recompiler/ir/passes/specShadow.h"
 
 #include "common/abi.h"
 #include "graphics/shader/nullDescDiag.h"
@@ -1401,6 +1402,7 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 		if (clean && (m_clean_evaluator == nullptr || m_runtime.read_specialization_memory == nullptr))
 			return false;
 		auto& evaluator = clean ? *m_clean_evaluator : *this;
+		SpecShadow::PurposeScope purpose(clean ? SpecShadow::Purpose::Slot : SpecShadow::CurrentPurpose()); // S406
 		return read.flat_offset < flat.size() && evaluator.Evaluate(read.value, flat[read.flat_offset]);
 	};
 	auto& active = m_program.active_sources;
@@ -1434,6 +1436,7 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 			const auto& block = m_program.control_flow[index];
 			uint32_t condition = 0;
 			auto& predicate = m_clean_evaluator != nullptr ? *m_clean_evaluator : *this;
+			SpecShadow::PurposeScope purpose(SpecShadow::Purpose::Cond); // S406
 			if (!block.condition.IsEmpty() &&
 			    (m_runtime.read_specialization_memory != nullptr || !m_program.capture_specialization_reads) &&
 			    predicate.Evaluate(block.condition, condition)) {

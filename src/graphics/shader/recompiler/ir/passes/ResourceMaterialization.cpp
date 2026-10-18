@@ -3,6 +3,8 @@
 #include "common/assert.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
+#include "graphics/shader/recompiler/ir/passes/specShadow.h"
+#include <optional>
 #include "graphics/presentation/cpSampler.h"
 #include "graphics/shader/nullDescDiag.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -50,6 +52,7 @@ void RememberNullImage(ResourceSnapshot& snapshot, uint32_t slot, const NullImag
 }
 
 bool SpecializationFail(std::string_view message) {
+	if (SpecShadow::ShadowRunning()) return false; // S406: a failed shadow run is counted by its caller
 	std::fprintf(stderr, "shader resource specialization failed: %.*s\n",
 	             static_cast<int>(message.size()), message.data());
 	return false;
@@ -1622,6 +1625,7 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	const auto active = std::span<const uint8_t>(program.active_sources);
 	std::array<uint32_t, 3> workgroup_counts {};
 	if (runtime.indirect_args_address != 0u) {
+		SpecShadow::PurposeScope purpose(SpecShadow::Purpose::Wg); // S406
 		for (uint32_t source = 0; source < program.descriptor_sources.size(); ++source) {
 			if ((!active.empty() && !active[source]) ||
 			    !uses_workgroup_count(program.descriptor_sources[source])) continue;
@@ -1633,6 +1637,8 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		}
 	}
 	snapshot.uniform_fill = {};
+	std::optional<SpecShadow::PurposeScope> fill_purpose; // S406: the uniform_fill parameters only
+	fill_purpose.emplace(SpecShadow::Purpose::Fill);
 	const auto& fill = program.uniform_fill;
 	auto words = fill.fill.words;
 	std::array<uint32_t, 4> stored {};
@@ -1650,6 +1656,8 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 		snapshot.uniform_fill.value = stored[0];
 		snapshot.uniform_fill.bounded_elements = elements;
 	}
+	fill_purpose.reset();
+	SpecShadow::PurposeScope desc_purpose(SpecShadow::Purpose::Desc); // S406: descriptors, to the end of the function
 	const auto evaluate = [&](uint32_t source, DescriptorValue& value, bool written = false) {
 		if (source >= program.descriptor_sources.size()) {
 			return false;
