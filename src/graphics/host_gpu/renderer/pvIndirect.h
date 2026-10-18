@@ -182,6 +182,17 @@ inline void RecordRange(RangeEntry& entry, const RangeKey& key, uint64_t first, 
 	entry.range = {first, end};
 }
 
+// S417: reuse is for the indices a read of which would fault: GPU-written bytes (tracker) OR a protected / GPU-owned page of the range (RESULT-415:
+// the bytes are clean, the page is not, and the read drains the queue all the same).
+constexpr bool RangeReuseDirty(bool bytes_dirty, bool page_modified) {
+#if defined(KYTY_PVINDIRECT_MUTANT_REUSE_IGNORES_PAGE)
+	(void)page_modified;
+	return bytes_dirty;
+#else
+	return bytes_dirty || page_modified;
+#endif
+}
+
 enum class RangeDecision : uint8_t {
 	NotApplicable, // mode 0 / shadow / not an On draw / indices not GPU-dirty: the CPU scan, nothing counted
 	Miss,          // On, dirty indices, but nothing remembered for this key: the CPU scan (and it is remembered)
