@@ -694,10 +694,10 @@ foreach(mutant IN ITEMS NO_BUMP_CPU NO_BUMP_GPU)
 	target_include_directories(memory_tracker_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(memory_tracker_mutant_${mutant_lower}_tests PRIVATE KYTY_MEMTRACKER_MUTANT_${mutant}=1)
 endforeach()
-# S406: KYTY_PV_RANGE_GEN memo decisions. Mutants: a hit although the stamp moved; the switch on by default.
+# S406: KYTY_PV_RANGE_GEN memo decisions. Mutants: a hit although the stamp moved; the switch off by default (S408: default is 1).
 add_executable(pv_range_gen_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PvRangeGenTests.cpp")
 target_include_directories(pv_range_gen_tests PRIVATE ${inc_headers})
-foreach(mutant IN ITEMS IGNORE_STAMP DEFAULT_ON)
+foreach(mutant IN ITEMS IGNORE_STAMP DEFAULT_OFF)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(pv_range_gen_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PvRangeGenTests.cpp")
 	target_include_directories(pv_range_gen_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
@@ -1294,7 +1294,7 @@ if(BUILD_TESTING)
 		set_tests_properties(memory_tracker_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
 	add_test(NAME pv_range_gen COMMAND $<TARGET_FILE:pv_range_gen_tests>)
-	foreach(mutant IN ITEMS ignore_stamp default_on)
+	foreach(mutant IN ITEMS ignore_stamp default_off)
 		add_test(NAME pv_range_gen_mutant_${mutant} COMMAND $<TARGET_FILE:pv_range_gen_mutant_${mutant}_tests>)
 		set_tests_properties(pv_range_gen_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
@@ -1495,7 +1495,7 @@ if(BUILD_TESTING)
 		memory_tracker_mutant_no_bump_gpu_tests
 		pv_range_gen_tests
 		pv_range_gen_mutant_ignore_stamp_tests
-		pv_range_gen_mutant_default_on_tests
+		pv_range_gen_mutant_default_off_tests
 		page_manager_tests
 		archive_file_tests
 		trophy_system_tests
