@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/renderer/syncCensus.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/eagerSubmit.h"
@@ -492,6 +493,11 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::QueueSubmits);
 	FrameTiming::OnQueueSubmit();
+	if (SyncCensus::Enabled()) {
+		SyncCensus::CommandsAtSubmit().store(FrameTiming::Get(FrameTiming::Counter::Draws) +
+		                                         FrameTiming::Get(FrameTiming::Counter::Dispatches),
+		                                     std::memory_order_relaxed);
+	}
 
 	m_command.m_buffer = nullptr;
 	return tick;

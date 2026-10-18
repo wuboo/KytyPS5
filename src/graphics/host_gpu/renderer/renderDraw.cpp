@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/renderDraw.h"
+#include "graphics/host_gpu/renderer/syncCensus.h"
 
 #include "common/assert.h"
 #include "common/common.h"
@@ -57,6 +58,32 @@
 #include <xxhash.h>
 
 namespace Libs::Graphics {
+
+// S398 (KYTY_DIAG_SYNC=1): largest color target of the current flip (rt_max_w / rt_max_h); a change is logged.
+static void NoteRenderTargetSize(uint32_t width, uint32_t height) {
+	if (!SyncCensus::Enabled()) {
+		return;
+	}
+	static uint64_t flip = ~0ull;
+	static uint32_t logged_w = 0, logged_h = 0;
+	static uint32_t logged_n = 0;
+	const auto      now = FrameTiming::GuestFlips();
+	if (now != flip) {
+		flip = now;
+		FrameTiming::Set(FrameTiming::Counter::RtMaxW, 0);
+		FrameTiming::Set(FrameTiming::Counter::RtMaxH, 0);
+	}
+	FrameTiming::Max(FrameTiming::Counter::RtMaxW, width);
+	FrameTiming::Max(FrameTiming::Counter::RtMaxH, height);
+	const auto w = static_cast<uint32_t>(FrameTiming::Get(FrameTiming::Counter::RtMaxW));
+	const auto h = static_cast<uint32_t>(FrameTiming::Get(FrameTiming::Counter::RtMaxH));
+	if ((w != logged_w || h != logged_h) && logged_n < 200) {
+		logged_w = w;
+		logged_h = h;
+		logged_n++;
+		LOGF("[rt-size] flip=%" PRIu64 " max_color_target=%ux%u\n", now, w, h);
+	}
+}
 
 std::pair<int32_t, uint32_t> ResolveDrawOffsets(uint32_t                     index_offset,
                                                 const ShaderVertexInputInfo& vs_input_info) {
@@ -524,6 +551,7 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		                                     view.layer_count},
 		              buffer.Handle());
 		const auto extent           = target.Extent();
+		NoteRenderTargetSize(extent.width, extent.height);
 		state.width                 = std::min(state.width, extent.width);
 		state.height                = std::min(state.height, extent.height);
 		state.num_layers            = std::min(state.num_layers, view.layer_count);

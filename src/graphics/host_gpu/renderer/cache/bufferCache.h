@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
+#include "graphics/host_gpu/renderer/syncCensus.h"
 
 #include <map>
 #include <mutex>
@@ -138,6 +139,8 @@ private:
 	void NoteGpuWrite(uint64_t vaddr, uint64_t size);
 	void FlushEagerReadbacks();
 	[[nodiscard]] bool WaitEagerReadback(uint64_t vaddr, uint64_t size);
+	void LogSyncReadback(SyncCensus::Site site, uint64_t vaddr, uint64_t size, uint64_t wait_ns,
+	                     const SyncCensus::Probe& probe, bool eager);
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
@@ -168,6 +171,9 @@ private:
 	std::vector<uint64_t>                  m_eager_pending;          // GPU thread
 	std::mutex                             m_eager_mutex;
 	std::unordered_map<uint64_t, EagerPage> m_eager_pages; // hot tracker pages, m_eager_mutex
+	// S398 (KYTY_DIAG_SYNC=1), GPU thread only.
+	SyncCensus::TickPages     m_sync_ticks;
+	SyncCensus::RepeatTracker m_sync_repeat;
 };
 
 } // namespace Libs::Graphics

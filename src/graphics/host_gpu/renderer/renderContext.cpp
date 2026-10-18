@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/syncCensus.h"
 #include "graphics/presentation/cpPhaseScope.h"
 
 #include "common/assert.h"
@@ -107,6 +108,7 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	} else {
 		FrameTiming::Add(on_gpu_thread ? FrameTiming::Counter::ReadbackReadFaultGpu
 		                               : FrameTiming::Counter::ReadbackReadFault);
+		const SyncCensus::SiteScope site_tag(on_gpu_thread ? SyncCensus::Site::RfGpu : SyncCensus::Site::RfGuest);
 		const bool downloaded = m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
 		if (!downloaded && access != PageFaultAccess::Execute) {
 			// Nothing to download and the tracker wants the page readable, yet it faulted:

@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 
+#include "graphics/host_gpu/renderer/syncCensus.h"
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
@@ -123,6 +124,7 @@ void PipelineCacheLog(fmt::format_string<Args...> format, Args&&... args) {
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
 	// Scalar and unformatted buffer dependencies use the same backing as native raw loads.
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
+	const SyncCensus::SiteScope site_tag(SyncCensus::Site::Spec);
 	return !values.empty() &&
 	       Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
 }
@@ -131,6 +133,7 @@ bool ReadBackingForShader(void*, uint64_t address, void* data, uint64_t size, bo
 	if (gpu_dirty != nullptr) {
 		*gpu_dirty = NullDesc::Enabled() && Libs::LibKernel::Memory::QueryShaderGpuDirty(address, size);
 	}
+	const SyncCensus::SiteScope site_tag(SyncCensus::Site::Spec);
 	return Libs::LibKernel::Memory::TryReadBufferBacking(address, data, size);
 }
 

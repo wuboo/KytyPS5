@@ -1178,6 +1178,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 	// so discovery runs before final draw uploads and never holds the texture lock across it.
 	if (m_buffer_cache.IsRegionGpuModified(range.address, range.size)) {
 		FrameTiming::Add(FrameTiming::Counter::ReadbackDcc);
+		const SyncCensus::SiteScope site_tag(SyncCensus::Site::Dcc);
 		m_buffer_cache.ReadMemory(range.address, range.size, false);
 	}
 	const auto slice_size = range.size / layers;

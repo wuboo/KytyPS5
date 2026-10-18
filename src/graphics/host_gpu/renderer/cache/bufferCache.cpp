@@ -308,9 +308,18 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	}
 	m_memory_tracker.InvalidateRegion(vaddr, size, [this, vaddr, size] {
 		FrameTiming::Add(FrameTiming::Counter::ReadbackWriteFault);
+		const SyncCensus::SiteScope site_tag(SyncCensus::Site::WriteFault);
 		ReadMemory(vaddr, size, true);
 	});
 }
+
+namespace {
+// S398: sync_<kind>_<site> counters sit in SyncCensus::Site order after their first member.
+FrameTiming::Counter SyncCounter(FrameTiming::Counter first, SyncCensus::Site site) {
+	return static_cast<FrameTiming::Counter>(static_cast<uint32_t>(first) + static_cast<uint32_t>(site));
+}
+
+} // namespace
 
 bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
@@ -319,20 +328,34 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		     vaddr, size);
 	}
 	FrameTiming::Add(FrameTiming::Counter::Readbacks);
+	const bool census = SyncCensus::Enabled();
+	const auto site   = census ? SyncCensus::CurrentSite() : SyncCensus::Site::Other;
 	const auto wait_begin = std::chrono::steady_clock::now();
 	const auto add_wait   = [&] {
-		FrameTiming::Add(FrameTiming::Counter::ReadbackWaitNs,
-		                 static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-		                                           std::chrono::steady_clock::now() - wait_begin)
-		                                           .count()));
+		const auto ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+		                                          std::chrono::steady_clock::now() - wait_begin)
+		                                          .count());
+		FrameTiming::Add(FrameTiming::Counter::ReadbackWaitNs, ns);
+		if (census) {
+			FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncDccN, site));
+			FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncDccNs, site), ns);
+		}
+		return ns;
 	};
 	if (!is_write && WaitEagerReadback(vaddr, size)) {
 		FrameTiming::Add(FrameTiming::Counter::ReadbackEagerHits);
-		add_wait();
+		if (census) {
+			FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncEagerHitDccN, site));
+		}
+		const auto ns = add_wait();
+		if (census) {
+			LogSyncReadback(site, vaddr, size, ns, SyncCensus::Probe {}, true);
+		}
 		return true;
 	}
-	bool downloaded = true;
-	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, &downloaded] {
+	bool       downloaded = true;
+	SyncCensus::Probe  probe;
+	m_scheduler.Context().GetGpu().SendCommandSync([this, vaddr, size, is_write, &downloaded, &probe, census, site] {
 		// A download already queued for this page must land before this one decides anything.
 		(void)WaitEagerReadback(vaddr, size);
 		if (!is_write) {
@@ -343,9 +366,29 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		}
 		auto& buffer = m_slot_buffers[FindBuffer(vaddr, size)];
 
+		if (census) {
+			probe.writer  = m_sync_ticks.MaxTick(vaddr, size);
+			probe.current = m_scheduler.CurrentTick();
+			m_scheduler.GetMasterSemaphore().Refresh();
+			probe.done = SyncCensus::WriterDone(probe.writer, m_scheduler.GetMasterSemaphore().KnownGpuTick());
+		}
 		if (DownloadBufferMemory<false>(buffer, vaddr, size)) {
 			FrameTiming::Add(FrameTiming::Counter::ReadbackDownloads);
 			m_memory_tracker.UnmarkRegionAsGpuModified(vaddr, size);
+			if (census) {
+				probe.downloaded = true;
+				m_sync_ticks.Forget(vaddr, size);
+				if (site == SyncCensus::Site::Dcc && size <= 0x10000) {
+					std::vector<uint8_t> bytes(size);
+					uint64_t             hash = 0;
+					if (LibKernel::Memory::TryReadBacking(vaddr, bytes.data(), size)) {
+						hash = SyncCensus::HashBytes(bytes.data(), size);
+					}
+					const auto repeat = m_sync_repeat.Note(vaddr, size, FrameTiming::GuestFlips(), hash);
+					probe.repeat      = repeat.repeat;
+					probe.same        = repeat.same;
+				}
+			}
 		} else if (!is_write) {
 			// A read fault that downloads nothing leaves the page protected and faults again;
 			// the caller restores access.
@@ -363,8 +406,45 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
 		}
 	});
-	add_wait();
+	const auto ns = add_wait();
+	if (census) {
+		if (probe.downloaded) {
+			const auto lag = SyncCensus::Lag(probe.current, probe.writer);
+			FrameTiming::Add(FrameTiming::Counter::SyncLagSum, lag);
+			if (lag == 0) {
+				FrameTiming::Add(FrameTiming::Counter::SyncLag0N);
+			}
+			if (probe.done) {
+				FrameTiming::Add(FrameTiming::Counter::SyncWriterDoneN);
+				FrameTiming::Add(FrameTiming::Counter::SyncWriterDoneNs, ns);
+			}
+			if (probe.repeat) {
+				FrameTiming::Add(FrameTiming::Counter::SyncDccRepeatN);
+				if (probe.same) {
+					FrameTiming::Add(FrameTiming::Counter::SyncDccRepeatSameN);
+				}
+			}
+		}
+		LogSyncReadback(site, vaddr, size, ns, probe, false);
+	}
 	return downloaded;
+}
+
+void BufferCache::LogSyncReadback(SyncCensus::Site site, uint64_t vaddr, uint64_t size, uint64_t wait_ns,
+                                  const SyncCensus::Probe& probe, bool eager) {
+	static std::atomic<uint64_t> logged {0};
+	const auto                   flip = FrameTiming::GuestFlips();
+	const auto                   n    = logged.fetch_add(1, std::memory_order_relaxed);
+	if (n >= 300 && !(flip >= 6300 && flip <= 6310)) {
+		return;
+	}
+	const auto commands = FrameTiming::Get(FrameTiming::Counter::Draws) +
+	                      FrameTiming::Get(FrameTiming::Counter::Dispatches) -
+	                      SyncCensus::CommandsAtSubmit().load(std::memory_order_relaxed);
+	LOGF("[sync] flip=%" PRIu64 " site=%s addr=0x%016" PRIx64 " size=0x%" PRIx64 " wait_us=%" PRIu64
+	     " dl=%d lag=%" PRIu64 " done=%d eager=%d cmds_since_submit=%" PRIu64 "\n",
+	     flip, SyncCensus::SiteName(site), vaddr, size, wait_ns / 1000, probe.downloaded ? 1 : 0,
+	     SyncCensus::Lag(probe.current, probe.writer), probe.done ? 1 : 0, eager ? 1 : 0, commands);
 }
 
 namespace {
@@ -695,6 +775,9 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
 		m_gpu_modified_ranges.Add(vaddr, size);
+		if (SyncCensus::Enabled()) {
+			m_sync_ticks.Note(vaddr, size, m_scheduler.CurrentTick());
+		}
 	}
 	return {&buffer, buffer.Offset(vaddr)};
 }
