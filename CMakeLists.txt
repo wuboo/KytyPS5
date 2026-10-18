@@ -682,6 +682,27 @@ add_executable(memory_tracker_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(memory_tracker_tests fmt::fmt common)
 target_include_directories(memory_tracker_tests PRIVATE ${inc_headers})
+# S406: the page-stamp mutants (a CPU / GPU modification takes no stamp) must fail TestPageGeneration.
+foreach(mutant IN ITEMS NO_BUMP_CPU NO_BUMP_GPU)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(memory_tracker_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/MemoryTrackerTests.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/pageManager.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/memoryTracker.cpp"
+	)
+	target_link_libraries(memory_tracker_mutant_${mutant_lower}_tests fmt::fmt common)
+	target_include_directories(memory_tracker_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(memory_tracker_mutant_${mutant_lower}_tests PRIVATE KYTY_MEMTRACKER_MUTANT_${mutant}=1)
+endforeach()
+# S406: KYTY_PV_RANGE_GEN memo decisions. Mutants: a hit although the stamp moved; the switch on by default.
+add_executable(pv_range_gen_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PvRangeGenTests.cpp")
+target_include_directories(pv_range_gen_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS IGNORE_STAMP DEFAULT_ON)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(pv_range_gen_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PvRangeGenTests.cpp")
+	target_include_directories(pv_range_gen_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(pv_range_gen_mutant_${mutant_lower}_tests PRIVATE KYTY_PVRANGEGEN_MUTANT_${mutant}=1)
+endforeach()
 
 add_executable(shader_vertex_metadata_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ShaderVertexMetadataTests.cpp"
@@ -1268,6 +1289,15 @@ if(BUILD_TESTING)
 	endforeach()
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
+	foreach(mutant IN ITEMS no_bump_cpu no_bump_gpu)
+		add_test(NAME memory_tracker_mutant_${mutant} COMMAND $<TARGET_FILE:memory_tracker_mutant_${mutant}_tests>)
+		set_tests_properties(memory_tracker_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME pv_range_gen COMMAND $<TARGET_FILE:pv_range_gen_tests>)
+	foreach(mutant IN ITEMS ignore_stamp default_on)
+		add_test(NAME pv_range_gen_mutant_${mutant} COMMAND $<TARGET_FILE:pv_range_gen_mutant_${mutant}_tests>)
+		set_tests_properties(pv_range_gen_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
 	add_test(NAME trophy_system COMMAND $<TARGET_FILE:trophy_system_tests>)
@@ -1461,6 +1491,11 @@ if(BUILD_TESTING)
 		scalar_provenance_tests
 		image_page_table_tests
 		memory_tracker_tests
+		memory_tracker_mutant_no_bump_cpu_tests
+		memory_tracker_mutant_no_bump_gpu_tests
+		pv_range_gen_tests
+		pv_range_gen_mutant_ignore_stamp_tests
+		pv_range_gen_mutant_default_on_tests
 		page_manager_tests
 		archive_file_tests
 		trophy_system_tests

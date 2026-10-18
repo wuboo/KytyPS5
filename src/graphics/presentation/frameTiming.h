@@ -213,6 +213,9 @@ enum class Counter : uint32_t {
 	GpuActiveEstNs,
 	// S406 (KYTY_PV_RANGE_GEN=1|shadow): VS-store range memo by page generation.
 	PvGenHitN, PvGenMissN, PvGenMismatchN, PvHashBytesSkipped,
+	// ... draws that could not use the generation at all: host copy of the indices / range not registered in the tracker / range CPU- or
+	// GPU-modified (dirty) at the time of the draw. Hit + miss + these three = VS-store scans seen with the switch on.
+	PvGenIneligibleHostN, PvGenIneligibleUnregN, PvGenIneligibleDirtyN,
 	Count,
 };
 

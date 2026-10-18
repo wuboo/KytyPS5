@@ -1227,6 +1227,12 @@ bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 	return m_memory_tracker.IsRegionGpuModified(vaddr, size);
 }
 
+MemoryTracker::PageGeneration BufferCache::QueryPageGeneration(uint64_t vaddr, uint64_t size) {
+	auto result = m_memory_tracker.QueryPageGeneration(vaddr, size);
+	if (result.clean && m_gpu_modified_ranges.Intersects(vaddr, size)) result.clean = false;
+	return result;
+}
+
 bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 	return m_gpu_modified_ranges.Intersects(vaddr, size);
 }

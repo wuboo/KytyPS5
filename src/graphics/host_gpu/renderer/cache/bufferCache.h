@@ -96,6 +96,8 @@ public:
 	[[nodiscard]] bool HasGpuDirtyBytes(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
+	// S406 (KYTY_PV_RANGE_GEN): see MemoryTracker::QueryPageGeneration; `clean` also needs no GPU-dirty byte range.
+	[[nodiscard]] MemoryTracker::PageGeneration QueryPageGeneration(uint64_t vaddr, uint64_t size);
 	void               ProcessFaultBuffer();
 	void               SynchronizeBda(const RangeSet& mapped);
 	void               QueueBdaSync(uint64_t vaddr, uint64_t size) {

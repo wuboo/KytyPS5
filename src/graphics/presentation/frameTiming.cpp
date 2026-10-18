@@ -258,6 +258,9 @@ constexpr const char* kCounterNames[] = {
     "pv_gen_miss_n",
     "pv_gen_mismatch_n",
     "pv_hash_bytes_skipped",
+    "pv_gen_ineligible_host_n",
+    "pv_gen_ineligible_unreg_n",
+    "pv_gen_ineligible_dirty_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
