@@ -297,6 +297,9 @@ enum class Counter : uint32_t {
 	// S429 (KYTY_EOP_COALESCE=0|1|shadow): EOP interrupts deferred as priority operations / dropped because the same (event, context) was already deferred in
 	// the tick; shadow: how many would have been dropped.
 	EopIrqDeferredN, EopIrqCoalescedN, EopCoalesceWouldN,
+	// S430 DIAG (only with KYTY_DIAG_CP_SAMPLE / KYTY_DIAG_CP_PHASES): SrtWalker::RefreshFlatBuffer paths (srtWalkPaths.h) and strict spec reads
+	// (ReadShaderGuestMemory calls / of those spanning a 4 KiB page).
+	SrtWalkTreeN, SrtWalkTreeFailN, SrtWalkCaptureN, SrtWalkSlotJitN, SrtWalkInterpN, SrtInterpSlotsN, SpecReadN, SpecReadXpageN,
 	Count,
 };
 

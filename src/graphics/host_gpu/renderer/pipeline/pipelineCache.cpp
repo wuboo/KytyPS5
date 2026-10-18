@@ -20,7 +20,9 @@
 #include "graphics/host_gpu/renderer/perVertexVsStoreRuntime.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/cpSampler.h"
+#include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/presentation/srtFast.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -360,7 +362,36 @@ struct ShaderReadContext {
 	uint32_t                             page_mismatch = 0;
 };
 
+// S430 DIAG: the sampler / phases switches turn the walker's path counters on; Drain moves them into FrameTiming once per Get().
+bool SpecDiagOn() {
+	static const bool on = [] {
+		const bool diag = CpSampler::Enabled() || CpPhases::Enabled();
+		if (diag) ShaderRecompiler::IR::SrtWalkPaths::Active().store(true, std::memory_order_relaxed);
+		return diag;
+	}();
+	return on;
+}
+
+void DrainSrtWalkPaths() {
+	if (!SpecDiagOn()) return;
+	using Path = ShaderRecompiler::IR::SrtWalkPaths::Path;
+	using C    = FrameTiming::Counter;
+	const auto cells = ShaderRecompiler::IR::SrtWalkPaths::Drain();
+	const auto at    = [&](Path path) { return cells[static_cast<size_t>(path)]; };
+	FrameTiming::Add(C::SrtWalkTreeN, at(Path::Tree));
+	FrameTiming::Add(C::SrtWalkTreeFailN, at(Path::TreeFail));
+	FrameTiming::Add(C::SrtWalkCaptureN, at(Path::Capture));
+	FrameTiming::Add(C::SrtWalkSlotJitN, at(Path::SlotJit));
+	FrameTiming::Add(C::SrtWalkInterpN, at(Path::InterpWalk));
+	FrameTiming::Add(C::SrtInterpSlotsN, at(Path::InterpSlots));
+}
+
 bool ReadShaderGuestMemory(void* userdata, uint64_t address, std::span<uint32_t> values) {
+	KYTY_CP_SITE(ShSpecRead); // S430
+	if (SpecDiagOn() && !values.empty()) {
+		FrameTiming::Add(FrameTiming::Counter::SpecReadN);
+		if (((address ^ (address + values.size_bytes() - 1)) & ~uint64_t {4095}) != 0) FrameTiming::Add(FrameTiming::Counter::SpecReadXpageN);
+	}
 	// S408 (KYTY_SPEC_COND=superset): a condition read of GPU-dirty bytes on the hit / refresh path fails without draining; the
 	// walker then follows both successors. See specCond.h. Mode 0 never asks for the dirty state.
 	const auto cond_mode = ShaderRecompiler::IR::SpecCond::EnvMode();
@@ -405,6 +436,7 @@ bool ReadShaderGuestMemory(void* userdata, uint64_t address, std::span<uint32_t>
 void NoteSrtMemo(const ShaderRecompiler::IR::ResourceSnapshot& snapshot, const ShaderReadContext& context, uint64_t hash,
                  ShaderType stage) {
 	using ShaderRecompiler::IR::SrtMemoOutcome;
+	DrainSrtWalkPaths();
 	if (context.mode == ShaderRecompiler::IR::SrtFastMode::Off) {
 		return;
 	}
