@@ -13,6 +13,7 @@
 #include "graphics/host_gpu/renderer/cache/gpuWriteLedger.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
+#include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
 
 #include <map>
@@ -104,6 +105,8 @@ public:
 		m_memory_tracker.QueueBdaSync(vaddr, size);
 	}
 	void               RunGarbageCollector();
+	// S412 (KYTY_DIAG_RFOP)
+	[[nodiscard]] uint32_t RfOpWriter(uint64_t vaddr, uint64_t size) const { return m_rfop_writers.Find(vaddr, size); }
 
 private:
 	friend struct BufferCacheTestAccess;
@@ -213,6 +216,7 @@ private:
 	ShadowFill m_shadow_fill; // GPU thread
 	// S398 (KYTY_DIAG_SYNC=1), GPU thread only.
 	SyncCensus::TickPages     m_sync_ticks;
+	RfOp::WriterOps           m_rfop_writers;   // S412: opcode of the newest GPU writer per page (KYTY_DIAG_RFOP)
 	SyncCensus::TickPages     m_sync_cmds;      // S404: draws + dispatches recorded when each page was last marked GPU-written
 	SyncCensus::TickPages     m_sync_seq;       // S402: write sequence number per page (spec log)
 	uint64_t                  m_sync_seq_next = 0;
