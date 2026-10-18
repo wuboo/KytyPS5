@@ -373,6 +373,8 @@ constexpr const char* kCounterNames[] = {
     "cp_read_backing_buffer_n",
     "cp_read_backing_buffer_fallback_n",
     "spec_backing_inflight_n",
+    "equeue_coalesced_n",
+    "equeue_pending_max",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

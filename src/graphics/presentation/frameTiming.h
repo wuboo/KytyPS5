@@ -275,6 +275,8 @@ enum class Counter : uint32_t {
 	// SpecBackingInflightN: shader-spec backing reads (TryReadBufferBacking) that found a GPU->host copy of the range not published yet.
 	CpReadBackingN, CpReadBackingBytes, CpReadBackingFallbackN, CpReadBackingInflightN, CpReadBackingEqN, CpReadBackingNeN,
 	CpReadBackingAttribN, CpReadBackingAttribFallbackN, CpReadBackingBufferN, CpReadBackingBufferFallbackN, SpecBackingInflightN,
+	EqueueCoalescedN, // S420: GRAPHICS equeue triggers merged into the last pending entry (queue at its cap)
+	EqueuePendingMax, // S420: largest pending_events size seen on an interrupt event
 	Count,
 };
 
