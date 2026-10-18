@@ -14,6 +14,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/shader/recompiler/ir/passes/specShadow.h"
 #include "kernel/memory.h"
 
 #include <algorithm>
@@ -407,6 +408,13 @@ FrameTiming::Counter SyncCounter(FrameTiming::Counter first, SyncCensus::Site si
 	return static_cast<FrameTiming::Counter>(static_cast<uint32_t>(first) + static_cast<uint32_t>(site));
 }
 
+// S406: sync_spec_purpose_<x>_n, in the order cond, slot, desc, fill, wg, call, other.
+FrameTiming::Counter SpecPurposeCounter(ShaderRecompiler::IR::SpecShadow::Purpose purpose) {
+	using P = ShaderRecompiler::IR::SpecShadow::Purpose;
+	const auto index = purpose == P::Other ? 6u : static_cast<uint32_t>(purpose) - 1u;
+	return static_cast<FrameTiming::Counter>(static_cast<uint32_t>(FrameTiming::Counter::SyncSpecPurposeCondN) + index);
+}
+
 } // namespace
 
 bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
@@ -429,6 +437,7 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		if (census) {
 			FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncDccN, site));
 			FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncDccNs, site), ns);
+			if (site == SyncCensus::Site::Spec) FrameTiming::Add(SpecPurposeCounter(ShaderRecompiler::IR::SpecShadow::CurrentPurpose()));
 		}
 		return ns;
 	};
@@ -630,8 +639,9 @@ void BufferCache::LogSyncReadback(SyncCensus::Site site, uint64_t vaddr, uint64_
 	char reader[160] = "";
 	if (site == SyncCensus::Site::Spec) {
 		const auto& tag = SyncCensus::CurrentReaderRef();
-		std::snprintf(reader, sizeof(reader), " reader=%016" PRIx64 "/%s path=%s wseq=%" PRIu64 " wsince=%d", tag.hash, tag.stage,
-		              tag.path, probe.write_seq, probe.written_since ? 1 : 0);
+		std::snprintf(reader, sizeof(reader), " reader=%016" PRIx64 "/%s path=%s purpose=%s wseq=%" PRIu64 " wsince=%d", tag.hash,
+		              tag.stage, tag.path, ShaderRecompiler::IR::SpecShadow::PurposeName(ShaderRecompiler::IR::SpecShadow::CurrentPurpose()), probe.write_seq,
+		              probe.written_since ? 1 : 0);
 	}
 	char stale[2 * SyncCensus::StaleFresh::kMaxSize * 2 + 48] = "";
 	if (probe.stale_fresh.size != 0 && probe.stale_fresh.ok) {

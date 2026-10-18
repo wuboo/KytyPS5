@@ -23,6 +23,7 @@
 #include "graphics/presentation/cpSampler.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
+#include "graphics/shader/recompiler/ir/passes/specShadow.h"
 #include "graphics/shader/recompiler/rtMiss.h"
 #include "graphics/shader/nullDescDiag.h"
 #include "graphics/shader/recompiler/srtReader.h"
@@ -255,6 +256,65 @@ void NoteMatMemoResult(uint64_t program_hash, uint32_t stage, const MatMemo::Res
 	}
 }
 
+// ---- S406 (KYTY_DIAG_SYNC=1): shadow of the decision when the spec reads see stale bytes of GPU-written memory ----
+namespace SpecShadow = ShaderRecompiler::IR::SpecShadow;
+
+bool ShadowBacking(uint64_t address, void* data, uint64_t size) {
+	return Libs::LibKernel::Memory::TryReadBacking(address, data, size);
+}
+bool ShadowDirty(uint64_t address, uint64_t size) {
+	return Libs::LibKernel::Memory::QueryShaderGpuDirty(address, size);
+}
+
+struct SpecShadowRun {
+	bool                      active = false; // a spec read hit GPU-dirty bytes: stale and superset were run, compare after the real run
+	SpecShadow::Outcome       stale;
+	SpecShadow::Outcome       superset;
+	SpecShadow::ShadowReader  stale_reader;
+	SpecShadow::ShadowReader  super_reader;
+};
+
+// Runs the stale shadow (every read returns the bytes in memory now, no drain). Only when it saw a GPU-dirty read the superset
+// shadow follows; otherwise the real run will not drain either and there is nothing to compare.
+void RunSpecShadowBefore(const ShaderRecompiler::IR::ResourcePlan& plan, const ShaderRecompiler::IR::SrtRuntime& runtime,
+                         SpecShadowRun& run) {
+	if (!plan.requires_specialization_memory && plan.source_reads.empty() && !plan.capture_specialization_reads) return;
+	run.stale_reader = {.mode = SpecShadow::ReadMode::Stale, .backing = ShadowBacking, .dirty = ShadowDirty};
+	auto shadow_runtime                       = runtime;
+	shadow_runtime.read_specialization_memory = SpecShadow::ShadowRead;
+	shadow_runtime.userdata                   = &run.stale_reader;
+	SpecShadow::Materialize(plan, shadow_runtime, run.stale);
+	if (run.stale_reader.DirtyTotal() == 0) return;
+	run.super_reader                          = {.mode = SpecShadow::ReadMode::Superset, .backing = ShadowBacking, .dirty = ShadowDirty};
+	shadow_runtime.userdata                   = &run.super_reader;
+	SpecShadow::Materialize(plan, shadow_runtime, run.superset);
+	run.active = true;
+}
+
+void NoteSpecShadow(const SpecShadowRun& run, const SpecShadow::Outcome& fresh, bool perm_same, uint64_t program_hash,
+                    const char* stage) {
+	using C = FrameTiming::Counter;
+	const auto verdict = SpecShadow::Compare(run.stale, run.superset, fresh);
+	FrameTiming::Add(verdict.StaleEqual() ? C::SpecDecStaleEqN : C::SpecDecStaleNeN);
+	FrameTiming::Add(verdict.super_ok ? C::SpecDecSuperOkN : C::SpecDecSuperFailN);
+	FrameTiming::Add(C::SpecSuperExtraSourcesN, verdict.extra_sources);
+	FrameTiming::Add(C::SpecSuperNewImagesN, verdict.new_images);
+	if (perm_same) FrameTiming::Add(C::SpecPermSameN);
+	if (verdict.StaleEqual() && verdict.super_ok && verdict.extra_sources == 0 && verdict.new_images == 0) return;
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) >= 200) return;
+	char dirty[96];
+	std::snprintf(dirty, sizeof(dirty), "cond=%u,slot=%u,desc=%u,fill=%u,wg=%u,call=%u,other=%u",
+	              run.stale_reader.dirty_reads[1], run.stale_reader.dirty_reads[2], run.stale_reader.dirty_reads[3],
+	              run.stale_reader.dirty_reads[4], run.stale_reader.dirty_reads[5], run.stale_reader.dirty_reads[6],
+	              run.stale_reader.dirty_reads[0]);
+	const auto diff = SpecShadow::FirstWordDiff(verdict.stale_part, run.stale, fresh);
+	LOGF("[spec-dec] flip=%" PRIu64 " program=0x%016" PRIx64 " stage=%s stale_part=%s stale_word=%u:%08x/%08x super_ok=%d "
+	     "extra_sources=%u new_images=%u perm_same=%d dirty_reads(%s)\n",
+	     FrameTiming::GuestFlips(), program_hash, stage, SpecShadow::PartName(verdict.stale_part), diff.index, diff.stale, diff.fresh,
+	     verdict.super_ok ? 1 : 0, verdict.extra_sources, verdict.new_images, perm_same ? 1 : 0, dirty);
+}
+
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
 	// Scalar and unformatted buffer dependencies use the same backing as native raw loads.
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
@@ -405,6 +465,7 @@ struct PipelineCache::ProgramCache {
 		}
 
 		bool RefreshCallSource(const ShaderRecompiler::IR::SrtRuntime& runtime) {
+			ShaderRecompiler::IR::SpecShadow::PurposeScope purpose(ShaderRecompiler::IR::SpecShadow::Purpose::Call); // S406
 			const auto revision = call_source->revision;
 			ShaderRecompiler::RefreshShaderSource(*call_source, runtime);
 			resource_plan.source_reads = call_source->reads;
@@ -441,6 +502,8 @@ struct PipelineCache::ProgramCache {
 		template <bool HasCalls>
 		Permutation* FindPermutation(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                             uint32_t push_data_cursor) {
+			SpecShadowRun shadow;
+			if (SyncCensus::Enabled()) RunSpecShadowBefore(resource_plan, runtime, shadow); // S406: before the real reads drain
 			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
 			    resource_plan, runtime, resources, specialization));
 			KYTY_CP_SITE(ShPermSearch);
@@ -463,6 +526,30 @@ struct PipelineCache::ProgramCache {
 				break;
 			}
 			if (MatMemoEnabled()) NoteMatMemo(runtime, push_data_cursor, found_index);
+			if (shadow.active) {
+				SpecShadow::Outcome fresh;
+				fresh.ok             = true;
+				fresh.snapshot       = resources;
+				fresh.specialization = specialization;
+				fresh.active         = resource_plan.active_sources;
+				// Would the stale specialization have picked the same permutation?
+				bool perm_same = shadow.stale.ok && shadow.stale.specialization == specialization;
+				if (shadow.stale.ok && !perm_same && found != nullptr) {
+					uint32_t at = 0;
+					for (auto& candidate: permutations) {
+						const auto& layout = candidate.program.bindings;
+						if (layout.push_data_start_dword == ShaderRecompiler::IR::PushData::StartFor(
+						        push_data_cursor, layout.ShaderDataDwords()) &&
+						    candidate.specialization == shadow.stale.specialization) {
+							perm_same = at == found_index;
+							break;
+						}
+						at++;
+					}
+				}
+				const auto stage_name = resource_plan.stage == ShaderType::Pixel ? "ps" : (resource_plan.stage == ShaderType::Compute ? "cs" : "vs");
+				NoteSpecShadow(shadow, fresh, perm_same, resource_plan.shader_hash, stage_name);
+			}
 			return found;
 		}
 

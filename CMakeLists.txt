@@ -804,6 +804,26 @@ add_executable(mat_memo_shadow_mutant_ignore_flat_tests EXCLUDE_FROM_ALL "${KYTY
 target_include_directories(mat_memo_shadow_mutant_ignore_flat_tests PRIVATE ${inc_headers})
 target_compile_definitions(mat_memo_shadow_mutant_ignore_flat_tests PRIVATE KYTY_MATMEMO_MUTANT_IGNORE_FLAT=1)
 
+# S406: spec read purposes and the stale / superset shadow runs. Mutants: tag ignored, stale shadow taken from the fresh run,
+# superset reader that does not fail a dirty condition read.
+set(KYTY_SPEC_SHADOW_SOURCES
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
+)
+set(KYTY_SPEC_SHADOW_MUTANTS TAG_IGNORED SHADOW_FRESH SUPERSET_READS_STALE)
+add_executable(spec_shadow_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SpecShadowTests.cpp" ${KYTY_SPEC_SHADOW_SOURCES})
+target_link_libraries(spec_shadow_tests fmt::fmt xbyak::xbyak)
+target_include_directories(spec_shadow_tests PRIVATE ${inc_headers})
+foreach(mutant IN LISTS KYTY_SPEC_SHADOW_MUTANTS)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(spec_shadow_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SpecShadowTests.cpp" ${KYTY_SPEC_SHADOW_SOURCES})
+	target_link_libraries(spec_shadow_mutant_${mutant_lower}_tests fmt::fmt xbyak::xbyak)
+	target_include_directories(spec_shadow_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(spec_shadow_mutant_${mutant_lower}_tests PRIVATE KYTY_SPECSHADOW_MUTANT_${mutant}=1)
+endforeach()
+
 add_executable(mem_events_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/MemEventsTests.cpp")
 target_include_directories(mem_events_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): an inclusive range end; repeats merge whatever the address.
@@ -1313,6 +1333,12 @@ if(BUILD_TESTING)
 	add_test(NAME mat_memo_shadow COMMAND $<TARGET_FILE:mat_memo_shadow_tests>)
 	add_test(NAME mat_memo_shadow_mutant_ignore_flat COMMAND $<TARGET_FILE:mat_memo_shadow_mutant_ignore_flat_tests>)
 	set_tests_properties(mat_memo_shadow_mutant_ignore_flat PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME spec_shadow COMMAND $<TARGET_FILE:spec_shadow_tests>)
+	foreach(mutant IN LISTS KYTY_SPEC_SHADOW_MUTANTS)
+		string(TOLOWER ${mutant} mutant_lower)
+		add_test(NAME spec_shadow_mutant_${mutant_lower} COMMAND $<TARGET_FILE:spec_shadow_mutant_${mutant_lower}_tests>)
+		set_tests_properties(spec_shadow_mutant_${mutant_lower} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME diag_tex COMMAND $<TARGET_FILE:diag_tex_tests>)
 	add_test(NAME min_lod_view COMMAND $<TARGET_FILE:min_lod_view_tests>)
 	add_test(NAME apple_drop COMMAND $<TARGET_FILE:apple_drop_tests>)
@@ -1591,6 +1617,10 @@ if(BUILD_TESTING)
 		gpu_done_mutant_no_max_tests
 		mat_memo_shadow_tests
 		mat_memo_shadow_mutant_ignore_flat_tests
+		spec_shadow_tests
+		spec_shadow_mutant_tag_ignored_tests
+		spec_shadow_mutant_shadow_fresh_tests
+		spec_shadow_mutant_superset_reads_stale_tests
 		cp_phases_mutant_keep_children_tests
 		cp_phases_mutant_drop_parse_tests
 		mem_events_tests
