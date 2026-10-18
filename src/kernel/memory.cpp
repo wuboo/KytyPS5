@@ -905,6 +905,34 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 	return TryReadBacking(vaddr, data, size);
 }
 
+bool TryReadBufferBackingPass(uint64_t vaddr, void* data, uint64_t size, SrtReadPass* pass) {
+	constexpr uint64_t PageMask = ~uint64_t {SrtReadPass::PageSize - 1u};
+	if (pass == nullptr || size == 0 || ((vaddr ^ (vaddr + size - 1)) & PageMask) != 0 ||
+	    g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
+		return TryReadBufferBacking(vaddr, data, size);
+	}
+	if (!Graphics::GuestGpu::IsGpuThread()) {
+		return false;
+	}
+	const uint64_t page = vaddr & PageMask;
+	if (pass->IsClean(page)) {
+		++pass->page_hits;
+		return TryReadBacking(vaddr, data, size);
+	}
+	// The whole page has to be quiet for the reads of a pass to skip the per-read checks: then none of them could have
+	// drained or waited differently from TryReadBacking (the S419 in-flight window counts as not quiet).
+	++pass->pages_checked;
+	auto& buffers = GetGpuResources().GetBufferCache();
+	const bool dirty    = buffers.HasGpuDirtyBytes(page, SrtReadPass::PageSize);
+	const bool inflight = Graphics::CpReadBacking::EnvMode() != Graphics::CpReadBacking::Mode::Off &&
+	                      buffers.HasInflightDownloadBytes(page, SrtReadPass::PageSize);
+	if (SrtPageQuiet(dirty, inflight)) {
+		pass->AddClean(page);
+		return TryReadBacking(vaddr, data, size);
+	}
+	return TryReadBufferBacking(vaddr, data, size);
+}
+
 // S421 (KYTY_DIAG_GUEST_FAULT): remember the backing reads of the command processor for the [gf] line.
 static void NoteGfBackingRead(uint64_t vaddr, uint64_t size, Graphics::GuestFault::Site site) {
 	if (Graphics::GuestFault::Enabled()) {
