@@ -75,6 +75,11 @@ inline bool ParsePvVsStoreGuard(const char* text, bool& guard) {
 	return false;
 }
 
+// Parser of KYTY_PV_VSSTORE_COMPACT (0|1, unset = 0; the grammar of the guard).
+inline bool ParsePvVsStoreCompact(const char* text, bool& compact) {
+	return ParsePvVsStoreGuard(text, compact);
+}
+
 // Which index element corner k of a triangle reads (the PerVertexKHR order of the guest PS).
 constexpr uint32_t PvVsStoreCornerElement(uint32_t k) {
 #if defined(KYTY_PVVS_MUTANT_FIRST_THIRD)
@@ -263,6 +268,24 @@ inline std::map<uint32_t, uint32_t> PvVsStoreSlots(std::span<const uint32_t> par
 // (push dword kPvPushStride) is the highest location the VS writes plus one.
 constexpr uint32_t PvVsStoreStrideFor(uint32_t vs_location_mask) {
 	return vs_location_mask == 0 ? 0u : 32u - static_cast<uint32_t>(std::countl_zero(vs_location_mask));
+}
+
+// S409 (KYTY_PV_VSSTORE_COMPACT=1): a record holds only the locations the PS reads. The slot of a location is its rank in the PS
+// mask (the PS knows its mask when it is compiled, the VS gets it with the pair) and the stride is the number of such locations.
+constexpr uint32_t PvCompactSlot(uint32_t ps_location_mask, uint32_t location) {
+#if defined(KYTY_PVVS_MUTANT_RANK_OFF_BY_ONE)
+	return static_cast<uint32_t>(std::popcount(ps_location_mask & ((2u << location) - 1u)));
+#else
+	return static_cast<uint32_t>(std::popcount(ps_location_mask & ((1u << location) - 1u)));
+#endif
+}
+
+constexpr uint32_t PvCompactStride(uint32_t ps_location_mask) {
+#if defined(KYTY_PVVS_MUTANT_STRIDE_FROM_VS)
+	return ps_location_mask == 0 ? 0u : 32u - static_cast<uint32_t>(std::countl_zero(ps_location_mask));
+#else
+	return static_cast<uint32_t>(std::popcount(ps_location_mask));
+#endif
 }
 
 enum class PvVsStoreInterfaceVerdict : uint32_t {

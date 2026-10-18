@@ -231,6 +231,42 @@ void TestInterface() {
 	Check(ClassifyPvVsStoreInterface(0b11, 1u << 31) == V::Param31, "PS reads location 31");
 }
 
+// S409: record of the locations the PS reads: slot = rank in the PS mask, stride = popcount.
+void TestCompact() {
+	struct Row { uint32_t mask, location, slot; };
+	const Row rows[] = {{0x1, 0, 0},    {0x8, 3, 0},    {0x205, 0, 0},  {0x205, 2, 1},  {0x205, 9, 2},   {0x205, 1, 1},
+	                    {0x7fffffffu, 30, 30}, {0x80000001u, 0, 0}, {0b10100, 4, 1}, {0b10100, 2, 0}, {0b10100, 3, 1}};
+	for (const auto& r : rows) {
+		const bool in_mask = (r.mask >> r.location) & 1u;
+		// a location outside the mask has the rank of the next one in it (never stored); only a location in the mask has a slot
+		if (in_mask) Check(PvCompactSlot(r.mask, r.location) == r.slot, "compact slot is the rank in the PS mask");
+	}
+	Check(PvCompactSlot(0x205, 0) == 0 && PvCompactSlot(0x205, 2) == 1 && PvCompactSlot(0x205, 9) == 2, "gapped mask 0x205");
+	Check(PvCompactSlot(0x8, 3) == 0, "single location 3 has slot 0");
+	Check(PvCompactSlot(0b10100, 4) == 1 && PvCompactSlot(0b10100, 2) == 0, "mask 0b10100");
+	Check(PvCompactSlot(0x7fffffffu, 30) == 30, "dense mask, last location");
+	Check(PvCompactStride(0) == 0 && PvCompactStride(0x8) == 1 && PvCompactStride(0x205) == 3 && PvCompactStride(0b10100) == 2 &&
+	          PvCompactStride(0x7fffffffu) == 31,
+	      "compact stride is the number of locations");
+	// the slots of one mask are dense 0..stride-1 in location order
+	for (const uint32_t mask : {0x205u, 0x8u, 0b10100u, 0x40000001u, 0x7fffffffu}) {
+		uint32_t expect = 0;
+		for (uint32_t l = 0; l < 31; ++l) {
+			if (((mask >> l) & 1u) == 0) continue;
+			Check(PvCompactSlot(mask, l) == expect, "slots are dense and ordered");
+			expect++;
+		}
+		Check(expect == PvCompactStride(mask), "stride equals the number of slots");
+	}
+	// the stride never exceeds the old one: the whole point of the layout
+	Check(PvCompactStride(0x205) < PvVsStoreStrideFor(0x205), "gapped mask is smaller than the highest-location stride");
+	bool compact = true;
+	Check(ParsePvVsStoreCompact(nullptr, compact) && !compact, "COMPACT unset = 0");
+	Check(ParsePvVsStoreCompact("1", compact) && compact, "COMPACT=1");
+	Check(ParsePvVsStoreCompact("0", compact) && !compact, "COMPACT=0");
+	Check(!ParsePvVsStoreCompact("2", compact), "COMPACT=2 is rejected");
+}
+
 void TestPushBlock() {
 	PvVsStoreDraw draw;
 	draw.base = 11; draw.span = 22; draw.first = 33; draw.first_instance = 44;
@@ -544,6 +580,7 @@ int main() {
 	TestRing();
 	TestSlots();
 	TestInterface();
+	TestCompact();
 	TestPushBlock();
 	TestIndexBinding();
 	TestIndexRange();
