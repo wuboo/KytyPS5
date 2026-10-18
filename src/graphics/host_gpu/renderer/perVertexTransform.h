@@ -83,6 +83,15 @@ bool DerivePerVertexLayout(const std::string& vs_source, const std::string& ps_s
                            PerVertexLayout& layout, std::map<uint32_t, std::string>& vs_param_vars);
 bool DerivePerVertexVertexLayout(const std::string& vs_source, PerVertexLayout& layout,
                                  std::map<uint32_t, std::string>& vs_param_vars);
+// S432 (KYTY_PV_LAYOUT_FAST): the same layout from the SPIR-V words of the vertex shader, without the text of the disassembly. Output variables are
+// the OpVariable ... Output without an initializer, their location the first OpDecorate Location, their name the OpName (what the friendly-names
+// disassembler prints), so the result equals DerivePerVertexVertexLayout(Disassemble(words)).
+bool DerivePerVertexVertexLayoutFromSpirv(std::span<const uint32_t> words, PerVertexLayout& layout,
+                                          std::map<uint32_t, std::string>& vs_param_vars);
+
+enum class PvLayoutFastMode : uint8_t { Off, On, Shadow };
+// null/""/"0" -> Off, "1" -> On, "shadow" -> Shadow, anything else -> Off.
+PvLayoutFastMode ParsePvLayoutFastMode(const char* text);
 // `unique` (S134): the replay reads captured[map[vertex index].x] instead of captured[vertex index];
 // the map is binding 2 of the extra set (one 8-byte entry per corner).
 std::string GenerateReplayVertexSpvasm(const PerVertexLayout& layout, bool unique = false);

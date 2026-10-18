@@ -130,6 +130,11 @@ std::vector<uint32_t> EmitPerVertexCaptureVariant(ShaderRecompiler::IR::Program&
 	                                            maintenance8_enabled, false, &capture);
 }
 
+PvLayoutFastMode PerVertexLayoutFastMode() {
+	static const PvLayoutFastMode mode = ParsePvLayoutFastMode(std::getenv("KYTY_PV_LAYOUT_FAST"));
+	return mode;
+}
+
 bool PerVertexUniqueEnabled() {
 	static const bool enabled = [] {
 		const char* value = std::getenv("KYTY_PV_UNIQUE");
@@ -322,11 +327,35 @@ void RememberPerVertexPrototypeShader(const ShaderProgram&                    pr
 		    }))
 			return;
 		spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
-		std::string          vs_source;
-		EXIT_IF(!tools.Disassemble(words, &vs_source, SPV_BINARY_TO_TEXT_OPTION_FRIENDLY_NAMES));
 		PerVertexLayout                 layout;
 		std::map<uint32_t, std::string> params;
-		if (!DerivePerVertexVertexLayout(vs_source, layout, params)) return;
+		bool                            derived = false;
+		const auto                      layout_mode = PerVertexLayoutFastMode();
+		if (layout_mode != PvLayoutFastMode::On) {
+			std::string vs_source;
+			EXIT_IF(!tools.Disassemble(words, &vs_source, SPV_BINARY_TO_TEXT_OPTION_FRIENDLY_NAMES));
+			derived = DerivePerVertexVertexLayout(vs_source, layout, params);
+		}
+		if (layout_mode != PvLayoutFastMode::Off) {
+			// S432: straight from the words. Shadow keeps the disassembly result and counts the differences.
+			PerVertexLayout                 fast_layout;
+			std::map<uint32_t, std::string> fast_params;
+			const bool fast_derived = DerivePerVertexVertexLayoutFromSpirv(words, fast_layout, fast_params);
+			FrameTiming::Add(FrameTiming::Counter::PvLayoutFastN);
+			if (layout_mode == PvLayoutFastMode::On) {
+				derived = fast_derived;
+				layout  = std::move(fast_layout);
+				params  = std::move(fast_params);
+			} else if (fast_derived != derived ||
+			           (derived && (fast_layout.record_stride_vec4 != layout.record_stride_vec4 || fast_layout.clip_slot != layout.clip_slot ||
+			                        fast_layout.num_params != layout.num_params || fast_layout.has_clip != layout.has_clip ||
+			                        fast_layout.location_to_slot != layout.location_to_slot ||
+			                        fast_layout.param_locations_and_slots != layout.param_locations_and_slots))) {
+				FrameTiming::Add(FrameTiming::Counter::PvLayoutNeN);
+				LOGF("[pv-layout] shadow differs for shader 0x%016llx\n", static_cast<unsigned long long>(program.id));
+			}
+		}
+		if (!derived) return;
 		const Spirv::VertexCaptureInfo capture {
 		    host_subgroup_size, static_cast<uint32_t>(vs.resources_num), layout.record_stride_vec4,
 		    layout.clip_slot, layout.location_to_slot};
@@ -335,8 +364,13 @@ void RememberPerVertexPrototypeShader(const ShaderProgram&                    pr
 		NotePvPushVariant("capture", options.shader_hash, result.program.bindings);
 		// Validation of our own emitter output is ~30% of a vertex permutation's cost; bench-only
 		// switch KYTY_PV_SKIP_VALIDATE=1 skips it (the first draw would still be validated by Vulkan).
+		// S432: KYTY_PV_LAYOUT_FAST=1 skips it too; shadow validates and so keeps the reference.
 		static const bool skip_validate = std::getenv("KYTY_PV_SKIP_VALIDATE") != nullptr;
-		EXIT_IF(!skip_validate && !tools.Validate(it->second.capture_words));
+		if (!skip_validate && layout_mode != PvLayoutFastMode::On) {
+			EXIT_IF(!tools.Validate(it->second.capture_words));
+		} else {
+			FrameTiming::Add(FrameTiming::Counter::PvValidateSkippedN);
+		}
 	}
 }
 

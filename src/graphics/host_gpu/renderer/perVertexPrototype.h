@@ -24,6 +24,8 @@ struct VertexCaptureInfo;
 } // namespace ShaderRecompiler
 bool PerVertexPrototypeEnabled();
 // S134: KYTY_PV_UNIQUE=1 (value "1" only) captures once per unique vertex; default OFF.
+// S432 KYTY_PV_LAYOUT_FAST=0|1|shadow (default 0).
+PvLayoutFastMode PerVertexLayoutFastMode();
 bool PerVertexUniqueEnabled();
 // S149: KYTY_PV_VSSTORE=1 (value "1" only) lets the VS write PerVertex values to an SSBO that the PS
 // reads back (perVertexVsStore.h); default OFF. The emitter side exists, the draw path is not wired yet.
