@@ -224,6 +224,7 @@ bool CommandScheduler::RenderingAttaches(vk::ImageView view) const {
 }
 
 void CommandScheduler::Flush() {
+	if (m_next_reason == GpuDone::SubmitReason::Flip) m_flip_mid3 = 0; // S410: the per-flip limit of mode 3
 	// Submitting a command buffer nothing was recorded into still costs a Metal command buffer
 	// under MoltenVK. It only matters when something waits for the tick it would signal: a
 	// deferred operation (EOP write, interrupt) queued for the current tick.
@@ -258,7 +259,7 @@ void CommandScheduler::RequestFlush() {
 	} else if (now - m_first_flush_request >= std::chrono::milliseconds(1)) {
 		m_next_reason = GpuDone::SubmitReason::Lazy1ms;
 		FlushPending();
-	} else {
+	} else if (!Eager3FlushNow()) {
 		FrameTiming::Add(FrameTiming::Counter::FlushesDeferred);
 	}
 }
@@ -651,21 +652,42 @@ void CommandScheduler::NoteDrainEnd() {
 }
 
 namespace {
-bool EagerEnabled() {
-	static const bool enabled = [] { const char* v = std::getenv("KYTY_EAGER_SUBMIT"); return v != nullptr && (v[0] == '1' || v[0] == '2'); }();
-	return enabled;
+// KYTY_EAGER_SUBMIT: 0 off, 1 split at safe points, 2 + one mid-pass split in the first buffer after a drain (S328), 3 + S410.
+int EagerMode() {
+	static const int mode = [] {
+		const char* v = std::getenv("KYTY_EAGER_SUBMIT");
+		return v != nullptr && v[0] >= '1' && v[0] <= '3' ? v[0] - '0' : 0;
+	}();
+	return mode;
 }
+bool EagerEnabled() { return EagerMode() >= 1; }
 // S328: KYTY_EAGER_SUBMIT=2 also splits ONE open pass in the middle, in the first command buffer after a drain.
-bool EagerMidEnabled() {
-	static const bool enabled = [] { const char* v = std::getenv("KYTY_EAGER_SUBMIT"); return v != nullptr && v[0] == '2'; }();
-	return enabled;
+bool EagerMidEnabled() { return EagerMode() >= 2; }
+bool Eager3Enabled() { return EagerMode() == 3; }
+uint64_t EnvU64(const char* name, uint64_t fallback) {
+	const char* v = std::getenv(name);
+	return v != nullptr ? static_cast<uint64_t>(std::strtoull(v, nullptr, 10)) : fallback;
 }
 uint64_t EagerMinUs() {
-	static const uint64_t min_us = [] {
-		const char* v = std::getenv("KYTY_EAGER_SUBMIT_US");
-		return v != nullptr ? static_cast<uint64_t>(std::strtoull(v, nullptr, 10)) : 300ull;
-	}();
+	static const uint64_t min_us = EnvU64("KYTY_EAGER_SUBMIT_US", 300ull);
 	return min_us;
+}
+// S410 (mode 3)
+uint64_t Eager3MidUs() {
+	static const uint64_t v = EnvU64("KYTY_EAGER_MID_US", 800ull);
+	return v;
+}
+uint32_t Eager3MidMax() {
+	static const uint32_t v = static_cast<uint32_t>(EnvU64("KYTY_EAGER_MID_MAX", 8ull));
+	return v;
+}
+bool LowWaterEnabled() {
+	static const bool v = Eager3Enabled() && EnvU64("KYTY_EAGER_LOWWATER", 0ull) == 1;
+	return v;
+}
+uint64_t LowWaterUs() {
+	static const uint64_t v = EnvU64("KYTY_EAGER_LOWWATER_US", 1000ull);
+	return v;
 }
 } // namespace
 
@@ -693,6 +715,15 @@ bool CommandScheduler::EagerSplitNow(bool pass_closing, bool* closed_pass, bool 
 	query.mid_mode     = mid_pass && EagerMidEnabled();
 	query.first_cb_after_drain = m_seg_first_pending && m_drain_depth == 0;
 	query.mid_splits   = m_seg_mid_splits;
+	if (Eager3Enabled()) { // S410
+		query.mode3       = true; // (mid_mode above: only the draw that continues the open pass is a mid-pass candidate)
+		query.mid3_us     = Eager3MidUs();
+		query.mid3_max    = Eager3MidMax();
+		query.flip_mid    = m_flip_mid3;
+		query.lowwater    = LowWaterEnabled();
+		query.lowwater_us = LowWaterUs();
+		query.backlog     = 1; // optimistic, like gpu_idle
+	}
 	if (!Sync::ShouldEagerSplit(query)) {
 		if (m_starve_diag && m_master.KnownGpuTick() + 1 >= CurrentTick()) { // S410: declined although the GPU is idle (no Refresh)
 			using FrameTiming::Counter;
@@ -708,14 +739,43 @@ bool CommandScheduler::EagerSplitNow(bool pass_closing, bool* closed_pass, bool 
 		return false;
 	}
 	m_master.Refresh();
-	query.gpu_idle = m_master.KnownGpuTick() + 1 >= CurrentTick();
+	const uint64_t known = m_master.KnownGpuTick();
+	const uint64_t cur   = CurrentTick();
+	query.backlog        = cur > known + 1 ? static_cast<uint32_t>(std::min<uint64_t>(cur - 1 - known, 1000u)) : 0u;
+	query.gpu_idle       = query.backlog == 0;
 	if (!Sync::ShouldEagerSplit(query)) return false;
+	const bool lowwater = !query.gpu_idle;
 	if (query.pass_open) {
 		m_command.EndRendering();
 		*closed_pass = true;
 	}
-	m_next_reason = reason;
+	m_next_reason = lowwater ? GpuDone::SubmitReason::LowWater : reason;
+	if (lowwater) FrameTiming::Add(FrameTiming::Counter::EagerLowwaterN);
 	Flush();
+	return true;
+}
+
+// S410: RequestFlush (KYTY_EAGER_SUBMIT=3): the GPU is idle, the buffer has work and is old enough -> submit the batched flush now.
+bool CommandScheduler::Eager3FlushNow() {
+	if (!Eager3Enabled() || !Active() || m_command.IsInvalid() || InDeferredOperation() || m_in_pre_submit) return false;
+	Sync::EagerQuery query;
+	query.enabled    = true;
+	query.mode3      = true;
+	query.has_work   = m_command.m_recorded;
+	query.gpu_idle   = true;
+	query.age_us     = FrameTiming::ElapsedNs(m_open_since_ns, FrameTiming::SteadyNowNs()) / 1000u;
+	query.min_age_us = EagerMinUs();
+	if (!Sync::ShouldEagerFlush3(query)) return false;
+	m_master.Refresh();
+	query.gpu_idle = m_master.KnownGpuTick() + 1 >= CurrentTick();
+	if (!Sync::ShouldEagerFlush3(query)) return false;
+	// The flush closes an open pass (Submit -> End); the pass the CP records next goes on from here: loads, no repeated clear (see ArmReopenLoadIfSame).
+	const bool        was_open = RenderingOpen();
+	const RenderState before   = was_open ? m_command.m_render_state : RenderState {};
+	m_next_reason              = GpuDone::SubmitReason::Eager3Flush;
+	FlushPending();
+	if (was_open) m_command.ArmReopenLoadIfSame(before);
+	FrameTiming::Add(FrameTiming::Counter::Eager3FlushN);
 	return true;
 }
 
@@ -730,9 +790,18 @@ void CommandScheduler::MaybeEagerSplitAtPass(const RenderState& next) {
 	if (!m_command.m_rendering) return;
 	bool closed = false;
 	if (m_command.SamePass(next)) {
-		// S328: the draw continues the open pass; the policy may still split it in the middle (first buffer after a drain only).
-		if (!EagerMidEnabled() || !EagerSplitNow(false, &closed, true, GpuDone::SubmitReason::EagerMid)) return;
-		++m_seg_mid_splits;
+		// S328: the draw continues the open pass; the policy may still split it in the middle (first buffer after a drain only;
+		// S410, mode 3: in any buffer, limited per flip).
+		const bool mode3 = Eager3Enabled();
+		if (!EagerMidEnabled() ||
+		    !EagerSplitNow(false, &closed, true, mode3 ? GpuDone::SubmitReason::Eager3Mid : GpuDone::SubmitReason::EagerMid))
+			return;
+		if (mode3) {
+			++m_flip_mid3;
+			FrameTiming::Add(FrameTiming::Counter::Eager3MidN);
+		} else {
+			++m_seg_mid_splits;
+		}
 		FrameTiming::Add(FrameTiming::Counter::EagerMidN);
 		m_command.ArmReopenLoad(); // the new buffer reopens this pass with loadOp=LOAD
 		return;

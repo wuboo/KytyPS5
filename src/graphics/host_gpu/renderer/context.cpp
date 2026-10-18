@@ -45,6 +45,7 @@ void CommandBuffer::Begin() {
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	m_recorded       = false;
 	m_t_first_rec    = 0;
+	m_reopen_if_same = false;
 }
 
 void CommandBuffer::End() const {
@@ -81,6 +82,10 @@ void CommandBuffer::BeginRendering(const RenderState& wanted) const {
 		return;
 	}
 	RenderState state = wanted;
+	if (m_reopen_if_same && !m_rendering) { // S410
+		m_reopen_if_same = false;
+		Sync::ReopenAfterFlush(m_reopen_state, state);
+	}
 	// S328: the pass armed by a mid-pass eager split is opened here: load, never clear again (an open stripped pass that is replaced is not).
 	if (m_strip_clears && !m_rendering) Sync::StripClearsOnReopen(state);
 	EXIT_IF(state.width == 0 || state.height == 0 || state.num_layers == 0 ||

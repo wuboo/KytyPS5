@@ -164,6 +164,12 @@ public:
 	[[nodiscard]] bool SamePass(const RenderState& state) const;
 	// S328: the pass that is (re)opened next has no clears (reopen of a split pass); lasts until that pass is closed.
 	void ArmReopenLoad() const { m_strip_clears = true; }
+	// S410: a flush closed the pass `before` (not at a draw, so the next draw is not known). If the next pass opened is exactly `before`, it is
+	// the continuation of that pass and loads (no clear repeated); any other state, in particular one with a clear `before` did not have, is opened as asked.
+	void ArmReopenLoadIfSame(const RenderState& before) const {
+		m_reopen_if_same = true;
+		m_reopen_state   = before;
+	}
 	void EndRendering() const;
 
 	[[nodiscard]] vk::CommandBuffer Handle() const;
@@ -199,6 +205,8 @@ private:
 	// S327: the scheduler arms this at a drain end; the next real EndRendering stamps the time (seg_first_pass_end_ns).
 	mutable bool        m_strip_clears = false; // S328
 	mutable bool        m_note_pass_end = false;
+	mutable bool        m_reopen_if_same = false; // S410
+	mutable RenderState m_reopen_state;           // S410
 	mutable int64_t     m_t_first_rec   = 0;      // S410 (KYTY_DIAG_STARVE=1): steady clock at the first command recorded into this buffer
 	mutable int64_t     m_pass_end_ns   = 0;
 	// Set by Handle(): something (possibly) recorded since Begin(). Over-reporting is harmless.
