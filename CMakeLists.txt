@@ -753,6 +753,16 @@ foreach(mutant IN ITEMS BACKING_IGNORES_DIRTY SHADOW_SKIPS_RAW FIRSTDIFF_SKIPS_L
 	target_compile_definitions(pv_index_backing_mutant_${mutant_lower}_tests PRIVATE KYTY_PVINDEXBACKING_MUTANT_${mutant}=1)
 endforeach()
 
+# S418: in-flight GPU->host copies and the backing-read decision. Mutants: the backing read although a copy is in flight; a publish ends every overlapping entry.
+add_executable(inflight_ranges_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/InflightRangesTests.cpp")
+target_include_directories(inflight_ranges_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS BACKING_IGNORES_INFLIGHT REMOVE_ALL_OVERLAPPING)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(inflight_ranges_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/InflightRangesTests.cpp")
+	target_include_directories(inflight_ranges_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(inflight_ranges_mutant_${mutant_lower}_tests PRIVATE KYTY_INFLIGHTRANGES_MUTANT_${mutant}=1)
+endforeach()
+
 add_executable(shader_vertex_metadata_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ShaderVertexMetadataTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
@@ -1402,6 +1412,11 @@ if(BUILD_TESTING)
 		add_test(NAME pv_index_backing_mutant_${mutant} COMMAND $<TARGET_FILE:pv_index_backing_mutant_${mutant}_tests>)
 		set_tests_properties(pv_index_backing_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
+	add_test(NAME inflight_ranges COMMAND $<TARGET_FILE:inflight_ranges_tests>)
+	foreach(mutant IN ITEMS backing_ignores_inflight remove_all_overlapping)
+		add_test(NAME inflight_ranges_mutant_${mutant} COMMAND $<TARGET_FILE:inflight_ranges_mutant_${mutant}_tests>)
+		set_tests_properties(inflight_ranges_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
 	add_test(NAME trophy_system COMMAND $<TARGET_FILE:trophy_system_tests>)
@@ -1624,6 +1639,9 @@ if(BUILD_TESTING)
 		pv_index_backing_mutant_backing_ignores_dirty_tests
 		pv_index_backing_mutant_shadow_skips_raw_tests
 		pv_index_backing_mutant_firstdiff_skips_last_tests
+		inflight_ranges_tests
+		inflight_ranges_mutant_backing_ignores_inflight_tests
+		inflight_ranges_mutant_remove_all_overlapping_tests
 		page_manager_tests
 		archive_file_tests
 		trophy_system_tests

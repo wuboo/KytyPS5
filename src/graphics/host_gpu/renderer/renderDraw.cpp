@@ -1562,7 +1562,7 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 			if (range_entry != nullptr) {
 				// S417: bytes the GPU wrote OR a page of the range the GPU owns (the read would fault although the bytes are clean).
 				const bool dirty = pvi_on && PvIndirect::RangeReuseDirty(
-				                                 m_context.GetBufferCache().HasGpuDirtyBytes(index_source.address, index_source.size),
+				                                 !m_context.GetBufferCache().CanReadBacking(index_source.address, index_source.size),
 				                                 m_context.GetBufferCache().IsRegionGpuModified(index_source.address, index_source.size));
 				range_decision = PvIndirect::DecideRangeReuse(range_mode, pvi_on, dirty, *range_entry, range_key);
 			}
@@ -1586,8 +1586,13 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 			thread_local std::vector<uint8_t> idx_copy;
 			const auto                        backing_mode = PvIndexBacking::EnvMode();
 			if (backing_mode != PvIndexBacking::Mode::Off && index_source.host_data == nullptr) {
+				// S418: the backing is current only when the GPU has not written the bytes AND no copy of them is still in flight.
+				int        backing_refusal = 0;
 				const bool bytes_dirty =
-				    m_context.GetBufferCache().HasGpuDirtyBytes(index_source.address, index_source.size);
+				    !m_context.GetBufferCache().CanReadBacking(index_source.address, index_source.size, &backing_refusal);
+				if (backing_refusal == 2) {
+					FrameTiming::Add(FrameTiming::Counter::PvIdxBackingInflightN);
+				}
 				const auto source = PvIndexBacking::Decide(backing_mode, false, bytes_dirty);
 				if (source == PvIndexBacking::Source::Raw) {
 					FrameTiming::Add(FrameTiming::Counter::PvIdxBackingFallbackN);

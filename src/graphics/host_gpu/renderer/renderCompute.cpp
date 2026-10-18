@@ -499,7 +499,13 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	                    0, mode, buffer.GetShaders().GetCs().cs_regs.data_addr);
 	Common::LockGuard lock(m_context.GetMutex());
 	vk::DispatchIndirectCommand args {};
-	if (!m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args)) &&
+	// S418: a copy of the args still in flight leaves the tracker clear and the backing stale (zeros from the previous use).
+	int args_refusal = 0;
+	const bool args_readable = m_context.GetBufferCache().CanReadBacking(args_addr, sizeof(args), &args_refusal);
+	if (args_refusal == 2) {
+		FrameTiming::Add(FrameTiming::Counter::DispIndirectBackingInflightN);
+	}
+	if (args_readable &&
 	    LibKernel::Memory::TryReadBacking(args_addr, &args, sizeof(args)) &&
 	    (args.x == 0 || args.y == 0 || args.z == 0)) {
 		return;

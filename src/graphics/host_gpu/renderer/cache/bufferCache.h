@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
 #include "graphics/host_gpu/renderer/cache/dccFillPublish.h"
+#include "graphics/host_gpu/renderer/cache/inflightRanges.h"
 #include "graphics/host_gpu/renderer/cache/eagerPages.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
 #include "graphics/host_gpu/renderer/cache/gpuWriteLedger.h"
@@ -95,6 +96,10 @@ public:
 	// Cache-index and exact dirty-range queries require GPU-thread serialization.
 	[[nodiscard]] bool IsRegionRegistered(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool HasGpuDirtyBytes(uint64_t vaddr, uint64_t size);
+	// S418: a recorded GPU->host copy of the range has not reached the backing yet (the tracker no longer lists it as GPU-modified).
+	[[nodiscard]] bool HasInflightDownloadBytes(uint64_t vaddr, uint64_t size) const;
+	// S418: the physical backing holds the current bytes: no GPU write and no copy in flight. `reason` (optional): 1 = GPU-dirty, 2 = in flight.
+	[[nodiscard]] bool CanReadBacking(uint64_t vaddr, uint64_t size, int* reason = nullptr);
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
 	// S406 (KYTY_PV_RANGE_GEN): see MemoryTracker::QueryPageGeneration; `clean` also needs no GPU-dirty byte range.
@@ -188,6 +193,7 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	RangeSet                                          m_gpu_modified_ranges;
+	InflightRanges                                    m_inflight_download_ranges;
 	MemoryTracker                                     m_memory_tracker;
 	StreamBuffer                                      m_staging_buffer;
 	StreamBuffer                                      m_stream_buffer;
