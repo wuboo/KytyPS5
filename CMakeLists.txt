@@ -2316,6 +2316,27 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 			add_dependencies(kyty_tests ${shader_cost_target})
 		endif()
 	endforeach()
+	# S433: KYTY_RECOMPILER_SIGNATURE (src/recompiler_signature.cmake), a cmake -P test on a synthetic tree. Mutants (WILL_FAIL): IGNORE_SHADER_DIR, IGNORE_PV,
+	# HASH_WHOLE_SRC, PATH_IGNORED, IGNORE_PINS.
+	foreach(mutant IN ITEMS "" IGNORE_SHADER_DIR IGNORE_PV HASH_WHOLE_SRC PATH_IGNORED IGNORE_PINS)
+		if(mutant STREQUAL "")
+			set(sig_test recompiler_signature)
+			set(sig_mutant_arg "")
+		else()
+			string(TOLOWER ${mutant} mutant_lower)
+			set(sig_test recompiler_signature_mutant_${mutant_lower})
+			set(sig_mutant_arg -DKYTY_SIG_MUTANT=${mutant})
+		endif()
+		if(BUILD_TESTING)
+			add_test(NAME ${sig_test}
+			         COMMAND ${CMAKE_COMMAND} -DSIG_DIR=${KYTY_SOURCE_DIR} -DGIT_EXECUTABLE=${GIT_EXECUTABLE} ${sig_mutant_arg}
+			                 -P ${KYTY_TESTS_DIR}/RecompilerSignatureTest.cmake)
+			set_tests_properties(${sig_test} PROPERTIES TIMEOUT 60)
+			if(NOT mutant STREQUAL "")
+				set_tests_properties(${sig_test} PROPERTIES WILL_FAIL TRUE)
+			endif()
+		endif()
+	endforeach()
 	add_executable(macos_wide_store_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/macosWideStoreTests.cpp"
 		"${KYTY_SOURCE_DIR}/loader/x64InstructionEmulator.cpp"

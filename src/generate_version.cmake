@@ -59,4 +59,8 @@ else()
 	string(SHA256 KYTY_PER_VERTEX_TRANSFORM_SIGNATURE "${PER_VERTEX_COMBINED_HASH}")
 endif()
 
+# S433: the key of the per-vertex disk cache (replaces KYTY_GIT_REVISION there).
+include("${CMAKE_CURRENT_LIST_DIR}/recompiler_signature.cmake")
+kyty_recompiler_signature("${GIT_WORKING_DIRECTORY}" KYTY_RECOMPILER_SIGNATURE)
+
 configure_file("${INPUT_FILE}" "${OUTPUT_FILE}")
