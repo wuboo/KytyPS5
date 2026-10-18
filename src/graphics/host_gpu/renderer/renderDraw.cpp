@@ -24,6 +24,7 @@
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/perVertexPrototype.h"
 #include "graphics/host_gpu/renderer/perVertexVsStoreRuntime.h"
+#include "graphics/host_gpu/renderer/pvIndirectRuntime.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -1474,7 +1475,16 @@ static void CountPvFallback(PvVsStoreFallback fallback) {
 bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRenderState& state,
                                       vk::PrimitiveTopology topology, bool primitive_restart_enable,
                                       const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source,
-                                      PvVsStoreDrawSetup& setup) {
+                                      PvVsStoreDrawSetup& setup, const PvIndirectDraw* pv_indirect, PvIndirect::Decline* why) {
+	// S408: a draw of mode On is declined to the CPU path, which counts its own fallback; here only the reason is reported.
+	const bool pvi_on = pv_indirect != nullptr && pv_indirect->mode == PvIndirect::Mode::On;
+	const auto fallback = [&](PvVsStoreFallback value, PvIndirect::Decline reason) {
+		if (pvi_on && why != nullptr) {
+			*why = reason;
+		} else {
+			CountPvFallback(value);
+		}
+	};
 	if (!state.ps_active || state.vertex_info[0].logical_stage != ShaderType::Vertex ||
 	    state.vertex_info[0].stage.program->stage == ShaderType::Mesh)
 		return false;
@@ -1482,7 +1492,7 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 	const auto* programs = GetPvVsStorePrograms(graphics, state.programs);
 	if (programs == nullptr) return false; // not a per-vertex pair the store knows
 	if (programs->verdict != PvVsStoreInterfaceVerdict::Use) {
-		CountPvFallback(ClassifyPvVsStoreFallback(programs->verdict));
+		fallback(ClassifyPvVsStoreFallback(programs->verdict), PvIndirect::Decline::Other);
 		return false;
 	}
 	LogPvPairFirstUse(*programs, static_cast<uint32_t>(topology), draw.IsIndexed(), draw.instance_count);
@@ -1621,7 +1631,7 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 			}
 		}
 		if (PvVsStoreGpuIndexFallback(PerVertexVsStoreGpuIdxMode(), gpu_index)) {
-			CountPvFallback(PvVsStoreFallback::Range);
+			fallback(PvVsStoreFallback::Range, PvIndirect::Decline::Range);
 			return false;
 		}
 	}
@@ -1633,7 +1643,24 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 		return region.ok;
 	}, index_tail_fits);
 	if (!decision.use) {
-		CountPvFallback(decision.fallback);
+		{
+			PvIndirect::Decline reason = PvIndirect::Decline::Other;
+			switch (decision.fallback) {
+				case PvVsStoreFallback::Range: reason = PvIndirect::Decline::Range; break;
+				case PvVsStoreFallback::IndexTail: reason = PvIndirect::Decline::IndexTail; break;
+				case PvVsStoreFallback::Ring: reason = PvIndirect::Decline::Ring; break;
+				case PvVsStoreFallback::Instanced:
+					// A draw with several instances is classified as "instanced" whatever the size reason; the plan says which.
+					// (the ring check runs after the plan accepted the draw, so an accepted plan means the ring)
+					reason = decision.plan.verdict == PvVsStoreVerdict::Use           ? PvIndirect::Decline::Ring
+					         : decision.plan.verdict == PvVsStoreVerdict::TooLarge     ? PvIndirect::Decline::TooLarge
+					         : decision.plan.verdict == PvVsStoreVerdict::InstancedOff ? PvIndirect::Decline::Other
+					                                                                   : PvIndirect::Decline::Range;
+					break;
+				default: break;
+			}
+			fallback(decision.fallback, reason);
+		}
 		// S151: the first draw that stays on the prototype for its topology says which one it was.
 		static std::atomic<bool> topology_logged {false};
 		if (decision.fallback == PvVsStoreFallback::Topology && !topology_logged.exchange(true)) {
@@ -1657,6 +1684,12 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 	setup.draw.vertex_offset = emit.vertex_offset;
 	setup.draw.index32       = element_size == 4;
 	setup.draw.records       = static_cast<uint32_t>(plan.records);
+	if (pv_indirect != nullptr && pv_indirect->mode != PvIndirect::Mode::Off) {
+		// S408: the plan with cap instances is the plan of the prepared draw (mode On: `plan` is it); a shadow draw compares it with the real one.
+		auto cap_request           = request;
+		cap_request.instance_count = pv_indirect->cap;
+		PvIndirectNotePlan(*pv_indirect, PlanPvVsStore(cap_request), plan, programs->stride_vec4);
+	}
 	if (PerVertexVsStoreGuard()) setup.guard = m_pv_vsstore->AcquireGuard(FrameTiming::GuestFlips());
 	if (const auto& ctx = SyncCensus::IndirectPvCtx(); ctx.active) {
 		// S406 (KYTY_DIAG_INDIRECT=1): the VS-store plan of an indirect draw next to the args before / after the drain.
@@ -1711,23 +1744,67 @@ static void BindPvVsStore(RenderContext& context, vk::CommandBuffer vk_buffer, c
 	}
 }
 
+// S408: the commands of the prepare compute, in the order PvIndirect::RecordPrepare dictates.
+namespace {
+struct PvIndirectRecorder {
+	CommandScheduler&                  scheduler;
+	CommandBuffer&                     buffer;
+	const RenderState&                 rendering;
+	PvIndirectRuntime&                 runtime;
+	const PvIndirectRuntime::Prepared& prepared;
+	vk::CommandBuffer                  command;
+	void EndPass() {
+		// The pass that is open and is the one this draw continues is reopened with loads (a clear must not be repeated).
+		const bool same = buffer.SamePass(rendering);
+		scheduler.EndRendering();
+		if (same) buffer.ArmReopenLoad();
+	}
+	void BindCompute() { runtime.Bind(command); }
+	void Push() { runtime.Push(command, prepared); }
+	void Dispatch() { runtime.Dispatch(command); }
+	void BarrierToIndirect() { runtime.BarrierToIndirect(command); }
+};
+} // namespace
+
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
                                          const DrawCallInfo& draw_in, DrawRenderState& state,
-                                         vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
-                                         const DrawIndexBufferSource& index_source,
-	                                     bool primitive_restart_enable) {
-	DrawCallInfo       draw = draw_in; // S404: the indirect buffer is filled in below
-	PvVsStoreDrawSetup pv_store;
-	bool               use_pv_store = false;
+                                         vk::PrimitiveTopology topology, const DrawEmitInfo& emit_in,
+                                         const DrawIndexBufferSource& index_source_in,
+	                                     bool primitive_restart_enable, PvIndirectDraw* pvi) {
+	DrawCallInfo          draw         = draw_in; // S404: the indirect buffer is filled in below
+	DrawEmitInfo          emit         = emit_in;
+	DrawIndexBufferSource index_source = index_source_in;
+	// S408 (KYTY_PV_INDIRECT): On draws from the args prepared on the GPU. The counts are the learned ones and the cap, only to make the
+	// plan and the region; the shapes that must not change (first index, vertex offset, first instance) are checked by the prepare compute.
+	const bool pvi_on     = pvi != nullptr && pvi->mode == PvIndirect::Mode::On;
+	const bool pvi_shadow = pvi != nullptr && pvi->mode == PvIndirect::Mode::Shadow;
+	if (pvi_on) {
+		draw.index_count    = pvi->expected.index_count;
+		draw.instance_count = pvi->cap;
+		emit.vertex_offset  = static_cast<int32_t>(pvi->expected.vertex_offset);
+		index_source.size   = uint64_t {draw.index_count} * index_source.guest_element_size;
+	}
+	PvVsStoreDrawSetup  pv_store;
+	bool                use_pv_store = false;
+	PvIndirect::Decline pvi_why      = PvIndirect::Decline::Other;
 	if (PerVertexVsStoreEnabled()) {
 		CpPhases::Scope phase(CpPhases::Phase::PvStore);
-		use_pv_store =
-		    TryPvVsStoreDraw(draw, state, topology, primitive_restart_enable, emit, index_source, pv_store);
+		use_pv_store = TryPvVsStoreDraw(draw, state, topology, primitive_restart_enable, emit, index_source, pv_store, pvi, &pvi_why);
 	}
-	if (use_pv_store) {
+	if (pvi_on && !use_pv_store) {
+		// Nothing has been recorded: the caller reads the args and draws the old way (never the prototype with placeholder counts).
+		pvi->declined = true;
+		pvi->why      = pvi_why;
+		return;
+	}
+	if (pvi_shadow && !use_pv_store) FrameTiming::Add(FrameTiming::Counter::PvIndShadowNoStoreN);
+	bool pvi_prepare = pvi_on || (pvi_shadow && use_pv_store);
+	// (mode On counts the draw once it is certain not to be declined, below)
+	const auto count_pv_draw = [&] {
 		FrameTiming::Add(FrameTiming::Counter::PvVsStoreDraws);
 		if (draw.instance_count > 1) FrameTiming::Add(FrameTiming::Counter::PvVsStoreInstanced);
-	}
+	};
+	if (use_pv_store && !pvi_on) count_pv_draw();
 	// The per-vertex prototype takes the draw when the VS store does not; true when it handled the draw (ran or skipped it).
 	const auto run_prototype = [&]() -> bool {
 		if (state.vertex_info[0].logical_stage != ShaderType::Vertex) return false;
@@ -1844,6 +1921,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	bind_phase.reset();
 	PreparedVertexBuffers vertex_bindings;
 	PreparedIndexBuffer   index_binding;
+	vk::Buffer            pvi_args_buffer = nullptr;
+	uint64_t              pvi_args_offset = 0;
 	if (!mesh_active) {
 		LogDrawPhase(draw.Name(), "PrepareVertexBuffers");
 		{
@@ -1851,30 +1930,46 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			vertex_bindings = AcquireVertexBuffers(buffer, state.vertex_info[0]);
 		}
 		KYTY_CP_SITE(DrawIndexBuffer);
-		if (draw.indirect_addr != 0) {
+		// S408: the prepare compute reads the args from the buffer cache the same way (mode On: the draw itself reads the prepared copy).
+		const uint64_t args_lookup = draw.indirect_addr != 0 ? draw.indirect_addr : (pvi_prepare ? pvi->args_addr : 0);
+		if (args_lookup != 0) {
 			// S404: the args are a GPU-read buffer of the cache like the index buffer; obtaining one can merge the other, so the
 			// index binding is taken between two lookups of the args and the last lookup is the one that is used.
-			EXIT_IF(use_pv_store);
-			(void)m_context.GetBufferCache().ObtainBuffer(draw.indirect_addr, sizeof(vk::DrawIndexedIndirectCommand), false);
+			EXIT_IF(draw.indirect_addr != 0 && use_pv_store && !pvi_on);
+			(void)m_context.GetBufferCache().ObtainBuffer(args_lookup, sizeof(vk::DrawIndexedIndirectCommand), false);
 		}
 		index_binding   = PrepareIndexBuffer(buffer, index_source);
-		if (draw.indirect_addr != 0) {
+		if (args_lookup != 0) {
 			const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
-			    draw.indirect_addr, sizeof(vk::DrawIndexedIndirectCommand), false);
+			    args_lookup, sizeof(vk::DrawIndexedIndirectCommand), false);
 			EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
-			draw.indirect_buffer = args_buffer->Handle();
-			draw.indirect_offset = args_offset;
+			if (draw.indirect_addr != 0) {
+				draw.indirect_buffer = args_buffer->Handle();
+				draw.indirect_offset = args_offset;
+			}
+			pvi_args_buffer = args_buffer->Handle();
+			pvi_args_offset = args_offset;
 		}
 	}
-	EXIT_IF(draw.indirect_addr != 0 && (mesh_active || use_pv_store));
+	EXIT_IF(draw.indirect_addr != 0 && (mesh_active || (use_pv_store && !pvi_on)));
 	// The index binding the draw really got (the cache may move or merge the range while the bindings above are
 	// prepared) decides the VS-store tail again; a tail that does not fit goes to the prototype, as in the early check.
 	if (use_pv_store && !mesh_active && draw.IsIndexed() && index_binding.buffer != nullptr &&
 	    !PvVsStoreIndexBindingFits(index_binding.offset, pv_store.index_element_size,
 	                               m_context.GetGraphics().StorageMinAlignment(), index_source.size,
 	                               index_binding.size)) {
-		CountPvFallback(PvVsStoreFallback::IndexTail);
 		use_pv_store = false;
+		if (pvi_on) {
+			// The resources of the draw are prepared but nothing of it is recorded: the old path prepares them again.
+			pvi->declined = true;
+			pvi->why      = PvIndirect::Decline::IndexTail;
+			return;
+		}
+		CountPvFallback(PvVsStoreFallback::IndexTail);
+		if (pvi_prepare) {
+			pvi_prepare = false;
+			FrameTiming::Add(FrameTiming::Counter::PvIndShadowNoStoreN);
+		}
 		if (run_prototype()) return;
 	}
 	if (draw.IsIndexed()) {
@@ -1901,10 +1996,46 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	CpPhases::Scope vkcmd_phase(CpPhases::Phase::DrawVkcmd); // to the end of the draw; CommitBindings below is its child
 
+	// S408: a ring slot for the prepared args of this draw (taken for the command buffer that records it).
+	PvIndirectRuntime::Prepared pvi_prepared;
+	if (pvi_prepare) {
+		EXIT_IF(pvi_args_buffer == nullptr);
+		auto& runtime = PvIndirectRt();
+		PvIndirectAdvance();
+		pvi_prepared = runtime.Reserve({pvi_args_buffer, pvi_args_offset, pvi->expected, pvi->cap, pvi->entry_id, FrameTiming::GuestFlips()});
+		if (!pvi_prepared.ok && pvi_on) {
+			pvi->declined = true;
+			pvi->why      = PvIndirect::Decline::Ring;
+			return;
+		}
+		if (pvi_on) count_pv_draw();
+	}
+
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
 	// point onward, every operation targets the current command buffer and cannot touch guest
 	// memory.
 	auto vk_buffer = buffer.Handle();
+	if (pvi_prepared.ok) {
+		// The prepare compute runs outside a pass, before the draw: the draw (mode On) takes its output as indirect args.
+		PvIndirectRecorder recorder {m_context.GetCommandScheduler(), buffer, rendering, PvIndirectRt(), pvi_prepared, vk_buffer};
+		const bool         pass_break = PvIndirect::RecordPrepare(recorder, m_context.GetCommandScheduler().RenderingOpen());
+		if (pass_break) FrameTiming::Add(FrameTiming::Counter::PvIndPassBreakN);
+		if (pvi_on) {
+			draw.indirect_buffer = pvi_prepared.out_buffer;
+			draw.indirect_offset = pvi_prepared.out_offset;
+			FrameTiming::Add(FrameTiming::Counter::PvIndN);
+		}
+		static std::atomic<uint32_t> logged {0};
+		const auto                   flip = FrameTiming::GuestFlips();
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 50 || (flip >= 6300 && flip <= 6302)) {
+			LOGF("[pv-ind] mode=%s flip=%" PRIu64 " args=0x%" PRIx64 " expected=%u,%u,%u,%u cap=%u vs=0x%016" PRIx64 " ps=0x%016" PRIx64
+			     " stride=%u span=%u first=%u records=%u ring_free=%" PRIu64 " pass_break=%d\n",
+			     pvi_on ? "1" : "shadow", flip, pvi->args_addr, pvi->expected.index_count, pvi->expected.first_index,
+			     pvi->expected.vertex_offset, pvi->expected.first_instance, pvi->cap, pv_store.programs->vs_hash, pv_store.programs->ps_hash,
+			     pv_store.programs->stride_vec4, pv_store.draw.span, pv_store.draw.first, pv_store.draw.records,
+			     m_pv_vsstore ? m_pv_vsstore->FreeRecords() : uint64_t {0}, pass_break ? 1 : 0);
+		}
+	}
 	SetDrawDebugPhase(buffer, submit_id, draw, draw.IsIndexed() ? 0x100u : 0x200u);
 	if (!mesh_active) {
 		CommitVertexBuffers(vk_buffer, vertex_bindings);
@@ -2098,8 +2229,10 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	LogDrawStateIfNeeded(buffer, draw, state, args.index_type_and_size, args.index_addr);
 
-	DrawCallInfo draw_to_run = draw;
-	if (igpu != nullptr) {
+	DrawCallInfo   draw_to_run = draw;
+	PvIndirectDraw pvi;       // S408: mode Off unless the draw takes (On) or shadows (Shadow) the prepared args
+	auto* const    pv_request = args.pv_indirect;
+	if (igpu != nullptr || (pv_request != nullptr && pv_request->mode != PvIndirect::Mode::Off)) {
 		// S404: what the host path of this draw is, without looking at index_count / instance_count (nothing below may).
 		IndirectGpu::HostPath host;
 		const auto&           first_stage = state.vertex_info[0];
@@ -2114,9 +2247,19 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		host.quad_list_legacy  = ucfg.GetPrimType() == Prospero::PrimitiveType::kQuadListLegacy;
 		host.restart           = PrimitiveRestartControlOn(buffer);
 		host.native_fetch      = !first_stage.fetch_embedded;
-		igpu->host_reason      = IndirectGpu::QualifyHost(host);
+		const auto host_reason = IndirectGpu::QualifyHost(host);
+		if (igpu != nullptr) igpu->host_reason = host_reason;
+		if (pv_request != nullptr && pv_request->mode != PvIndirect::Mode::Off) {
+			// S408: a VS-store pair with nothing else in the way may take the prepared args (learns when the CPU has read them).
+			const bool pv_candidate = host.pv_store_possible && PvIndirect::ResidualReason(host) == IndirectGpu::Reason::Eligible;
+			pvi = PvIndirectDecide(*pv_request, pv_candidate);
+			if (!pv_candidate && host.pv_store_possible && !pv_request->have_cpu_args) {
+				FrameTiming::Add(FrameTiming::Counter::PvIndDeclineN);
+				FrameTiming::Add(FrameTiming::Counter::PvIndDeclineResidualN);
+			}
+		}
 		if (igpu_on) {
-			if (igpu->host_reason != IndirectGpu::Reason::Eligible) {
+			if (host_reason != IndirectGpu::Reason::Eligible && pvi.mode != PvIndirect::Mode::On) {
 				// Nothing has been recorded: the caller reads the args and draws the old way. The draw is counted by that second call.
 				igpu->declined = true;
 				ResetBindings();
@@ -2139,7 +2282,27 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	emit.first_instance = native_indirect ? 0 : instance_offset;
 
 	ExecutePreparedDraw(submit_id, buffer, draw_to_run, state, topology, emit, index_source,
-	                    primitive_restart);
+	                    primitive_restart, pvi.mode != PvIndirect::Mode::Off ? &pvi : nullptr);
+	if (pvi.declined) {
+		// S408: the prepared draw was given up before anything of it was recorded: the caller reads the args and draws the old way.
+		using C = FrameTiming::Counter;
+		FrameTiming::Add(C::PvIndDeclineN);
+		switch (pvi.why) {
+			case PvIndirect::Decline::Range: FrameTiming::Add(C::PvIndDeclineRangeN); break;
+			case PvIndirect::Decline::Ring: FrameTiming::Add(C::PvIndDeclineRingN); break;
+			case PvIndirect::Decline::IndexTail: FrameTiming::Add(C::PvIndDeclineIndexTailN); break;
+			case PvIndirect::Decline::TooLarge: FrameTiming::Add(C::PvIndDeclineTooLargeN); break;
+			default: FrameTiming::Add(C::PvIndDeclineOtherN); break;
+		}
+		static std::atomic<uint32_t> declined_logged {0};
+		if (declined_logged.fetch_add(1, std::memory_order_relaxed) < 20) {
+			LOGF("[pv-ind-decline] flip=%" PRIu64 " args=0x%" PRIx64 " reason=%s\n", FrameTiming::GuestFlips(), pvi.args_addr,
+			     PvIndirect::DeclineName(pvi.why));
+		}
+		EXIT_IF(igpu == nullptr);
+		igpu->declined = true;
+		FrameTiming::Add(FrameTiming::Counter::Draws, ~uint64_t {0});
+	}
 	ResetBindings();
 }
 

@@ -225,6 +225,18 @@ enum class Counter : uint32_t {
 	// that the superset run makes and the stale run does not (new drains in the added blocks).
 	SpecSuperPermSameN, SpecSuperSpecEqN, SpecSuperExtraBufferN, SpecSuperExtraImageN, SpecSuperExtraSamplerN,
 	SpecSuperExtraWrittenN, SpecSuperExtraBadAddrN, SpecSuperDirtyNoncondN,
+	// S408 (KYTY_PV_INDIRECT=1|shadow): draws recorded from prepared args / first calls of a candidate that went to the CPU read because the
+	// args address was not learned yet or was cooling down after a mismatch / draws that were declined after the decision (per reason) /
+	// passes closed for the prepare compute (a pass was open) / mismatches and overflows the GPU reported (status, two flips late) /
+	// gauges: cap of the last prepared entry, largest instance count seen.
+	PvIndN, PvIndLearnN, PvIndCooldownN, PvIndDeclineN, PvIndDeclineRangeN, PvIndDeclineRingN, PvIndDeclineIndexTailN,
+	PvIndDeclineTooLargeN, PvIndDeclineOffN, PvIndDeclineResidualN, PvIndDeclineOtherN, PvIndPassBreakN, PvIndMismatchN, PvIndOverflowN,
+	PvIndCap, PvIndMaxInstance,
+	// ... shadow: prepared draws recorded next to the old draw / the prepared args equal (ne) the args the CPU read in that flip /
+	// fields as expected (mismatch) / draws over cap / the plan made with cap equals (ne) the real plan / shadow draws that did not use
+	// the VS-store / flips with more than one draw of the entry (no args comparison).
+	PvIndShadowN, PvIndShadowArgsEqN, PvIndShadowArgsNeN, PvIndShadowFieldsOkN, PvIndShadowFieldsMismatchN, PvIndShadowOverflowN,
+	PvIndShadowPlanEqN, PvIndShadowPlanNeN, PvIndShadowNoStoreN, PvIndShadowMultiN,
 	Count,
 };
 
