@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "graphics/host_gpu/renderer/perVertexTransform.h"
+#include "graphics/host_gpu/renderer/pvIndirect.h"
 #include "graphics/host_gpu/renderer/pvRangeGen.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
@@ -45,6 +46,7 @@ struct DrawIndexBufferSource;
 struct DrawRenderState;
 struct PerVertexPrototypePrograms;
 class PvVsStoreRuntime;
+class PvIndirectRuntime;
 struct PvVsStoreDrawSetup;
 class RenderContext;
 class CommandScheduler;
@@ -74,6 +76,30 @@ struct IndirectGpuRequest {
 	IndirectGpu::Reason host_reason  = IndirectGpu::Reason::Eligible;
 };
 
+// S408 (KYTY_PV_INDIRECT): what the command processor tells the executor about an indirect draw that may use prepared args.
+//   !have_cpu_args  the first call of an eligible candidate (KYTY_INDIRECT_GPU=1): the args have NOT been read. Mode On takes the draw
+//                   from the prepared args when its entry is learned (else `declined`); the CPU then reads the args and calls again.
+//   have_cpu_args   the old path: the CPU has read the args (cpu_args); the executor learns them, and in Shadow records the prepare
+//                   compute next to the draw and compares its output with cpu_args two flips later.
+struct PvIndirectRequest {
+	PvIndirect::Mode mode              = PvIndirect::Mode::Off;
+	uint64_t         args_addr         = 0;
+	uint32_t         index_buffer_size = 0; // INDEX_BUFFER_SIZE, in indices
+	bool             have_cpu_args     = false;
+	PvIndirect::Args cpu_args;
+};
+
+// The draw the executor takes from the prepared args (On) or the old draw that gets a prepare next to it (Shadow).
+struct PvIndirectDraw {
+	PvIndirect::Mode    mode = PvIndirect::Mode::Off;
+	uint64_t            args_addr = 0;
+	PvIndirect::Fields  expected;
+	uint32_t            cap      = 0;
+	uint32_t            entry_id = 0;
+	PvIndirect::Decline why      = PvIndirect::Decline::Other; // out, with `declined`
+	bool                declined = false;                      // out: nothing has been drawn, take the old path
+};
+
 struct DrawIndexArgs {
 	uint32_t         index_count                = 0;
 	const void*      index_addr                 = nullptr;
@@ -84,6 +110,7 @@ struct DrawIndexArgs {
 	DrawOffsetSource offset_source              = DrawOffsetSource::DrawState;
 	uint32_t         render_target_slice_offset = 0;
 	IndirectGpuRequest* indirect_gpu            = nullptr; // S404
+	PvIndirectRequest*  pv_indirect             = nullptr; // S408
 };
 
 struct DrawAutoArgs {
@@ -249,13 +276,38 @@ private:
 	void ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer, const DrawCallInfo& draw,
 	                         DrawRenderState& state, vk::PrimitiveTopology topology,
 	                         const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source,
-	                         bool primitive_restart_enable);
+	                         bool primitive_restart_enable, PvIndirectDraw* pv_indirect = nullptr);
 	// S150 (KYTY_PV_VSSTORE=1): true when the draw takes the VS-store path (fills `setup`); counts the
 	// fallback reason otherwise.
 	[[nodiscard]] bool TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRenderState& state,
 	                                    vk::PrimitiveTopology topology, bool primitive_restart_enable,
 	                                    const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source,
-	                                    PvVsStoreDrawSetup& setup);
+	                                    PvVsStoreDrawSetup& setup, const PvIndirectDraw* pv_indirect = nullptr,
+	                                    PvIndirect::Decline* why = nullptr);
+
+	// ---- S408 (KYTY_PV_INDIRECT), renderPvIndirect.cpp ----
+	// The state of the args addresses seen, and the decision for one draw (learns when the request carries the args the CPU read).
+	// `pv_candidate`: the draw's host path is a VS-store pair with nothing else in the way.
+	[[nodiscard]] PvIndirectDraw PvIndirectDecide(const PvIndirectRequest& request, bool pv_candidate);
+	// Moves the status rows to the current flip and applies what the GPU wrote two flips ago.
+	void PvIndirectAdvance();
+	// Notes the plan of a prepared draw (cap limit of the entry, the dry plan of a shadow draw).
+	void PvIndirectNotePlan(const PvIndirectDraw& draw, const PvVsStorePlan& cap_plan, const PvVsStorePlan& real_plan,
+	                        uint32_t stride_vec4);
+	[[nodiscard]] PvIndirectRuntime& PvIndirectRt();
+	struct PvIndirectEntryState {
+		PvIndirect::Entry entry;
+		uint64_t          addr      = 0;
+		uint32_t          cap_limit = UINT32_MAX;
+		// Shadow: the args the CPU read in a flip (compared with the prepared ones when the status is reported).
+		struct Seen {
+			uint64_t         flip = 0;
+			bool             have = false;
+			PvIndirect::Args cpu_args;
+			bool             plan_checked = false;
+		};
+		std::array<Seen, 8> seen {};
+	};
 	void ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer& buffer,
 	                               const DrawCallInfo& draw, DrawRenderState& state,
 	                               vk::PrimitiveTopology topology, const DrawEmitInfo& emit,
@@ -317,6 +369,9 @@ private:
 	PerVertexRangeMemo                                   m_prototype_range_memo;
 	PvRangeGen::Memo                                     m_pv_range_gen; // S406 (KYTY_PV_RANGE_GEN)
 	std::shared_ptr<PvVsStoreRuntime>                    m_pv_vsstore; // S150, created on the first VS-store draw
+	std::shared_ptr<PvIndirectRuntime>                   m_pvi_rt;     // S408, created on the first prepared draw
+	std::array<PvIndirectEntryState, PvIndirect::kMaxEntries> m_pvi_entries;
+	uint32_t                                             m_pvi_count = 0;
 
 	// Batching of consecutive per-vertex-prototype replay draws into one render pass (see
 	// perVertexPrototypeDraw.inc, bench-notes.md 2026-09-27 "Kierunek A"). A draw is appended here

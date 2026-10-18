@@ -1,0 +1,68 @@
+// S408 (KYTY_PV_INDIRECT): prepares the args of a VS-store indexed indirect draw. Same arithmetic as PvIndirect::PrepareArgs
+// (src/graphics/host_gpu/renderer/pvIndirect.h, pinned by tests/PvIndirectTests.cpp).
+//   in      the 5 dwords the guest wrote (VkDrawIndexedIndirectCommand layout), read from the buffer cache
+//   out     the draw to record: fields as learned and instanceCount clamped to cap, or all zero when a field differs
+//   status  per flip and entry (16 dwords): [0] mismatch, [1] overflow, [2] max instance, [3] draws, [4..8] in, [9..13] out of the last draw
+
+#version 450
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer InArgs {
+	uint in_args[];
+};
+layout(std430, set = 0, binding = 1) writeonly buffer OutArgs {
+	uint out_args[];
+};
+layout(std430, set = 0, binding = 2) buffer Status {
+	uint status[];
+};
+
+layout(push_constant) uniform Push {
+	uint exp_index_count;
+	uint exp_first_index;
+	uint exp_vertex_offset;
+	uint exp_first_instance;
+	uint cap;
+	uint in_word;     // first dword of the args inside the bound range (the descriptor offset is aligned down)
+	uint out_word;    // first dword of the slot in the host ring
+	uint status_word; // first dword of the status entry
+}
+push;
+
+void main() {
+	const uint i = push.in_word;
+	const uint s = push.status_word;
+	const uint o = push.out_word;
+
+	const uint index_count    = in_args[i + 0u];
+	const uint instance_count = in_args[i + 1u];
+	const uint first_index    = in_args[i + 2u];
+	const uint vertex_offset  = in_args[i + 3u];
+	const uint first_instance = in_args[i + 4u];
+
+	atomicAdd(status[s + 3u], 1u);
+	status[s + 4u] = index_count;
+	status[s + 5u] = instance_count;
+	status[s + 6u] = first_index;
+	status[s + 7u] = vertex_offset;
+	status[s + 8u] = first_instance;
+
+	const bool match = index_count == push.exp_index_count && first_index == push.exp_first_index &&
+	                   vertex_offset == push.exp_vertex_offset && first_instance == push.exp_first_instance;
+	uint out_value[5];
+	if (!match) {
+		atomicAdd(status[s + 0u], 1u);
+		out_value = uint[5](0u, 0u, 0u, 0u, 0u);
+	} else {
+		if (instance_count > push.cap) {
+			atomicAdd(status[s + 1u], 1u);
+		}
+		atomicMax(status[s + 2u], instance_count);
+		out_value = uint[5](push.exp_index_count, min(instance_count, push.cap), push.exp_first_index, push.exp_vertex_offset, 0u);
+	}
+	for (uint k = 0u; k < 5u; ++k) {
+		out_args[o + k]    = out_value[k];
+		status[s + 9u + k] = out_value[k];
+	}
+}

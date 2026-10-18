@@ -314,6 +314,21 @@ add_custom_command(
 	DEPENDS "${fault_buffer_shader_source}"
 	VERBATIM
 )
+# S408: KYTY_PV_INDIRECT prepare shader (the args of a VS-store indirect draw: instance clamp + field check).
+set(pv_indirect_shader_source "${gpu_tiler_shader_dir}/pv_indirect_prepare.comp")
+set(pv_indirect_shader_spv "${gpu_tiler_generated_dir}/pv_indirect_prepare.spv")
+set(pv_indirect_shader_header "${gpu_tiler_generated_dir}/pv_indirect_prepare_spv.h")
+add_custom_command(
+	OUTPUT "${pv_indirect_shader_header}"
+	COMMAND ${CMAKE_COMMAND} -E make_directory "${gpu_tiler_generated_dir}"
+	COMMAND "${KYTY_GLSLANG_VALIDATOR}" -V --target-env vulkan1.2 -Os
+	        -o "${pv_indirect_shader_spv}" "${pv_indirect_shader_source}"
+	COMMAND ${CMAKE_COMMAND} -DINPUT=${pv_indirect_shader_spv} -DOUTPUT=${pv_indirect_shader_header}
+	        -DSYMBOL=PV_INDIRECT_PREPARE_SPV -P "${KYTY_SOURCE_DIR}/embed_spirv.cmake"
+	DEPENDS "${pv_indirect_shader_source}"
+	VERBATIM
+)
+list(APPEND kyty_emulator_src "${pv_indirect_shader_header}")
 list(APPEND kyty_emulator_src "${fault_buffer_shader_header}")
 list(APPEND kyty_emulator_src ${gpu_tiler_shader_headers})
 
@@ -693,6 +708,16 @@ foreach(mutant IN ITEMS NO_BUMP_CPU NO_BUMP_GPU)
 	target_link_libraries(memory_tracker_mutant_${mutant_lower}_tests fmt::fmt common)
 	target_include_directories(memory_tracker_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(memory_tracker_mutant_${mutant_lower}_tests PRIVATE KYTY_MEMTRACKER_MUTANT_${mutant}=1)
+endforeach()
+# S408: KYTY_PV_INDIRECT (prepared args, entry life cycle, cap limit, recorded order). Mutants: instance clamp off, field check ignored,
+# no cooldown after a mismatch, no cap growth after an overflow.
+add_executable(pv_indirect_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PvIndirectTests.cpp")
+target_include_directories(pv_indirect_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS CLAMP_OFF IGNORE_FIELDS NO_COOLDOWN CAP_NO_GROW)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(pv_indirect_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PvIndirectTests.cpp")
+	target_include_directories(pv_indirect_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(pv_indirect_mutant_${mutant_lower}_tests PRIVATE KYTY_PVINDIRECT_MUTANT_${mutant}=1)
 endforeach()
 # S406: KYTY_PV_RANGE_GEN memo decisions. Mutants: a hit although the stamp moved; the switch off by default (S408: default is 1).
 add_executable(pv_range_gen_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PvRangeGenTests.cpp")
@@ -1302,6 +1327,11 @@ if(BUILD_TESTING)
 		add_test(NAME memory_tracker_mutant_${mutant} COMMAND $<TARGET_FILE:memory_tracker_mutant_${mutant}_tests>)
 		set_tests_properties(memory_tracker_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
+	add_test(NAME pv_indirect COMMAND $<TARGET_FILE:pv_indirect_tests>)
+	foreach(mutant IN ITEMS clamp_off ignore_fields no_cooldown cap_no_grow)
+		add_test(NAME pv_indirect_mutant_${mutant} COMMAND $<TARGET_FILE:pv_indirect_mutant_${mutant}_tests>)
+		set_tests_properties(pv_indirect_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME pv_range_gen COMMAND $<TARGET_FILE:pv_range_gen_tests>)
 	foreach(mutant IN ITEMS ignore_stamp default_off)
 		add_test(NAME pv_range_gen_mutant_${mutant} COMMAND $<TARGET_FILE:pv_range_gen_mutant_${mutant}_tests>)
@@ -1507,6 +1537,11 @@ if(BUILD_TESTING)
 		memory_tracker_tests
 		memory_tracker_mutant_no_bump_cpu_tests
 		memory_tracker_mutant_no_bump_gpu_tests
+		pv_indirect_tests
+		pv_indirect_mutant_clamp_off_tests
+		pv_indirect_mutant_ignore_fields_tests
+		pv_indirect_mutant_no_cooldown_tests
+		pv_indirect_mutant_cap_no_grow_tests
 		pv_range_gen_tests
 		pv_range_gen_mutant_ignore_stamp_tests
 		pv_range_gen_mutant_default_off_tests

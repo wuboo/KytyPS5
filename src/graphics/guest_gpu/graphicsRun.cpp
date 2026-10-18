@@ -1168,6 +1168,11 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	// vkCmdDrawIndexedIndirect without reading the args. Mode 0 never gets here (the whole block is skipped).
 	const auto           ig_mode = IndirectGpu::EnvMode();
 	IndirectGpuRequest   ig_request;
+	// S408 (KYTY_PV_INDIRECT): a VS-store candidate of this draw may be drawn from args prepared on the GPU (needs KYTY_INDIRECT_GPU != 0).
+	const auto           pv_mode = PvIndirect::EnvMode();
+	PvIndirectRequest    pv_request;
+	pv_request.mode              = pv_mode;
+	pv_request.index_buffer_size = m_index_buffer_size;
 	auto                 ig_cmd_reason = IndirectGpu::Reason::NotIndexed;
 	if (ig_mode != IndirectGpu::Mode::Off && indexed) {
 		IndirectGpu::Candidate candidate;
@@ -1183,6 +1188,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		FrameTiming::Add(FrameTiming::Counter::IndirectGpuCandidateN);
 		ig_request.mode      = ig_mode;
 		ig_request.args_addr = m_draw_indirect_args_base_addr + data_offset;
+		pv_request.args_addr = ig_request.args_addr;
 		if (ig_cmd_reason == IndirectGpu::Reason::Eligible) {
 			FrameTiming::Add(FrameTiming::Counter::IndirectGpuEligibleN);
 			if (ig_mode == IndirectGpu::Mode::On) {
@@ -1192,7 +1198,8 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 				           .index_addr     = reinterpret_cast<const void*>(m_index_base_addr),
 				           .instance_count = 1,
 				           .offset_source  = DrawOffsetSource::IndirectArgs,
-				           .indirect_gpu   = &ig_request});
+				           .indirect_gpu   = &ig_request,
+				           .pv_indirect    = pv_mode == PvIndirect::Mode::On ? &pv_request : nullptr});
 				if (!ig_request.declined) {
 					FrameTiming::Add(FrameTiming::Counter::IndirectGpuN);
 					LogIndirectGpu("gpu", ig_request.args_addr, ig_cmd_reason, ig_request.host_reason, m_index_buffer_size, false, 0,
@@ -1258,13 +1265,21 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		// S404 shadow: the real draw, with the executor reporting what it would have decided.
 		const bool ig_shadow = ig_mode == IndirectGpu::Mode::Shadow && i == 0 && draw_count == 1 &&
 		                       ig_cmd_reason == IndirectGpu::Reason::Eligible;
+		// S408: the args the CPU read are what the executor learns (and, in shadow, compares with the prepared ones two flips later).
+		const bool pv_learn = pv_mode != PvIndirect::Mode::Off && i == 0 && ig_cmd_reason == IndirectGpu::Reason::Eligible;
+		if (pv_learn) {
+			pv_request.have_cpu_args = true;
+			pv_request.cpu_args      = {args->index_count_per_instance, args->instance_count, args->start_index_location,
+			                            args->base_vertex_location, args->start_instance_location};
+		}
 		DrawIndex({.index_count    = index_count,
 		           .index_addr     = index_addr,
 		           .instance_count = args->instance_count,
 		           .base_vertex    = static_cast<int32_t>(args->base_vertex_location),
 		           .first_instance = args->start_instance_location,
 		           .offset_source  = DrawOffsetSource::IndirectArgs,
-		           .indirect_gpu   = ig_shadow ? &ig_request : nullptr});
+		           .indirect_gpu   = ig_shadow ? &ig_request : nullptr,
+		           .pv_indirect    = pv_learn ? &pv_request : nullptr});
 		SyncCensus::IndirectPvCtx().active = false;
 		if (pv_census && ig_request.host_reason == IndirectGpu::Reason::PerVertexStore) {
 			// S406: the draw is pv_store on the host side: are the 20 args bytes of the CPU path the same before and after the drain?
