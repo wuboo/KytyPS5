@@ -1,5 +1,6 @@
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/presentation/cpPhases.h"
+#include "graphics/presentation/cpSampler.h"
 #include "graphics/shader/nullDescDiag.h"
 
 #include "common/memEvents.h"
@@ -8,13 +9,16 @@
 #include "common/profiler.h"
 #include "common/signalCensus.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <iterator>
+#include <mutex>
 #include <string>
+#include <vector>
 
 namespace Libs::Graphics::FrameTiming {
 
@@ -215,6 +219,45 @@ constexpr const char* kCounterNames[] = {
     "indirect_gpu_n",
     "indirect_gpu_fallback_n",
     "indirect_gpu_clamp_risk_n",
+    "cp_sample_n",
+    "cp_sample_wait_n",
+    "sync_spec_purpose_cond_n",
+    "sync_spec_purpose_slot_n",
+    "sync_spec_purpose_desc_n",
+    "sync_spec_purpose_fill_n",
+    "sync_spec_purpose_wg_n",
+    "sync_spec_purpose_call_n",
+    "sync_spec_purpose_other_n",
+    "spec_dec_stale_eq_n",
+    "spec_dec_stale_ne_n",
+    "spec_dec_super_ok_n",
+    "spec_dec_super_fail_n",
+    "spec_super_extra_sources_n",
+    "spec_perm_same_n",
+    "spec_super_new_images_n",
+    "indirect_pv_args_eq_n",
+    "indirect_pv_args_ne_n",
+    "indirect_pv_inst_max",
+    "mat_memo_vs_n",
+    "mat_memo_ps_n",
+    "mat_memo_cs_n",
+    "mat_memo_in_hit_vs_n",
+    "mat_memo_in_hit_ps_n",
+    "mat_memo_in_hit_cs_n",
+    "mat_memo_unsafe_vs_n",
+    "mat_memo_unsafe_ps_n",
+    "mat_memo_unsafe_cs_n",
+    "mat_memo_out_hit_vs_n",
+    "mat_memo_out_hit_ps_n",
+    "mat_memo_out_hit_cs_n",
+    "mat_memo_rebase_vs_n",
+    "mat_memo_rebase_ps_n",
+    "mat_memo_rebase_cs_n",
+    "gpu_active_est_ns",
+    "pv_gen_hit_n",
+    "pv_gen_miss_n",
+    "pv_gen_mismatch_n",
+    "pv_hash_bytes_skipped",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
@@ -363,3 +406,78 @@ uint64_t GuestFlips() {
 }
 
 } // namespace Libs::Graphics::FrameTiming
+
+// S406: production side of the CP breadcrumb sampler (cpSampler.h).
+namespace Libs::Graphics::CpSampler {
+
+bool Enabled() {
+	static const bool on = FrameTiming::DiagFlagOn(std::getenv("KYTY_DIAG_CP_SAMPLE"));
+	return on;
+}
+
+namespace {
+
+void DumpHistogram(const Histogram& hist, uint64_t from, uint64_t to) {
+	struct Cell {
+		uint32_t site;
+		size_t   op;
+		uint64_t n;
+	};
+	std::vector<Cell> cells;
+	for (uint32_t site = 0; site < kSiteCount; site++) {
+		for (size_t op = 0; op < Histogram::kOps; op++) {
+			if (const auto n = hist.Cell(site, op); n != 0) cells.push_back({site, op, n});
+		}
+	}
+	std::sort(cells.begin(), cells.end(), [](const Cell& a, const Cell& b) { return a.n > b.n; });
+	for (size_t i = 0; i < cells.size() && i < 80; i++) {
+		char op[8];
+		if (cells[i].op == Histogram::kOps - 1) {
+			std::snprintf(op, sizeof(op), "-");
+		} else {
+			std::snprintf(op, sizeof(op), "0x%02zx", cells[i].op);
+		}
+		LOGF("[cp-sample] flips=%llu-%llu total=%llu site=%s op=%s n=%llu\n", static_cast<unsigned long long>(from),
+		     static_cast<unsigned long long>(to), static_cast<unsigned long long>(hist.Total()), SiteName(cells[i].site), op,
+		     static_cast<unsigned long long>(cells[i].n));
+	}
+}
+
+// Sampler-thread state (only that thread touches it).
+bool OnSample(Histogram& hist) {
+	const auto window = Window();
+	static uint64_t     base_total = 0, base_wait = 0, seg_from = 0;
+	static bool         in_segment = false;
+
+	const uint64_t flips  = FrameTiming::GuestFlips();
+	const bool     inside = flips >= window.from && flips <= window.to;
+	if (in_segment && (!inside || flips / 100 != seg_from / 100)) {
+		DumpHistogram(hist, seg_from, flips);
+		base_total += hist.Total();
+		base_wait += hist.Wait();
+		hist.Clear();
+		in_segment = false;
+	}
+	if (!inside) return false;
+	if (!in_segment) {
+		seg_from   = flips;
+		in_segment = true;
+	}
+	FrameTiming::Set(FrameTiming::Counter::CpSampleN, base_total + hist.Total());
+	FrameTiming::Set(FrameTiming::Counter::CpSampleWaitN, base_wait + hist.Wait());
+	return true;
+}
+
+} // namespace
+
+void StartProduction() {
+	static Sampler sampler;
+	static std::once_flag once;
+	std::call_once(once, [] {
+		Active().store(true);
+		LOGF("[cp-sample] sampler on: 10 kHz, window from KYTY_DIAG_CP_SAMPLE_WINDOW (default 6300:6800)\n");
+		sampler.Start(100, OnSample);
+	});
+}
+
+} // namespace Libs::Graphics::CpSampler

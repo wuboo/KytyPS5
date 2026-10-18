@@ -103,10 +103,30 @@ bool CommandScheduler::InDeferredOperation() noexcept {
 CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graphics)
     : m_master(graphics), m_context(context), m_graphics(graphics),
       m_command_pool(graphics, m_master), m_command(*this),
-      m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }) {}
+      m_priority_thread([this](std::stop_token stop) { PriorityOperationsThread(stop); }) {
+	if (FrameTiming::DiagFlagOn(std::getenv("KYTY_DIAG_GPU_DONE"))) {
+		m_gpu_done = std::make_unique<GpuDone::Tracker>(
+		    [this](uint64_t value) {
+			    // 50 ms slices so Shutdown can stop the waiter.
+			    while (!m_gpu_done_stop.load(std::memory_order_relaxed) && !m_master.IsFree(value)) {
+				    vk::SemaphoreWaitInfo wait_info {};
+				    const auto            handle = m_master.Handle();
+				    wait_info.semaphoreCount     = 1;
+				    wait_info.pSemaphores        = &handle;
+				    wait_info.pValues            = &value;
+				    (void)m_graphics.device.waitSemaphores(&wait_info, 50'000'000ull);
+				    m_master.Refresh();
+			    }
+		    },
+		    [] { return FrameTiming::SteadyNowNs(); },
+		    [](uint64_t ns) { FrameTiming::Add(FrameTiming::Counter::GpuActiveEstNs, ns); });
+	}
+}
 
 CommandScheduler::~CommandScheduler() {
 	Shutdown();
+	m_gpu_done_stop.store(true, std::memory_order_relaxed); // S406
+	m_gpu_done.reset();
 }
 
 void CommandScheduler::Shutdown() {
@@ -538,6 +558,7 @@ void CommandScheduler::QueueSubmitNow(SubmitJob& job) {
 		                  job.debug_args[3], job.debug_arg4);
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	if (m_gpu_done) m_gpu_done->NoteSubmit(job.tick); // S406: the moment vkQueueSubmit returned
 }
 
 void CommandScheduler::EnableAsyncSubmit() {

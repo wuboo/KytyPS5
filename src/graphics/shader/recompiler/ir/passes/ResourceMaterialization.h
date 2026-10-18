@@ -58,6 +58,9 @@ ResourcePlan ExtractResourcePlan(const Program& program);
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization);
 
+// S406 (DIAG): bit i = the plan reads user_data[i] (GetUserData of register user_data_base + i), i < 64.
+uint64_t PlanUsedUserDataMask(const ResourcePlan& plan);
+
 // Applies an already-derived specialization to native IR before layout and emission.
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization);
 

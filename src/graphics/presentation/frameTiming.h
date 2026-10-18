@@ -196,10 +196,33 @@ enum class Counter : uint32_t {
 	// (shadow) / recorded as vkCmdDrawIndexedIndirect (1) / taken on the CPU although the mode was 1 / whose index count exceeded
 	// INDEX_BUFFER_SIZE (the CPU path clamps it, the GPU path cannot).
 	IndirectGpuCandidateN, IndirectGpuEligibleN, IndirectGpuHostEligibleN, IndirectGpuN, IndirectGpuFallbackN, IndirectGpuClampRiskN,
+	// S406 (KYTY_DIAG_CP_SAMPLE=1): samples taken in the flip window, and the ones that found the CP thread in a wait.
+	CpSampleN, CpSampleWaitN,
+	// S406 (KYTY_DIAG_SYNC=1): target of a spec readback (SyncCensus::SpecPurpose order).
+	SyncSpecPurposeCondN, SyncSpecPurposeSlotN, SyncSpecPurposeDescN, SyncSpecPurposeFillN, SyncSpecPurposeWgN, SyncSpecPurposeCallN,
+	SyncSpecPurposeOtherN,
+	// S406: shadow of the decision on the spec hit path (stale reader vs fresh; superset reader vs fresh).
+	SpecDecStaleEqN, SpecDecStaleNeN, SpecDecSuperOkN, SpecDecSuperFailN, SpecSuperExtraSourcesN, SpecPermSameN, SpecSuperNewImagesN,
+	// S406 (KYTY_DIAG_INDIRECT=1): pv_store indirect draws: args stale vs fresh (20 B) and the largest instance count.
+	IndirectPvArgsEqN, IndirectPvArgsNeN, IndirectPvInstMax,
+	// S406 (KYTY_DIAG_MATMEMO=1): shadow memo after the walk, by stage (vs, ps, cs): lookups, input hits, unsafe hits
+	// (same input, different output: MUST stay 0), output hits (same output as the entry), rebase hits (same after masking buffer bases).
+	MatMemoVsN, MatMemoPsN, MatMemoCsN, MatMemoInHitVsN, MatMemoInHitPsN, MatMemoInHitCsN, MatMemoUnsafeVsN, MatMemoUnsafePsN,
+	MatMemoUnsafeCsN, MatMemoOutHitVsN, MatMemoOutHitPsN, MatMemoOutHitCsN, MatMemoRebaseVsN, MatMemoRebasePsN, MatMemoRebaseCsN,
+	// S406 (KYTY_DIAG_GPU_DONE=1): estimated GPU busy time from timeline completions (sum over submits of t_done - max(t_submit, t_done_prev)).
+	GpuActiveEstNs,
+	// S406 (KYTY_PV_RANGE_GEN=1|shadow): VS-store range memo by page generation.
+	PvGenHitN, PvGenMissN, PvGenMismatchN, PvHashBytesSkipped,
 	Count,
 };
 
 void Add(Counter counter, uint64_t value = 1);
+
+// Stage index of the MatMemo columns: 0 = vs, 1 = ps, 2 = cs.
+enum class MatMemoMetric : uint32_t { N, InHit, Unsafe, OutHit, Rebase };
+constexpr Counter MatMemoCounter(MatMemoMetric metric, uint32_t stage) {
+	return static_cast<Counter>(static_cast<uint32_t>(Counter::MatMemoVsN) + static_cast<uint32_t>(metric) * 3u + stage);
+}
 
 // Counter of a dispatch class (the DispGuest..DispOther columns are in DispatchClass order).
 constexpr Counter DispatchCounter(DispatchClass cls) {

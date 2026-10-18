@@ -30,6 +30,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/cpPhaseScope.h"
+#include "graphics/presentation/cpSampler.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -983,6 +984,7 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
                                             uint32_t            render_target_slice_offset,
 	                                        DrawRenderState& state) {
+	KYTY_CP_SITE(DrawRenderState);
 	const auto& shader_regs       = buffer.GetRegisters().GetShaderRegisters();
 	const auto  color_output_mask = DrawColorOutputMask(buffer.GetRegisters());
 	state.ps_active = buffer.GetShaders().GetPs().ps_regs.data_addr != 0 &&
@@ -1506,7 +1508,12 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 		// content hash exactly like the prototype does.
 		constexpr uint32_t kNoDropLimit = 0x7fffffffu; // only negative vertex numbers count as dropped
 		FrameTiming::Add(FrameTiming::Counter::PvVsstoreIndexBytes, index_source.size);
-		const PerVertexRangeMemo::Key memo_key {XXH3_64bits(idx_bytes, index_source.size), index_source.size,
+		uint64_t index_hash;
+		{
+			KYTY_CP_SITE(PvIndexHash);
+			index_hash = XXH3_64bits(idx_bytes, index_source.size);
+		}
+		const PerVertexRangeMemo::Key memo_key {index_hash, index_source.size,
 		                                        element_size, draw.index_count, emit.vertex_offset, kNoDropLimit};
 		PerVertexRecordRange range;
 		bool                 known = false;
@@ -1515,6 +1522,7 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 			range = memoized.range;
 			known = memoized.derivable;
 		} else {
+			KYTY_CP_SITE(PvRangeScan);
 			known = ComputePerVertexRecordRange(true, idx_bytes, index_source.size, element_size,
 			                                    draw.index_count, emit.first_vertex, emit.vertex_offset,
 			                                    kNoDropLimit, range);
@@ -1534,6 +1542,7 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 	// last word the PS reads fits. A host copy is padded to a whole word in PrepareIndexBuffer.
 	bool index_tail_fits = true;
 	if (index_aligned && scannable && index_source.host_data == nullptr) {
+		KYTY_CP_SITE(PvObtainTail);
 		const auto [index_buffer, index_offset] =
 		    m_context.GetBufferCache().ObtainBuffer(index_source.address, index_source.size, false);
 		index_tail_fits = PvVsStoreIndexDescriptorFor(index_offset, element_size, graphics.StorageMinAlignment(),
@@ -1563,6 +1572,7 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 	if (!m_pv_vsstore) m_pv_vsstore = std::make_shared<PvVsStoreRuntime>(graphics, m_context.GetCommandScheduler());
 	PvVsStoreRuntime::Region region;
 	const auto decision = DecidePvVsStore(programs->verdict, request, index_aligned, [&](const PvVsStorePlan& plan) {
+		KYTY_CP_SITE(PvPlace);
 		region = m_pv_vsstore->Place(plan.records, programs->stride_vec4);
 		return region.ok;
 	}, index_tail_fits);
@@ -1592,6 +1602,19 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 	setup.draw.index32       = element_size == 4;
 	setup.draw.records       = static_cast<uint32_t>(plan.records);
 	if (PerVertexVsStoreGuard()) setup.guard = m_pv_vsstore->AcquireGuard(FrameTiming::GuestFlips());
+	if (const auto& ctx = SyncCensus::IndirectPvCtx(); ctx.active) {
+		// S406 (KYTY_DIAG_INDIRECT=1): the VS-store plan of an indirect draw next to the args before / after the drain.
+		static std::atomic<uint32_t> logged {0};
+		const auto                   flip = FrameTiming::GuestFlips();
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 200 || (flip >= 6300 && flip <= 6302)) {
+			LOGF("[indirect-pv] flip=%" PRIu64 " eq=%d stale=%u,%u,%u,%u,%u fresh=%u,%u,%u,%u,%u first=%u span=%u records=%u instances=%u "
+			     "ring_free=%" PRIu64 " index_count=%u\n",
+			     flip, ctx.Equal() ? 1 : 0, ctx.stale[0], ctx.stale[1], ctx.stale[2], ctx.stale[3], ctx.stale[4], ctx.fresh[0],
+			     ctx.fresh[1], ctx.fresh[2], ctx.fresh[3], ctx.fresh[4], static_cast<uint32_t>(plan.first),
+			     static_cast<uint32_t>(plan.span), static_cast<uint32_t>(plan.records), draw.instance_count,
+			     m_pv_vsstore->FreeRecords(), draw.index_count);
+		}
+	}
 	return true;
 }
 
@@ -1697,7 +1720,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	// batch first, same reasoning as the PM4-interpreter-level flush in graphicsRun.cpp -- two
 	// consecutive IT_DRAW_INDEX_2 packets reach the same opcode check there, so only the check
 	// here (now that we know this one isn't prototype-eligible) can catch that case.
-	FlushPendingPrototypeBatch(buffer);
+	{
+		KYTY_CP_SITE(DrawFlushProto);
+		FlushPendingPrototypeBatch(buffer);
+	}
 	auto& ucfg = buffer.GetUserConfig();
 	if (CopyDepthToColor(buffer, draw, emit, state)) {
 		return;
@@ -1764,7 +1790,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	PreparedIndexBuffer   index_binding;
 	if (!mesh_active) {
 		LogDrawPhase(draw.Name(), "PrepareVertexBuffers");
-		vertex_bindings = AcquireVertexBuffers(buffer, state.vertex_info[0]);
+		{
+			KYTY_CP_SITE(DrawVertexBuffers);
+			vertex_bindings = AcquireVertexBuffers(buffer, state.vertex_info[0]);
+		}
+		KYTY_CP_SITE(DrawIndexBuffer);
 		if (draw.indirect_addr != 0) {
 			// S404: the args are a GPU-read buffer of the cache like the index buffer; obtaining one can merge the other, so the
 			// index binding is taken between two lookups of the args and the last lookup is the one that is used.
@@ -1809,7 +1839,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	pipeline_phase.reset();
 	// S327: the pass about to be needed differs from the open one (BeginRendering would close it below): split here, before this draw
 	// records anything into the buffer.
-	m_context.GetCommandScheduler().MaybeEagerSplitAtPass(rendering);
+	{
+		KYTY_CP_SITE(DrawEagerSplit);
+		m_context.GetCommandScheduler().MaybeEagerSplitAtPass(rendering);
+	}
 	CpPhases::Scope vkcmd_phase(CpPhases::Phase::DrawVkcmd); // to the end of the draw; CommitBindings below is its child
 
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
@@ -1911,7 +1944,10 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	auto* const igpu = args.indirect_gpu; // S404: KYTY_INDIRECT_GPU request (placeholder counts with mode On)
 	const bool  igpu_on = igpu != nullptr && igpu->mode == IndirectGpu::Mode::On;
 	FrameTiming::Add(FrameTiming::Counter::Draws);
-	m_context.GetCommandScheduler().MaybeEagerSplit();
+	{
+		KYTY_CP_SITE(DrawEagerSplit);
+		m_context.GetCommandScheduler().MaybeEagerSplit();
+	}
 
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
@@ -2055,7 +2091,10 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const DrawAutoArgs& args) {
 	KYTY_PROFILER_FUNCTION();
 	FrameTiming::Add(FrameTiming::Counter::Draws);
-	m_context.GetCommandScheduler().MaybeEagerSplit();
+	{
+		KYTY_CP_SITE(DrawEagerSplit);
+		m_context.GetCommandScheduler().MaybeEagerSplit();
+	}
 
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);

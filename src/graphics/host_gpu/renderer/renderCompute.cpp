@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/cpPhaseScope.h"
+#include "graphics/presentation/cpSampler.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
@@ -30,6 +31,7 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <optional>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -341,6 +343,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	const auto& program   = *input_info.stage.program;
 	const auto& resources = *input_info.stage.resources;
 	if (resources.specialization_reads.empty()) {
+		KYTY_CP_SITE(DispFillResolve);
 		// Cached metadata addresses can be reused as ordinary buffers; preserve their guest writes.
 		UpdateComputeMetaClears(input_info, buffer);
 		if (TryConsumeComputeFill(input_info, buffer, thread_group_x, thread_group_y,
@@ -372,6 +375,8 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	buffer.EndRendering();
 	auto& pipeline =
 	    m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
+	std::optional<CpSampler::SiteScope> disp_site;
+	if (CpSampler::Active().load(std::memory_order_relaxed)) disp_site.emplace(CpSampler::SiteId(CpSampler::Site::DispBind));
 	auto& bindings = m_compute_bindings;
 	PrepareBindings(input_info.stage, bindings);
 	if (program.bindings.dispatch_thread_dword != ShaderRecompiler::IR::PushData::NoStart) {
@@ -388,8 +393,13 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	RebindBuffers(bindings);
 
 	auto              vk_buffer        = buffer.Handle();
-	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
-	               std::span {&descriptor_stage, 1u});
+	disp_site.reset();
+	{
+		KYTY_CP_SITE(DispDesc);
+		CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
+		               std::span {&descriptor_stage, 1u});
+	}
+	KYTY_CP_SITE(DispRecord);
 	bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
 	    HasShaderBufferWrites(input_info.stage);
 	has_storage_writes =
@@ -505,6 +515,8 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	    cs_regs, buffer.GetRegisters().GetShaderRegisters(), input_info);
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
+	std::optional<CpSampler::SiteScope> disp_site;
+	if (CpSampler::Active().load(std::memory_order_relaxed)) disp_site.emplace(CpSampler::SiteId(CpSampler::Site::DispBind));
 	auto& bindings = m_compute_bindings;
 	PrepareBindings(input_info.stage, bindings);
 	PreparedBindings* descriptor_stage = &bindings;
@@ -520,8 +532,13 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
 	RebindBuffers(bindings);
-	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
-	               std::span {&descriptor_stage, 1u});
+	disp_site.reset();
+	{
+		KYTY_CP_SITE(DispDesc);
+		CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
+		               std::span {&descriptor_stage, 1u});
+	}
+	KYTY_CP_SITE(DispRecord);
 	const auto vk_buffer = buffer.Handle();
 	const bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
 	    HasShaderBufferWrites(input_info.stage) ||

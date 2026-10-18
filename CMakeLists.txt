@@ -783,6 +783,27 @@ foreach(mutant IN ITEMS KEEP_CHILDREN DROP_PARSE)
 	target_compile_definitions(cp_phases_mutant_${mutant_lower}_tests PRIVATE KYTY_CPPHASES_MUTANT_${mutant}=1)
 endforeach()
 
+# S406: CP breadcrumb sampler. Mutant: a nested site does not restore its parent (must fail the proportions).
+add_executable(cp_sampler_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpSamplerTests.cpp")
+target_include_directories(cp_sampler_tests PRIVATE ${inc_headers})
+add_executable(cp_sampler_mutant_no_restore_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpSamplerTests.cpp")
+target_include_directories(cp_sampler_mutant_no_restore_tests PRIVATE ${inc_headers})
+target_compile_definitions(cp_sampler_mutant_no_restore_tests PRIVATE KYTY_CPSAMPLER_MUTANT_NO_RESTORE=1)
+
+# S406: GPU busy-time estimate from timeline completions. Mutant: no max with the previous completion.
+add_executable(gpu_done_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GpuDoneTests.cpp")
+target_include_directories(gpu_done_tests PRIVATE ${inc_headers})
+add_executable(gpu_done_mutant_no_max_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GpuDoneTests.cpp")
+target_include_directories(gpu_done_mutant_no_max_tests PRIVATE ${inc_headers})
+target_compile_definitions(gpu_done_mutant_no_max_tests PRIVATE KYTY_GPUDONE_MUTANT_NO_MAX=1)
+
+# S406: shadow memo after the walk. Mutant: the flattened SRT is not part of the input (unsafe hits appear).
+add_executable(mat_memo_shadow_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/MatMemoShadowTests.cpp")
+target_include_directories(mat_memo_shadow_tests PRIVATE ${inc_headers})
+add_executable(mat_memo_shadow_mutant_ignore_flat_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/MatMemoShadowTests.cpp")
+target_include_directories(mat_memo_shadow_mutant_ignore_flat_tests PRIVATE ${inc_headers})
+target_compile_definitions(mat_memo_shadow_mutant_ignore_flat_tests PRIVATE KYTY_MATMEMO_MUTANT_IGNORE_FLAT=1)
+
 add_executable(mem_events_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/MemEventsTests.cpp")
 target_include_directories(mem_events_tests PRIVATE ${inc_headers})
 # Mutants (each must be caught, WILL_FAIL): an inclusive range end; repeats merge whatever the address.
@@ -1283,6 +1304,15 @@ if(BUILD_TESTING)
 	add_test(NAME rt_dump COMMAND $<TARGET_FILE:rt_dump_tests>)
 	add_test(NAME mem_events COMMAND $<TARGET_FILE:mem_events_tests>)
 	add_test(NAME cp_phases COMMAND $<TARGET_FILE:cp_phases_tests>)
+	add_test(NAME cp_sampler COMMAND $<TARGET_FILE:cp_sampler_tests>)
+	add_test(NAME cp_sampler_mutant_no_restore COMMAND $<TARGET_FILE:cp_sampler_mutant_no_restore_tests>)
+	set_tests_properties(cp_sampler_mutant_no_restore PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME gpu_done COMMAND $<TARGET_FILE:gpu_done_tests>)
+	add_test(NAME gpu_done_mutant_no_max COMMAND $<TARGET_FILE:gpu_done_mutant_no_max_tests>)
+	set_tests_properties(gpu_done_mutant_no_max PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME mat_memo_shadow COMMAND $<TARGET_FILE:mat_memo_shadow_tests>)
+	add_test(NAME mat_memo_shadow_mutant_ignore_flat COMMAND $<TARGET_FILE:mat_memo_shadow_mutant_ignore_flat_tests>)
+	set_tests_properties(mat_memo_shadow_mutant_ignore_flat PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME diag_tex COMMAND $<TARGET_FILE:diag_tex_tests>)
 	add_test(NAME min_lod_view COMMAND $<TARGET_FILE:min_lod_view_tests>)
 	add_test(NAME apple_drop COMMAND $<TARGET_FILE:apple_drop_tests>)
@@ -1555,6 +1585,12 @@ if(BUILD_TESTING)
 		diag_tex_mutant_nonzero_tests
 		diag_tex_mutant_no_once_tests
 		cp_phases_tests
+		cp_sampler_tests
+		cp_sampler_mutant_no_restore_tests
+		gpu_done_tests
+		gpu_done_mutant_no_max_tests
+		mat_memo_shadow_tests
+		mat_memo_shadow_mutant_ignore_flat_tests
 		cp_phases_mutant_keep_children_tests
 		cp_phases_mutant_drop_parse_tests
 		mem_events_tests

@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 
+#include "graphics/host_gpu/renderer/pipeline/matMemoShadow.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -19,6 +20,7 @@
 #include "graphics/host_gpu/renderer/perVertexVsStoreRuntime.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/presentation/cpSampler.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/rtMiss.h"
@@ -38,6 +40,7 @@
 #include <fmt/format.h>
 #include <limits>
 #include <mutex>
+#include <optional>
 #include <span>
 #include <unordered_set>
 #include <spirv-tools/libspirv.hpp>
@@ -131,6 +134,124 @@ const char* SyncStageName(ShaderType stage) {
 		case ShaderType::Pixel: return "ps";
 		case ShaderType::Compute: return "cs";
 		default: return "?";
+	}
+}
+
+// ---- S406 (KYTY_DIAG_MATMEMO=1): shadow memo after the walk, see matMemoShadow.h ----
+bool MatMemoEnabled() {
+	static const bool on = FrameTiming::DiagFlagOn(std::getenv("KYTY_DIAG_MATMEMO"));
+	return on;
+}
+
+uint64_t HashDescriptors(uint64_t hash, const std::vector<ShaderRecompiler::IR::DescriptorValue>& values, bool mask_base48) {
+	hash = MatMemo::Mix(hash, values.size());
+	for (const auto& value: values) {
+		auto dwords = value.dwords;
+		if (mask_base48) {
+			dwords[0] = 0;
+			dwords[1] &= 0xFFFF0000u;
+		}
+		hash = MatMemo::Mix(hash, value.dword_count);
+		hash = MatMemo::HashWords(hash, dwords);
+	}
+	return hash;
+}
+
+uint64_t HashSpecialization(uint64_t hash, const ShaderRecompiler::IR::ResourceSpecialization& spec) {
+	for (const auto& b: spec.buffers) {
+		hash = MatMemo::Mix(hash, b.packed_stride);
+		hash = MatMemo::Mix(hash, static_cast<uint64_t>(b.descriptor_format));
+		hash = MatMemo::Mix(hash, b.descriptor_swizzle);
+		hash = MatMemo::Mix(hash, (b.zero_stride_oob ? 1u : 0u) | (b.scalar_empty ? 2u : 0u));
+		hash = MatMemo::Mix(hash, (static_cast<uint64_t>(b.indirect_root) << 32) | b.indirect_mapping_offset);
+		hash = MatMemo::Mix(hash, b.indirect_search_iterations);
+	}
+	hash = MatMemo::Mix(hash, 0x1111);
+	for (const auto& i: spec.images) {
+		hash = MatMemo::Mix(hash, (static_cast<uint64_t>(i.numeric_class) << 32) | static_cast<uint64_t>(i.dimension));
+		hash = MatMemo::Mix(hash, (static_cast<uint64_t>(i.mip_count) << 32) | static_cast<uint64_t>(i.conversion_format));
+		hash = MatMemo::Mix(hash, (static_cast<uint64_t>(i.shader_swizzle) << 32) | i.indirect_root);
+		hash = MatMemo::Mix(hash, (static_cast<uint64_t>(i.indirect_mapping_offset) << 32) | i.indirect_search_iterations);
+		hash = MatMemo::Mix(hash, (i.cube ? 1u : 0u) | (i.fmask ? 2u : 0u));
+		hash = MatMemo::Mix(hash, (static_cast<uint64_t>(i.min_lod_resinfo.shift) << 32) | i.min_lod_resinfo.levels);
+		hash = MatMemo::Mix(hash, (static_cast<uint64_t>(i.min_lod_resinfo.extent[0]) << 32) | i.min_lod_resinfo.extent[1]);
+		hash = MatMemo::Mix(hash, i.min_lod_resinfo.extent[2]);
+	}
+	hash = MatMemo::Mix(hash, 0x2222);
+	for (const auto& s: spec.samplers) {
+		hash = MatMemo::Mix(hash, (static_cast<uint64_t>(s.indirect_root) << 32) | s.indirect_mapping_offset);
+		hash = MatMemo::Mix(hash, s.indirect_search_iterations);
+	}
+	return hash;
+}
+
+// Output of the part after the walk: snapshot (buffers, images, samplers, the user_data words in `used_mask`, flattened SRT, uniform
+// fill), specialization and the chosen permutation (UINT32_MAX = none yet).
+MatMemo::Output HashMaterializationOutput(const ShaderRecompiler::IR::ResourceSnapshot& snapshot,
+                                          const ShaderRecompiler::IR::ResourceSpecialization& spec, uint64_t used_mask,
+                                          uint32_t permutation) {
+	MatMemo::Output out;
+	for (int masked = 0; masked < 2; masked++) {
+		uint64_t hash = 0x6f757470757401ull;
+		hash          = HashDescriptors(hash, snapshot.buffers, masked != 0);
+		hash          = HashDescriptors(hash, snapshot.images, false);
+		hash          = HashDescriptors(hash, snapshot.samplers, false);
+		for (size_t i = 0; i < snapshot.user_data.size() && i < 64; i++) {
+			if (((used_mask >> i) & 1u) != 0) hash = MatMemo::Mix(hash, (static_cast<uint64_t>(i) << 32) | snapshot.user_data[i]);
+		}
+		hash = MatMemo::HashWords(hash, snapshot.flattened_srt);
+		const auto& fill = snapshot.uniform_fill;
+		hash = MatMemo::Mix(hash, (static_cast<uint64_t>(fill.kind) << 32) | fill.resource);
+		hash = MatMemo::Mix(hash, (static_cast<uint64_t>(fill.words) << 32) | fill.value);
+		hash = MatMemo::Mix(hash, fill.bounded_elements);
+		hash = HashSpecialization(hash, spec);
+		hash = MatMemo::Mix(hash, permutation);
+		(masked != 0 ? out.masked : out.full) = hash;
+	}
+	return out;
+}
+
+struct MatMemoLog {
+	MatMemo::Report report;
+	uint64_t        last_bucket = 0;
+};
+MatMemoLog& MatMemoLogState() {
+	static MatMemoLog state;
+	return state;
+}
+
+void NoteMatMemoResult(uint64_t program_hash, uint32_t stage, const MatMemo::Result& result) {
+	using FrameTiming::Add;
+	using FrameTiming::MatMemoCounter;
+	using FrameTiming::MatMemoMetric;
+	Add(MatMemoCounter(MatMemoMetric::N, stage));
+	if (result.in_hit) Add(MatMemoCounter(MatMemoMetric::InHit, stage));
+	if (result.unsafe) Add(MatMemoCounter(MatMemoMetric::Unsafe, stage));
+	if (result.out_hit) Add(MatMemoCounter(MatMemoMetric::OutHit, stage));
+	if (result.rebase) Add(MatMemoCounter(MatMemoMetric::Rebase, stage));
+	if (result.unsafe) {
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 50) {
+			LOGF("[matmemo-unsafe] program=0x%016" PRIx64 " stage=%s\n", program_hash, stage == 0 ? "vs" : (stage == 1 ? "ps" : "cs"));
+		}
+	}
+	const auto window = CpSampler::Window();
+	const auto flips  = FrameTiming::GuestFlips();
+	auto&      state  = MatMemoLogState();
+	if (flips >= window.from && flips <= window.to) {
+		state.report.Add(program_hash, stage, result);
+		if (flips / 100 != state.last_bucket) {
+			if (state.last_bucket != 0) {
+				for (const auto& row: state.report.TopMisses(10)) {
+					LOGF("[matmemo] flips<=%" PRIu64 " program=0x%016" PRIx64 " stage=%s n=%" PRIu64 " in_hit=%" PRIu64 " miss=%" PRIu64
+					     " unsafe=%" PRIu64 "\n",
+					     flips, row.hash, row.stage == 0 ? "vs" : (row.stage == 1 ? "ps" : "cs"), row.n, row.in_hit, row.Misses(),
+					     row.unsafe);
+				}
+				state.report.Clear();
+			}
+			state.last_bucket = flips / 100;
+		}
 	}
 }
 
@@ -290,12 +411,44 @@ struct PipelineCache::ProgramCache {
 			return revision != call_source->revision;
 		}
 
+		// S406 (KYTY_DIAG_MATMEMO=1): what a memo keyed by the input of the part after the walk would have done.
+		void NoteMatMemo(const ShaderRecompiler::IR::SrtRuntime& runtime, uint32_t push_data_cursor, uint32_t permutation) {
+			if (!m_matmemo_mask_valid) {
+				m_matmemo_plan_mask  = ShaderRecompiler::IR::PlanUsedUserDataMask(resource_plan);
+				m_matmemo_mask_valid = true;
+			}
+			uint64_t mask = m_matmemo_plan_mask;
+			for (const auto& candidate: permutations) {
+				for (const auto reg: candidate.program.info.user_data_registers) {
+					if (reg >= candidate.program.user_data_base && reg - candidate.program.user_data_base < 64u) {
+						mask |= uint64_t {1} << (reg - candidate.program.user_data_base);
+					}
+				}
+			}
+			MatMemo::InputParts parts;
+			parts.user_data        = runtime.user_data;
+			parts.used_mask        = mask;
+			parts.flat             = resources.flattened_srt;
+			parts.workgroup_counts = runtime.workgroup_counts;
+			parts.min_lod_remap    = runtime.min_lod_remap;
+			parts.push_cursor      = push_data_cursor;
+			const auto  result = m_matmemo.Note(MatMemo::InputKey(parts),
+			                                    HashMaterializationOutput(resources, specialization, mask, permutation));
+			const auto stage_index = resource_plan.stage == ShaderType::Pixel ? 1u : (resource_plan.stage == ShaderType::Compute ? 2u : 0u);
+			NoteMatMemoResult(resource_plan.shader_hash, stage_index, result);
+		}
+
 		template <bool HasCalls>
 		Permutation* FindPermutation(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                             uint32_t push_data_cursor) {
 			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
 			    resource_plan, runtime, resources, specialization));
+			KYTY_CP_SITE(ShPermSearch);
+			Permutation* found = nullptr;
+			uint32_t     found_index = UINT32_MAX;
+			uint32_t     index = 0;
 			for (auto& candidate: permutations) {
+				const auto here = index++;
 				const auto& layout = candidate.program.bindings;
 				if (layout.push_data_start_dword != ShaderRecompiler::IR::PushData::StartFor(
 				        push_data_cursor, layout.ShaderDataDwords()) ||
@@ -305,9 +458,12 @@ struct PipelineCache::ProgramCache {
 				if constexpr (HasCalls) {
 					if (!std::ranges::equal(candidate.function_code, FunctionCode())) continue;
 				}
-				return &candidate;
+				found       = &candidate;
+				found_index = here;
+				break;
 			}
-			return nullptr;
+			if (MatMemoEnabled()) NoteMatMemo(runtime, push_data_cursor, found_index);
+			return found;
 		}
 
 		std::unique_ptr<ShaderRecompiler::ShaderSource> call_source;
@@ -315,6 +471,9 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		std::vector<Permutation>                    permutations;
+		MatMemo::Shadow                             m_matmemo;          // S406
+		uint64_t                                    m_matmemo_plan_mask = 0;
+		bool                                        m_matmemo_mask_valid = false;
 	};
 
 	struct ProgramKeyHash {
@@ -390,12 +549,15 @@ struct PipelineCache::ProgramCache {
 		lookup_key.hash            = params.hash;
 		lookup_key.user_data_count = params.user_data_count;
 		lookup_key.code_size       = static_cast<uint32_t>(params.code.size());
+		std::optional<CpSampler::SiteScope> static_key_site;
+		if (CpSampler::Active().load(std::memory_order_relaxed)) static_key_site.emplace(CpSampler::SiteId(CpSampler::Site::ShStaticKeyFind));
 		BuildStageStaticKey(input_info, lookup_key.static_state);
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 			// Only when on, so the keys of runs without KYTY_RT_MISS stay as they were.
 			if (ShaderRecompiler::RtMissEnabled()) lookup_key.static_state.push_back(0x52544d53u);
 		}
 		auto                                         entry = programs.find(lookup_key);
+		static_key_site.reset();
 		// S404: the reader is named for the whole lookup (hit, call-source refresh, compile), not only the compile.
 		const SyncCensus::ReaderScope reader_tag(
 		    params.hash, SyncStageName(stage),
@@ -419,12 +581,16 @@ struct PipelineCache::ProgramCache {
 			auto& cached = entry->second;
 			Permutation* permutation = nullptr;
 			if (cached.call_source) {
-				source_changed = cached.RefreshCallSource(runtime);
+				{
+					KYTY_CP_SITE(ShRefreshCallSource);
+					source_changed = cached.RefreshCallSource(runtime);
+				}
 				if (!source_changed) permutation = cached.FindPermutation<true>(runtime, push_data_cursor);
 			} else {
 				permutation = cached.FindPermutation<false>(runtime, push_data_cursor);
 			}
 			if (permutation != nullptr) {
+				KYTY_CP_SITE(ShProgramsRest);
 				input_info.stage = {.program = &permutation->program, .resources = &entry->second.resources};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
 				return permutation->handle;
@@ -499,6 +665,7 @@ struct PipelineCache::ProgramCache {
 			    entry->second.specialization));
 		} else if (source_changed) {
 			entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+			entry->second.m_matmemo_mask_valid = false;
 			if (const auto* permutation = entry->second.FindPermutation<true>(runtime, push_data_cursor)) {
 				input_info.stage = {.program = &permutation->program, .resources = &entry->second.resources};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
