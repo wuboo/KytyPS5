@@ -773,6 +773,18 @@ foreach(mutant IN ITEMS BACKING_IGNORES_INFLIGHT REMOVE_ALL_OVERLAPPING)
 	target_compile_definitions(inflight_ranges_mutant_${mutant_lower}_tests PRIVATE KYTY_INFLIGHTRANGES_MUTANT_${mutant}=1)
 endforeach()
 
+# S428 (B2): the GPU-dirty ranges the fault handler of a guest thread reads (hand-over order, try_lock). Mutants: SUBTRACT_FIRST, BLOCKING_QUERY.
+add_executable(guest_fault_sync_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GuestFaultSyncTests.cpp")
+target_link_libraries(guest_fault_sync_tests common fmt::fmt)
+target_include_directories(guest_fault_sync_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS SUBTRACT_FIRST BLOCKING_QUERY)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(guest_fault_sync_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GuestFaultSyncTests.cpp")
+	target_link_libraries(guest_fault_sync_mutant_${mutant_lower}_tests common fmt::fmt)
+	target_include_directories(guest_fault_sync_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(guest_fault_sync_mutant_${mutant_lower}_tests PRIVATE KYTY_GUESTFAULTSYNC_MUTANT_${mutant}=1)
+endforeach()
+
 add_executable(shader_vertex_metadata_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ShaderVertexMetadataTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
@@ -1479,6 +1491,12 @@ if(BUILD_TESTING)
 		add_test(NAME inflight_ranges_mutant_${mutant} COMMAND $<TARGET_FILE:inflight_ranges_mutant_${mutant}_tests>)
 		set_tests_properties(inflight_ranges_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
+	add_test(NAME guest_fault_sync COMMAND $<TARGET_FILE:guest_fault_sync_tests>)
+	set_tests_properties(guest_fault_sync PROPERTIES TIMEOUT 30)
+	foreach(mutant IN ITEMS subtract_first blocking_query)
+		add_test(NAME guest_fault_sync_mutant_${mutant} COMMAND $<TARGET_FILE:guest_fault_sync_mutant_${mutant}_tests>)
+		set_tests_properties(guest_fault_sync_mutant_${mutant} PROPERTIES TIMEOUT 30 WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
 	add_test(NAME trophy_system COMMAND $<TARGET_FILE:trophy_system_tests>)
@@ -1716,6 +1734,9 @@ if(BUILD_TESTING)
 		inflight_ranges_tests
 		inflight_ranges_mutant_backing_ignores_inflight_tests
 		inflight_ranges_mutant_remove_all_overlapping_tests
+		guest_fault_sync_tests
+		guest_fault_sync_mutant_subtract_first_tests
+		guest_fault_sync_mutant_blocking_query_tests
 		page_manager_tests
 		archive_file_tests
 		trophy_system_tests
@@ -1950,7 +1971,7 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 		set_tests_properties(guest_read_emulator PROPERTIES TIMEOUT 30)
 		add_dependencies(kyty_tests guest_read_emulator_tests)
 	endif()
-	foreach(mutant IN ITEMS EMU_IGNORES_DIRTY EMU_WRONG_RIP VEX_NO_ZERO_UPPER VEX_IGNORE_VVVV)
+	foreach(mutant IN ITEMS EMU_IGNORES_DIRTY EMU_WRONG_RIP VEX_NO_ZERO_UPPER VEX_IGNORE_VVVV GPR8_RAW_ID)
 		string(TOLOWER ${mutant} mutant_lower)
 		add_executable(guest_read_emulator_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL
 			"${KYTY_TESTS_DIR}/GuestReadEmulatorTests.cpp"

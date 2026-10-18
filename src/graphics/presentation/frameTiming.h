@@ -290,6 +290,10 @@ enum class Counter : uint32_t {
 	// S426 (KYTY_GF_EMULATE=1|shadow): guest read faults served by executing the load on the backing / handed to the ordinary drain (unsupported form,
 	// dirty or in-flight bytes); shadow: the emulated bytes equal / different from the raw read after the drain.
 	GfEmuN, GfEmuFallbackN, GfEmuEqN, GfEmuNeN, GfEmuVexNoAvxN,
+	// S428: why a fault was handed to the ordinary drain (they add up to gf_emu_fallback_n): GPU-dirty bytes, a GPU->host copy in flight, VEX.L = 1 / EVEX,
+	// any other form / address the decoder refuses, the buffer cache lock held by the command processor; and the most emulated loads on one 4 KiB
+	// page in one flip so far (a running maximum).
+	GfEmuFbDirtyN, GfEmuFbInflightN, GfEmuFbVexN, GfEmuFbFormN, GfEmuFbLockbusyN, GfEmuPageMax,
 	Count,
 };
 

@@ -261,14 +261,15 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	const auto                  buffer_address = buffer.CpuAddress();
 	m_memory_tracker.ForEachDownloadRange<false>(
 	    vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
-		    m_memory_tracker.ValidateGpuDirtyPages(m_gpu_modified_ranges, address, bytes,
+		    m_memory_tracker.ValidateGpuDirtyPages(m_gpu_modified_ranges.Set(), address, bytes,
 		                                           "buffer download");
-		    m_gpu_modified_ranges.ForEachInRange(address, bytes, [&](uint64_t start, uint64_t end) {
+		    // S428 (B2): every piece becomes "in flight" before the range stops being "dirty" (before: dirty -> neither -> in flight, a window in
+		    // which a guest thread's fault handler saw clean bytes and a stale backing); the whole step is under the dirty-set lock.
+		    m_gpu_modified_ranges.BeginDownloadCopy(m_inflight_download_ranges, address, bytes, [&](uint64_t start, uint64_t end) {
 			    copies.emplace_back(start - buffer_address, total_size, end - start);
 			    // Keep packed ranges on separate cache lines, as in shadPS4.
 			    total_size += Common::AlignUp(end - start, 64);
 		    });
-		    m_gpu_modified_ranges.Subtract(address, bytes);
 		    if (DccFillPublish::EnvMode() != DccFillPublish::Mode::Off) {
 			    m_write_ledger.Forget(address, bytes);
 		    }
@@ -320,10 +321,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	                       vk::PipelineStageFlagBits::eAllCommands |
 	                           vk::PipelineStageFlagBits::eHost,
 	                       {}, 0, nullptr, 1, &after, 0, nullptr);
-	// S418: from here until the backing is written the range is neither GPU-modified nor current in the backing.
-	for (const auto& copy: copies) {
-		m_inflight_download_ranges.Add(buffer_address + copy.srcOffset, copy.size);
-	}
+	// S418: from the BeginDownloadCopy above until the backing is written the range is in flight (no longer GPU-modified, not yet current in the backing).
 	auto publish = [this, mapped, offset, total_size, buffer_address,
 	                copies = std::move(copies), owner = std::move(temporary)] {
 		(owner ? *owner : m_download_buffer).Invalidate(offset, total_size);
@@ -1250,6 +1248,15 @@ bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 	return m_gpu_modified_ranges.Intersects(vaddr, size);
 }
 
+bool BufferCache::TryQueryGuestFault(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight) const {
+	// Dirty first, in flight second: BeginDownloadCopy adds to in-flight before it removes from dirty, so "not dirty" followed by "not in flight"
+	// means the copy has been published (or never existed).
+	if (!m_gpu_modified_ranges.TryIntersects(vaddr, size, dirty)) {
+		return false;
+	}
+	return m_inflight_download_ranges.TryIntersects(vaddr, size, inflight);
+}
+
 bool BufferCache::HasInflightDownloadBytes(uint64_t vaddr, uint64_t size) const {
 	return m_inflight_download_ranges.Intersects(vaddr, size);
 }
@@ -1295,7 +1302,7 @@ void BufferCache::RunGarbageCollector() {
 		if (buffer.CpuAddress() == 0) {
 			return false;
 		}
-		m_memory_tracker.ValidateGpuDirtyOwnership(m_gpu_modified_ranges, buffer.CpuAddress(),
+		m_memory_tracker.ValidateGpuDirtyOwnership(m_gpu_modified_ranges.Set(), buffer.CpuAddress(),
 		                                           buffer.Size(), "garbage collection");
 		const bool dirty = m_memory_tracker.IsRegionGpuModified(buffer.CpuAddress(), buffer.Size());
 		if (dirty && !aggressive) {

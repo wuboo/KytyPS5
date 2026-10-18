@@ -46,8 +46,16 @@ enum class Why : uint8_t {
 	Misaligned,     // aligned-only form on a misaligned address
 	PageCross,      // the access crosses the 4 KiB page of the fault
 	WrongAddress,   // the effective address does not contain the fault address
-	BackingRefused, // the caller refused to read the backing (dirty / in flight / unreadable)
+	BackingRefused, // the caller could not read the backing (range not tracked / unreadable)
+	BackingDirty,    // S428: the bytes are GPU-dirty (the ordinary drain has to fetch them)
+	BackingInflight, // S428: a GPU->host copy of the bytes has not been published yet
+	LockBusy,        // S428: the buffer cache state is being changed by the command processor (try_lock failed); a signal handler never waits
 };
+
+// S428: the five reasons a fault is handed to the ordinary drain, as the frames.csv columns gf_emu_fb_{dirty,inflight,vex,form,lockbusy}_n.
+enum class Fallback : uint8_t { Dirty, Inflight, Vex, Form, LockBusy };
+// Pure: Vex = VEX.L = 1 / EVEX / vvvv != 1111b (Why::Vex), VexNoAvx stays Form (it has its own column); everything the decoder refuses is Form.
+[[nodiscard]] Fallback ClassifyFallback(Why why);
 
 struct Plan {
 	bool     ok        = false;
@@ -83,16 +91,17 @@ struct Gate {
 };
 [[nodiscard]] bool MayEmulate(const Gate& gate);
 
-// Callback: read [address, address + size) from the backing into dst; false when the bytes may not be taken from the backing.
-using ReadBackingFn = bool (*)(uint64_t address, uint64_t size, void* dst);
+// Callback: read [address, address + size) from the backing into dst; anything but Ok when the bytes may not be taken from the backing.
+enum class BackingResult : uint8_t { Ok, Unavailable, Dirty, Inflight, LockBusy };
+using ReadBackingFn = BackingResult (*)(uint64_t address, uint64_t size, void* dst);
 
 struct Attempt {
 	Plan    plan;
 	uint8_t bytes[16] = {};
 };
 
-// Decode + read the backing. On true, `attempt` holds everything Commit needs; on false attempt.plan.why says why (BackingRefused when only the
-// backing read failed).
+// Decode + read the backing. On true, `attempt` holds everything Commit needs; on false attempt.plan.why says why (BackingRefused / BackingDirty /
+// BackingInflight / LockBusy when only the backing read failed).
 [[nodiscard]] bool Prepare(void* native_context, uint64_t fault_address, ReadBackingFn read, Attempt* attempt);
 
 } // namespace Loader::GuestReadEmulator

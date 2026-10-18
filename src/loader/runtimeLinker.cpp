@@ -687,14 +687,59 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 
 // S426 (KYTY_GF_EMULATE=0|1|shadow): the backing read the emulated load is served from. The gate looks at the bytes the instruction reads, not at the
 // fault byte: GPU-dirty or in-flight bytes keep the ordinary drain.
-static bool GfEmuReadBacking(uint64_t address, uint64_t size, void* dst) {
+static Loader::GuestReadEmulator::BackingResult GfEmuReadBacking(uint64_t address, uint64_t size, void* dst) {
+	using Loader::GuestReadEmulator::BackingResult;
 	bool dirty    = false;
 	bool inflight = false;
-	if (!Libs::LibKernel::Memory::QueryGuestFaultBytes(address, size, &dirty, &inflight)) {
-		return false;
+	bool busy     = false;
+	if (!Libs::LibKernel::Memory::QueryGuestFaultBytes(address, size, &dirty, &inflight, &busy)) {
+		return busy ? BackingResult::LockBusy : BackingResult::Unavailable; // S428: busy = the command processor holds the lock, never wait here
 	}
 	const Loader::GuestReadEmulator::Gate gate {Loader::GuestReadEmulator::EnvMode(), true, false, dirty, inflight};
-	return Loader::GuestReadEmulator::MayEmulate(gate) && Libs::LibKernel::Memory::TryReadBacking(address, dst, size);
+	if (!Loader::GuestReadEmulator::MayEmulate(gate)) {
+		return dirty ? BackingResult::Dirty : BackingResult::Inflight;
+	}
+	return Libs::LibKernel::Memory::TryReadBacking(address, dst, size) ? BackingResult::Ok : BackingResult::Unavailable;
+}
+
+// S428 (gf_emu_page_max): emulated loads per 4 KiB page within one guest flip, a small table of atomics cleared when the flip number changes.
+static void GfEmuNotePage(uint64_t address) {
+	static std::atomic<uint64_t> flip {~uint64_t {0}};
+	static std::atomic<uint64_t> pages[256] {};
+	static std::atomic<uint32_t> counts[256] {};
+	const auto                   now = Libs::Graphics::FrameTiming::GuestFlips();
+	if (flip.load(std::memory_order_relaxed) != now) {
+		flip.store(now, std::memory_order_relaxed);
+		for (size_t i = 0; i < 256; ++i) {
+			counts[i].store(0, std::memory_order_relaxed);
+			pages[i].store(0, std::memory_order_relaxed);
+		}
+	}
+	const uint64_t page = (address >> 12) + 1;
+	size_t         slot = static_cast<size_t>((page * 0x9e3779b97f4a7c15ull) >> 56);
+	for (size_t probe = 0; probe < 256; ++probe, slot = (slot + 1) & 255) {
+		uint64_t known = pages[slot].load(std::memory_order_relaxed);
+		if (known == 0 && pages[slot].compare_exchange_strong(known, page, std::memory_order_relaxed)) {
+			known = page;
+		}
+		if (known == page) {
+			Libs::Graphics::FrameTiming::Max(Libs::Graphics::FrameTiming::Counter::GfEmuPageMax,
+			                                 counts[slot].fetch_add(1, std::memory_order_relaxed) + 1u);
+			return;
+		}
+	}
+}
+
+static void GfEmuCountFallback(Loader::GuestReadEmulator::Why why) {
+	using C = Libs::Graphics::FrameTiming::Counter;
+	using Loader::GuestReadEmulator::Fallback;
+	switch (Loader::GuestReadEmulator::ClassifyFallback(why)) {
+		case Fallback::Dirty: Libs::Graphics::FrameTiming::Add(C::GfEmuFbDirtyN); break;
+		case Fallback::Inflight: Libs::Graphics::FrameTiming::Add(C::GfEmuFbInflightN); break;
+		case Fallback::Vex: Libs::Graphics::FrameTiming::Add(C::GfEmuFbVexN); break;
+		case Fallback::LockBusy: Libs::Graphics::FrameTiming::Add(C::GfEmuFbLockbusyN); break;
+		case Fallback::Form: Libs::Graphics::FrameTiming::Add(C::GfEmuFbFormN); break;
+	}
 }
 
 // KYTY_DIAG_GUEST_FAULT: which instruction faults (mnemonic and operand shape only), once per distinct pc, <= 50 lines.
@@ -732,6 +777,7 @@ static bool TryGuestReadEmulation(const Common::HostException::ExceptionInfo* in
 	Attempt attempt;
 	if (!Prepare(info->native_context, info->access_violation_vaddr, GfEmuReadBacking, &attempt)) {
 		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuFallbackN);
+		GfEmuCountFallback(attempt.plan.why); // S428
 		if (attempt.plan.why == Why::VexNoAvx) {
 			Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuVexNoAvxN); // S427
 		}
@@ -751,6 +797,7 @@ static bool TryGuestReadEmulation(const Common::HostException::ExceptionInfo* in
 	}
 	Commit(info->native_context, attempt.plan, attempt.bytes);
 	Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuN);
+	GfEmuNotePage(attempt.plan.address);
 	return true;
 }
 

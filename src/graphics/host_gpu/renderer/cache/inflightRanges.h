@@ -43,6 +43,15 @@ public:
 		                   [&](const Entry& e) { return e.begin < address + size && address < e.end; });
 	}
 
+	// S428: for a signal handler of a guest thread; false when Add / Remove holds the lock (*out untouched), never waits.
+	[[nodiscard]] bool TryIntersects(uint64_t address, uint64_t size, bool* out) const {
+		std::unique_lock lock(m_mutex, std::try_to_lock);
+		if (!lock.owns_lock()) return false;
+		*out = size != 0 && std::any_of(m_entries.begin(), m_entries.end(),
+		                                [&](const Entry& e) { return e.begin < address + size && address < e.end; });
+		return true;
+	}
+
 	[[nodiscard]] size_t Count() const {
 		std::lock_guard lock(m_mutex);
 		return m_entries.size();

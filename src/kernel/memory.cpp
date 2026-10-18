@@ -1076,13 +1076,16 @@ bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noex
 	return g_gpu_resources != nullptr && g_gpu_resources->HandleFault(access, fault_vaddr);
 }
 
-bool QueryGuestFaultBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight) noexcept {
+bool QueryGuestFaultBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight, bool* busy) noexcept {
+	*busy = false;
 	if (size == 0 || g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
 		return false;
 	}
-	auto& buffers = g_gpu_resources->GetBufferCache();
-	*dirty        = buffers.HasGpuDirtyBytes(vaddr, size);
-	*inflight     = buffers.HasInflightDownloadBytes(vaddr, size);
+	// S428 (B2): called from a signal handler on a guest thread: try-locks only, the handler never waits for the command processor.
+	if (!g_gpu_resources->GetBufferCache().TryQueryGuestFault(vaddr, size, dirty, inflight)) {
+		*busy = true;
+		return false;
+	}
 	return true;
 }
 

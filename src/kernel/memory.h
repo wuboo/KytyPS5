@@ -159,8 +159,9 @@ std::vector<std::string> DiagDescribeRange(uint64_t addr, uint64_t len);
 void                   InstallGpuResources(Graphics::RenderContext* renderer) noexcept;
 [[nodiscard]] bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noexcept;
 // S426 (KYTY_GF_EMULATE): the GPU state of [vaddr, vaddr + size) for a read fault of a guest thread: false when the range is not tracked by the GPU
-// caches; else *dirty = GPU-written bytes the backing does not have yet, *inflight = a GPU->host copy of them is not published yet.
-[[nodiscard]] bool QueryGuestFaultBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight) noexcept;
+// caches (or the buffer cache state is being changed: then *busy = true); else *dirty = GPU-written bytes the backing does not have yet, *inflight = a
+// GPU->host copy of them is not published yet. S428: never blocks (try_lock), safe in a signal handler.
+[[nodiscard]] bool QueryGuestFaultBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight, bool* busy) noexcept;
 
 int KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags,
                                                const char* name);

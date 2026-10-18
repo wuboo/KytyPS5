@@ -34,6 +34,23 @@ constexpr bool kCheckVvvv = false;
 constexpr bool kCheckVvvv = true;
 #endif
 
+// S428 mutant: the raw Zydis register id of a GPR8 (SPL..R15B are 8..19, not 4..15) is used as the register number (B1).
+#if defined(KYTY_GUESTREAD_MUTANT_GPR8_RAW_ID)
+constexpr bool kMapGpr8 = false;
+#else
+constexpr bool kMapGpr8 = true;
+#endif
+
+Fallback ClassifyFallback(Why why) {
+	switch (why) {
+		case Why::BackingDirty: return Fallback::Dirty;
+		case Why::BackingInflight: return Fallback::Inflight;
+		case Why::LockBusy: return Fallback::LockBusy;
+		case Why::Vex: return Fallback::Vex;
+		default: return Fallback::Form;
+	}
+}
+
 Mode ParseMode(const char* text) {
 	if (text == nullptr) {
 		return Mode::Off;
@@ -262,8 +279,8 @@ Plan Decode(void* native_context, uint64_t fault_address) {
 
 	const auto dst_reg   = operands[0].reg.value;
 	const auto reg_class = ZydisRegisterGetClass(dst_reg);
-	const int  reg_id    = ZydisRegisterGetId(dst_reg);
-	if (reg_id < 0 || reg_id > 15) {
+	int        reg_id    = ZydisRegisterGetId(dst_reg);
+	if (reg_id < 0 || reg_id > 19) {
 		return Refuse(plan, Why::NotALoad);
 	}
 	const bool dst_is_gpr = reg_class == ZYDIS_REGCLASS_GPR8 || reg_class == ZYDIS_REGCLASS_GPR16 || reg_class == ZYDIS_REGCLASS_GPR32 ||
@@ -271,6 +288,14 @@ Plan Decode(void* native_context, uint64_t fault_address) {
 	const bool dst_is_xmm = reg_class == ZYDIS_REGCLASS_XMM;
 	if (dst_reg == ZYDIS_REGISTER_AH || dst_reg == ZYDIS_REGISTER_BH || dst_reg == ZYDIS_REGISTER_CH || dst_reg == ZYDIS_REGISTER_DH) {
 		return Refuse(plan, Why::HighByteReg);
+	}
+	// S428 (B1): Zydis numbers the 8-bit registers AL..BL = 0..3, AH..BH = 4..7, SPL..DIL = 8..11, R8B..R15B = 12..19. With the high bytes gone,
+	// the encoding number of a REX byte register is that id - 4 (SPL = RSP's low byte = 4, ..., R15B = 15).
+	if (reg_class == ZYDIS_REGCLASS_GPR8 && reg_id >= 8 && kMapGpr8) {
+		reg_id -= 4;
+	}
+	if (reg_id > 15) {
+		return Refuse(plan, Why::NotALoad);
 	}
 	const uint32_t mem_bits = operands[1].size;
 	if (mem_bits == 0 || mem_bits > 128 || (mem_bits & 7u) != 0) {
@@ -407,11 +432,15 @@ bool Prepare(void* native_context, uint64_t fault_address, ReadBackingFn read, A
 	if (!attempt->plan.ok) {
 		return false;
 	}
-	if (read == nullptr || !read(attempt->plan.address, attempt->plan.size, attempt->bytes)) {
-		attempt->plan = Refuse(attempt->plan, Why::BackingRefused);
-		return false;
+	const BackingResult result = read == nullptr ? BackingResult::Unavailable : read(attempt->plan.address, attempt->plan.size, attempt->bytes);
+	switch (result) {
+		case BackingResult::Ok: return true;
+		case BackingResult::Dirty: attempt->plan = Refuse(attempt->plan, Why::BackingDirty); break;
+		case BackingResult::Inflight: attempt->plan = Refuse(attempt->plan, Why::BackingInflight); break;
+		case BackingResult::LockBusy: attempt->plan = Refuse(attempt->plan, Why::LockBusy); break;
+		default: attempt->plan = Refuse(attempt->plan, Why::BackingRefused); break;
 	}
-	return true;
+	return false;
 }
 
 } // namespace Loader::GuestReadEmulator
