@@ -841,6 +841,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			// else in the whole PM4 stream can ever observe a partially-applied batch. The other
 			// half of this decision -- whether a draw itself is batchable, and with what -- lives
 			// in RenderExecutor::ExecutePerVertexPrototype/FlushPendingPrototypeBatch.
+			KYTY_CP_SITE(DrawFlushProto);
 			m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
 		}
 
@@ -848,7 +849,9 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		uint32_t packet_dw;
 		{
 			CpPhases::Scope handler_phase(CpPhases::Phase::Handler);
+			if (CpSampler::Active().load(std::memory_order_relaxed)) CpSampler::CpOpcode().store(opcode, std::memory_order_relaxed);
 			packet_dw = handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
+			if (CpSampler::Active().load(std::memory_order_relaxed)) CpSampler::CpOpcode().store(CpSampler::kNoOpcode, std::memory_order_relaxed);
 		}
 		EXIT_IF(packet_dw > remaining_dw);
 		if (execution.m_suspended) {
@@ -1129,11 +1132,21 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		    args_first, static_cast<uint64_t>(draw_count - 1) * stride_in_bytes + args_size);
 		probe.pv_before = FrameTiming::Get(FrameTiming::Counter::PvVsStoreDraws) +
 		                  FrameTiming::Get(FrameTiming::Counter::PrototypeDraws);
+		// S406: the bytes the CPU would see before the drain (stale), for the pv_store census below.
+		auto& pv_ctx = SyncCensus::IndirectPvCtx();
+		pv_ctx       = {};
+		bool have_stale = false;
+		if (indexed && args_size == sizeof(pv_ctx.stale)) {
+			have_stale = Libs::LibKernel::Memory::TryReadBacking(args_first, pv_ctx.stale, sizeof(pv_ctx.stale));
+		}
 		// The first CPU read of the args takes the read fault (GPU thread) when they are GPU-written.
 		const auto begin = FrameTiming::SteadyNowNs();
 		(void)*reinterpret_cast<const volatile uint32_t*>(args_first);
 		if (probe.args_dirty) {
 			probe.wait_ns += static_cast<uint64_t>(FrameTiming::SteadyNowNs() - begin);
+		}
+		if (have_stale) {
+			pv_ctx.have = Libs::LibKernel::Memory::TryReadBacking(args_first, pv_ctx.fresh, sizeof(pv_ctx.fresh));
 		}
 		for (const auto reg: {registers.vertex_offset, registers.instance_offset, registers.index_offset}) {
 			probe.regs_patched += reg != Pm4::SH_NOP ? 1u : 0u;
@@ -1239,6 +1252,8 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 			probe.clamped++;
 		}
 		m_num_instances = args->instance_count;
+		const bool pv_census = diag && i == 0 && SyncCensus::IndirectPvCtx().have;
+		SyncCensus::IndirectPvCtx().active = pv_census;
 		// S404 shadow: the real draw, with the executor reporting what it would have decided.
 		const bool ig_shadow = ig_mode == IndirectGpu::Mode::Shadow && i == 0 && draw_count == 1 &&
 		                       ig_cmd_reason == IndirectGpu::Reason::Eligible;
@@ -1249,6 +1264,13 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		           .first_instance = args->start_instance_location,
 		           .offset_source  = DrawOffsetSource::IndirectArgs,
 		           .indirect_gpu   = ig_shadow ? &ig_request : nullptr});
+		SyncCensus::IndirectPvCtx().active = false;
+		if (pv_census && ig_request.host_reason == IndirectGpu::Reason::PerVertexStore) {
+			// S406: the draw is pv_store on the host side: are the 20 args bytes of the CPU path the same before and after the drain?
+			const bool equal = SyncCensus::IndirectPvCtx().Equal();
+			FrameTiming::Add(equal ? FrameTiming::Counter::IndirectPvArgsEqN : FrameTiming::Counter::IndirectPvArgsNeN);
+			FrameTiming::Max(FrameTiming::Counter::IndirectPvInstMax, args->instance_count);
+		}
 		if (ig_mode == IndirectGpu::Mode::Shadow && i == 0) {
 			const bool clamp_risk = IndirectGpu::ClampRisk(args->index_count_per_instance, m_index_buffer_size);
 			if (ig_cmd_reason == IndirectGpu::Reason::Eligible && ig_request.host_reason == IndirectGpu::Reason::Eligible) {

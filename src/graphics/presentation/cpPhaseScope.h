@@ -6,9 +6,11 @@
 // level scene, so ~0.6 ms/flip by estimate: not on by default; measured in the task, not here).
 
 #include "graphics/presentation/cpPhases.h"
+#include "graphics/presentation/cpSampler.h"
 #include "graphics/presentation/frameTiming.h"
 
 #include <cstdlib>
+#include <optional>
 
 #if defined(__APPLE__)
 #include <pthread.h>
@@ -19,6 +21,7 @@ namespace Libs::Graphics::CpPhases {
 struct ThreadState {
 	Accountant<> accountant;
 	bool         bound = false; // only the CP thread counts
+	bool         sampler = false; // S406: this thread writes the sampler breadcrumbs
 };
 inline ThreadState& State() {
 	thread_local ThreadState state;
@@ -32,11 +35,17 @@ inline bool Enabled() {
 // Called once by the CP thread.
 inline void BindCpThread() {
 	if (Enabled()) State().bound = true;
+	if (CpSampler::Enabled()) {
+		State().sampler = true;
+		CpSampler::StartProduction();
+	}
 }
 
 class Scope {
 public:
 	explicit Scope(Phase phase) {
+		// S406: the breadcrumb works without KYTY_DIAG_CP_PHASES (it is a single relaxed store), and only on the CP thread.
+		if (CpSampler::Active().load(std::memory_order_relaxed) && State().sampler) m_site.emplace(CpSampler::PhaseSite(static_cast<uint32_t>(phase)));
 		auto& state = State();
 		if (!state.bound) return;
 		m_active = state.accountant.Enter(phase, FrameTiming::SteadyNowNs());
@@ -53,7 +62,8 @@ public:
 	Scope& operator=(const Scope&) = delete;
 
 private:
-	bool m_active = false;
+	bool                          m_active = false;
+	std::optional<CpSampler::SiteScope> m_site;
 };
 
 // Thread name visible to `sample` / Instruments (the Tracy name alone is not).

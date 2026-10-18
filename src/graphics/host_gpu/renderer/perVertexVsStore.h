@@ -240,6 +240,7 @@ public:
 	}
 	void                 EndPass() { m_used = 0; }
 	[[nodiscard]] uint64_t Used() const { return m_used; }
+	[[nodiscard]] uint64_t Free() const { return m_capacity - m_used; }
 	[[nodiscard]] uint64_t Draws() const { return m_draws; }
 
 private:
@@ -633,6 +634,8 @@ public:
 	}
 	[[nodiscard]] size_t   Size() const { return m_slabs.size(); }
 	[[nodiscard]] uint64_t SlabRecords() const { return m_slab_records; }
+	// S406 (DIAG): records left in the slab the last placement used (0 when none was used yet).
+	[[nodiscard]] uint64_t CurrentFreeRecords() const { return m_current < m_slabs.size() ? m_slabs[m_current].ring.Free() : 0; }
 
 private:
 	struct Slab {

@@ -105,6 +105,8 @@ public:
 	GuardSlot AcquireGuard(uint64_t flip);
 	// Largest region (in vec4s) a draw may take.
 	[[nodiscard]] static uint64_t SlabVec4s();
+	// S406 (DIAG): records left in the slab the last placement used.
+	[[nodiscard]] uint64_t FreeRecords() const { return m_slabs.CurrentFreeRecords(); }
 
 private:
 	GraphicContext&                      m_graphics;

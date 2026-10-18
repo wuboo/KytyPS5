@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
+#include "graphics/presentation/cpSampler.h"
 #include "graphics/shader/nullDescDiag.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/shaderBindings.h"
@@ -1574,6 +1575,19 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	return plan;
 }
 
+uint64_t PlanUsedUserDataMask(const ResourcePlan& plan) {
+	uint64_t mask = 0;
+	for (const auto& inst: plan.value_storage) {
+		if (inst.GetOpcode() != ValueOpcode::GetUserData || inst.NumArgs() != 1 ||
+		    inst.Arg(0).GetType() != Type::ScalarReg) {
+			continue;
+		}
+		const auto reg = RegIndex(inst.Arg(0).ScalarRegister());
+		if (reg >= plan.user_data_base && reg - plan.user_data_base < 64u) mask |= uint64_t {1} << (reg - plan.user_data_base);
+	}
+	return mask;
+}
+
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
 	for (auto& keys: program.selector_keys) keys.resolved = false;
@@ -1595,10 +1609,16 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	SrtWalker clean(program, CleanRuntime(observed));
 	SrtWalker walker(program, observed,
 	                 capture_reads || program.requires_specialization_memory ? &clean : nullptr);
-	if (!walker.RefreshFlatBuffer(snapshot.flattened_srt)) {
+	bool walked;
+	{
+		KYTY_CP_SITE(ShWalk);
+		walked = walker.RefreshFlatBuffer(snapshot.flattened_srt);
+	}
+	if (!walked) {
 		return SpecializationFail(fmt::format("SRT refresh complete={} reads={} user_data={}",
 		    program.srt_plan_complete, program.srt_reads.size(), runtime.user_data.size()));
 	}
+	KYTY_CP_SITE(ShMaterializeRest); // S406: everything after the walk (descriptor evaluation, specialization, snapshot)
 	const auto active = std::span<const uint8_t>(program.active_sources);
 	std::array<uint32_t, 3> workgroup_counts {};
 	if (runtime.indirect_args_address != 0u) {

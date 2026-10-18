@@ -33,7 +33,7 @@ int main() {
 	Check(Common::CountUnknownKytyEnvironment(nullptr, known) == 0, "null environment counted");
 	// The diagnostic switches of this build are known: a run with KYTY_ENV_STRICT=1 must not abort on them.
 	const char* const diag[] = {"KYTY_CONTROL_FILE=/tmp/c.txt", "KYTY_DIAG_CP_PHASES=1", "KYTY_DIAG_DIR=/tmp/d",
-	                            "KYTY_DIAG_PROTO_SKIP=1", "KYTY_DIAG_SIGCENSUS=1", "KYTY_DIAG_SYNC=1", "KYTY_DIAG_INDIRECT=1", "KYTY_DCC_KNOWN=shadow", "KYTY_DCC_EAGER=1", "KYTY_INDIRECT_GPU=shadow", "KYTY_RT_MISS=1", "KYTY_PV_UNIQUE=1", "KYTY_PV_VSSTORE=1", nullptr};
+	                            "KYTY_DIAG_PROTO_SKIP=1", "KYTY_DIAG_SIGCENSUS=1", "KYTY_DIAG_SYNC=1", "KYTY_DIAG_CP_SAMPLE=1", "KYTY_DIAG_CP_SAMPLE_WINDOW=6300:6800", "KYTY_DIAG_GPU_DONE=1", "KYTY_DIAG_MATMEMO=1", "KYTY_PV_RANGE_GEN=shadow", "KYTY_DIAG_INDIRECT=1", "KYTY_DCC_KNOWN=shadow", "KYTY_DCC_EAGER=1", "KYTY_INDIRECT_GPU=shadow", "KYTY_RT_MISS=1", "KYTY_PV_UNIQUE=1", "KYTY_PV_VSSTORE=1", nullptr};
 	Check(Common::CountUnknownKytyEnvironment(diag, Common::kKnownKytyEnv) == 0,
 	      "a diagnostic switch of this build is unknown to the env audit");
 	const char* const typo[] = {"KYTY_RT_MISSS=1", "KYTY_DIAG_CS_TRACE=1", nullptr};

@@ -117,7 +117,23 @@ void TestSnapshotsAndStaleFresh() {
 
 } // namespace
 
+// S406: pv_store indirect args census: equality is over all 20 bytes (5 words), and needs both snapshots.
+void TestIndirectPvContext() {
+	IndirectPvContext ctx;
+	Check(!ctx.Equal(), "no snapshots: not equal");
+	ctx.have = true;
+	for (size_t i = 0; i < IndirectPvContext::kWords; i++) ctx.stale[i] = ctx.fresh[i] = 100 + static_cast<uint32_t>(i);
+	Check(ctx.Equal(), "same 5 words");
+	ctx.fresh[4] ^= 1; // the last word (start_instance_location) only
+	Check(!ctx.Equal(), "a difference in the last word counts");
+	ctx.fresh[4] ^= 1;
+	ctx.fresh[1] += 1; // instance_count
+	Check(!ctx.Equal(), "a difference in the instance count counts");
+	Check(&IndirectPvCtx() == &IndirectPvCtx(), "one context per thread");
+}
+
 int main() {
+	TestIndirectPvContext();
 	TestReaderPaths();
 	TestSnapshotsAndStaleFresh();
 	TestTickPages();

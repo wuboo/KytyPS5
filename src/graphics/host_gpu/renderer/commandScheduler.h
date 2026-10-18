@@ -4,13 +4,16 @@
 #include "common/common.h"
 #include "common/uniqueFunction.h"
 #include "graphics/host_gpu/renderer/dynamicState.h"
+#include "graphics/host_gpu/renderer/gpuDone.h"
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 #include "graphics/host_gpu/renderer/render.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <queue>
 #include <thread>
@@ -99,6 +102,8 @@ private:
 	void DrainAsyncSubmits();
 	void QueueSubmitNow(SubmitJob& job);
 	bool                    m_async_submit = false;
+	std::atomic<bool>       m_gpu_done_stop {false};            // S406 (KYTY_DIAG_GPU_DONE=1)
+	std::unique_ptr<GpuDone::Tracker> m_gpu_done;
 	std::mutex              m_submit_mutex;
 	std::condition_variable m_submit_cv;
 	std::deque<SubmitJob>   m_submit_jobs;

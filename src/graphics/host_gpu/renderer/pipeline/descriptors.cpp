@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "common/controlFile.h"
 #include "graphics/guest_gpu/lodStats.h"
+#include "graphics/presentation/cpSampler.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -1012,6 +1013,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	prepared.samplers.clear();
 	prepared.shader_data.clear();
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
+		KYTY_CP_SITE(BindResolveTexture);
 		NullDesc::Hint null_hint {};
 		if (i < snapshot.image_null_notes.size()) {
 			null_hint.reason = snapshot.image_null_notes[i].reason;
@@ -1026,9 +1028,12 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 		prepared.images[i] = std::move(binding);
 	}
 	prepared.samplers.reserve(program.info.samplers.size());
-	for (uint32_t i = 0; i < program.info.samplers.size(); i++) {
-		prepared.samplers.push_back(NativeSampler(
-		    m_context, program, i, snapshot.samplers[program.info.samplers[i].snapshot_index]));
+	{
+		KYTY_CP_SITE(BindSamplers);
+		for (uint32_t i = 0; i < program.info.samplers.size(); i++) {
+			prepared.samplers.push_back(NativeSampler(
+			    m_context, program, i, snapshot.samplers[program.info.samplers[i].snapshot_index]));
+		}
 	}
 	prepared.shader_data.reserve(program.bindings.ShaderDataDwords());
 	for (const auto reg: program.info.user_data_registers) {
@@ -1095,6 +1100,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 
 void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	KYTY_PROFILER_FUNCTION();
+	KYTY_CP_SITE(BindRebindBuffers);
 	EXIT_IF(prepared.runtime == nullptr || !*prepared.runtime);
 	const auto& program   = *prepared.runtime->program;
 	const auto& snapshot  = *prepared.runtime->resources;
@@ -1118,6 +1124,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 		                                              resource, buffer_offset);
 		pack_memory_offset(index, buffer_offset);
 	}
+	KYTY_CP_SITE(BindNativeUpload);
 	if (layout.descriptor_counts[static_cast<size_t>(BindingKind::FlattenedSrt)] != 0) {
 		prepared.flattened_srt = NativeUpload(m_context, snapshot.flattened_srt);
 	}
@@ -1128,6 +1135,7 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 
 void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	KYTY_PROFILER_FUNCTION();
+	KYTY_CP_SITE(BindRebindImages);
 	EXIT_IF(prepared.runtime == nullptr || !*prepared.runtime);
 	const auto& program  = *prepared.runtime->program;
 	const auto& snapshot = *prepared.runtime->resources;
@@ -1149,6 +1157,7 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 				null_hint.addr   = snapshot.image_null_notes[i].addr;
 			}
 			null_hint.shader = program.shader_hash;
+			KYTY_CP_SITE(BindResolveTexture);
 			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i],
 			                           program.stage == ShaderType::Pixel ? program.shader_hash : 0, i, &null_hint);
 			BindImage(images[i].image_id,
@@ -1182,7 +1191,10 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
                                              std::span<RenderColorInfo>         colors) {
 	bool uses_dma = false;
-	FindBuffers(stages);
+	{
+		KYTY_CP_SITE(BindFindBuffers);
+		FindBuffers(stages);
+	}
 	for (auto* stage: stages) {
 		uses_dma |= stage->runtime->program->info.uses_dma;
 	}

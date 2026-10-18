@@ -250,6 +250,27 @@ struct Probe {
 	uint64_t eager_wait_ns      = 0;
 };
 
+// S406 (KYTY_DIAG_INDIRECT=1): args of the pv_store indirect draw being executed (first draw of a DrawIndirectMulti), read before
+// (stale) and after (fresh) the CPU's first read, for the [indirect-pv] line of TryPvVsStoreDraw. Thread-local: the GPU thread.
+struct IndirectPvContext {
+	static constexpr size_t kWords = 5;
+	bool                    active = false;
+	bool                    have   = false; // both snapshots were read
+	uint32_t                stale[kWords] {};
+	uint32_t                fresh[kWords] {};
+	[[nodiscard]] bool      Equal() const {
+#if defined(KYTY_SYNCCENSUS_MUTANT_STALE_ALWAYS_EQUAL)
+		return have;
+#else
+		return have && std::memcmp(stale, fresh, sizeof(stale)) == 0;
+#endif
+	}
+};
+inline IndirectPvContext& IndirectPvCtx() {
+	static thread_local IndirectPvContext ctx;
+	return ctx;
+}
+
 // draws + dispatches recorded when the last command buffer was submitted (for the [sync] log).
 inline std::atomic<uint64_t>& CommandsAtSubmit() {
 	static std::atomic<uint64_t> value {0};
