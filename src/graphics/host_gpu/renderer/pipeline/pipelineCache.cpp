@@ -33,6 +33,7 @@
 #include "graphics/shader/nullDescDiag.h"
 #include "graphics/shader/recompiler/srtReader.h"
 #include "graphics/shader/shaderCompiler.h"
+#include "graphics/shader/shaderCost.h"
 #include "kernel/memory.h"
 #include "loader/systemContent.h"
 
@@ -797,17 +798,24 @@ struct PipelineCache::ProgramCache {
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::ShadersCompiled,
 		                                         Common::DebugCounters::Counter::ShaderCompileNs,
 		                                         Common::DebugCounters::Peak::ShaderCompileNs);
+		FrameTiming::ScopedCounterNs compile_total(FrameTiming::Counter::ShaderCompilePermNs); // S433 (S441)
+		std::optional<FrameTiming::ScopedCounterNs> stage_timer(std::in_place, FrameTiming::Counter::ShaderEmitSpirvNs);
 		auto result = ShaderRecompiler::CompileProgram(std::move(translated), options,
 		                                               specialization, push_data_start_dword);
-		if (!ValidateShaderSpirv(options.dump_label, options.shader_hash, result.spirv,
-		                         options.maintenance8_enabled)) {
+		stage_timer.emplace(FrameTiming::Counter::ShaderValidateNs);
+		const bool spirv_valid = ValidateShaderSpirv(options.dump_label, options.shader_hash, result.spirv,
+		                                             options.maintenance8_enabled);
+		stage_timer.reset();
+		if (!spirv_valid) {
 			DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
 			EXIT("%s failed hash=0x%016" PRIx64 ": SPIR-V validation failed\n", options.dump_label,
 			     options.shader_hash);
 		}
 		DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
 
+		stage_timer.emplace(FrameTiming::Counter::ShaderModuleNs);
 		const auto module = CompileSPV(result.spirv, graphics.device);
+		stage_timer.reset();
 		EXIT_IF(module == nullptr);
 		if (options.dump_ir) {
 			LOGF("%s SPIR-V words=%" PRIu64 " wave_size=%u\n", options.dump_label,
@@ -816,7 +824,9 @@ struct PipelineCache::ProgramCache {
 		const ShaderProgram handle {.id = ++next_shader_id, .module = module};
 		// The per-vertex capture and VS-store variants re-emit the program, and EmitProgram rewrites
 		// program.bindings (push start, layout); the permutation keeps the bindings of its own emission.
+		stage_timer.emplace(FrameTiming::Counter::ShaderPvVariantsNs);
 		RememberPerVertexVariants(handle, result, options, graphics.subgroup_size, push_data_start_dword);
+		stage_timer.reset();
 		return {
 		    .function_code  = {function_code.begin(), function_code.end()},
 		    .specialization = std::move(specialization),
@@ -943,9 +953,20 @@ struct PipelineCache::ProgramCache {
 		}
 		DumpShaderOriginal(stage_name, options.shader_hash, params.code);
 		ShaderRecompiler::ShaderSource source;
-		if (entry == programs.end()) source = ShaderRecompiler::PrepareShaderSource(params.code, options);
+		if (entry == programs.end()) {
+			FrameTiming::ScopedCounterNs prepare_timer(FrameTiming::Counter::ShaderPrepareNs);
+			source = ShaderRecompiler::PrepareShaderSource(params.code, options);
+		}
 		auto* current = entry == programs.end() ? &source : entry->second.call_source.get();
+		{
+			// S433 (S441): a lookup that reaches this point found no cached permutation.
+			const auto miss = ShaderCost::ClassifyLookup(entry != programs.end(), false, current != nullptr && current->call);
+			FrameTiming::Add(FrameTiming::Counter::ShaderProgramMissN, miss.program_miss);
+			FrameTiming::Add(FrameTiming::Counter::ShaderPermMissN, miss.perm_miss);
+			FrameTiming::Add(FrameTiming::Counter::ShaderCallProgramN, miss.call_program);
+		}
 		ShaderRecompiler::TranslateResult translated;
+		std::optional<FrameTiming::ScopedCounterNs> translate_timer(std::in_place, FrameTiming::Counter::ShaderTranslateNs);
 		if (current != nullptr) {
 			if (current->call) {
 				if (entry == programs.end()) ShaderRecompiler::RefreshShaderSource(*current, runtime);
@@ -957,15 +978,21 @@ struct PipelineCache::ProgramCache {
 		} else {
 			translated = ShaderRecompiler::TranslateProgram(params.code, options);
 		}
+		translate_timer.reset();
 		if (entry == programs.end()) {
 			auto retained = source.call ? std::make_unique<ShaderRecompiler::ShaderSource>(std::move(source)) : nullptr;
+			std::optional<FrameTiming::ScopedCounterNs> plan_timer(std::in_place, FrameTiming::Counter::ShaderResourcePlanNs);
 			entry = programs.try_emplace(lookup_key,
 			    ShaderRecompiler::IR::ExtractResourcePlan(translated.program), std::move(retained)).first;
+			plan_timer.reset();
 			if (entry->second.call_source) read_context.mode = runtime.fast_mode = ShaderRecompiler::IR::SrtFastMode::Off;
 			read_context.pass = {};
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-			    entry->second.resource_plan, runtime, entry->second.resources,
-			    entry->second.specialization));
+			{
+				FrameTiming::ScopedCounterNs materialize_timer(FrameTiming::Counter::ShaderMaterializeFirstNs);
+				EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
+				    entry->second.resource_plan, runtime, entry->second.resources,
+				    entry->second.specialization));
+			}
 			NoteSrtMemo(entry->second.resources, read_context, params.hash, stage);
 		} else if (source_changed) {
 			entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
@@ -1197,6 +1224,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping, bool pixel_active,
     std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info,
     bool single_sample) {
+	const FrameTiming::ScopedCounterNs cost_timer(FrameTiming::Counter::GetGraphicsProgramsNs); // S433 (S441)
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
 	std::array<ShaderParams, 3> vertex_params;
 	if (tess_active) {
@@ -1361,6 +1389,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs,
                                                const HW::ShaderRegisters&   sh,
                                                ShaderComputeInputInfo&      input_info) {
+	const FrameTiming::ScopedCounterNs cost_timer(FrameTiming::Counter::GetComputeProgramNs); // S433 (S441)
 	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	const auto        params      = PrepareProgram(regs, sh, input_info);
 	input_info.lds_storage = input_info.lds_size_dwords * 4u >
@@ -1379,6 +1408,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
     std::span<const ShaderVertexInputInfo> vertex_info, CommandBuffer& command,
     const ShaderPixelInputInfo* ps_input_info, vk::PrimitiveTopology topology,
     bool primitive_restart_enable, const GraphicsPrograms& programs) {
+	const FrameTiming::ScopedCounterNs cost_timer(FrameTiming::Counter::GetGraphicsPipelineNs); // S433 (S441)
 	const auto& vs_input_info  = vertex_info.front();
 	const auto& vertex_program = programs.vertex[0];
 	const auto& pixel_program  = programs.pixel;

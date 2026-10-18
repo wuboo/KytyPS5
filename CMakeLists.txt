@@ -2291,6 +2291,31 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 			add_dependencies(kyty_tests ${pcsaver_target})
 		endif()
 	endforeach()
+	# S433 (S441): first-use cost counters of shaders (lead histogram, miss classification). Mutants (WILL_FAIL): COUNT_ON_HIT, LEAD_EVERY_USE,
+	# REMAP_RESETS_USED.
+	foreach(mutant IN ITEMS "" COUNT_ON_HIT LEAD_EVERY_USE REMAP_RESETS_USED)
+		if(mutant STREQUAL "")
+			set(shader_cost_target shader_cost_tests)
+			set(shader_cost_test shader_cost)
+		else()
+			string(TOLOWER ${mutant} mutant_lower)
+			set(shader_cost_target shader_cost_mutant_${mutant_lower}_tests)
+			set(shader_cost_test shader_cost_mutant_${mutant_lower})
+		endif()
+		add_executable(${shader_cost_target} EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ShaderCostTests.cpp")
+		target_include_directories(${shader_cost_target} PRIVATE ${inc_headers})
+		if(NOT mutant STREQUAL "")
+			target_compile_definitions(${shader_cost_target} PRIVATE KYTY_SHADERCOST_MUTANT_${mutant}=1)
+		endif()
+		if(BUILD_TESTING)
+			add_test(NAME ${shader_cost_test} COMMAND $<TARGET_FILE:${shader_cost_target}>)
+			set_tests_properties(${shader_cost_test} PROPERTIES TIMEOUT 30)
+			if(NOT mutant STREQUAL "")
+				set_tests_properties(${shader_cost_test} PROPERTIES WILL_FAIL TRUE)
+			endif()
+			add_dependencies(kyty_tests ${shader_cost_target})
+		endif()
+	endforeach()
 	add_executable(macos_wide_store_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/macosWideStoreTests.cpp"
 		"${KYTY_SOURCE_DIR}/loader/x64InstructionEmulator.cpp"
