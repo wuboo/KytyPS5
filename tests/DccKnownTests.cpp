@@ -167,7 +167,8 @@ void TestMaterializeAfterPublish() {
 }
 
 void TestMode() {
-	Check(ParseMode(nullptr) == Mode::Off && ParseMode("0") == Mode::Off && ParseMode("") == Mode::Off, "off by default");
+	Check(ParseMode(nullptr) == Mode::On, "on by default (variable unset)");
+	Check(ParseMode("0") == Mode::Off && ParseMode("") == Mode::Off, "0 turns it off");
 	Check(ParseMode("1") == Mode::On && ParseMode("shadow") == Mode::Shadow, "1 and shadow");
 	Check(ParseMode("yes") == Mode::Off, "anything else is off");
 }
