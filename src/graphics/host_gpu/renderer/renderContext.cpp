@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
+#include "graphics/host_gpu/renderer/gfDiag.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
 #include "kernel/memory.h"
 #include "graphics/presentation/cpPhaseScope.h"
@@ -126,7 +127,42 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 			eager_before        = FrameTiming::Get(FrameTiming::Counter::ReadbackEagerHits);
 			read_begin          = FrameTiming::SteadyNowNs();
 		}
+		// S421 (KYTY_DIAG_GUEST_FAULT): a read fault of a guest thread; was the page read from the backing by the CP in this flip?
+		const bool gf = !on_gpu_thread && access == PageFaultAccess::Read && GuestFault::Enabled();
+		GuestFault::Event gf_event;
+		int64_t           gf_begin = 0;
+		uint64_t          gf_eager_before = 0;
+		if (gf) {
+			gf_event.flip       = FrameTiming::GuestFlips();
+			gf_event.addr       = fault_vaddr;
+			gf_event.dirty      = m_buffer_cache.HasGpuDirtyBytes(fault_vaddr, 16);
+			gf_event.page_dirty = m_buffer_cache.IsRegionGpuModified(fault_vaddr & ~uint64_t {4095}, 4096);
+			const auto hit      = GuestFault::Reads().Find(fault_vaddr);
+			gf_event.after_backing = GuestFault::AfterBacking(hit, gf_event.flip);
+			gf_event.backing_site  = hit.found ? hit.site : GuestFault::Site::None;
+			gf_eager_before        = FrameTiming::Get(FrameTiming::Counter::ReadbackEagerHits);
+			gf_begin               = FrameTiming::SteadyNowNs();
+		}
 		const bool downloaded = m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		if (gf) {
+			const auto wait_ns = FrameTiming::ElapsedNs(gf_begin, FrameTiming::SteadyNowNs());
+			gf_event.wait_us   = wait_ns / 1000;
+			gf_event.eager     = FrameTiming::Get(FrameTiming::Counter::ReadbackEagerHits) != gf_eager_before;
+			FrameTiming::Add(FrameTiming::Counter::GfN);
+			FrameTiming::Add(FrameTiming::Counter::GfWaitNs, wait_ns);
+			if (gf_event.after_backing) {
+				FrameTiming::Add(FrameTiming::Counter::GfAfterBackingN);
+			}
+			static std::atomic<uint64_t> gf_logged {0};
+			if (GuestFault::ShouldLog(gf_logged.fetch_add(1, std::memory_order_relaxed), GuestFault::InWindow(gf_event.flip))) {
+				const auto& ctx = RfOp::FaultCtxRef();
+				uint64_t stack_lo = 0, stack_hi = 0, frames[RfOp::kMaxFrames];
+				if (RfOp::CurrentStackBounds(&stack_lo, &stack_hi)) {
+					gf_event.bt_text = RfOp::FormatBacktrace(frames, RfOp::WalkFrames(ctx, stack_lo, stack_hi, frames));
+				}
+				LOGF("%s\n", GuestFault::FormatLine(gf_event).c_str());
+			}
+		}
 		if (rf_op) {
 			const auto wait_ns = FrameTiming::ElapsedNs(read_begin, FrameTiming::SteadyNowNs());
 			rf_event.wait_us   = wait_ns / 1000;
