@@ -950,6 +950,10 @@ static bool RegisterWideStoreTrap(uint64_t site, uint64_t trampoline) {
 	return false;
 }
 
+bool RestoreWideStoreTrap(uint64_t site, uint64_t trampoline) {
+	return RegisterWideStoreTrap(site, trampoline);
+}
+
 static WideStoreTrap* FindWideStoreTrapEntry(uint64_t site) {
 	for (uint64_t i = 0; i < WideStoreTrapCapacity; i++) {
 		auto&      entry = g_wide_store_traps[(TrapSlot(site) + i) % WideStoreTrapCapacity];
@@ -1357,6 +1361,7 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
 				code[0] = 0x0F; // ud2
 				code[1] = 0x0B;
 				std::memset(code + ShortJumpSize, 0xCC, length - ShortJumpSize);
+				result.traps.emplace_back(site, trampoline);
 				result.trapped++;
 				result.patched++;
 				continue;

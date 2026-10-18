@@ -62,6 +62,9 @@ void UnregisterGuestInstructionPatchModule(void* module_ptr);
 // registered). Other users of the same area, e.g. the 256-bit store split, must start after them.
 uint64_t GetGuestInstructionTrampolineBytesUsed(void* module_ptr);
 
+// Sets the used size of the module's trampoline area, as left by a patch run restored from the S432 patch cache.
+void SetGuestInstructionTrampolineBytesUsed(void* module_ptr, uint64_t bytes);
+
 // Apply enabled instruction fixes using native trampolines or safe trap fallbacks.
 GuestInstructionPatchResult PatchGuestInstructions(
     uint64_t segment_addr, uint64_t segment_size, std::span<const uintptr_t> function_starts,

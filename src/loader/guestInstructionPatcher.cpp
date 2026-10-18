@@ -1829,6 +1829,13 @@ uint64_t GetGuestInstructionTrampolineBytesUsed(void* module_ptr) {
 	return (found->second.trampoline_gen.getSize() + 15u) & ~static_cast<uint64_t>(15u);
 }
 
+void SetGuestInstructionTrampolineBytesUsed(void* module_ptr, uint64_t bytes) {
+	const auto found = g_patch_modules.find(reinterpret_cast<u64>(module_ptr));
+	if (found != g_patch_modules.end()) {
+		found->second.trampoline_gen.setSize(bytes);
+	}
+}
+
 #undef ASSERT
 
 } // namespace Loader
