@@ -4,6 +4,7 @@
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/presentation/frameTiming.h"
 #include "graphics/presentation/videoOut.h"
 #include "kernel/eventQueue.h"
 #include "kernel/pthread.h"
@@ -84,7 +85,10 @@ static void InterruptEventTriggerFunc(LibKernel::EventQueue::KernelEqueueEvent* 
 	triggered_event.fflags++;
 	triggered_event.data = reinterpret_cast<intptr_t>(trigger_data);
 	if (event->triggered) {
-		event->pending_events.push_back(triggered_event);
+		if (LibKernel::EventQueue::PushPendingEvent(*event, triggered_event)) {
+			FrameTiming::Add(FrameTiming::Counter::EqueueCoalescedN);
+		}
+		FrameTiming::Max(FrameTiming::Counter::EqueuePendingMax, event->pending_events.size());
 	} else {
 		event->event     = triggered_event;
 		event->triggered = true;

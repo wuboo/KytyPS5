@@ -58,6 +58,26 @@ struct KernelEqueueEvent {
 	std::deque<KernelEvent> pending_events;
 };
 
+// S420: a trigger on an event nobody waits for must not grow pending_events without bound (about 1300
+// GRAPHICS triggers per flip, 40 bytes each). Entries carry a per-trigger payload (the GRAPHICS data is the
+// context id AgcDriverGetEqContextId reads), so the first kMaxPendingEvents stay distinct; past the cap the
+// trigger replaces the last entry (kqueue style: latest data, one wakeup). Returns true when it coalesced.
+constexpr size_t kMaxPendingEvents = 256;
+
+inline bool PushPendingEvent(KernelEqueueEvent& event, const KernelEvent& triggered) {
+#if defined(KYTY_EQUEUE_MUTANT_COALESCE_OFF)
+	event.pending_events.push_back(triggered);
+	return false;
+#else
+	if (event.pending_events.size() < kMaxPendingEvents) {
+		event.pending_events.push_back(triggered);
+		return false;
+	}
+	event.pending_events.back() = triggered;
+	return true;
+#endif
+}
+
 [[nodiscard]] KernelEqueueRef KernelPinEqueue(KernelEqueue eq);
 
 int KYTY_SYSV_ABI KernelAddEvent(KernelEqueue eq, const KernelEqueueEvent& event);
