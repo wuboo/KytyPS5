@@ -355,6 +355,11 @@ constexpr const char* kCounterNames[] = {
     "pv_ind_range_eq_n",
     "pv_ind_range_ne_n",
     "pv_ind_range_ne_within_n",
+    "pv_idx_backing_n",
+    "pv_idx_backing_bytes",
+    "pv_idx_backing_fallback_n",
+    "pv_idx_backing_eq_n",
+    "pv_idx_backing_ne_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

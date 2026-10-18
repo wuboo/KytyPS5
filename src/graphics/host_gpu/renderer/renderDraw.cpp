@@ -24,6 +24,7 @@
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/perVertexPrototype.h"
 #include "graphics/host_gpu/renderer/perVertexVsStoreRuntime.h"
+#include "graphics/host_gpu/renderer/pvIndexBacking.h"
 #include "graphics/host_gpu/renderer/pvIndirectRuntime.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
@@ -1576,10 +1577,48 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 			FrameTiming::Add(FrameTiming::Counter::PvHashBytesSkipped, index_source.size);
 		} else {
 			FrameTiming::Add(FrameTiming::Counter::PvVsstoreIndexBytes, index_source.size);
+			// S417 (KYTY_PV_IDX_BACKING): clean index bytes on a protected page are copied from the backing, which neither faults nor waits.
+			// The copy is what the hash and the scan see (mode 1); shadow keeps the guest read and compares it with the copy.
+			const void*                       raw_bytes = idx_bytes;
+			const void*                       copy_bytes = nullptr;
+			thread_local std::vector<uint8_t> idx_copy;
+			const auto                        backing_mode = PvIndexBacking::EnvMode();
+			if (backing_mode != PvIndexBacking::Mode::Off && index_source.host_data == nullptr) {
+				const bool bytes_dirty =
+				    m_context.GetBufferCache().HasGpuDirtyBytes(index_source.address, index_source.size);
+				const auto source = PvIndexBacking::Decide(backing_mode, false, bytes_dirty);
+				if (source == PvIndexBacking::Source::Raw) {
+					FrameTiming::Add(FrameTiming::Counter::PvIdxBackingFallbackN);
+				} else {
+					idx_copy.resize(index_source.size);
+					if (Libs::LibKernel::Memory::TryReadBacking(index_source.address, idx_copy.data(), index_source.size)) {
+						copy_bytes = idx_copy.data();
+						FrameTiming::Add(FrameTiming::Counter::PvIdxBackingN);
+						FrameTiming::Add(FrameTiming::Counter::PvIdxBackingBytes, index_source.size);
+						if (source == PvIndexBacking::Source::Backing) idx_bytes = copy_bytes;
+					} else {
+						FrameTiming::Add(FrameTiming::Counter::PvIdxBackingFallbackN);
+					}
+				}
+			}
 			uint64_t index_hash;
 			{
 				KYTY_CP_SITE(PvIndexHash);
 				index_hash = XXH3_64bits(idx_bytes, index_source.size);
+			}
+			if (copy_bytes != nullptr && idx_bytes == raw_bytes) {
+				// shadow: the hash above was the guest read; the copy was taken before it.
+				const auto first_diff = PvIndexBacking::FirstDiff(copy_bytes, raw_bytes, index_source.size);
+				if (first_diff == index_source.size) {
+					FrameTiming::Add(FrameTiming::Counter::PvIdxBackingEqN);
+				} else {
+					FrameTiming::Add(FrameTiming::Counter::PvIdxBackingNeN);
+					static std::atomic<uint32_t> ne_logged {0};
+					if (ne_logged.fetch_add(1, std::memory_order_relaxed) < 20) {
+						LOGF("[pv-idx-backing-ne] flip=%" PRIu64 " addr=0x%" PRIx64 " size=%" PRIu64 " first_diff=%" PRIu64 "\n",
+						     FrameTiming::GuestFlips(), index_source.address, index_source.size, first_diff);
+					}
+				}
 			}
 			const PerVertexRangeMemo::Key memo_key {index_hash, index_source.size,
 			                                        element_size, draw.index_count, emit.vertex_offset, kNoDropLimit};
