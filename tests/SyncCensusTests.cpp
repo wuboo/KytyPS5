@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace {
 
@@ -75,9 +76,50 @@ void TestRepeat() {
 	Check(HashBytes(a, 3) != HashBytes(b, 3) && HashBytes(a, 3) == HashBytes(a, 3), "hash");
 }
 
+// S404: the reader is named on every path of the lookup, not only the compile.
+void TestReaderPaths() {
+	Check(CurrentReaderRef().hash == 0, "no scope: nobody");
+	for (const char* path: {"hit", "refresh", "miss"}) {
+		ReaderScope scope(0xabcdef, "vs", path);
+		Check(CurrentReaderRef().hash == 0xabcdef, "the scope names the reader on every path (hit, refresh, miss)");
+		Check(std::strcmp(CurrentReaderRef().path, path) == 0, "the path is recorded");
+		Check(std::strcmp(CurrentReaderRef().stage, "vs") == 0, "the stage is recorded");
+	}
+	Check(CurrentReaderRef().hash == 0, "leaving the scope restores nobody");
+	{
+		ReaderScope scope(0x77, "ps", "hit");
+		SetReaderPath("miss");
+		Check(std::strcmp(CurrentReaderRef().path, "miss") == 0, "SetReaderPath moves the lookup on to the compile");
+	}
+	SetReaderPath("miss");
+	Check(CurrentReaderRef().hash == 0 && std::strcmp(CurrentReaderRef().path, "?") == 0, "SetReaderPath outside a scope does nothing");
+}
+
+void TestSnapshotsAndStaleFresh() {
+	Check(Diff(10, 4) == 6 && Diff(4, 10) == 0, "saturating difference");
+	Check(Backlog(12, 9) == 3 && Backlog(9, 12) == 0, "backlog never underflows");
+	const uint8_t a[] = {0x00, 0xab, 0xff};
+	Check(ToHex(a, 3) == "00abff" && ToHex(a, 0) == "-", "hex");
+	StaleFresh sf;
+	sf.ok = true;
+	sf.size = 3;
+	std::memcpy(sf.stale, a, 3);
+	std::memcpy(sf.fresh, a, 3);
+	Check(sf.Equal(), "same bytes");
+	sf.fresh[2] = 0x01;
+	Check(!sf.Equal(), "a drain that changed the bytes is stale-ne");
+	sf.ok = false;
+	Check(!sf.Equal(), "a failed read is never equal");
+	Check(StaleFreshSite(Site::Spec, 64) && StaleFreshSite(Site::RfGpu, 4), "spec and rf_gpu are probed");
+	Check(!StaleFreshSite(Site::Spec, 65) && !StaleFreshSite(Site::Dcc, 4) && !StaleFreshSite(Site::Spec, 0), "others are not");
+	Check(ThreadId() != 0 && ThreadId() == ThreadId(), "thread id is stable");
+}
+
 } // namespace
 
 int main() {
+	TestReaderPaths();
+	TestSnapshotsAndStaleFresh();
 	TestTickPages();
 	TestLagAndDone();
 	TestSiteTag();

@@ -121,6 +121,19 @@ void PipelineCacheLog(fmt::format_string<Args...> format, Args&&... args) {
 	Log::WriteToConsoleAndLog(message);
 }
 
+const char* SyncStageName(ShaderType stage) {
+	switch (stage) {
+		case ShaderType::Vertex: return "vs";
+		case ShaderType::Mesh: return "ms";
+		case ShaderType::Local: return "ls";
+		case ShaderType::TessellationControl: return "hs";
+		case ShaderType::TessellationEvaluation: return "ds";
+		case ShaderType::Pixel: return "ps";
+		case ShaderType::Compute: return "cs";
+		default: return "?";
+	}
+}
+
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
 	// Scalar and unformatted buffer dependencies use the same backing as native raw loads.
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
@@ -384,6 +397,10 @@ struct PipelineCache::ProgramCache {
 			if (ShaderRecompiler::RtMissEnabled()) lookup_key.static_state.push_back(0x52544d53u);
 		}
 		auto                                         entry = programs.find(lookup_key);
+		// S404: the reader is named for the whole lookup (hit, call-source refresh, compile), not only the compile.
+		const SyncCensus::ReaderScope reader_tag(
+		    params.hash, SyncStageName(stage),
+		    entry == programs.end() ? "miss" : (entry->second.call_source ? "refresh" : "hit"));
 		ShaderRecompiler::IR::SrtRuntime             runtime {
 		    .user_data                  = user_data,
 		    .shader_base                = params.Base(),
@@ -436,7 +453,7 @@ struct PipelineCache::ProgramCache {
 			case ShaderType::Compute: label = "ShaderRecompiler CS"; stage_name = "cs"; break;
 			default: EXIT("invalid pipeline shader stage\n");
 		}
-		const SyncCensus::ReaderScope reader_tag(params.hash, stage_name);
+		SyncCensus::SetReaderPath("miss");
 		ShaderRecompiler::CompileOptions options;
 		options.stage       = stage;
 		options.maintenance8_enabled = graphics.maintenance8_enabled;

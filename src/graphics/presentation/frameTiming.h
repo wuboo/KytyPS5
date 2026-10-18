@@ -182,6 +182,16 @@ enum class Counter : uint32_t {
 	DccEagerHitN,            // DCC readbacks served by queued eager downloads
 	DccEagerMissN,           // DCC readbacks that wanted eager and took the synchronous path
 	EagerPagesN,             // gauge: hot tracker pages tracked for eager readback
+	// S404 (KYTY_DIAG_SYNC=1): spec / rf_gpu readbacks of <= 64 bytes that drained the queue: the bytes the CPU would have seen
+	// before the drain equal (Eq) or differ from (Ne) the bytes after it.
+	SyncStaleEqSpecN, SyncStaleNeSpecN, SyncStaleEqRfGpuN, SyncStaleNeRfGpuN,
+	SyncEagerAlreadyDoneN,   // rf_guest eager waits whose download tick had already completed
+	SyncEagerLagSum,         // ... sum of CurrentTick - eager tick at the fault
+	SyncEagerWaitNs,         // ... time of the eager Wait itself
+	SyncQueueNs,             // sum over drains: SendCommandSync sent -> lambda starts on the GPU thread
+	SyncLambdaNs,            // sum over drains: the lambda
+	// S404: why a piece took the old path in PlanKnownFill (DccFillPublish::Why order), counted always.
+	DccFallbackNoFillN, DccFallbackPartialN, DccFallbackNewerWriteN, DccFallbackPendingN, DccFallbackOtherN,
 	Count,
 };
 

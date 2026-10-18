@@ -195,6 +195,20 @@ constexpr const char* kCounterNames[] = {
     "dcc_eager_hit_n",
     "dcc_eager_miss_n",
     "eager_pages_n",
+    "sync_stale_eq_spec_n",
+    "sync_stale_ne_spec_n",
+    "sync_stale_eq_rf_gpu_n",
+    "sync_stale_ne_rf_gpu_n",
+    "sync_eager_already_done_n",
+    "sync_eager_lag_sum",
+    "sync_eager_wait_ns",
+    "sync_queue_ns",
+    "sync_lambda_ns",
+    "dcc_fallback_no_fill_n",
+    "dcc_fallback_partial_n",
+    "dcc_fallback_newer_write_n",
+    "dcc_fallback_pending_download_n",
+    "dcc_fallback_other_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

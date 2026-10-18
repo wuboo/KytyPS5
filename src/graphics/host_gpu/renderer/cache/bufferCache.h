@@ -151,8 +151,11 @@ private:
 	void NoteReadbackFault(uint64_t vaddr, uint64_t size, bool dcc);
 	void NoteGpuWrite(uint64_t vaddr, uint64_t size);
 	void FlushEagerReadbacks();
-	[[nodiscard]] bool WaitEagerReadback(uint64_t vaddr, uint64_t size, bool dcc = false);
-	[[nodiscard]] bool WaitEagerReadbackPages(uint64_t vaddr, uint64_t size);
+	[[nodiscard]] bool WaitEagerReadback(uint64_t vaddr, uint64_t size, bool dcc = false, SyncCensus::Probe* probe = nullptr);
+	[[nodiscard]] bool WaitEagerReadbackPages(uint64_t vaddr, uint64_t size, SyncCensus::Probe* probe = nullptr);
+	void               NoteEagerWait(SyncCensus::Probe& probe, uint64_t tick);
+	static void        NoteEagerProbe(const SyncCensus::Probe& probe);
+	static void        LogDccFallback(uint64_t address, uint64_t size, DccFillPublish::Why why);
 	// KYTY_DCC_KNOWN: the GPU-modified pieces of a range, each with the fill value that describes all of it.
 	struct KnownFillPiece {
 		uint64_t address;
@@ -208,6 +211,7 @@ private:
 	ShadowFill m_shadow_fill; // GPU thread
 	// S398 (KYTY_DIAG_SYNC=1), GPU thread only.
 	SyncCensus::TickPages     m_sync_ticks;
+	SyncCensus::TickPages     m_sync_cmds;      // S404: draws + dispatches recorded when each page was last marked GPU-written
 	SyncCensus::TickPages     m_sync_seq;       // S402: write sequence number per page (spec log)
 	uint64_t                  m_sync_seq_next = 0;
 	std::unordered_map<uint64_t, uint64_t> m_spec_last_seq; // S402: per spec-read range, the write sequence seen by the previous read

@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <set>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -99,6 +100,20 @@ void TestDecide() {
 	Check(!d.publish && d.reason == Reason::FallbackPartial, "a range that is only partly known takes the old path");
 }
 
+// S404: the reason a piece took the old path.
+void TestExplain() {
+	GpuWriteLedger ledger;
+	Check(Explain(ledger.QueryFill(kBase, 0x2000), false) == Why::NoFill, "nothing written: no_fill");
+	ledger.RecordFill(kBase, 0x1000, 0x01010101);
+	Check(Explain(ledger.QueryFill(kBase, 0x2000), false) == Why::Partial, "a fill covers only part: partial");
+	Check(Explain(ledger.QueryFill(kBase, 0x1000), true) == Why::PendingDownload, "known but a download is queued: pending_download");
+	Check(Explain(ledger.QueryFill(kBase, 0x1000), false) == Why::Other, "known and nothing pending: other (Decide would publish)");
+	ledger.RecordWrite(kBase, 0x10);
+	Check(Explain(ledger.QueryFill(kBase, 0x1000), false) == Why::NewerWrite, "a newer write: newer_write");
+	Check(std::string(WhyName(Why::PendingDownload)) == "pending_download" && std::string(WhyName(Why::NoFill)) == "no_fill",
+	      "names");
+}
+
 // Publish model: pieces = GPU-modified ranges of a read; the backing is a byte array.
 struct Model {
 	std::vector<uint8_t>                  backing = std::vector<uint8_t>(0x4000, 0xaa);
@@ -182,6 +197,7 @@ int main() {
 	TestLedgerPartialCover();
 	TestLedgerTrimAndEviction();
 	TestDecide();
+	TestExplain();
 	TestPublishPattern();
 	TestPartialPieceTakesOldPath();
 	TestMaterializeAfterPublish();

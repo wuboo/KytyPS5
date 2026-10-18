@@ -83,6 +83,31 @@ inline Decision Decide(const FillQuery& q, bool pending_download) {
 	return decision;
 }
 
+// S404 (diagnostics): why a piece took the old path, finer than Reason. Order = the dcc_fallback_<why>_n counters.
+enum class Why : uint32_t { NoFill, Partial, NewerWrite, PendingDownload, Other, Count };
+constexpr const char* WhyName(Why why) {
+	switch (why) {
+		case Why::NoFill: return "no_fill";
+		case Why::Partial: return "partial";
+		case Why::NewerWrite: return "newer_write";
+		case Why::PendingDownload: return "pending_download";
+		default: return "other";
+	}
+}
+// Same inputs as Decide; for a piece Decide refused.
+inline Why Explain(const FillQuery& q, bool pending_download) {
+	switch (q.kind) {
+		case FillKind::Partial: return q.seen ? Why::Partial : Why::NoFill;
+		case FillKind::NewerWrite: return Why::NewerWrite;
+#ifdef KYTY_DCCEXPLAIN_MUTANT_PENDING_AS_OTHER
+		case FillKind::Known: return Why::Other;
+#else
+		case FillKind::Known: return pending_download ? Why::PendingDownload : Why::Other;
+#endif
+	}
+	return Why::Other;
+}
+
 // The bytes of [address, address + size) when the dword-aligned fill `value` covers them.
 inline std::vector<uint8_t> Pattern(uint32_t value, uint64_t address, uint64_t size) {
 	std::vector<uint8_t> bytes(static_cast<size_t>(size));
