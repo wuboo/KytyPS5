@@ -35,6 +35,9 @@ bool PerVertexVsStoreInstanced();
 // S388: KYTY_PV_VSSTORE_GUARD=0|1 (read once, default 0, logged as [pv-guard] mode=). 1: the VS-store VS skips records
 // outside the draw's range and counts them (pv_vsstore_oob), the PS paints a read outside it magenta.
 bool PerVertexVsStoreGuard();
+// S409: KYTY_PV_VSSTORE_COMPACT=0|1 (read once, default 0, logged as [pv-compact] mode=). 1: a VS-store record holds only the locations the
+// PS reads (slot = rank in the PS mask, stride = their number) and the VS is specialized with the PS mask of its pair.
+bool PerVertexVsStoreCompact();
 // S388: KYTY_PV_VSSTORE_PAIRS=all|VS:PS,...|first=N (read once, logged as [pv-pairs] mode=).
 const PvVsStorePairFilter& PerVertexVsStorePairs();
 bool HasPerVertexPrototypeInput(std::span<const uint32_t> words);

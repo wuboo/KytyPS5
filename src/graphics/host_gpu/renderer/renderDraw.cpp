@@ -1736,6 +1736,9 @@ static void BindPvVsStore(RenderContext& context, vk::CommandBuffer vk_buffer, c
 	graphics.device.updateDescriptorSets(binding_count, writes, 0, nullptr);
 	vk_buffer.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline.pipeline_layout, 1, 1, &set, 0, nullptr);
 	const auto block = PvVsStorePushBlock(setup.draw, setup.programs->stride_vec4);
+	// S409: the bytes of records this draw has bound (both modes of KYTY_PV_VSSTORE_COMPACT, to measure the mechanism).
+	FrameTiming::Add(FrameTiming::Counter::PvVsstoreRecordBytes, setup.draw.records * setup.programs->stride_vec4 * 16ull);
+	if (setup.programs->compact) FrameTiming::Add(FrameTiming::Counter::PvCompactDrawsN);
 	vk_buffer.pushConstants(pipeline.pipeline_layout, vk::ShaderStageFlagBits::eVertex | vk::ShaderStageFlagBits::eFragment,
 	                        PvVsStorePushOffset(), sizeof(block), block.data());
 	if (guard) {

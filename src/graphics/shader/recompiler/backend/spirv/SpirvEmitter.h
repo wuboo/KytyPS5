@@ -38,6 +38,12 @@ struct PvStoreInfo {
 	// S388 (KYTY_PV_VSSTORE_GUARD=1): push dword kPvPushRecords (the draw's record count) bounds the records; the VS skips a
 	// store outside it and counts it in set 1 binding 2, the PS paints a read outside it magenta. Off: the module is unchanged.
 	bool                         guard              = false;
+	// S409 (KYTY_PV_VSSTORE_COMPACT=1), VS only, dynamic stride: the PS location mask is a specialization constant (SpecId 0, a
+	// single OpSpecConstant whose id is reported in *compact_mask_id; its default literal is patched per pair). A location is stored
+	// only when its bit is set, under slot = rank of the bit, all computed from the constant, so the store specializes at pipeline
+	// build. The PS side needs no flag: it is emitted with record_stride_vec4 = popcount and parameter_slots = the ranks.
+	bool                         compact_spec       = false;
+	uint32_t*                    compact_mask_id    = nullptr;
 };
 
 // Resets and writes backend IDs and descriptor indices; do not emit the same program concurrently.

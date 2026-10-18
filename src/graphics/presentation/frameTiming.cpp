@@ -321,6 +321,8 @@ constexpr const char* kCounterNames[] = {
     "eager_decline_no_work_n",
     "eager_decline_mid_limit_n",
     "eager_decline_first_cb_only_n",
+    "pv_vsstore_record_bytes",
+    "pv_compact_draws_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

@@ -288,6 +288,26 @@ constexpr uint32_t PvCompactStride(uint32_t ps_location_mask) {
 #endif
 }
 
+// S409: the VS-store VS of KYTY_PV_VSSTORE_COMPACT=1 has the PS location mask as OpSpecConstant (result id `spec_id`, one literal word);
+// the module is built once per VS and the literal is set per pair. Returns false when the module has no such instruction.
+inline bool PvCompactPatchMask(std::vector<uint32_t>& words, uint32_t spec_id, uint32_t mask) {
+	constexpr uint32_t kOpSpecConstant = 50;
+	for (size_t at = 5; at < words.size();) { // 5 header words
+		const uint32_t count = words[at] >> 16;
+		if (count == 0 || at + count > words.size()) return false;
+#if defined(KYTY_PVVS_MUTANT_PATCH_FIRST)
+		if ((words[at] & 0xffffu) == kOpSpecConstant && count == 4) {
+#else
+		if ((words[at] & 0xffffu) == kOpSpecConstant && count == 4 && words[at + 2] == spec_id) {
+#endif
+			words[at + 3] = mask;
+			return true;
+		}
+		at += count;
+	}
+	return false;
+}
+
 enum class PvVsStoreInterfaceVerdict : uint32_t {
 	Use,
 	Param31,       // the VS or the PS uses host location 31, which carries the instance index

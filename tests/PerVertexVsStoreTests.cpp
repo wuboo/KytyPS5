@@ -267,6 +267,19 @@ void TestCompact() {
 	Check(!ParsePvVsStoreCompact("2", compact), "COMPACT=2 is rejected");
 }
 
+// S409: the per-pair literal of the specialization constant goes into the right instruction.
+void TestCompactPatch() {
+	// header (5 words), OpSpecConstant %2 = 7 (id 3 first, an unrelated one), OpConstant, OpSpecConstant id 9
+	std::vector<uint32_t> words = {0x07230203, 0x10300, 0, 20, 0,
+	                               (4u << 16) | 50u, 1, 3, 111,  // other spec constant: untouched
+	                               (4u << 16) | 43u, 1, 4, 222,  // OpConstant
+	                               (4u << 16) | 50u, 1, 9, 333}; // the mask
+	Check(PvCompactPatchMask(words, 9, 0x205) && words[8] == 111 && words[12] == 222 && words[16] == 0x205, "mask literal patched");
+	Check(!PvCompactPatchMask(words, 77, 1), "unknown spec id is not patched");
+	std::vector<uint32_t> broken = {0x07230203, 0x10300, 0, 20, 0, (4u << 16) | 50u, 1};
+	Check(!PvCompactPatchMask(broken, 9, 1), "truncated module is refused");
+}
+
 void TestPushBlock() {
 	PvVsStoreDraw draw;
 	draw.base = 11; draw.span = 22; draw.first = 33; draw.first_instance = 44;
@@ -581,6 +594,7 @@ int main() {
 	TestSlots();
 	TestInterface();
 	TestCompact();
+	TestCompactPatch();
 	TestPushBlock();
 	TestIndexBinding();
 	TestIndexRange();

@@ -167,6 +167,16 @@ bool PerVertexVsStoreGuard() {
 	return guard;
 }
 
+bool PerVertexVsStoreCompact() {
+	static const bool compact = [] {
+		bool parsed = false;
+		EXIT_IF(!ParsePvVsStoreCompact(std::getenv("KYTY_PV_VSSTORE_COMPACT"), parsed));
+		LOGF("[pv-compact] mode=%d\n", parsed ? 1 : 0);
+		return parsed;
+	}();
+	return compact;
+}
+
 bool PerVertexVsStoreInstanced() {
 	static const bool allowed = [] {
 		bool parsed = true;

@@ -31,17 +31,37 @@ struct StoreShader {
 	uint32_t              mask = 0;    // host locations the stage stores (VS) / reads per vertex (PS)
 	uint32_t              corners = 0; // PS: corners (P0/P10/P20) it reads, bit k = corner k
 	uint64_t              hash = 0;    // guest shader hash (stable between runs)
+	uint32_t              compact_spec_id = 0; // S409 VS: id of the OpSpecConstant that holds the PS mask (its literal is patched per pair)
 };
 std::map<uint64_t, StoreShader>                                    s_shaders;
 std::map<std::pair<uint64_t, uint64_t>, PvVsStorePrograms>         s_pairs;
+// S409: the VS-store VS specialized with a PS mask, one module per (VS, mask).
+std::map<std::pair<uint64_t, uint32_t>, vk::ShaderModule>          s_compact_vs;
+uint32_t                                                           s_compact_pair_lines = 0;
 vk::DescriptorSetLayout                                            s_set_layout = nullptr;
 uint32_t                                                           s_pairs_admitted = 0;
 uint32_t                                                           s_pairs_candidates = 0;
 uint32_t                                                           s_pair_lines = 0;
 // S389: the pair-use lines (`[pv-pairs]` index lines and first-use lines) share this budget.
 constexpr uint32_t kMaxPairLines = 200;
+constexpr uint32_t kMaxCompactLines = 100; // S409: `[pv-compact]` lines
 
 } // namespace
+
+void FillPvCompactPixelInfo(ShaderRecompiler::Spirv::PvStoreInfo& info, uint32_t ps_mask, uint32_t vs_mask) {
+#if defined(KYTY_PVVS_MUTANT_COMPACT_PS_USES_VS_SLOT)
+	// the PS ranks its locations in the mask of the VS (and so reads other slots than the VS wrote)
+	const uint32_t slot_mask = vs_mask | ps_mask;
+#else
+	(void)vs_mask;
+	const uint32_t slot_mask = ps_mask;
+#endif
+	info.record_stride_vec4 = PvCompactStride(slot_mask);
+	info.parameter_slots.clear();
+	for (uint32_t location = 0; location < kPvVsStoreInstanceLocation; ++location) {
+		if (((ps_mask >> location) & 1u) != 0) info.parameter_slots[location] = PvCompactSlot(slot_mask, location);
+	}
+}
 
 std::vector<uint32_t> EmitPvVsStoreVariant(ShaderRecompiler::IR::Program&          program,
                                            const ShaderRecompiler::CompileOptions& options,
@@ -62,6 +82,7 @@ void RememberPvVsStoreShader(const ShaderProgram& program, ShaderRecompiler::Com
 	(void)PerVertexVsStoreGpuIdxMode(); // read and logged once, at the first compile
 	(void)PerVertexVsStoreInstanced();
 	(void)PerVertexVsStorePairs();
+	(void)PerVertexVsStoreCompact();
 	using Role = ShaderRecompiler::Spirv::PvStoreInfo::Role;
 	const bool vertex = options.stage == ShaderType::Vertex && options.input_info.vertex != nullptr;
 	const bool pixel  = options.stage == ShaderType::Pixel && options.input_info.pixel != nullptr &&
@@ -76,7 +97,17 @@ void RememberPvVsStoreShader(const ShaderProgram& program, ShaderRecompiler::Com
 	info.coherent      = true; // Coherent cap + a device barrier after the VS stores (the probe of RESULT-262 needs them)
 	info.location_mask = &entry.mask;
 	info.corner_mask   = &entry.corners;
+	const bool compact = PerVertexVsStoreCompact();
+	if (compact && vertex) {
+		info.compact_spec    = true;
+		info.compact_mask_id = &entry.compact_spec_id;
+	}
 	auto words         = EmitPvVsStoreVariant(result.program, options, info, push_data_start_dword, maintenance8_enabled);
+	if (compact && pixel) {
+		// The first emission (dynamic stride) found the locations the PS reads; the PS of a compact record knows them at compile time.
+		FillPvCompactPixelInfo(info, entry.mask, entry.mask);
+		words = EmitPvVsStoreVariant(result.program, options, info, push_data_start_dword, maintenance8_enabled);
+	}
 	NotePvPushVariant(vertex ? "vsstore-vs" : "vsstore-ps", options.shader_hash, result.program.bindings);
 	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
 	tools.SetMessageConsumer([&](spv_message_level_t, const char*, const spv_position_t& position, const char* message) {
@@ -208,6 +239,7 @@ const PvVsStorePrograms* GetPvVsStorePrograms(GraphicContext& graphics, const Pi
 			     static_cast<unsigned long long>(key.first), static_cast<unsigned long long>(vs->second.hash),
 			     static_cast<unsigned long long>(key.second), static_cast<unsigned long long>(ps->second.hash),
 			     PvVsStoreStrideFor(vs->second.mask), allowed ? "admitted" : "skipped (KYTY_PV_VSSTORE_PAIRS)");
+			if (PerVertexVsStoreCompact()) LOGF("[pv-pairs] #%u stride_compact=%u\n", index, PvCompactStride(ps->second.mask));
 		}
 		if (!allowed) {
 			value.stride_vec4 = UINT32_MAX; // negative cache: this pair stays on the prototype
@@ -217,7 +249,30 @@ const PvVsStorePrograms* GetPvVsStorePrograms(GraphicContext& graphics, const Pi
 		s_pairs_admitted++;
 		value.stride_vec4               = PvVsStoreStrideFor(vs->second.mask);
 		value.graphics                  = programs;
-		value.graphics.vertex[0].module = CompileSPV(vs->second.words, graphics.device);
+		value.graphics.vertex[0].module = nullptr;
+		if (PerVertexVsStoreCompact()) {
+			// S409: the record holds the locations of the PS mask; the VS is the same module with that mask as its specialization literal.
+			const uint32_t ps_mask = ps->second.mask;
+			const auto     module_key = std::pair {key.first, ps_mask};
+			auto           cached     = s_compact_vs.find(module_key);
+			if (cached == s_compact_vs.end()) {
+				auto words = vs->second.words;
+				EXIT_IF(vs->second.compact_spec_id == 0 || !PvCompactPatchMask(words, vs->second.compact_spec_id, ps_mask));
+				cached = s_compact_vs.emplace(module_key, CompileSPV(words, graphics.device)).first;
+			}
+			value.stride_vec4               = PvCompactStride(ps_mask);
+			value.graphics.vertex[0].module = cached->second;
+			value.compact                   = true;
+			// one module per (VS, mask): the id tells the pipelines of one VS with different masks apart
+			value.graphics.vertex[0].id |= (1ull << 60) | (uint64_t {ps_mask} << 29);
+			if (s_compact_pair_lines++ < kMaxCompactLines) {
+				LOGF("[pv-compact] #%u VS=0x%016llx PS=0x%016llx vs_mask=0x%x ps_mask=0x%x stride %u -> %u\n", index,
+				     static_cast<unsigned long long>(vs->second.hash), static_cast<unsigned long long>(ps->second.hash),
+				     vs->second.mask, ps_mask, PvVsStoreStrideFor(vs->second.mask), value.stride_vec4);
+			}
+		} else {
+			value.graphics.vertex[0].module = CompileSPV(vs->second.words, graphics.device);
+		}
 		value.graphics.pixel.module     = CompileSPV(ps->second.words, graphics.device);
 		value.graphics.vertex[0].id |= 1ull << 61;
 		value.graphics.pixel.id |= 1ull << 61;

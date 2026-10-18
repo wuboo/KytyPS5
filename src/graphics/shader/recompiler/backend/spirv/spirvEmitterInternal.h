@@ -120,6 +120,8 @@ struct EmitterState {
 	uint32_t                                         pv_index_buffer         = 0;
 	uint32_t                                         pv_instance_variable    = 0;
 	uint32_t                                         pv_vertex_record        = 0;
+	uint32_t                                         pv_compact_mask         = 0; // S409 VS: OpSpecConstant uint, the PS location mask
+	std::vector<uint32_t>                            pv_compact_rank;          // S409 VS: pv_compact_rank[L] = spec id of the number of mask bits below L
 	uint32_t                                         pv_guard_counter        = 0; // S388 VS: set 1 binding 2 (uint count)
 	uint32_t                                         pv_guard_ok             = 0; // S388 VS: bool, the record is inside the draw's range
 	uint32_t                                         pv_oob_flag             = 0; // S388 PS: Private uint, a corner read was outside
