@@ -6,6 +6,17 @@
 
 namespace Libs::LibKernel::Memory {
 
+// S425: a page is quiet for the pass when the GPU has no unflushed bytes in it and (KYTY_CP_READ_BACKING != 0) no GPU->host copy of it is
+// still in flight; only then does TryReadBufferBacking do nothing but TryReadBacking for a read inside it.
+constexpr bool SrtPageQuiet(bool gpu_dirty, bool inflight) {
+#ifdef KYTY_SRTMEMO_MUTANT_INFLIGHT_IGNORED
+	(void)inflight;
+	return !gpu_dirty;
+#else
+	return !gpu_dirty && !inflight;
+#endif
+}
+
 struct SrtReadPass {
 	static constexpr uint64_t PageSize = 4096;
 	std::array<uint64_t, 32>  clean {};

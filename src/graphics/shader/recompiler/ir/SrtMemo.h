@@ -39,6 +39,7 @@ struct SrtMemo {
 	bool                  valid = false;
 	const void*           plan  = nullptr;
 	uint64_t              shader_base = 0;
+	uint64_t              indirect_args = 0; // S425: compute indirect dispatch args address (the walk reads the counts there)
 	bool                  min_lod_remap = false;
 	bool                  has_ordinary = false;
 	std::vector<uint32_t> user_data;
@@ -53,10 +54,11 @@ struct SrtMemo {
 	}
 
 	void Begin(const void* plan_id, std::span<const uint32_t> user, uint64_t base, std::span<const uint32_t> groups,
-	           bool remap, bool ordinary_reader) {
+	           uint64_t indirect, bool remap, bool ordinary_reader) {
 		Clear();
 		plan             = plan_id;
 		shader_base      = base;
+		indirect_args    = indirect;
 		min_lod_remap    = remap;
 		has_ordinary     = ordinary_reader;
 		user_data.assign(user.begin(), user.end());
@@ -74,10 +76,26 @@ struct SrtMemo {
 	}
 
 	bool KeyMatches(const void* plan_id, std::span<const uint32_t> user, uint64_t base,
-	                std::span<const uint32_t> groups, bool remap, bool ordinary_reader) const {
-		return valid && plan == plan_id && shader_base == base && min_lod_remap == remap &&
-		       has_ordinary == ordinary_reader && std::ranges::equal(user_data, user) &&
-		       std::ranges::equal(workgroup_counts, groups);
+	                std::span<const uint32_t> groups, uint64_t indirect, bool remap, bool ordinary_reader) const {
+#ifdef KYTY_SRTMEMO_MUTANT_IGNORES_PLAN
+		(void)plan_id;
+		const bool same_plan = true;
+#else
+		const bool same_plan = plan == plan_id;
+#endif
+#ifdef KYTY_SRTMEMO_MUTANT_IGNORES_INDIRECT
+		(void)indirect;
+		const bool same_indirect = true;
+#else
+		const bool same_indirect = indirect_args == indirect;
+#endif
+#ifdef KYTY_SRTMEMO_MUTANT_IGNORES_USERDATA
+		const bool same_user = true;
+#else
+		const bool same_user = std::ranges::equal(user_data, user);
+#endif
+		return valid && same_plan && shader_base == base && same_indirect && min_lod_remap == remap &&
+		       has_ordinary == ordinary_reader && same_user && std::ranges::equal(workgroup_counts, groups);
 	}
 
 	// Reads every logged address again; true when each returns what it returned during the walk.

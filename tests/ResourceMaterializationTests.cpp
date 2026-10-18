@@ -16,7 +16,7 @@ namespace {
 void Check(bool value, const char *text) {
   if (!value) {
     std::fprintf(stderr, "ResourceMaterializationTests: failed: %s\n", text);
-    std::abort();
+    std::exit(1); // not abort(): the WILL_FAIL mutants need a plain nonzero exit code
   }
 }
 
@@ -67,6 +67,10 @@ Libs::Graphics::ShaderRecompiler::IR::Program SrtProgram(uint64_t address) {
   source.dword_count = 2;
   program.descriptor_sources.push_back(source);
   return program;
+}
+
+Libs::Graphics::ShaderRecompiler::IR::ResourcePlan SrtPlan(uint64_t address) {
+  return Libs::Graphics::ShaderRecompiler::IR::ExtractResourcePlan(SrtProgram(address));
 }
 
 Libs::Graphics::ShaderRecompiler::IR::ResourcePlan UnbasedFlatPlan() {
@@ -1588,6 +1592,7 @@ void TestSrtFastMemo() {
   memory.values.fill(0x11u);
   std::array<uint32_t, 2> user_data{1u, 2u};
   SrtRuntime runtime{.user_data = user_data,
+                     .read_memory = ReadSequencedMemory,
                      .userdata = &memory,
                      .read_specialization_memory = ReadSequencedMemory,
                      .fast_mode = SrtFastMode::On};
@@ -1675,7 +1680,7 @@ void TestSrtMemoLogsFailedReads() {
   };
   uint32_t word = 0;
   SrtMemo memo;
-  memo.Begin(nullptr, {}, 0, {}, false, false);
+  memo.Begin(nullptr, {}, 0, {}, 0, false, false);
   memo.Record(false, 0x2000, std::span<const uint32_t>(&word, 1), false);
   word = 7;
   memo.Record(false, 0x2004, std::span<const uint32_t>(&word, 1), true);
@@ -1713,6 +1718,119 @@ void TestSrtReadPassPages() {
         "pass: a page that did not fit was reported quiet");
 }
 
+// S425: ordinary reads of a runtime without an ordinary reader (main mode: the walker copies host memory) are part of the memo.
+void TestSrtFastMemoDirectReads() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  constexpr uint32_t poison = 0xdeadbeefu;
+  uint32_t dword = 0x12345678;
+  auto plan = ExtractResourcePlan(SrtProgram(reinterpret_cast<uint64_t>(&dword)));
+  uint32_t specialization_reads = 0;
+  SrtRuntime runtime{.userdata = &specialization_reads,
+                     .read_specialization_memory = RejectSpecializationRead,
+                     .fast_mode = SrtFastMode::On};
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.srt_outcome == SrtMemoOutcome::Miss &&
+            snapshot.flattened_srt == std::vector<uint32_t>{0x12345678u} &&
+            snapshot.srt_memo.valid && !snapshot.srt_memo.reads.empty(),
+        "memo: a direct host read was not recorded");
+  snapshot.flattened_srt[0] = poison;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.srt_outcome == SrtMemoOutcome::Hit && snapshot.flattened_srt[0] == poison,
+        "memo: unchanged host memory did not reuse the snapshot");
+  dword = 0x0badf00du;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.srt_outcome == SrtMemoOutcome::Miss &&
+            snapshot.flattened_srt == std::vector<uint32_t>{0x0badf00du},
+        "memo: a changed host word was served from the memo");
+  // Shadow agrees on unchanged host memory and flags a change the memo would have missed.
+  runtime.fast_mode = SrtFastMode::Shadow;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.srt_outcome == SrtMemoOutcome::Hit,
+        "memo: shadow disagreed on unchanged host memory");
+  // A null table pointer reads zero and stays zero through the memo.
+  auto null_plan = ExtractResourcePlan(SrtProgram(0x18u));
+  ResourceSnapshot null_snapshot;
+  runtime.fast_mode = SrtFastMode::On;
+  Check(MaterializeResources(null_plan, runtime, null_snapshot, specialization) &&
+            null_snapshot.flattened_srt == std::vector<uint32_t>{0u},
+        "memo: the null-page direct read did not read zero");
+}
+
+// S425: the strict (specialization) reader path of an integer buffer count: the memo logs it and a changed value rebuilds the descriptor.
+void TestSrtFastMemoVectorRead() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Compute;
+  program.srt_plan_complete = program.resource_tracking_complete = true;
+  auto &block = AddValueBlock(program);
+  auto &handle = block.AppendNewInst(ValueOpcode::GetBufferResource,
+      {Value(0x1000u), Value(4u << 16u), Value(1u), Value(0x16204u)});
+  program.memory_info.push_back({.kind = ResourceKind::Buffer});
+  auto &count = block.AppendNewInst(ValueOpcode::LoadBufferU32,
+      {Value(&handle), Value(0u), Value(0u), Value(0u), Value(true)});
+  count.SetFlags(MemoryFlags{.index = 0});
+  auto &next = block.AppendNewInst(ValueOpcode::IAdd32, {Value(&count), Value(1u)});
+  DescriptorSource source;
+  source.dword_count = 4;
+  source.dwords = {Value(0x2000u), Value(4u << 16u), Value(&next), Value(0x16204u)};
+  program.descriptor_sources.push_back(source);
+  program.info.buffers.push_back({.source = 0, .written = false});
+  struct Reads { uint32_t value = 72; uint32_t strict = 0; } reads;
+  SrtRuntime runtime{
+      .userdata = &reads,
+      .read_specialization_memory = [](void *data, uint64_t address, std::span<uint32_t> words) {
+        auto &reads = *static_cast<Reads *>(data);
+        ++reads.strict;
+        if (address != 0x1000u || words.size() != 1) return false;
+        words[0] = reads.value;
+        return true;
+      },
+      .fast_mode = SrtFastMode::On};
+  auto plan = ExtractResourcePlan(program);
+  ResourceSnapshot snapshot;
+  ResourceSpecialization specialization;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.srt_outcome == SrtMemoOutcome::Miss && snapshot.buffers[0].dwords[2] == 73u,
+        "memo: strict read walk did not build the descriptor");
+  snapshot.buffers[0].dwords[2] = 1u;
+  reads.strict = 0;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.srt_outcome == SrtMemoOutcome::Hit && snapshot.buffers[0].dwords[2] == 1u && reads.strict != 0,
+        "memo: unchanged strict read did not reuse the descriptor (or skipped the read)");
+  reads.value = 40;
+  Check(MaterializeResources(plan, runtime, snapshot, specialization) &&
+            snapshot.srt_outcome == SrtMemoOutcome::Miss && snapshot.buffers[0].dwords[2] == 41u,
+        "memo: a changed strict read was served from the memo");
+}
+
+// S425: every input of the walk is part of the key.
+void TestSrtMemoKey() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  const int plan_a = 0, plan_b = 0;
+  std::array<uint32_t, 2> user{1u, 2u}, other_user{1u, 3u};
+  std::array<uint32_t, 3> groups{4u, 1u, 1u};
+  SrtMemo memo;
+  memo.Begin(&plan_a, user, 0x1000, groups, 0x2000, false, false);
+  memo.valid = true;
+  Check(memo.KeyMatches(&plan_a, user, 0x1000, groups, 0x2000, false, false), "memo key: identical inputs were rejected");
+  Check(!memo.KeyMatches(&plan_b, user, 0x1000, groups, 0x2000, false, false), "memo key: another plan hit");
+  Check(!memo.KeyMatches(&plan_a, other_user, 0x1000, groups, 0x2000, false, false), "memo key: other user data hit");
+  Check(!memo.KeyMatches(&plan_a, user, 0x1000, groups, 0x3000, false, false), "memo key: another indirect args address hit");
+  Check(!memo.KeyMatches(&plan_a, user, 0x1004, groups, 0x2000, false, false), "memo key: another shader base hit");
+  Check(!memo.KeyMatches(&plan_a, user, 0x1000, groups, 0x2000, true, false), "memo key: another min_lod_remap hit");
+  Check(!memo.KeyMatches(&plan_a, user, 0x1000, groups, 0x2000, false, true), "memo key: another reader set hit");
+}
+
+// S425: the quiet page rule of the pass includes the S419 in-flight window.
+void TestSrtPageQuiet() {
+  using Libs::LibKernel::Memory::SrtPageQuiet;
+  Check(SrtPageQuiet(false, false), "pass: a clean page was not quiet");
+  Check(!SrtPageQuiet(true, false), "pass: a GPU-dirty page was quiet");
+  Check(!SrtPageQuiet(false, true), "pass: a page with a download in flight was quiet");
+}
+
 int main() {
   TestMappedSrtUsesDirectReaderByDefault();
   TestNullPageSrtReadsZero();
@@ -1740,6 +1858,10 @@ int main() {
   TestSrtFastMemo();
   TestSrtMemoLogsFailedReads();
   TestSrtReadPassPages();
+  TestSrtFastMemoDirectReads();
+  TestSrtFastMemoVectorRead();
+  TestSrtMemoKey();
+  TestSrtPageQuiet();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }

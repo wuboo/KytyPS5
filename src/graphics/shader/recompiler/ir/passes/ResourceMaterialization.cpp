@@ -14,6 +14,7 @@
 #include <array>
 #include <bit>
 #include <cstdio>
+#include <cstring>
 #include <fmt/format.h>
 #include <functional>
 #include <numeric>
@@ -1550,9 +1551,27 @@ bool MemoRecordStrict(void* userdata, uint64_t address, std::span<uint32_t> valu
 	return ok;
 }
 
+// The ordinary reader of a runtime that has none (main mode): the walker copies host memory directly, below guest memory it reads
+// zeros (the same as SrtReadCapture::ReadOrdinary). The memo has to see these reads, so it installs this one in their place.
+constexpr uint64_t kMemoGuestMemoryMin = 0x40000;
+
+bool MemoDirectRead(void*, uint64_t address, std::span<uint32_t> values) {
+	if (address < kMemoGuestMemoryMin) {
+		std::ranges::fill(values, 0u);
+	} else {
+		std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
+	}
+	return true;
+}
+
 bool MemoRecordOrdinary(void* userdata, uint64_t address, std::span<uint32_t> values) {
 	auto&      recorder = *static_cast<MemoRecorder*>(userdata);
-	const bool ok       = recorder.source.read_memory(recorder.source.userdata, address, values);
+	const bool ok       = recorder.source.read_memory != nullptr
+	                          ? recorder.source.read_memory(recorder.source.userdata, address, values)
+	                          : MemoDirectRead(nullptr, address, values);
+#ifdef KYTY_SRTMEMO_MUTANT_NO_DIRECT
+	if (recorder.source.read_memory == nullptr) return ok;
+#endif
 	recorder.memo.Record(true, address, values, ok);
 	return ok;
 }
@@ -1571,17 +1590,19 @@ uint32_t FirstDifference(const ResourceSnapshot& before, const ResourceSnapshot&
 
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
+	// NullDesc (DIAG) notes what each walk read; a reused snapshot would keep the notes of the old one.
 	if (runtime.fast_mode == SrtFastMode::Off || runtime.read_specialization_memory == nullptr ||
-	    !program.resource_tracking_complete) {
+	    !program.resource_tracking_complete || NullDesc::Enabled()) {
 		snapshot.srt_outcome = SrtMemoOutcome::None;
 		return MaterializeResourcesWalk(program, runtime, snapshot, specialization);
 	}
 	auto&      memo     = snapshot.srt_memo;
 	const bool ordinary = runtime.read_memory != nullptr;
+	const auto replay_ordinary = ordinary ? runtime.read_memory : MemoDirectRead;
 	const bool predicted =
 	    memo.KeyMatches(&program, runtime.user_data, runtime.shader_base, runtime.workgroup_counts,
-	                    runtime.min_lod_remap, ordinary) &&
-	    memo.ReadsUnchanged(runtime.read_specialization_memory, runtime.read_memory, runtime.userdata);
+	                    runtime.indirect_args_address, runtime.min_lod_remap, ordinary) &&
+	    memo.ReadsUnchanged(runtime.read_specialization_memory, replay_ordinary, runtime.userdata);
 	if (predicted && runtime.fast_mode == SrtFastMode::On) {
 		snapshot.srt_outcome = SrtMemoOutcome::Hit;
 		return true;
@@ -1595,12 +1616,12 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	}
 	SrtMemo recorded;
 	recorded.Begin(&program, runtime.user_data, runtime.shader_base, runtime.workgroup_counts,
-	               runtime.min_lod_remap, ordinary);
+	               runtime.indirect_args_address, runtime.min_lod_remap, ordinary);
 	MemoRecorder recorder {runtime, recorded};
 	SrtRuntime   observed = runtime;
 	observed.userdata                   = &recorder;
 	observed.read_specialization_memory = MemoRecordStrict;
-	observed.read_memory                = ordinary ? MemoRecordOrdinary : nullptr;
+	observed.read_memory                = MemoRecordOrdinary;
 	const bool ok = MaterializeResourcesWalk(program, observed, snapshot, specialization);
 	if (ok) {
 		recorded.valid = true;
