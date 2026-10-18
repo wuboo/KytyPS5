@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/eagerSubmit.h"
+#include "graphics/host_gpu/renderer/gpuDone.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -27,6 +28,7 @@ bool CommandBuffer::IsInvalid() const {
 
 vk::CommandBuffer CommandBuffer::Handle() const {
 	EXIT_IF(IsInvalid());
+	if (!m_recorded && GpuDone::g_starve_diag) m_t_first_rec = FrameTiming::SteadyNowNs(); // S410
 	m_recorded = true;
 	return m_buffer;
 }
@@ -41,7 +43,8 @@ void CommandBuffer::Begin() {
 	auto result = buffer.begin(&begin_info);
 
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
-	m_recorded = false;
+	m_recorded       = false;
+	m_t_first_rec    = 0;
 }
 
 void CommandBuffer::End() const {

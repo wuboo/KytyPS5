@@ -839,6 +839,9 @@ target_compile_definitions(cp_sampler_mutant_no_restore_tests PRIVATE KYTY_CPSAM
 # S406: GPU busy-time estimate from timeline completions. Mutant: no max with the previous completion.
 add_executable(gpu_done_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GpuDoneTests.cpp")
 target_include_directories(gpu_done_tests PRIVATE ${inc_headers})
+add_executable(gpu_done_mutant_starve_no_firstrec_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GpuDoneTests.cpp")
+target_include_directories(gpu_done_mutant_starve_no_firstrec_tests PRIVATE ${inc_headers})
+target_compile_definitions(gpu_done_mutant_starve_no_firstrec_tests PRIVATE KYTY_GPUDONE_MUTANT_STARVE_NO_FIRSTREC=1)
 add_executable(gpu_done_mutant_no_max_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GpuDoneTests.cpp")
 target_include_directories(gpu_done_mutant_no_max_tests PRIVATE ${inc_headers})
 target_compile_definitions(gpu_done_mutant_no_max_tests PRIVATE KYTY_GPUDONE_MUTANT_NO_MAX=1)
@@ -1399,6 +1402,8 @@ if(BUILD_TESTING)
 	add_test(NAME gpu_done COMMAND $<TARGET_FILE:gpu_done_tests>)
 	add_test(NAME gpu_done_mutant_no_max COMMAND $<TARGET_FILE:gpu_done_mutant_no_max_tests>)
 	set_tests_properties(gpu_done_mutant_no_max PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME gpu_done_mutant_starve_no_firstrec COMMAND $<TARGET_FILE:gpu_done_mutant_starve_no_firstrec_tests>)
+	set_tests_properties(gpu_done_mutant_starve_no_firstrec PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME mat_memo_shadow COMMAND $<TARGET_FILE:mat_memo_shadow_tests>)
 	add_test(NAME mat_memo_shadow_mutant_ignore_flat COMMAND $<TARGET_FILE:mat_memo_shadow_mutant_ignore_flat_tests>)
 	set_tests_properties(mat_memo_shadow_mutant_ignore_flat PROPERTIES WILL_FAIL TRUE)
@@ -1699,6 +1704,7 @@ if(BUILD_TESTING)
 		cp_sampler_mutant_no_restore_tests
 		gpu_done_tests
 		gpu_done_mutant_no_max_tests
+		gpu_done_mutant_starve_no_firstrec_tests
 		mat_memo_shadow_tests
 		mat_memo_shadow_mutant_ignore_flat_tests
 		spec_shadow_tests

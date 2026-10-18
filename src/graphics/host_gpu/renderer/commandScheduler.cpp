@@ -119,7 +119,17 @@ CommandScheduler::CommandScheduler(RenderContext& context, GraphicContext& graph
 			    }
 		    },
 		    [] { return FrameTiming::SteadyNowNs(); },
-		    [](uint64_t ns) { FrameTiming::Add(FrameTiming::Counter::GpuActiveEstNs, ns); });
+		    [](uint64_t ns) { FrameTiming::Add(FrameTiming::Counter::GpuActiveEstNs, ns); },
+		    [this](const GpuDone::Starve& starve, GpuDone::SubmitReason reason) { // S410
+			    if (!m_starve_diag) return;
+			    using FrameTiming::Counter;
+			    FrameTiming::Add(Counter::GpuStarveNs, starve.total_ns);
+			    FrameTiming::Add(Counter::GpuStarveWorkNs, starve.work_ns);
+			    if (starve.total_ns >= 20'000ull) FrameTiming::Add(Counter::GpuStarveN);
+			    if (starve.total_ns >= 1'000'000ull) FrameTiming::Add(Counter::GpuStarveGe1msN);
+			    FrameTiming::Add(static_cast<Counter>(static_cast<uint32_t>(Counter::GpuStarveWorkDrainNs) + static_cast<uint32_t>(reason)),
+			                     starve.work_ns);
+		    });
 	}
 }
 
@@ -221,6 +231,7 @@ void CommandScheduler::Flush() {
 	if (skip_empty && !m_command.IsInvalid() && !m_command.m_recorded &&
 	    !HasOperationsAtCurrentTick()) {
 		FrameTiming::Add(FrameTiming::Counter::SkippedSubmits);
+		m_next_reason = GpuDone::SubmitReason::Other;
 		return;
 	}
 	SubmitInfo submit;
@@ -241,7 +252,11 @@ void CommandScheduler::RequestFlush() {
 	if (m_flush_requests++ == 0) {
 		m_first_flush_request = now;
 	}
-	if (m_flush_requests >= max || now - m_first_flush_request >= std::chrono::milliseconds(1)) {
+	if (m_flush_requests >= max) {
+		m_next_reason = GpuDone::SubmitReason::LazyMax;
+		FlushPending();
+	} else if (now - m_first_flush_request >= std::chrono::milliseconds(1)) {
+		m_next_reason = GpuDone::SubmitReason::Lazy1ms;
 		FlushPending();
 	} else {
 		FrameTiming::Add(FrameTiming::Counter::FlushesDeferred);
@@ -251,6 +266,8 @@ void CommandScheduler::RequestFlush() {
 void CommandScheduler::FlushPending() {
 	if (m_flush_requests != 0) {
 		m_flush_requests = 0;
+		// Called without a reason = by the GPU thread that is about to wait with nothing runnable.
+		if (m_next_reason == GpuDone::SubmitReason::Other) m_next_reason = GpuDone::SubmitReason::LazyIdle;
 		Flush();
 	}
 }
@@ -268,6 +285,7 @@ void CommandScheduler::Flush(SubmitInfo& submit) {
 }
 
 void CommandScheduler::FlushAndWait() {
+	m_next_reason = GpuDone::SubmitReason::Drain;
 	NoteDrainBegin();
 	const auto tick = Submit();
 	m_master.Wait(tick);
@@ -280,6 +298,7 @@ void CommandScheduler::Finish() {
 	NoteDrainBegin();
 	FrameTiming::Add(FrameTiming::Counter::Finishes);
 	if (!m_command.IsInvalid()) {
+		m_next_reason = GpuDone::SubmitReason::Drain;
 		Submit();
 	}
 	m_master.Wait(CurrentTick() - 1);
@@ -296,6 +315,7 @@ void CommandScheduler::Wait(uint64_t tick) {
 		// A stream-buffer wrap can wait while a draw is being prepared through a reference to
 		// Current(). The wrapper stays stable while its pooled Vulkan buffer is retired. Deferred
 		// resources are released only at the next GPU operation boundary.
+		m_next_reason             = GpuDone::SubmitReason::Drain;
 		const auto submitted_tick = Submit();
 		EXIT_IF(submitted_tick != tick);
 		m_master.Wait(tick);
@@ -471,6 +491,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 		m_seg_first_pending = false;
 	}
 	m_flush_requests = 0; // this submit carries everything a pending flush would
+	const int64_t t_first_rec = m_command.m_recorded ? m_command.m_t_first_rec : 0; // S410 (End() below marks the buffer recorded)
 	m_command.End();
 	ConsumeSegPassEnd(); // End() closed the last pass; the first pass end of the segment may be that one
 	const auto buffer   = m_command.m_buffer;
@@ -487,6 +508,9 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	job.debug_args[3]   = m_command.m_debug_arg3;
 	job.debug_arg4      = m_command.m_debug_arg4;
 	job.first_seg       = first_after_drain;
+	job.t_first_rec     = t_first_rec; // S410
+	job.reason          = m_next_reason;
+	m_next_reason       = GpuDone::SubmitReason::Other;
 	job.queued_ns       = first_after_drain ? FrameTiming::SteadyNowNs() : 0; // S328 (the async path overwrites it with the same clock)
 	// Only timeline-only submissions may be deferred: a binary semaphore wait/signal must reach
 	// the queue before whatever the caller does next (e.g. vkQueuePresentKHR).
@@ -558,7 +582,7 @@ void CommandScheduler::QueueSubmitNow(SubmitJob& job) {
 		                  job.debug_args[3], job.debug_arg4);
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
-	if (m_gpu_done) m_gpu_done->NoteSubmit(job.tick); // S406: the moment vkQueueSubmit returned
+	if (m_gpu_done) m_gpu_done->NoteSubmit(job.tick, job.t_first_rec, job.reason); // S406: the moment vkQueueSubmit returned
 }
 
 void CommandScheduler::EnableAsyncSubmit() {
@@ -645,8 +669,19 @@ uint64_t EagerMinUs() {
 }
 } // namespace
 
+void CommandScheduler::EnableStarveDiag() {
+	const char* v = std::getenv("KYTY_DIAG_STARVE");
+	if (!FrameTiming::DiagFlagOn(v)) return;
+	if (!m_gpu_done) {
+		LOGF("KYTY_DIAG_STARVE=1 needs KYTY_DIAG_GPU_DONE=1: gpu_starve_* stay 0\n");
+		return;
+	}
+	m_starve_diag          = true;
+	GpuDone::g_starve_diag = true;
+}
+
 // Asks the policy; true = the buffer was split (when pass_closing, the open pass was closed first and *closed_pass is set).
-bool CommandScheduler::EagerSplitNow(bool pass_closing, bool* closed_pass, bool mid_pass) {
+bool CommandScheduler::EagerSplitNow(bool pass_closing, bool* closed_pass, bool mid_pass, GpuDone::SubmitReason reason) {
 	Sync::EagerQuery query;
 	query.enabled      = true;
 	query.pass_open    = RenderingOpen();
@@ -658,7 +693,20 @@ bool CommandScheduler::EagerSplitNow(bool pass_closing, bool* closed_pass, bool 
 	query.mid_mode     = mid_pass && EagerMidEnabled();
 	query.first_cb_after_drain = m_seg_first_pending && m_drain_depth == 0;
 	query.mid_splits   = m_seg_mid_splits;
-	if (!Sync::ShouldEagerSplit(query)) return false;
+	if (!Sync::ShouldEagerSplit(query)) {
+		if (m_starve_diag && m_master.KnownGpuTick() + 1 >= CurrentTick()) { // S410: declined although the GPU is idle (no Refresh)
+			using FrameTiming::Counter;
+			switch (Sync::EagerDeclineReason(query)) {
+			case Sync::EagerDecline::NoWork: FrameTiming::Add(Counter::EagerDeclineNoWorkN); break;
+			case Sync::EagerDecline::PassOpen: FrameTiming::Add(Counter::EagerDeclinePassOpenN); break;
+			case Sync::EagerDecline::FirstCbOnly: FrameTiming::Add(Counter::EagerDeclineFirstCbOnlyN); break;
+			case Sync::EagerDecline::MidLimit: FrameTiming::Add(Counter::EagerDeclineMidLimitN); break;
+			case Sync::EagerDecline::Age: FrameTiming::Add(Counter::EagerDeclineAgeN); break;
+			case Sync::EagerDecline::None: break;
+			}
+		}
+		return false;
+	}
 	m_master.Refresh();
 	query.gpu_idle = m_master.KnownGpuTick() + 1 >= CurrentTick();
 	if (!Sync::ShouldEagerSplit(query)) return false;
@@ -666,6 +714,7 @@ bool CommandScheduler::EagerSplitNow(bool pass_closing, bool* closed_pass, bool 
 		m_command.EndRendering();
 		*closed_pass = true;
 	}
+	m_next_reason = reason;
 	Flush();
 	return true;
 }
@@ -673,7 +722,7 @@ bool CommandScheduler::EagerSplitNow(bool pass_closing, bool* closed_pass, bool 
 void CommandScheduler::MaybeEagerSplit() {
 	if (!EagerEnabled() || !Active() || m_command.IsInvalid() || InDeferredOperation() || m_in_pre_submit) return;
 	bool closed = false;
-	if (EagerSplitNow(false, &closed)) FrameTiming::Add(FrameTiming::Counter::EagerSubmitN);
+	if (EagerSplitNow(false, &closed, false, GpuDone::SubmitReason::Eager)) FrameTiming::Add(FrameTiming::Counter::EagerSubmitN);
 }
 
 void CommandScheduler::MaybeEagerSplitAtPass(const RenderState& next) {
@@ -682,13 +731,13 @@ void CommandScheduler::MaybeEagerSplitAtPass(const RenderState& next) {
 	bool closed = false;
 	if (m_command.SamePass(next)) {
 		// S328: the draw continues the open pass; the policy may still split it in the middle (first buffer after a drain only).
-		if (!EagerMidEnabled() || !EagerSplitNow(false, &closed, true)) return;
+		if (!EagerMidEnabled() || !EagerSplitNow(false, &closed, true, GpuDone::SubmitReason::EagerMid)) return;
 		++m_seg_mid_splits;
 		FrameTiming::Add(FrameTiming::Counter::EagerMidN);
 		m_command.ArmReopenLoad(); // the new buffer reopens this pass with loadOp=LOAD
 		return;
 	}
-	if (EagerSplitNow(true, &closed)) FrameTiming::Add(FrameTiming::Counter::EagerSubmitPassN);
+	if (EagerSplitNow(true, &closed, false, GpuDone::SubmitReason::EagerPass)) FrameTiming::Add(FrameTiming::Counter::EagerSubmitPassN);
 }
 
 void CommandScheduler::ConsumeSegPassEnd() {
