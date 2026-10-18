@@ -31,6 +31,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/cpSampler.h"
+#include "graphics/host_gpu/renderer/pvRangeGen.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -1507,26 +1508,81 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 		// The scan of a big index buffer is the expensive part; meshes recur, so it is memoized by the
 		// content hash exactly like the prototype does.
 		constexpr uint32_t kNoDropLimit = 0x7fffffffu; // only negative vertex numbers count as dropped
-		FrameTiming::Add(FrameTiming::Counter::PvVsstoreIndexBytes, index_source.size);
-		uint64_t index_hash;
-		{
-			KYTY_CP_SITE(PvIndexHash);
-			index_hash = XXH3_64bits(idx_bytes, index_source.size);
+		// S406 (KYTY_PV_RANGE_GEN=0|1|shadow): the page generation of the index range can stand in for the hash of its bytes.
+		const auto             gen_mode = PvRangeGen::EnvMode();
+		const PvRangeGen::Key  gen_key {index_source.address, index_source.size, element_size, draw.index_count,
+		                                emit.vertex_offset, kNoDropLimit};
+		PvRangeGen::Probe      gen_probe;
+		const PvRangeGen::Entry* gen_entry = nullptr;
+		auto                   gen_outcome = PvRangeGen::Outcome::IneligibleHost;
+		if (gen_mode != PvRangeGen::Mode::Off) {
+			gen_probe.host_data = index_source.host_data != nullptr;
+			if (!gen_probe.host_data) {
+				const auto generation = m_context.GetBufferCache().QueryPageGeneration(index_source.address, index_source.size);
+				gen_probe.registered  = generation.registered;
+				gen_probe.clean       = generation.clean;
+				gen_probe.max_stamp   = generation.max_stamp;
+				gen_entry             = m_pv_range_gen.Find(gen_key);
+			}
+			gen_outcome = PvRangeGen::Decide(gen_probe, gen_entry);
+			using C = FrameTiming::Counter;
+			switch (gen_outcome) {
+				case PvRangeGen::Outcome::IneligibleHost: FrameTiming::Add(C::PvGenIneligibleHostN); break;
+				case PvRangeGen::Outcome::IneligibleUnregistered: FrameTiming::Add(C::PvGenIneligibleUnregN); break;
+				case PvRangeGen::Outcome::IneligibleDirty: FrameTiming::Add(C::PvGenIneligibleDirtyN); break;
+				case PvRangeGen::Outcome::Miss: FrameTiming::Add(C::PvGenMissN); break;
+				case PvRangeGen::Outcome::Hit: FrameTiming::Add(C::PvGenHitN); break;
+			}
 		}
-		const PerVertexRangeMemo::Key memo_key {index_hash, index_source.size,
-		                                        element_size, draw.index_count, emit.vertex_offset, kNoDropLimit};
 		PerVertexRecordRange range;
 		bool                 known = false;
-		const auto           memoized = m_prototype_range_memo.Find(memo_key);
-		if (memoized.found) {
-			range = memoized.range;
-			known = memoized.derivable;
+		if (gen_mode == PvRangeGen::Mode::On && gen_outcome == PvRangeGen::Outcome::Hit) {
+			range = {gen_entry->range.first, gen_entry->range.end, gen_entry->range.dropped};
+			known = gen_entry->derivable;
+			FrameTiming::Add(FrameTiming::Counter::PvHashBytesSkipped, index_source.size);
 		} else {
-			KYTY_CP_SITE(PvRangeScan);
-			known = ComputePerVertexRecordRange(true, idx_bytes, index_source.size, element_size,
-			                                    draw.index_count, emit.first_vertex, emit.vertex_offset,
-			                                    kNoDropLimit, range);
-			m_prototype_range_memo.Insert(memo_key, known, range);
+			FrameTiming::Add(FrameTiming::Counter::PvVsstoreIndexBytes, index_source.size);
+			uint64_t index_hash;
+			{
+				KYTY_CP_SITE(PvIndexHash);
+				index_hash = XXH3_64bits(idx_bytes, index_source.size);
+			}
+			const PerVertexRangeMemo::Key memo_key {index_hash, index_source.size,
+			                                        element_size, draw.index_count, emit.vertex_offset, kNoDropLimit};
+			const auto memoized = m_prototype_range_memo.Find(memo_key);
+			if (memoized.found) {
+				range = memoized.range;
+				known = memoized.derivable;
+			} else {
+				KYTY_CP_SITE(PvRangeScan);
+				known = ComputePerVertexRecordRange(true, idx_bytes, index_source.size, element_size,
+				                                    draw.index_count, emit.first_vertex, emit.vertex_offset,
+				                                    kNoDropLimit, range);
+				m_prototype_range_memo.Insert(memo_key, known, range);
+			}
+			if (gen_mode != PvRangeGen::Mode::Off) {
+				const PvRangeGen::Range current {range.first, range.end, range.dropped};
+				if (gen_outcome == PvRangeGen::Outcome::Hit) {
+					// Shadow: what the hash would have skipped, and whether the generation told the truth.
+					FrameTiming::Add(FrameTiming::Counter::PvHashBytesSkipped, index_source.size);
+					const auto comparison = PvRangeGen::Compare(*gen_entry, index_hash, known, current);
+					if (comparison.Mismatch()) {
+						FrameTiming::Add(FrameTiming::Counter::PvGenMismatchN);
+						static std::atomic<uint32_t> mismatch_logged {0};
+						if (mismatch_logged.fetch_add(1, std::memory_order_relaxed) < 20) {
+							LOGF("[pv-gen-mismatch] flip=%" PRIu64 " addr=0x%" PRIx64 " bytes=%" PRIu64 " index_count=%u hash_differs=%d "
+							     "range_differs=%d stamp=%" PRIu64 " memo_range=%" PRIu64 "..%" PRIu64 " now=%" PRIu64 "..%" PRIu64 "\n",
+							     FrameTiming::GuestFlips(), index_source.address, index_source.size, draw.index_count,
+							     comparison.hash_differs ? 1 : 0, comparison.range_differs ? 1 : 0, gen_probe.max_stamp,
+							     gen_entry->range.first, gen_entry->range.end, current.first, current.end);
+						}
+					}
+				}
+				if (gen_outcome == PvRangeGen::Outcome::Hit || gen_outcome == PvRangeGen::Outcome::Miss) {
+					// The stamp was read before the bytes were hashed: a write in between only makes the entry miss later.
+					m_pv_range_gen.Insert(gen_key, {gen_probe.max_stamp, index_hash, known, current});
+				}
+			}
 		}
 		request.range_known   = known;
 		request.range_dropped = range.dropped;

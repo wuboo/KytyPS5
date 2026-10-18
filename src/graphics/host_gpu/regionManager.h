@@ -5,6 +5,8 @@
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/regionDefinitions.h"
 
+#include <algorithm>
+#include <array>
 #include <atomic>
 #include <mutex>
 #include <utility>
@@ -77,6 +79,15 @@ private:
 
 static_assert(std::atomic_uint32_t::is_always_lock_free);
 
+// S406 (KYTY_PV_RANGE_GEN): one stamp per page, taken from a process-wide clock every time the page BECOMES CPU- or GPU-modified.
+// A stamp is greater than every stamp given before it, so the maximum over a range grows whenever any page of it changes; a
+// cached result is valid while the range is clean (neither CPU- nor GPU-modified: its pages are write-protected, so a write would
+// fault and take a new stamp) and the maximum is the one seen when the result was made. Clearing a dirty bit does not take a stamp.
+inline std::atomic<uint64_t>& PageStampClock() {
+	static std::atomic<uint64_t> clock {0};
+	return clock;
+}
+
 class RegionManager final {
 public:
 	RegionManager(PageManager& page_manager, uint64_t cpu_addr)
@@ -113,6 +124,17 @@ public:
 		}
 		auto& bits = GetBits<source>();
 		if constexpr (enable) {
+#if defined(KYTY_MEMTRACKER_MUTANT_NO_BUMP_CPU)
+			constexpr bool stamp = source != DirtySource::Cpu;
+#elif defined(KYTY_MEMTRACKER_MUTANT_NO_BUMP_GPU)
+			constexpr bool stamp = source != DirtySource::Gpu;
+#else
+			constexpr bool stamp = true;
+#endif
+			if constexpr (stamp) {
+				const auto value = PageStampClock().fetch_add(1, std::memory_order_relaxed) + 1;
+				for (size_t page = start; page < end; ++page) m_stamps[page] = value;
+			}
 			bits.SetRange(start, end);
 		} else {
 			bits.UnsetRange(start, end);
@@ -122,6 +144,14 @@ public:
 		} else {
 			UpdateProtection<enable, true>();
 		}
+	}
+
+	// Largest page stamp over the pages of [vaddr, vaddr + size) (0: no page of it ever became modified).
+	[[nodiscard]] uint64_t MaxStamp(uint64_t vaddr, uint64_t size) const {
+		const auto [start, end] = GetPageRange(vaddr, size);
+		uint64_t result = 0;
+		for (size_t page = start; page < end; ++page) result = std::max(result, m_stamps[page]);
+		return result;
 	}
 
 	template <DirtySource source, bool clear, typename Func>
@@ -194,6 +224,7 @@ private:
 	RegionBits   m_gpu_dirty;
 	RegionBits   m_writable;
 	RegionBits   m_readable;
+	std::array<uint64_t, TRACKER_REGION_PAGES> m_stamps {};
 };
 
 } // namespace Libs::Graphics

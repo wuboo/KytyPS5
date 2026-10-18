@@ -95,6 +95,24 @@ bool MemoryTracker::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 	});
 }
 
+MemoryTracker::PageGeneration MemoryTracker::QueryPageGeneration(uint64_t vaddr, uint64_t size) {
+	CheckNotInUploadCallback();
+	PageGeneration result;
+	result.clean     = true;
+	uint64_t covered = 0;
+	Iterate<false>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
+		std::scoped_lock lock(manager->lock);
+		covered += bytes;
+		if (manager->IsModified<DirtySource::Cpu>(offset, bytes) || manager->IsModified<DirtySource::Gpu>(offset, bytes)) {
+			result.clean = false;
+		}
+		result.max_stamp = std::max(result.max_stamp, manager->MaxStamp(manager->GetCpuAddr() + offset, bytes));
+	});
+	result.registered = covered == size;
+	result.clean      = result.clean && result.registered;
+	return result;
+}
+
 void MemoryTracker::MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size) {
 	CheckNotInUploadCallback();
 	Iterate<true>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {

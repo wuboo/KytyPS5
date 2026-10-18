@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "graphics/host_gpu/renderer/perVertexTransform.h"
+#include "graphics/host_gpu/renderer/pvRangeGen.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/indirectGpu.h"
@@ -314,6 +315,7 @@ private:
 	};
 	std::unordered_map<uint64_t, CachedPrototypeCapture> m_prototype_capture_cache;
 	PerVertexRangeMemo                                   m_prototype_range_memo;
+	PvRangeGen::Memo                                     m_pv_range_gen; // S406 (KYTY_PV_RANGE_GEN)
 	std::shared_ptr<PvVsStoreRuntime>                    m_pv_vsstore; // S150, created on the first VS-store draw
 
 	// Batching of consecutive per-vertex-prototype replay draws into one render pass (see

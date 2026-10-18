@@ -25,6 +25,14 @@ public:
 
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
+	// S406 (KYTY_PV_RANGE_GEN): generation of a range. `registered`: every region of it exists in the tracker; `clean`: registered and
+	// neither CPU- nor GPU-modified (so write-protected); `max_stamp`: see PageStampClock.
+	struct PageGeneration {
+		bool     registered = false;
+		bool     clean      = false;
+		uint64_t max_stamp  = 0;
+	};
+	[[nodiscard]] PageGeneration QueryPageGeneration(uint64_t vaddr, uint64_t size);
 	void               MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size);
 	void               MarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	void               UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);

@@ -52,7 +52,11 @@ using Libs::Graphics::TRACKER_ADDRESS_SIZE;
 void Check(bool value, const char *text) {
   if (!value) {
     std::fprintf(stderr, "MemoryTrackerTests: failed: %s\n", text);
+#if defined(KYTY_MEMTRACKER_MUTANT_NO_BUMP_CPU) || defined(KYTY_MEMTRACKER_MUTANT_NO_BUMP_GPU)
+    std::_Exit(1); // a mutant must fail with an exit code (an abort is not inverted by WILL_FAIL)
+#else
     std::abort();
+#endif
   }
 }
 
@@ -414,6 +418,64 @@ void TestCpuDirtyUpload() {
   Check(tracker.IsRegionCpuModified(address, page_size) && IsWritable(memory),
         "explicit CPU dirtiness did not release write protection");
   tracker.UntrackMemory(address, page_size * 2);
+  Release(memory);
+}
+
+// S406 (KYTY_PV_RANGE_GEN): page stamps. A stamp is taken when a page BECOMES CPU- or GPU-modified (never when it is cleaned), so the
+// maximum over a range moves whenever any page of it was written, and a range that is clean again after a write still shows it.
+// Mutants NO_BUMP_CPU / NO_BUMP_GPU (compile definitions of this target) must fail here.
+void TestPageGeneration() {
+  TrackerHarness harness;
+  auto &tracker = harness.tracker;
+  auto &page_manager = harness.page_manager;
+  const auto page_size = page_manager.GetPageSize();
+  auto *memory = Allocate(page_manager, 4);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+  const auto whole = page_size * 4;
+
+  auto q = tracker.QueryPageGeneration(address, whole);
+  Check(!q.registered && !q.clean, "a range of a region the tracker never saw is not registered");
+  Check(tracker.IsRegionCpuModified(address, whole), "new region is CPU dirty");
+  q = tracker.QueryPageGeneration(address, whole);
+  Check(q.registered && !q.clean, "registered but CPU dirty is not clean");
+
+  const auto make_clean = [&] {
+    tracker.ForEachUploadRange(
+        address, whole, false, [&](uint64_t, uint64_t) noexcept {}, [&]() noexcept {});
+  };
+  make_clean();
+  q = tracker.QueryPageGeneration(address, whole);
+  const auto s0 = q.max_stamp;
+  Check(q.registered && q.clean, "an uploaded range is clean");
+
+  tracker.MarkRegionAsCpuModified(address + page_size + 16, 32); // page 1
+  q = tracker.QueryPageGeneration(address, whole);
+  const auto s1 = q.max_stamp;
+  Check(!q.clean && s1 > s0, "a CPU write took a newer stamp");
+  const auto page0 = tracker.QueryPageGeneration(address, page_size);
+  Check(page0.clean && page0.max_stamp == s0, "a write to page 1 does not move page 0");
+  make_clean();
+  q = tracker.QueryPageGeneration(address, whole);
+  Check(q.clean && q.max_stamp == s1, "cleaning takes no stamp: the range is clean again and still shows the write");
+
+  tracker.MarkRegionAsGpuModified(address, page_size);
+  q = tracker.QueryPageGeneration(address, whole);
+  const auto s2 = q.max_stamp;
+  Check(!q.clean && s2 > s1, "a GPU write took a newer stamp");
+  tracker.UnmarkRegionAsGpuModified(address, page_size);
+  q = tracker.QueryPageGeneration(address, whole);
+  Check(q.clean && q.max_stamp == s2, "unmarking takes no stamp");
+
+  bool flushed = false;
+  tracker.InvalidateRegion(address + 2 * page_size, page_size, [&] { flushed = true; });
+  q = tracker.QueryPageGeneration(address, whole);
+  Check(!flushed && !q.clean && q.max_stamp > s2, "invalidation (the fault route) took a newer stamp");
+
+  // A range that runs into a region the tracker has not created is not registered.
+  q = tracker.QueryPageGeneration(address, whole + Libs::Graphics::TRACKER_REGION_SIZE);
+  Check(!q.registered && !q.clean, "a range leaving the registered regions is not registered");
+
+  tracker.UntrackMemory(address, whole);
   Release(memory);
 }
 
@@ -1280,6 +1342,7 @@ int main(int argc, char **argv) {
   TestQueriesDoNotRequireMappedOwnership();
   TestConcurrentRegionPublication();
   TestCpuDirtyUpload();
+  TestPageGeneration();
   TestBdaSyncDirtiness();
   TestBdaSyncConcurrentDrain();
   TestCleanUploadPreservesOwnership();
