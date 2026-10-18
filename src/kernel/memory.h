@@ -142,6 +142,11 @@ bool                   TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t
 // in-flight GPU->host copy is checked once; later reads inside it go straight to TryReadBacking, exactly what
 // TryReadBufferBacking would have done for them. Not safe across a submit: make a new pass per walk.
 bool                   TryReadBufferBackingPass(uint64_t vaddr, void* data, uint64_t size, SrtReadPass* pass);
+// S430 (KYTY_SPEC_READ_FAST): TryReadBufferBacking through the page cache of specPageCache.h (same result, same drains and waits for pages
+// that are not quiet). *hit: served from an entry without asking the sync state. SpecPageQuietCached: the page of a range inside one page
+// is remembered as quiet (the answer "not GPU-dirty" without a query).
+bool                   TryReadBufferBackingFast(uint64_t vaddr, void* data, uint64_t size, bool* hit);
+bool                   SpecPageQuietCached(uint64_t vaddr, uint64_t size);
 // True when the GPU thread still has unflushed bytes for this range (S419, KYTY_CP_READ_BACKING != 0: or a GPU->host copy of it is not published yet).
 // Safe off that thread: returns false.
 bool                   QueryShaderGpuDirty(uint64_t vaddr, uint64_t size);

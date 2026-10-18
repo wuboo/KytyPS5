@@ -9,6 +9,7 @@
 // Pure part; tests/GuestFaultSyncTests.cpp pins it.
 
 #include "graphics/host_gpu/rangeSet.h"
+#include "kernel/specPageCache.h"
 #include "graphics/host_gpu/renderer/cache/inflightRanges.h"
 
 #include <cstdint>
@@ -21,6 +22,10 @@ public:
 	void Add(uint64_t address, uint64_t size) {
 		std::lock_guard lock(m_mutex);
 		m_set.Add(address, size);
+		// S430 (KYTY_SPEC_READ_FAST): pages of this range are no longer quiet.
+#ifndef KYTY_SPECFAST_MUTANT_FAST_NO_INVALIDATE_ON_WRITE
+		Libs::LibKernel::Memory::SpecPageCache::OnRangeBecameBusy(address, size);
+#endif
 	}
 
 	void Subtract(uint64_t address, uint64_t size) {

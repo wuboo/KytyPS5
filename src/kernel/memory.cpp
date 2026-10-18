@@ -12,6 +12,7 @@
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
 #include "kernel/guestDriverMemory.h"
+#include "kernel/specPageCache.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
 
@@ -931,6 +932,45 @@ bool TryReadBufferBackingPass(uint64_t vaddr, void* data, uint64_t size, SrtRead
 		return TryReadBacking(vaddr, data, size);
 	}
 	return TryReadBufferBacking(vaddr, data, size);
+}
+
+namespace {
+// S430: what ReadViaPageCache asks of the world (specPageCache.h).
+template <typename Buffers>
+struct SpecFastHooks {
+	Buffers& buffers;
+	bool     track_inflight;
+	uint64_t MapSeq() const { return g_guest_address_space->MapSeq(); }
+	bool     Dirty(uint64_t page) { return buffers.HasGpuDirtyBytes(page, SpecPageCache::PageSize); }
+	bool     Inflight(uint64_t page) { return track_inflight && buffers.HasInflightDownloadBytes(page, SpecPageCache::PageSize); }
+	bool     ResolvePage(uint64_t page, const uint8_t** host, uint64_t* seq) {
+        return g_guest_address_space->TryResolveBackingPage(page, host, seq);
+	}
+	bool Full(uint64_t vaddr, void* data, uint64_t size) { return TryReadBufferBacking(vaddr, data, size); }
+};
+} // namespace
+
+bool TryReadBufferBackingFast(uint64_t vaddr, void* data, uint64_t size, bool* hit) {
+	bool unused = false;
+	if (hit == nullptr) hit = &unused;
+	*hit = false;
+	if (size == 0 || g_gpu_resources == nullptr || g_guest_address_space == nullptr || !IsGpuAddressRange(vaddr, size)) {
+		return TryReadBufferBacking(vaddr, data, size);
+	}
+	if (!Graphics::GuestGpu::IsGpuThread()) {
+		return false;
+	}
+	auto&                               buffers = GetGpuResources().GetBufferCache();
+	SpecFastHooks<decltype(buffers)>    hooks {buffers, Graphics::CpReadBacking::EnvMode() != Graphics::CpReadBacking::Mode::Off};
+	return ReadViaPageCache(SpecPageCache::Global(), hooks, vaddr, data, size, hit);
+}
+
+bool SpecPageQuietCached(uint64_t vaddr, uint64_t size) {
+	if (size == 0 || g_guest_address_space == nullptr || ((vaddr ^ (vaddr + size - 1)) & SpecPageCache::PageMask) != 0 ||
+	    !Graphics::GuestGpu::IsGpuThread()) {
+		return false;
+	}
+	return SpecPageCache::Global().Lookup(vaddr & SpecPageCache::PageMask, g_guest_address_space->MapSeq()) != nullptr;
 }
 
 // S421 (KYTY_DIAG_GUEST_FAULT): remember the backing reads of the command processor for the [gf] line.

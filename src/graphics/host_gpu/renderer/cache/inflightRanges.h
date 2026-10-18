@@ -8,6 +8,8 @@
 // Remove(a, n) takes away exactly one Add(a, n). Add runs on the GPU thread, Remove on the priority-operation thread, hence the mutex.
 // Pure part; tests/InflightRangesTests.cpp pins it.
 
+#include "kernel/specPageCache.h"
+
 #include <algorithm>
 #include <cstdint>
 #include <mutex>
@@ -21,6 +23,10 @@ public:
 		if (size == 0) return;
 		std::lock_guard lock(m_mutex);
 		m_entries.push_back({address, address + size});
+		// S430 (KYTY_SPEC_READ_FAST): pages of this range are no longer quiet.
+#if !defined(KYTY_SPECFAST_MUTANT_NO_INFLIGHT_INVALIDATE) && !defined(KYTY_SPECFAST_MUTANT_FAST_NO_INVALIDATE_ON_WRITE)
+		Libs::LibKernel::Memory::SpecPageCache::OnRangeBecameBusy(address, size);
+#endif
 	}
 
 	void Remove(uint64_t address, uint64_t size) {

@@ -23,6 +23,7 @@
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/cpSampler.h"
 #include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
+#include "kernel/specPageCache.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/presentation/srtFast.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -366,6 +367,9 @@ struct ShaderReadContext {
 bool SpecDiagOn() {
 	static const bool on = [] {
 		const bool diag = CpSampler::Enabled() || CpPhases::Enabled();
+		const auto fast = Libs::LibKernel::Memory::SpecFastEnvMode();
+		LOGF("[spec-read-fast] mode=%s\n", fast == Libs::LibKernel::Memory::SpecFastMode::On ? "1"
+		                                    : fast == Libs::LibKernel::Memory::SpecFastMode::Shadow ? "shadow" : "0");
 		if (diag) ShaderRecompiler::IR::SrtWalkPaths::Active().store(true, std::memory_order_relaxed);
 		return diag;
 	}();
@@ -386,6 +390,58 @@ void DrainSrtWalkPaths() {
 	FrameTiming::Add(C::SrtInterpSlotsN, at(Path::InterpSlots));
 }
 
+// S430 (KYTY_SPEC_READ_FAST): tallies of the CP thread, added to FrameTiming once per Get() (NoteSrtMemo).
+struct SpecFastTally {
+	uint64_t hit = 0, miss = 0, stale = 0, mismatch = 0;
+};
+SpecFastTally& SpecFastCounts() {
+	static SpecFastTally tally;
+	return tally;
+}
+
+void FlushSpecFastCounts() {
+	auto& tally = SpecFastCounts();
+	using C     = FrameTiming::Counter;
+	if (tally.hit != 0) FrameTiming::Add(C::SpecFastHitN, std::exchange(tally.hit, 0));
+	if (tally.miss != 0) FrameTiming::Add(C::SpecFastMissN, std::exchange(tally.miss, 0));
+	if (tally.stale != 0) FrameTiming::Add(C::SpecFastStaleN, std::exchange(tally.stale, 0));
+	if (tally.mismatch != 0) FrameTiming::Add(C::SpecFastMismatchN, std::exchange(tally.mismatch, 0));
+}
+
+// 1: the page cache. shadow: the cache first (so it cannot profit from a drain the full read does), then the full read, whose result is returned;
+// stale = the cache answered from an entry although the range is GPU-dirty / in flight now (must stay 0), mismatch = different ok or bytes.
+bool ReadSpecFast(Libs::LibKernel::Memory::SpecFastMode mode, uint64_t address, std::span<uint32_t> values) {
+	namespace Memory = Libs::LibKernel::Memory;
+	auto& tally      = SpecFastCounts();
+	bool  hit        = false;
+	if (mode == Memory::SpecFastMode::On) {
+		const bool ok = Memory::TryReadBufferBackingFast(address, values.data(), values.size_bytes(), &hit);
+		++(hit ? tally.hit : tally.miss);
+		return ok;
+	}
+	std::array<uint32_t, 32> fast_small;
+	std::vector<uint32_t>    fast_large;
+	std::span<uint32_t>      fast = values.size() <= fast_small.size() ? std::span(fast_small).first(values.size())
+	                                                                    : (fast_large.resize(values.size()), std::span(fast_large));
+	const bool fast_ok = Memory::TryReadBufferBackingFast(address, fast.data(), fast.size_bytes(), &hit);
+	const bool stale   = hit && Memory::QueryShaderGpuDirty(address, values.size_bytes());
+	const bool ok      = Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
+	const bool differs = fast_ok != ok || (ok && !std::ranges::equal(fast, values));
+	++(hit ? tally.hit : tally.miss);
+	static std::atomic_uint logged_stale = 0, logged_mismatch = 0;
+	if (stale) {
+		++tally.stale;
+		if (logged_stale.fetch_add(1) < 20) PipelineCacheLog("[spec-fast-stale] addr={:016x} size={}", address, values.size_bytes());
+	}
+	if (differs) {
+		++tally.mismatch;
+		if (logged_mismatch.fetch_add(1) < 20) {
+			PipelineCacheLog("[spec-fast-mismatch] addr={:016x} size={} hit={} fast_ok={} ok={}", address, values.size_bytes(), hit, fast_ok, ok);
+		}
+	}
+	return ok;
+}
+
 bool ReadShaderGuestMemory(void* userdata, uint64_t address, std::span<uint32_t> values) {
 	KYTY_CP_SITE(ShSpecRead); // S430
 	if (SpecDiagOn() && !values.empty()) {
@@ -399,7 +455,14 @@ bool ReadShaderGuestMemory(void* userdata, uint64_t address, std::span<uint32_t>
 		using C            = FrameTiming::Counter;
 		const auto action = ShaderRecompiler::IR::SpecCond::Decide(
 		    cond_mode, SpecShadow::CurrentPurpose(), ShaderRecompiler::IR::SpecCond::IsMissPath(SyncCensus::CurrentReaderRef().path),
-		    [&] { return Libs::LibKernel::Memory::QueryShaderGpuDirty(address, values.size_bytes()); });
+		    [&] {
+			    // S430: a page remembered as quiet is not GPU-dirty (KYTY_SPEC_READ_FAST=1).
+			    if (Libs::LibKernel::Memory::SpecFastEnvMode() == Libs::LibKernel::Memory::SpecFastMode::On &&
+			        Libs::LibKernel::Memory::SpecPageQuietCached(address, values.size_bytes())) {
+				    return false;
+			    }
+			    return Libs::LibKernel::Memory::QueryShaderGpuDirty(address, values.size_bytes());
+		    });
 		if (action == ShaderRecompiler::IR::SpecCond::Action::Fail) {
 			FrameTiming::Add(C::SpecCondSupersetN);
 			return false;
@@ -414,6 +477,9 @@ bool ReadShaderGuestMemory(void* userdata, uint64_t address, std::span<uint32_t>
 	}
 	auto* context = static_cast<ShaderReadContext*>(userdata);
 	if (context == nullptr || context->mode == ShaderRecompiler::IR::SrtFastMode::Off) {
+		if (const auto fast = Libs::LibKernel::Memory::SpecFastEnvMode(); fast != Libs::LibKernel::Memory::SpecFastMode::Off) {
+			return ReadSpecFast(fast, address, values);
+		}
 		return Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
 	}
 	if (context->mode == ShaderRecompiler::IR::SrtFastMode::On) {
@@ -437,6 +503,7 @@ void NoteSrtMemo(const ShaderRecompiler::IR::ResourceSnapshot& snapshot, const S
                  ShaderType stage) {
 	using ShaderRecompiler::IR::SrtMemoOutcome;
 	DrainSrtWalkPaths();
+	FlushSpecFastCounts();
 	if (context.mode == ShaderRecompiler::IR::SrtFastMode::Off) {
 		return;
 	}

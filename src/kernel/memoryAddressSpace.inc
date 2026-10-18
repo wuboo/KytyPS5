@@ -232,6 +232,29 @@ public:
 		return true;
 	}
 
+	// S430 (KYTY_SPEC_READ_FAST): the sequence of the mappings (odd while a change is under way) and the backing of a whole page that one mapping covers.
+	[[nodiscard]] uint64_t MapSeq() const { return m_map_seq.load(std::memory_order_acquire); }
+
+	bool TryResolveBackingPage(uint64_t page, const uint8_t** host, uint64_t* seq) {
+		if (!IsAvailable() || host == nullptr || seq == nullptr || UINT64_MAX - page < 4096) {
+			return false;
+		}
+		std::shared_lock lock(m_mutex);
+		auto             it = m_maps.upper_bound(page);
+		if (it == m_maps.begin()) {
+			return false;
+		}
+		--it;
+		const auto& entry = it->second;
+		if (page < entry.vaddr || page + 4096 > entry.vaddr + entry.size ||
+		    !RangeOk(entry.backing_offset + page - entry.vaddr, 4096)) {
+			return false;
+		}
+		*host = m_backing_base + entry.backing_offset + page - entry.vaddr;
+		*seq  = m_map_seq.load(std::memory_order_acquire);
+		return (*seq & 1u) == 0;
+	}
+
 	bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 		if (!IsAvailable() || data == nullptr || size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
@@ -315,12 +338,14 @@ public:
 
 		{
 			std::lock_guard lock(m_mutex);
+			MapMutation     mutation(m_map_seq);
 			EXIT_IF(!m_maps.emplace(vaddr, MapEntry {vaddr, size, backing_offset, mode}).second);
 		}
 		SetFailure(failure_reason, FailureReason::None);
 		return true;
 #else
 		std::lock_guard lock(m_mutex);
+		MapMutation     mutation(m_map_seq);
 		void* mapped = MapView(vaddr, size, backing_offset, mode, failure_reason);
 		if (mapped == nullptr || reinterpret_cast<uint64_t>(mapped) != vaddr) {
 			return false;
@@ -407,6 +432,7 @@ public:
 		MapEntry old {};
 		{
 			std::lock_guard lock(m_mutex);
+			MapMutation     mutation(m_map_seq);
 			auto            next = m_maps.upper_bound(vaddr);
 			if (next != m_maps.begin()) {
 				auto entry = std::prev(next);
@@ -433,6 +459,7 @@ public:
 			    UnmapViewPreservePlaceholder(reinterpret_cast<void*>(old.vaddr), old.size);
 			if (!unmapped) {
 				std::lock_guard lock(m_mutex);
+				MapMutation     mutation(m_map_seq);
 				m_maps.emplace(old.vaddr, old);
 				return false;
 			}
@@ -477,6 +504,7 @@ public:
 			return false;
 		}
 		std::lock_guard lock(m_mutex);
+		MapMutation     mutation(m_map_seq);
 		m_maps.emplace(old.vaddr, old);
 		return false;
 #else
@@ -487,6 +515,7 @@ public:
 		}
 
 		std::lock_guard lock(m_mutex);
+		MapMutation     mutation(m_map_seq);
 		RemoveMappingsUnlocked(vaddr, size);
 
 		if (placeholder_preserved != nullptr) {
@@ -521,6 +550,15 @@ public:
 	}
 
 private:
+	// S430: odd while m_maps / the views are being changed (taken right after the unique lock, released before it).
+	struct MapMutation {
+		explicit MapMutation(std::atomic<uint64_t>& seq): m_seq(seq) { m_seq.fetch_add(1, std::memory_order_acq_rel); }
+		~MapMutation() { m_seq.fetch_add(1, std::memory_order_acq_rel); }
+		MapMutation(const MapMutation&)            = delete;
+		MapMutation& operator=(const MapMutation&) = delete;
+		std::atomic<uint64_t>& m_seq;
+	};
+
 	struct MapEntry {
 		uint64_t            vaddr          = 0;
 		uint64_t            size           = 0;
@@ -689,6 +727,7 @@ private:
 	uint64_t                     m_size         = 0;
 	std::shared_mutex            m_mutex;
 	std::map<uint64_t, MapEntry> m_maps;
+	std::atomic<uint64_t>        m_map_seq {0};
 };
 
 class GuestAddressSpace {
@@ -780,6 +819,12 @@ public:
 
 	bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 		return m_backing->TryReadBacking(vaddr, data, size);
+	}
+
+	[[nodiscard]] uint64_t MapSeq() const { return m_backing->MapSeq(); }
+
+	bool TryResolveBackingPage(uint64_t page, const uint8_t** host, uint64_t* seq) {
+		return m_backing->TryResolveBackingPage(page, host, seq);
 	}
 
 	template <bool copy_private>
