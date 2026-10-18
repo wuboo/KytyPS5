@@ -1583,6 +1583,18 @@ void CommandProcessor::EmitGlobalBarrier() {
 
 void CommandProcessor::TriggerEopEventAtEndOfPipe(uint32_t interrupt_context_id) {
 	(void)CurrentBuffer().Handle();
+	// S429 (KYTY_EOP_COALESCE): the same (event, context) twice in one tick is deferred once.
+	const auto mode = EopCoalesce::EnvMode();
+	if (mode != EopCoalesce::Mode::Off) {
+		if (m_eop_tracker.AlreadyDeferred(GetScheduler().CurrentTick(), m_interrupt_event_id, interrupt_context_id)) {
+			if (mode == EopCoalesce::Mode::On) {
+				FrameTiming::Add(FrameTiming::Counter::EopIrqCoalescedN);
+				return;
+			}
+			FrameTiming::Add(FrameTiming::Counter::EopCoalesceWouldN);
+		}
+	}
+	FrameTiming::Add(FrameTiming::Counter::EopIrqDeferredN);
 	GetScheduler().DeferPriorityOperation(
 	    [&renderer = m_renderer, event_id = m_interrupt_event_id, interrupt_context_id] {
 		    renderer.TriggerInterrupt(event_id, interrupt_context_id);
