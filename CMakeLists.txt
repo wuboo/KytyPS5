@@ -2194,6 +2194,37 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 	add_rosettacmp_mutant(LEGACY_FROM_0 "return predicate >= 3 && predicate <= 7;" "return predicate <= 7;")
 	add_rosettacmp_mutant(KIND_IGNORED "(amd_kinds & Common::AmdPatchRosettaCmp) != 0 && IsRosettaCompareSite(decoded)" "IsRosettaCompareSite(decoded)")
 	add_rosettacmp_mutant(LEGACY_VEX_MOVE "generator.movaps(destination, destination);" "generator.vmovaps(destination, destination);")
+	# S432: KYTY_PATCH_CACHE, the cached effect of the patchers (real AMD patcher + wide store split on a synthetic module). Mutants (WILL_FAIL):
+	# CACHE_IGNORES_KEY, APPLY_SKIPS_TRAMPOLINE, APPLY_NO_ORIGINAL_CHECK, CAPTURE_DROPS_LAST_RANGE, SERIALIZE_DROPS_TRAPS, CHECKSUM_IGNORED.
+	foreach(mutant IN ITEMS "" CACHE_IGNORES_KEY APPLY_SKIPS_TRAMPOLINE APPLY_NO_ORIGINAL_CHECK CAPTURE_DROPS_LAST_RANGE SERIALIZE_DROPS_TRAPS CHECKSUM_IGNORED)
+		if(mutant STREQUAL "")
+			set(patch_cache_target patch_cache_tests)
+			set(patch_cache_test patch_cache)
+		else()
+			string(TOLOWER ${mutant} mutant_lower)
+			set(patch_cache_target patch_cache_mutant_${mutant_lower}_tests)
+			set(patch_cache_test patch_cache_mutant_${mutant_lower})
+		endif()
+		add_executable(${patch_cache_target} EXCLUDE_FROM_ALL
+			"${KYTY_TESTS_DIR}/PatchCacheTests.cpp"
+			"${KYTY_SOURCE_DIR}/loader/patchCache.cpp"
+			"${KYTY_SOURCE_DIR}/loader/x64InstructionEmulator.cpp"
+			"${KYTY_SOURCE_DIR}/loader/guestInstructionPatcher.cpp"
+		)
+		target_link_libraries(${patch_cache_target} common fmt::fmt Zydis::Zydis xbyak::xbyak xxhash)
+		target_include_directories(${patch_cache_target} PRIVATE ${inc_headers})
+		if(NOT mutant STREQUAL "")
+			target_compile_definitions(${patch_cache_target} PRIVATE KYTY_PATCHCACHE_MUTANT_${mutant}=1)
+		endif()
+		if(BUILD_TESTING)
+			add_test(NAME ${patch_cache_test} COMMAND $<TARGET_FILE:${patch_cache_target}>)
+			set_tests_properties(${patch_cache_test} PROPERTIES TIMEOUT 60)
+			if(NOT mutant STREQUAL "")
+				set_tests_properties(${patch_cache_test} PROPERTIES WILL_FAIL TRUE)
+			endif()
+			add_dependencies(kyty_tests ${patch_cache_target})
+		endif()
+	endforeach()
 	add_executable(macos_wide_store_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/macosWideStoreTests.cpp"
 		"${KYTY_SOURCE_DIR}/loader/x64InstructionEmulator.cpp"

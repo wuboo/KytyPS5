@@ -28,6 +28,7 @@
 #include "loader/guestInstructionPatcher.h"
 #include "loader/guestReadEmulator.h"
 #include "loader/jit.h"
+#include "loader/patchCache.h"
 #include "loader/symbolDatabase.h"
 #include "loader/x64InstructionEmulator.h"
 
@@ -37,7 +38,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fmt/format.h>
+#include <optional>
 #include <magic_enum.hpp>
 #include <memory>
 #include <vector>
@@ -1141,6 +1144,98 @@ static KYTY_MS_ABI uint8_t* TlsMainGetAddr() {
 	return g_tls_cached_main_tcb;
 }
 
+// S432 KYTY_PATCH_CACHE. What the patchers report for the log, kept with the cached effect.
+struct ModulePatchStats {
+	bool                                                      have_function_starts = false;
+	InstructionPatchCounts                                    kinds[6] {};
+	std::vector<X64InstructionEmulator::WideStoreSplitResult> split;
+};
+
+static std::vector<uint64_t> PackModulePatchStats(const ModulePatchStats& stats) {
+	std::vector<uint64_t> out {stats.have_function_starts ? 1u : 0u};
+	for (const auto& counts: stats.kinds) {
+		out.insert(out.end(), {counts.found, counts.native, counts.trapped});
+	}
+	out.push_back(stats.split.size());
+	for (const auto& r: stats.split) {
+		out.insert(out.end(), {r.candidates, r.patched, r.too_short, r.via_cave, r.trapped, r.relocated,
+		                       r.unsupported, r.trampoline_bytes});
+	}
+	return out;
+}
+
+static ModulePatchStats UnpackModulePatchStats(const std::vector<uint64_t>& in) {
+	ModulePatchStats stats;
+	size_t           pos = 0;
+	const auto       next = [&]() { return pos < in.size() ? in[pos++] : 0; };
+	stats.have_function_starts = next() != 0;
+	for (auto& counts: stats.kinds) {
+		counts.found   = next();
+		counts.native  = next();
+		counts.trapped = next();
+	}
+	const auto count = next();
+	for (uint64_t i = 0; i < count && pos < in.size(); ++i) {
+		X64InstructionEmulator::WideStoreSplitResult r;
+		r.candidates       = next();
+		r.patched          = next();
+		r.too_short        = next();
+		r.via_cave         = next();
+		r.trapped          = next();
+		r.relocated        = next();
+		r.unsupported      = next();
+		r.trampoline_bytes = next();
+		stats.split.push_back(r);
+	}
+	return stats;
+}
+
+static std::filesystem::path PatchCacheDir() {
+	return std::filesystem::path("_PatchCache");
+}
+
+// Everything the patchers read: see patchCache.h.
+static PatchCache::Key MakePatchCacheKey(const Program* program, const std::string& module_name,
+                                         const std::vector<std::pair<uint64_t, uint64_t>>& segments,
+                                         const std::vector<uintptr_t>& function_starts,
+                                         bool have_function_starts, bool protect_memory,
+                                         bool emulate_amd, bool split_wide_stores) {
+	PatchCache::KeyBuilder key;
+	key.AddU64(PatchCache::PatchVersion);
+	key.Add(module_name.data(), module_name.size());
+	key.AddU64(program->base_vaddr);
+	key.AddU64(program->base_size_aligned);
+	key.AddU64(program->instruction_trampoline_vaddr);
+	key.AddU64(program->instruction_trampoline_size);
+	const auto host = GetGuestInstructionHostFeatures();
+	key.AddU64((protect_memory ? 1u : 0u) | (emulate_amd ? 2u : 0u) | (split_wide_stores ? 4u : 0u) |
+	           (have_function_starts ? 8u : 0u) | (host.sse4a ? 16u : 0u) | (host.rdpid ? 32u : 0u) |
+	           (host.clwb ? 64u : 0u));
+	key.AddU64(Config::GetAmdPatchKinds());
+	// The wide-store split also depends on its hot-site profile and the move switch.
+	for (const char* name: {"KYTY_WIDE_STORE_MOVE", "KYTY_WIDE_STORE_HOT"}) {
+		const char* value = std::getenv(name);
+		key.AddU64(value != nullptr ? 1 : 0);
+		if (value != nullptr) key.Add(value, std::strlen(value));
+	}
+	if (const char* path = std::getenv("KYTY_WIDE_STORE_HOT"); path != nullptr) {
+		if (FILE* file = std::fopen(path, "rb"); file != nullptr) {
+			char   buffer[4096];
+			size_t got = 0;
+			while ((got = std::fread(buffer, 1, sizeof(buffer), file)) != 0) key.Add(buffer, got);
+			std::fclose(file);
+		}
+	}
+	key.AddU64(function_starts.size());
+	key.Add(function_starts.data(), function_starts.size() * sizeof(uintptr_t));
+	for (const auto& [addr, size]: segments) {
+		key.AddU64(addr);
+		key.AddU64(size);
+		key.Add(reinterpret_cast<const void*>(addr), size);
+	}
+	return key.Finish();
+}
+
 static void PatchProgram(Program* program, uint64_t address, uint64_t size) {
 	EXIT_IF(program == nullptr);
 	EXIT_IF(program->elf == nullptr);
@@ -2004,57 +2099,164 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 		}
 	}
 
-	if (patch_guest_instructions) {
+	if (patch_guest_instructions || split_wide_stores) {
 		std::vector<uintptr_t> function_starts;
-		const bool             have_function_starts =
-		    DecodeEhFrameFunctionStarts(eh_frame_header_addr, eh_frame_header_size,
-		                                &function_starts) &&
-		    !function_starts.empty();
-		const auto module_name = Common::PathToString(program->file_name.filename());
-		if (!have_function_starts) {
-			Log::WriteToConsoleAndLog(
-			    fmt::format("{}: {} not patched (function boundaries unavailable)\n",
-			                emulate_amd ? "AMD CPU compatibility" : "Guest red-zone protection",
-			                module_name));
-		}
-		GuestInstructionPatchResult totals {};
-		for (const auto& [segment_addr, segment_size]: executable_segments) {
-			const auto result = PatchGuestInstructions(segment_addr, segment_size, function_starts,
-			                                           protect_memory_faults, emulate_amd,
-			                                           GetGuestInstructionHostFeatures(),
-			                                           Config::GetAmdPatchKinds());
-			totals.reciprocal_sqrt += result.reciprocal_sqrt;
-			totals.extrq += result.extrq;
-			totals.insertq += result.insertq;
-			totals.rdpid += result.rdpid;
-			totals.clwb += result.clwb;
-			totals.rosettacmp += result.rosettacmp;
-			if (protect_memory_faults) {
-				LOGF("Windows guest red-zone patching: %s, functions=%" PRIu64 ", red_zone=%" PRIu64
-				     ", memory=%" PRIu64 ", patched=%" PRIu64 ", short=%" PRIu64 ", stack=%" PRIu64
-				     ", control=%" PRIu64 ", unrelocatable=%" PRIu64 "\n",
-				     module_name.c_str(),
-				     result.function_count, result.red_zone_function_count,
-				     result.memory_instruction_count, result.patched_memory_instruction_count,
-				     result.short_memory_instruction_count,
-				     result.stack_dependent_memory_instruction_count,
-				     result.control_flow_memory_instruction_count,
-				     result.unrelocatable_memory_instruction_count);
+		bool                   have_function_starts = false;
+		const auto             module_name          = Common::PathToString(program->file_name.filename());
+		if (patch_guest_instructions) {
+			have_function_starts = DecodeEhFrameFunctionStarts(eh_frame_header_addr,
+			                                                   eh_frame_header_size,
+			                                                   &function_starts) &&
+			                       !function_starts.empty();
+			if (!have_function_starts) {
+				Log::WriteToConsoleAndLog(
+				    fmt::format("{}: {} not patched (function boundaries unavailable)\n",
+				                emulate_amd ? "AMD CPU compatibility" : "Guest red-zone protection",
+				                module_name));
 			}
 		}
-		if (emulate_amd && have_function_starts) {
+
+		// S432 KYTY_PATCH_CACHE: the effect of the patchers below, kept on disk (see patchCache.h).
+		ModulePatchStats stats;
+		const auto       cache_mode = PatchCache::EnvMode();
+		PatchCache::Key   cache_key {};
+		PatchCache::Entry cached;
+		bool              have_cached = false;
+		bool              restored    = false;
+		if (cache_mode != PatchCache::Mode::Off) {
+			cache_key   = MakePatchCacheKey(program, module_name, executable_segments, function_starts,
+			                                have_function_starts, protect_memory_faults, emulate_amd,
+			                                split_wide_stores);
+			have_cached = PatchCache::Load(PatchCacheDir(), cache_key, &cached);
+			if (have_cached && cache_mode == PatchCache::Mode::On) {
+				restored = PatchCache::Apply(cached);
+				if (!restored) {
+					Log::WriteToConsoleAndLog(fmt::format(
+					    "[patch-cache] {} entry {} rejected: the bytes under a patched range differ\n",
+					    module_name, cache_key.Hex()));
+				}
+			}
+		}
+		if (restored) {
+			stats = UnpackModulePatchStats(cached.stats);
+			if (patch_guest_instructions) {
+				SetGuestInstructionTrampolineBytesUsed(reinterpret_cast<void*>(program->base_vaddr),
+				                                       cached.patcher_bytes);
+			}
+#if defined(__APPLE__)
+			for (const auto& [site, trampoline]: cached.wide_traps) {
+				EXIT_IF(!X64InstructionEmulator::RestoreWideStoreTrap(site, trampoline));
+			}
+#endif
+			for (const auto& [segment_addr, segment_size]: executable_segments) {
+				Common::VirtualMemory::FlushInstructionCache(segment_addr, segment_size);
+			}
+			if (!cached.trampoline.empty()) {
+				Common::VirtualMemory::FlushInstructionCache(cached.trampoline_addr,
+				                                             cached.trampoline.size());
+			}
+			Log::WriteToConsoleAndLog(fmt::format(
+			    "[patch-cache] {} hit {}: {} ranges, {} trampoline bytes, {} wide-store traps\n",
+			    module_name, cache_key.Hex(), cached.ranges.size(), cached.trampoline.size(),
+			    cached.wide_traps.size()));
+		} else {
+			std::optional<PatchCache::Snapshot> snapshot;
+			if (cache_mode != PatchCache::Mode::Off) {
+				snapshot.emplace(executable_segments);
+			}
+			stats.have_function_starts = have_function_starts;
+			uint64_t trampoline_used   = 0;
+			if (patch_guest_instructions) {
+				GuestInstructionPatchResult totals {};
+				for (const auto& [segment_addr, segment_size]: executable_segments) {
+					const auto result = PatchGuestInstructions(
+					    segment_addr, segment_size, function_starts, protect_memory_faults,
+					    emulate_amd, GetGuestInstructionHostFeatures(), Config::GetAmdPatchKinds());
+					totals.reciprocal_sqrt += result.reciprocal_sqrt;
+					totals.extrq += result.extrq;
+					totals.insertq += result.insertq;
+					totals.rdpid += result.rdpid;
+					totals.clwb += result.clwb;
+					totals.rosettacmp += result.rosettacmp;
+					if (protect_memory_faults) {
+						LOGF("Windows guest red-zone patching: %s, functions=%" PRIu64
+						     ", red_zone=%" PRIu64 ", memory=%" PRIu64 ", patched=%" PRIu64
+						     ", short=%" PRIu64 ", stack=%" PRIu64 ", control=%" PRIu64
+						     ", unrelocatable=%" PRIu64 "\n",
+						     module_name.c_str(), result.function_count,
+						     result.red_zone_function_count, result.memory_instruction_count,
+						     result.patched_memory_instruction_count,
+						     result.short_memory_instruction_count,
+						     result.stack_dependent_memory_instruction_count,
+						     result.control_flow_memory_instruction_count,
+						     result.unrelocatable_memory_instruction_count);
+					}
+				}
+				stats.kinds[0]  = totals.reciprocal_sqrt;
+				stats.kinds[1]  = totals.extrq;
+				stats.kinds[2]  = totals.insertq;
+				stats.kinds[3]  = totals.rdpid;
+				stats.kinds[4]  = totals.clwb;
+				stats.kinds[5]  = totals.rosettacmp;
+				trampoline_used = GetGuestInstructionTrampolineBytesUsed(
+				    reinterpret_cast<void*>(program->base_vaddr));
+			}
+			const uint64_t patcher_bytes = trampoline_used;
+#if defined(__APPLE__)
+			std::vector<std::pair<uint64_t, uint64_t>> wide_traps;
+			if (split_wide_stores) {
+				// The AMD CPU patcher fills this area from its start, so the split continues behind it.
+				uint64_t cursor = program->instruction_trampoline_vaddr + patcher_bytes;
+				const uint64_t cursor_begin = cursor;
+				for (const auto& [segment_addr, segment_size]: executable_segments) {
+					auto result = X64InstructionEmulator::SplitWideStores(
+					    segment_addr, segment_size, &cursor,
+					    program->instruction_trampoline_vaddr +
+					        program->instruction_trampoline_size);
+					Common::VirtualMemory::FlushInstructionCache(segment_addr, segment_size);
+					wide_traps.insert(wide_traps.end(), result.traps.begin(), result.traps.end());
+					stats.split.push_back(result);
+				}
+				// One flush for the trampolines written by all segments.
+				if (cursor > cursor_begin) {
+					Common::VirtualMemory::FlushInstructionCache(cursor_begin, cursor - cursor_begin);
+				}
+				trampoline_used = std::max(trampoline_used,
+				                           cursor - program->instruction_trampoline_vaddr);
+			}
+#endif
+			if (snapshot) {
+				auto entry = snapshot->Capture(program->instruction_trampoline_vaddr, trampoline_used);
+				entry.patcher_bytes = patcher_bytes;
+#if defined(__APPLE__)
+				entry.wide_traps = std::move(wide_traps);
+#endif
+				entry.stats = PackModulePatchStats(stats);
+				if (cache_mode == PatchCache::Mode::Verify && have_cached) {
+					Log::WriteToConsoleAndLog(fmt::format(
+					    "[patch-cache] {} verify {} ({} ranges, {} trampoline bytes)\n", module_name,
+					    entry == cached ? "eq" : "ne", entry.ranges.size(), entry.trampoline.size()));
+				} else {
+					const bool saved = PatchCache::Save(PatchCacheDir(), cache_key, entry);
+					Log::WriteToConsoleAndLog(fmt::format(
+					    "[patch-cache] {} miss {}: {} {} ranges, {} trampoline bytes, {} wide-store traps\n",
+					    module_name, cache_key.Hex(), saved ? "saved" : "NOT saved",
+					    entry.ranges.size(), entry.trampoline.size(), entry.wide_traps.size()));
+				}
+			}
+		}
+
+		if (patch_guest_instructions && emulate_amd && stats.have_function_starts) {
+			static constexpr const char* kind_names[] = {"VRSQRTPS", "EXTRQ",   "INSERTQ",
+			                                             "RDPID",    "CLWB",    "ROSETTACMP"};
 			InstructionPatchCounts combined {};
 			std::string            details;
-			for (const auto& [name, counts]: {std::pair {"VRSQRTPS", totals.reciprocal_sqrt},
-			                                  {"EXTRQ", totals.extrq},
-			                                  {"INSERTQ", totals.insertq},
-			                                  {"RDPID", totals.rdpid},
-			                                  {"CLWB", totals.clwb},
-			                                  {"ROSETTACMP", totals.rosettacmp}}) {
+			for (size_t i = 0; i < std::size(kind_names); ++i) {
+				const auto& counts = stats.kinds[i];
 				combined += counts;
 				if (!details.empty()) details += "; ";
-				details += fmt::format("{}: native={}, trapped={}, skipped={}", name, counts.native,
-				                       counts.trapped, counts.Skipped());
+				details += fmt::format("{}: native={}, trapped={}, skipped={}", kind_names[i],
+				                       counts.native, counts.trapped, counts.Skipped());
 			}
 			const auto  found   = combined.found;
 			const auto  skipped = combined.Skipped();
@@ -2065,33 +2267,17 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 			Log::WriteToConsoleAndLog(
 			    fmt::format("AMD CPU compatibility: {} {} ({})\n", module_name, status, details));
 		}
-	}
-
 #if defined(__APPLE__)
-	if (split_wide_stores) {
-		// The AMD CPU patcher fills this area from its start, so the split continues behind it.
-		uint64_t cursor = program->instruction_trampoline_vaddr +
-		                  GetGuestInstructionTrampolineBytesUsed(
-		                      reinterpret_cast<void*>(program->base_vaddr));
-		const uint64_t cursor_begin = cursor;
-		for (const auto& [segment_addr, segment_size]: executable_segments) {
-			const auto result = X64InstructionEmulator::SplitWideStores(
-			    segment_addr, segment_size, &cursor,
-			    program->instruction_trampoline_vaddr + program->instruction_trampoline_size);
-			Common::VirtualMemory::FlushInstructionCache(segment_addr, segment_size);
+		for (const auto& result: stats.split) {
 			LOGF("Guest 256-bit store splitting: %s, candidates=%" PRIu64 ", patched=%" PRIu64
 			     " (via padding=%" PRIu64 ", ud2=%" PRIu64 ", moved=%" PRIu64 "), short=%" PRIu64
 			     ", unsupported=%" PRIu64 ", trampoline bytes=%" PRIu64 "\n",
-			     Common::PathToString(program->file_name.filename()).c_str(), result.candidates,
-			     result.patched, result.via_cave, result.trapped, result.relocated,
-			     result.too_short, result.unsupported, result.trampoline_bytes);
+			     module_name.c_str(), result.candidates, result.patched, result.via_cave,
+			     result.trapped, result.relocated, result.too_short, result.unsupported,
+			     result.trampoline_bytes);
 		}
-		// One flush for the trampolines written by all segments.
-		if (cursor > cursor_begin) {
-			Common::VirtualMemory::FlushInstructionCache(cursor_begin, cursor - cursor_begin);
-		}
-	}
 #endif
+	}
 
 	if (!is_shared) {
 		SetupTlsHandler(program);

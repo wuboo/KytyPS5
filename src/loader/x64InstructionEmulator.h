@@ -2,6 +2,8 @@
 #define KYTY_LOADER_X64_INSTRUCTION_EMULATOR_H_
 
 #include <cstdint>
+#include <utility>
+#include <vector>
 
 namespace Loader::X64InstructionEmulator {
 
@@ -15,7 +17,11 @@ struct WideStoreSplitResult {
 	uint64_t relocated        = 0; // hot short stores patched by moving the next instructions along
 	uint64_t unsupported = 0; // segment override, encoder failure or trampoline area full
 	uint64_t trampoline_bytes = 0;
+	std::vector<std::pair<uint64_t, uint64_t>> traps; // (site, trampoline) registered for the trapped stores
 };
+
+// Puts a (site, trampoline) pair of a trapped store into the SIGILL handler's table (S432 KYTY_PATCH_CACHE replays a cached split).
+bool RestoreWideStoreTrap(uint64_t site, uint64_t trampoline);
 
 // Rosetta aborts the process when a 256-bit store that crosses into a write-protected page
 // faults after writing its first half. 128-bit stores fault cleanly. Rewrite each plain
