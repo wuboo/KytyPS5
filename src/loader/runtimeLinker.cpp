@@ -15,7 +15,10 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/virtualMemory.h"
+#include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/pageManager.h"
+#include "graphics/host_gpu/renderer/gfDiag.h"
+#include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
@@ -23,6 +26,7 @@
 #include "loader/elf.h"
 #include "loader/gamePatch.h"
 #include "loader/guestInstructionPatcher.h"
+#include "loader/guestReadEmulator.h"
 #include "loader/jit.h"
 #include "loader/symbolDatabase.h"
 #include "loader/x64InstructionEmulator.h"
@@ -681,6 +685,92 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 	return true;
 }
 
+// S426 (KYTY_GF_EMULATE=0|1|shadow): the backing read the emulated load is served from. The gate looks at the bytes the instruction reads, not at the
+// fault byte: GPU-dirty or in-flight bytes keep the ordinary drain.
+static bool GfEmuReadBacking(uint64_t address, uint64_t size, void* dst) {
+	bool dirty    = false;
+	bool inflight = false;
+	if (!Libs::LibKernel::Memory::QueryGuestFaultBytes(address, size, &dirty, &inflight)) {
+		return false;
+	}
+	const Loader::GuestReadEmulator::Gate gate {Loader::GuestReadEmulator::EnvMode(), true, false, dirty, inflight};
+	return Loader::GuestReadEmulator::MayEmulate(gate) && Libs::LibKernel::Memory::TryReadBacking(address, dst, size);
+}
+
+// KYTY_DIAG_GUEST_FAULT: which instruction faults (mnemonic and operand shape only), once per distinct pc, <= 50 lines.
+static void GfEmuLogInstruction(void* native_context, uint64_t fault_vaddr, uint64_t pc) {
+	static std::atomic<uint32_t> logged {0};
+	static std::atomic<uint64_t> seen[64] {};
+	for (const auto& slot: seen) {
+		if (slot.load(std::memory_order_relaxed) == pc) {
+			return;
+		}
+	}
+	const auto index = logged.fetch_add(1, std::memory_order_relaxed);
+	if (index >= 50) {
+		return;
+	}
+	seen[index % 64].store(pc, std::memory_order_relaxed);
+	const auto plan = Loader::GuestReadEmulator::Decode(native_context, fault_vaddr);
+	LOGF("[gf-insn] pc=0x%016" PRIx64 " addr=0x%016" PRIx64 " mnemonic=%s operands=%s size=%u supported=%d why=%u\n", pc, fault_vaddr,
+	     plan.mnemonic[0] != 0 ? plan.mnemonic : "?", plan.operands[0] != 0 ? plan.operands : "-", static_cast<unsigned>(plan.size),
+	     plan.ok ? 1 : 0, static_cast<unsigned>(plan.why));
+}
+
+struct GfEmuShadow {
+	Loader::GuestReadEmulator::Attempt attempt;
+	bool                               pending = false;
+};
+
+// True when the fault was served here (mode 1). In shadow mode the emulated bytes are kept in `shadow` and compared after the ordinary path.
+static bool TryGuestReadEmulation(const Common::HostException::ExceptionInfo* info, GfEmuShadow* shadow) {
+	using namespace Loader::GuestReadEmulator;
+	const auto mode = EnvMode();
+	if (mode == Mode::Off || Libs::Graphics::GuestGpu::IsGpuThread()) {
+		return false;
+	}
+	Attempt attempt;
+	if (!Prepare(info->native_context, info->access_violation_vaddr, GfEmuReadBacking, &attempt)) {
+		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuFallbackN);
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 50) {
+			LOGF("[gf-emu-fallback] pc=0x%016" PRIx64 " addr=0x%016" PRIx64 " mnemonic=%s operands=%s why=%u\n", info->exception_address,
+			     info->access_violation_vaddr, attempt.plan.mnemonic[0] != 0 ? attempt.plan.mnemonic : "?",
+			     attempt.plan.operands[0] != 0 ? attempt.plan.operands : "-", static_cast<unsigned>(attempt.plan.why));
+		}
+		return false;
+	}
+	if (mode == Mode::Shadow) {
+		shadow->attempt = attempt;
+		shadow->pending = true;
+		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuN);
+		return false;
+	}
+	Commit(info->native_context, attempt.plan, attempt.bytes);
+	Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuN);
+	return true;
+}
+
+static void GfEmuShadowFinish(const GfEmuShadow& shadow) {
+	if (!shadow.pending || !IsReadableRange(shadow.attempt.plan.address, shadow.attempt.plan.size)) {
+		return;
+	}
+	using C = Libs::Graphics::FrameTiming::Counter;
+	// The ordinary path has drained and released the page: the raw bytes are what the guest would have read.
+	uint8_t raw[16] = {};
+	std::memcpy(raw, reinterpret_cast<const void*>(shadow.attempt.plan.address), shadow.attempt.plan.size);
+	if (std::memcmp(raw, shadow.attempt.bytes, shadow.attempt.plan.size) == 0) {
+		Libs::Graphics::FrameTiming::Add(C::GfEmuEqN);
+		return;
+	}
+	Libs::Graphics::FrameTiming::Add(C::GfEmuNeN);
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 20) {
+		LOGF("[gf-emu-ne] addr=0x%016" PRIx64 " size=%u mnemonic=%s\n", shadow.attempt.plan.address,
+		     static_cast<unsigned>(shadow.attempt.plan.size), shadow.attempt.plan.mnemonic);
+	}
+}
+
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
@@ -705,7 +795,18 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		if (Libs::Graphics::RfOp::Enabled()) {
 			Libs::Graphics::RfOp::FaultCtxRef() = {info->exception_address, info->rsp, info->rbp}; // S412/S413 (KYTY_DIAG_RFOP)
 		}
+		GfEmuShadow gf_shadow;
+		if (access == GpuAccess::Read) {
+			if (Libs::Graphics::GuestFault::Enabled() && !Libs::Graphics::GuestGpu::IsGpuThread()) {
+				GfEmuLogInstruction(info->native_context, info->access_violation_vaddr, info->exception_address);
+			}
+			if (TryGuestReadEmulation(info, &gf_shadow)) {
+				Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultHandled);
+				return true;
+			}
+		}
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
+			GfEmuShadowFinish(gf_shadow);
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
 			Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultHandled);
 			return true;

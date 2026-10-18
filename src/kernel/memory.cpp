@@ -1076,6 +1076,16 @@ bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noex
 	return g_gpu_resources != nullptr && g_gpu_resources->HandleFault(access, fault_vaddr);
 }
 
+bool QueryGuestFaultBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight) noexcept {
+	if (size == 0 || g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
+		return false;
+	}
+	auto& buffers = g_gpu_resources->GetBufferCache();
+	*dirty        = buffers.HasGpuDirtyBytes(vaddr, size);
+	*inflight     = buffers.HasInflightDownloadBytes(vaddr, size);
+	return true;
+}
+
 struct PrtAperture {
 	uint64_t address = 0;
 	uint64_t size    = 0;
