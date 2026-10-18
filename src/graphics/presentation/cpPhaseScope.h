@@ -5,6 +5,8 @@
 // one thread_local flag test. On, it costs two steady_clock reads and one counter add (~7 k scopes per flip in the
 // level scene, so ~0.6 ms/flip by estimate: not on by default; measured in the task, not here).
 
+#include "graphics/host_gpu/renderer/cpWaitDiag.h"
+#include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/presentation/cpPhases.h"
 #include "graphics/presentation/cpSampler.h"
 #include "graphics/presentation/frameTiming.h"
@@ -38,6 +40,10 @@ inline void BindCpThread() {
 	if (CpSampler::Enabled()) {
 		State().sampler = true;
 		CpSampler::StartProduction();
+	} else if (RfOp::Enabled() || CpWait::Enabled()) {
+		// S413: the breadcrumbs (site, opcode) without the 10 kHz sampler thread; the same single relaxed store per site as with the sampler.
+		State().sampler = true;
+		CpSampler::Active().store(true);
 	}
 }
 

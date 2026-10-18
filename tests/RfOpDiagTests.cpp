@@ -93,6 +93,79 @@ void TestResolvePc() {
 	Check(ResolvePc(0) == "?", "null pc");
 }
 
+
+std::string FakeResolve(uint64_t pc) {
+	char text[32];
+	std::snprintf(text, sizeof(text), "f%llx", static_cast<unsigned long long>(pc));
+	return text;
+}
+
+// S413: the new fields of the line.
+void TestLineSiteWaitDirtyBt() {
+	Event event;
+	event.flip       = 6302;
+	event.site       = SiteLabel(Libs::Graphics::CpSampler::SiteId(Libs::Graphics::CpSampler::Site::PvIndexHash));
+	event.wait_us    = 8123;
+	event.eager      = true;
+	event.dirty      = true;
+	event.page_dirty = false;
+	const uint64_t frames[3] = {0x10, 0x20, 0x30};
+	event.bt_text            = FormatBacktrace(frames, 3, &FakeResolve);
+	const auto line          = FormatLine(event);
+	Check(Has(line, " site=pv.index_hash "), "line names the CP breadcrumb site");
+	Check(Has(line, " wait_us=8123 eager=1 dirty=1 page_dirty=0 "), "line carries wait, eager, dirty, page_dirty");
+	Check(Has(line, " bt=f10|f20|f30"), "line carries the backtrace");
+	Check(FormatBacktrace(frames, 0, &FakeResolve) == "-", "no frames");
+	Event plain;
+	Check(Has(FormatLine(plain), " site=none wait_us=0 eager=0 dirty=0 page_dirty=0 bt=-"), "defaults");
+}
+
+// S413: the RBP walker on a synthetic stack (the array stands for the thread stack, indices count 8-byte words).
+void TestWalkFrames() {
+	alignas(16) uint64_t stack[32] = {};
+	const auto addr = [&](int word) { return reinterpret_cast<uint64_t>(&stack[word]); };
+	// Leaf at sp = word 2 (returns to 0xA1 pushed at the word 2), frame chain: rbp=word 6 -> word 12 -> word 20 -> 0.
+	stack[2]  = 0xA1;
+	stack[6]  = addr(12);
+	stack[7]  = 0xB1;
+	stack[12] = addr(20);
+	stack[13] = 0xC1;
+	stack[20] = 0;
+	stack[21] = 0xD1;
+	FaultContext ctx {0x1000, addr(2), addr(6)};
+	uint64_t     out[kMaxFrames] = {};
+	auto         n               = WalkFrames(ctx, addr(0), addr(32), out);
+	Check(n == 5, "pc, word at rsp and three chain frames");
+	Check(out[0] == 0x1000 && out[1] == 0xA1 && out[2] == 0xB1 && out[3] == 0xC1 && out[4] == 0xD1, "frames in order");
+	n = WalkFrames(ctx, addr(0), addr(32), out, 3);
+	Check(n == 3, "capped at max");
+	// A frame pointer that does not grow stops the chain after the frames already collected.
+	stack[12] = addr(6);
+	n = WalkFrames(ctx, addr(0), addr(32), out);
+	Check(n == 4 && out[3] == 0xC1, "non-growing rbp stops the walk");
+	stack[12] = addr(12); // a frame that points at itself must not loop
+	n = WalkFrames(ctx, addr(0), addr(32), out);
+	Check(n == 4 && out[3] == 0xC1, "self-pointing rbp stops the walk");
+	// A bad rbp (outside the stack, misaligned, below rsp) yields only pc and the word at rsp.
+	for (const uint64_t bad: {uint64_t {0}, addr(0) - 8, addr(32), addr(6) + 1, addr(1)}) {
+		FaultContext c {0x1000, addr(2), bad};
+		Check(WalkFrames(c, addr(0), addr(32), out) == 2, "bad rbp stops at once");
+	}
+	FaultContext no_sp {0x1000, 0, 0};
+	Check(WalkFrames(no_sp, addr(0), addr(32), out) == 1 && out[0] == 0x1000, "no stack pointer: pc only");
+	FaultContext near_top {0x1000, addr(2), addr(31)};
+	Check(WalkFrames(near_top, addr(0), addr(32), out) == 2, "frame whose two words do not fit is refused");
+}
+
+void TestCurrentStackBounds() {
+#if defined(__APPLE__)
+	uint64_t lo = 0, hi = 0;
+	int      local = 0;
+	Check(CurrentStackBounds(&lo, &hi) && lo < reinterpret_cast<uint64_t>(&local) && reinterpret_cast<uint64_t>(&local) < hi,
+	      "a local variable lies inside the thread stack bounds");
+#endif
+}
+
 } // namespace
 
 int main() {
@@ -102,5 +175,8 @@ int main() {
 	TestLogGate();
 	TestWriterOps();
 	TestResolvePc();
+	TestLineSiteWaitDirtyBt();
+	TestWalkFrames();
+	TestCurrentStackBounds();
 	return 0;
 }

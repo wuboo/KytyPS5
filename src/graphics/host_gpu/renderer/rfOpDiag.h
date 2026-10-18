@@ -6,9 +6,15 @@
 //                      handled, the first four dwords of its packet, the fault address, the faulting PC (symbol + offset), the opcode of
 //                      the last GPU writer of the page, and 16 bytes at the fault address before and after the drain. It also counts
 //                      the fault per opcode in the frames.csv columns rf_op_<name>_n.
+// S413 (DIAG v5) adds to the same line: site= (CP breadcrumb at the fault: which part of the draw/dispatch/PM4 code is reading),
+//                      wait_us= (time of the drain inside ReadMemory), eager= (served by an eager download), dirty= (the 16 bytes at the
+//                      fault address are GPU-dirty before the drain), page_dirty= (the 4 KiB page is GPU-modified), bt= (up to six
+//                      frames: PC, the word at RSP, then the RBP chain; no unwinder, no debugger). Columns rf_op_wait_ns,
+//                      rf_op_draw_index_indirect_n and rf_op_draw_index_indirect_wait_ns (opcode 0x25).
 // This header is the pure part (tests/RfOpDiagTests.cpp pins it). Nothing here feeds a shader or pipeline cache key.
 
 #include "graphics/host_gpu/renderer/syncCensus.h"
+#include "graphics/presentation/cpSampler.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -18,6 +24,9 @@
 #include <unordered_map>
 
 #include <dlfcn.h>
+#if defined(__APPLE__)
+#include <pthread.h>
+#endif
 
 namespace Libs::Graphics::RfOp {
 
@@ -27,6 +36,7 @@ inline bool Enabled() {
 }
 
 constexpr uint32_t kNoOpcode = 0xFFFFFFFFu;
+constexpr uint32_t kOpDrawIndexIndirect = 0x25; // IT_DRAW_INDEX_INDIRECT: no slot of its own in S412, its own columns in S413
 
 // The opcodes with their own column; every other opcode counts in "other", a fault outside any packet handler in "none".
 // The eight are the ones a handler reads guest memory in, or that wait on it (predication, indirect args, wait_reg_mem).
@@ -83,10 +93,76 @@ inline void EndPacket() {
 	CurrentPacket().opcode = kNoOpcode;
 }
 
-// PC of the access violation being handled (set by the exception handler on the faulting thread just before HandleGpuFault).
+// PC, stack pointer and frame pointer of the access violation being handled (set by the exception handler on the faulting thread just
+// before HandleGpuFault).
+struct FaultContext {
+	uint64_t pc  = 0;
+	uint64_t rsp = 0;
+	uint64_t rbp = 0;
+};
+inline FaultContext& FaultCtxRef() {
+	static thread_local FaultContext ctx;
+	return ctx;
+}
 inline uint64_t& FaultPcRef() {
-	static thread_local uint64_t pc = 0;
-	return pc;
+	return FaultCtxRef().pc;
+}
+
+constexpr uint32_t kMaxFrames = 6;
+
+// Bounds [lo, hi) of the current thread's stack; false where the platform has no cheap query.
+inline bool CurrentStackBounds(uint64_t* lo, uint64_t* hi) {
+#if defined(__APPLE__)
+	const pthread_t self = pthread_self();
+	const auto      top  = reinterpret_cast<uint64_t>(pthread_get_stackaddr_np(self));
+	const auto      size = static_cast<uint64_t>(pthread_get_stacksize_np(self));
+	if (top == 0 || size == 0 || size > top) {
+		return false;
+	}
+	*hi = top;
+	*lo = top - size;
+	return true;
+#else
+	(void)lo;
+	(void)hi;
+	return false;
+#endif
+}
+
+// Frames of the faulting code without an unwinder: [0] = PC; [1] = the word at RSP (the return address when the faulting function is a
+// leaf that pushed nothing, e.g. memmove; otherwise a stale value, which the reader sees as a symbol that makes no sense); then the
+// return addresses of the RBP chain. The chain is followed only while every frame pointer is 8-aligned, inside [lo, hi), not below
+// the stack pointer and strictly growing, and its two words fit in the stack. Returns the number of frames written (>= 1).
+inline uint32_t WalkFrames(const FaultContext& ctx, uint64_t stack_lo, uint64_t stack_hi, uint64_t* out, uint32_t max = kMaxFrames) {
+	uint32_t count = 0;
+	if (max == 0) {
+		return 0;
+	}
+	out[count++] = ctx.pc;
+	const auto readable = [&](uint64_t address) { return (address & 7u) == 0 && address >= stack_lo && address + 8 <= stack_hi; };
+	if (count < max && readable(ctx.rsp)) {
+		out[count++] = *reinterpret_cast<const uint64_t*>(ctx.rsp);
+	}
+	uint64_t frame = ctx.rbp;
+	while (count < max && readable(frame) && readable(frame + 8) && frame >= ctx.rsp) {
+		const uint64_t ret  = *reinterpret_cast<const uint64_t*>(frame + 8);
+		const uint64_t next = *reinterpret_cast<const uint64_t*>(frame);
+		if (ret == 0) {
+			break;
+		}
+		out[count++] = ret;
+#if defined(KYTY_RFOP_MUTANT_WALK_NO_GROW)
+		if (next < frame) {
+			break;
+		}
+#else
+		if (next <= frame) {
+			break;
+		}
+#endif
+		frame = next;
+	}
+	return count;
 }
 
 // "symbol+0xoff" through dladdr; "image+0xoff" when the symbol is not exported, "?" for an address outside every image.
@@ -108,6 +184,28 @@ inline std::string ResolvePc(uint64_t pc) {
 	return text;
 }
 
+// "a|b|c" of the frames through `resolve` (dladdr only for the frames of a logged line).
+inline std::string FormatBacktrace(const uint64_t* frames, uint32_t count, std::string (*resolve)(uint64_t) = &ResolvePc) {
+	std::string text;
+	for (uint32_t i = 0; i < count; i++) {
+		if (i != 0) {
+			text += '|';
+		}
+		text += resolve(frames[i]);
+	}
+	return text.empty() ? "-" : text;
+}
+
+// Label of a CP breadcrumb site for the [rf-op] line.
+inline const char* SiteLabel(uint32_t site) {
+#if defined(KYTY_RFOP_MUTANT_NO_SITE)
+	(void)site;
+	return "none";
+#else
+	return CpSampler::SiteName(site);
+#endif
+}
+
 // 16 bytes at the fault address, read through the backing (not the protected mapping).
 struct Bytes16 {
 	bool    ok = false;
@@ -123,6 +221,13 @@ struct Event {
 	uint64_t    writer_hash = 0;         // 0 = unknown
 	Bytes16     stale;
 	Bytes16     fresh;
+	// S413
+	std::string site       = "none"; // CP breadcrumb site at the fault (SiteLabel)
+	uint64_t    wait_us    = 0;      // time of ReadMemory
+	bool        eager      = false;  // served by an eager download
+	bool        dirty      = false;  // HasGpuDirtyBytes(addr, 16) before the drain
+	bool        page_dirty = false;  // IsRegionGpuModified(4 KiB page) before the drain
+	std::string bt_text    = "-";
 };
 
 inline std::string FormatLine(const Event& event) {
@@ -144,13 +249,16 @@ inline std::string FormatLine(const Event& event) {
 	} else {
 		std::snprintf(hash, sizeof(hash), "%016llx", static_cast<unsigned long long>(event.writer_hash));
 	}
-	char text[1024];
+	char text[3072];
 	std::snprintf(text, sizeof(text),
-	              "[rf-op] flip=%llu op=%s pkt=%08x,%08x,%08x,%08x addr=0x%016llx pc=%s writer_op=%s writer_hash=%s stale=%s fresh=%s",
+	              "[rf-op] flip=%llu op=%s pkt=%08x,%08x,%08x,%08x addr=0x%016llx pc=%s writer_op=%s writer_hash=%s stale=%s fresh=%s"
+	              " site=%s wait_us=%llu eager=%d dirty=%d page_dirty=%d bt=%s",
 	              static_cast<unsigned long long>(event.flip), op, event.packet.dw[0], event.packet.dw[1], event.packet.dw[2],
 	              event.packet.dw[3], static_cast<unsigned long long>(event.addr), event.pc_text.c_str(), writer, hash,
 	              SyncCensus::ToHex(event.stale.data, event.stale.ok ? 16 : 0).c_str(),
-	              SyncCensus::ToHex(event.fresh.data, event.fresh.ok ? 16 : 0).c_str());
+	              SyncCensus::ToHex(event.fresh.data, event.fresh.ok ? 16 : 0).c_str(), event.site.c_str(),
+	              static_cast<unsigned long long>(event.wait_us), event.eager ? 1 : 0, event.dirty ? 1 : 0, event.page_dirty ? 1 : 0,
+	              event.bt_text.c_str());
 	return text;
 }
 

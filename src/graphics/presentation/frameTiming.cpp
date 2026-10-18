@@ -2,6 +2,7 @@
 #include "graphics/presentation/cpPhases.h"
 #include "graphics/presentation/cpSampler.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
+#include "graphics/host_gpu/renderer/cpWaitDiag.h"
 #include "graphics/shader/nullDescDiag.h"
 
 #include "common/memEvents.h"
@@ -335,6 +336,19 @@ constexpr const char* kCounterNames[] = {
     "rf_op_indirect_buffer_n",
     "rf_op_other_n",
     "rf_op_none_n",
+    "rf_op_wait_ns",
+    "rf_op_draw_index_indirect_n",
+    "rf_op_draw_index_indirect_wait_ns",
+    "cp_wait_cause_rf_gpu_ns",
+    "cp_wait_cause_spec_ns",
+    "cp_wait_cause_dcc_ns",
+    "cp_wait_cause_readmem_ns",
+    "cp_wait_cause_eager_ns",
+    "cp_wait_cause_delete_drain_ns",
+    "cp_wait_cause_drain_ns",
+    "cp_wait_cause_stream_ns",
+    "cp_wait_cause_desc_heap_ns",
+    "cp_wait_cause_other_ns",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
@@ -349,6 +363,16 @@ constexpr bool RfOpColumnsMatch() {
 	return true;
 }
 static_assert(RfOpColumnsMatch(), "frames.csv rf_op columns out of step with RfOp::SlotOf");
+static_assert(static_cast<uint32_t>(Counter::CpWaitCauseOtherNs) - static_cast<uint32_t>(Counter::CpWaitCauseRfGpuNs) + 1 == CpWait::kCauseCount);
+constexpr bool CpWaitColumnsMatch() {
+	for (uint32_t cause = 0; cause < CpWait::kCauseCount; cause++) {
+		if (std::string_view(kCounterNames[static_cast<uint32_t>(Counter::CpWaitCauseRfGpuNs) + cause]) != CpWait::ColumnName(cause)) {
+			return false;
+		}
+	}
+	return true;
+}
+static_assert(CpWaitColumnsMatch(), "frames.csv cp_wait_cause columns out of step with CpWait::Cause");
 static_assert(static_cast<uint32_t>(Counter::DispOther) - static_cast<uint32_t>(Counter::DispGuest) ==
               static_cast<uint32_t>(DispatchClass::Other));
 
@@ -509,11 +533,18 @@ void DumpHistogram(const Histogram& hist, uint64_t from, uint64_t to) {
 		uint32_t site;
 		size_t   op;
 		uint64_t n;
+		uint32_t parent; // S413: for the Wait site, the site that asked for the wait
 	};
 	std::vector<Cell> cells;
 	for (uint32_t site = 0; site < kSiteCount; site++) {
 		for (size_t op = 0; op < Histogram::kOps; op++) {
-			if (const auto n = hist.Cell(site, op); n != 0) cells.push_back({site, op, n});
+			if (site == kWaitSite) {
+				for (uint32_t parent = 0; parent < kSiteCount; parent++) {
+					if (const auto n = hist.WaitCell(parent, op); n != 0) cells.push_back({site, op, n, parent});
+				}
+			} else if (const auto n = hist.Cell(site, op); n != 0) {
+				cells.push_back({site, op, n, 0});
+			}
 		}
 	}
 	std::sort(cells.begin(), cells.end(), [](const Cell& a, const Cell& b) { return a.n > b.n; });
@@ -524,8 +555,14 @@ void DumpHistogram(const Histogram& hist, uint64_t from, uint64_t to) {
 		} else {
 			std::snprintf(op, sizeof(op), "0x%02zx", cells[i].op);
 		}
+		char site[64];
+		if (cells[i].site == kWaitSite) {
+			std::snprintf(site, sizeof(site), "wait@%s", SiteName(cells[i].parent));
+		} else {
+			std::snprintf(site, sizeof(site), "%s", SiteName(cells[i].site));
+		}
 		LOGF("[cp-sample] flips=%llu-%llu total=%llu site=%s op=%s n=%llu\n", static_cast<unsigned long long>(from),
-		     static_cast<unsigned long long>(to), static_cast<unsigned long long>(hist.Total()), SiteName(cells[i].site), op,
+		     static_cast<unsigned long long>(to), static_cast<unsigned long long>(hist.Total()), site, op,
 		     static_cast<unsigned long long>(cells[i].n));
 	}
 }

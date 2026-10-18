@@ -115,21 +115,42 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		// S412 (KYTY_DIAG_RFOP): who on the command processor thread reads the page, and what it would have seen before the drain.
 		const bool rf_op = on_gpu_thread && RfOp::Enabled();
 		RfOp::Event rf_event;
+		uint64_t    eager_before = 0;
+		int64_t     read_begin   = 0;
 		if (rf_op) {
-			rf_event.stale.ok = LibKernel::Memory::TryReadBacking(fault_vaddr, rf_event.stale.data, sizeof(rf_event.stale.data));
+			rf_event.stale.ok    = LibKernel::Memory::TryReadBacking(fault_vaddr, rf_event.stale.data, sizeof(rf_event.stale.data));
+			// S413: state of the bytes and of the page before the drain, and the breadcrumb of the code that is reading.
+			rf_event.dirty      = m_buffer_cache.HasGpuDirtyBytes(fault_vaddr, sizeof(rf_event.stale.data));
+			rf_event.page_dirty = m_buffer_cache.IsRegionGpuModified(fault_vaddr & ~uint64_t {4095}, 4096);
+			rf_event.site       = RfOp::SiteLabel(CpSampler::CpSite().load(std::memory_order_relaxed));
+			eager_before        = FrameTiming::Get(FrameTiming::Counter::ReadbackEagerHits);
+			read_begin          = FrameTiming::SteadyNowNs();
 		}
 		const bool downloaded = m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
 		if (rf_op) {
-			rf_event.fresh.ok = LibKernel::Memory::TryReadBacking(fault_vaddr, rf_event.fresh.data, sizeof(rf_event.fresh.data));
+			const auto wait_ns = FrameTiming::ElapsedNs(read_begin, FrameTiming::SteadyNowNs());
+			rf_event.wait_us   = wait_ns / 1000;
+			rf_event.eager     = FrameTiming::Get(FrameTiming::Counter::ReadbackEagerHits) != eager_before;
+			rf_event.fresh.ok  = LibKernel::Memory::TryReadBacking(fault_vaddr, rf_event.fresh.data, sizeof(rf_event.fresh.data));
 			rf_event.flip      = FrameTiming::GuestFlips();
 			rf_event.packet    = RfOp::CurrentPacket();
 			rf_event.addr      = fault_vaddr;
 			rf_event.writer_op = m_buffer_cache.RfOpWriter(fault_vaddr, fault_size);
 			FrameTiming::Add(static_cast<FrameTiming::Counter>(static_cast<uint32_t>(FrameTiming::Counter::RfOpWaitRegMemN) +
 			                                                   RfOp::SlotOf(rf_event.packet.opcode)));
+			FrameTiming::Add(FrameTiming::Counter::RfOpWaitNs, wait_ns);
+			if (rf_event.packet.opcode == RfOp::kOpDrawIndexIndirect) {
+				FrameTiming::Add(FrameTiming::Counter::RfOpDrawIndexIndirectN);
+				FrameTiming::Add(FrameTiming::Counter::RfOpDrawIndexIndirectWaitNs, wait_ns);
+			}
 			static std::atomic<uint64_t> logged {0};
 			if (RfOp::ShouldLog(logged.fetch_add(1, std::memory_order_relaxed), rf_event.flip)) {
-				rf_event.pc_text = RfOp::ResolvePc(RfOp::FaultPcRef());
+				const auto& ctx = RfOp::FaultCtxRef();
+				rf_event.pc_text = RfOp::ResolvePc(ctx.pc);
+				uint64_t stack_lo = 0, stack_hi = 0, frames[RfOp::kMaxFrames];
+				if (RfOp::CurrentStackBounds(&stack_lo, &stack_hi)) {
+					rf_event.bt_text = RfOp::FormatBacktrace(frames, RfOp::WalkFrames(ctx, stack_lo, stack_hi, frames));
+				}
 				LOGF("%s\n", RfOp::FormatLine(rf_event).c_str());
 			}
 		}
