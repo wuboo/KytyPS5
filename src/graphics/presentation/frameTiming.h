@@ -260,6 +260,10 @@ enum class Counter : uint32_t {
 	// S413 (KYTY_DIAG_CP_WAIT=1): ns the CP thread waited in MasterSemaphore::Wait by cause (order of CpWait::Cause).
 	CpWaitCauseRfGpuNs, CpWaitCauseSpecNs, CpWaitCauseDccNs, CpWaitCauseReadMemNs, CpWaitCauseEagerNs, CpWaitCauseDeleteDrainNs,
 	CpWaitCauseDrainNs, CpWaitCauseStreamNs, CpWaitCauseDescHeapNs, CpWaitCauseOtherNs,
+	// S413 (KYTY_PV_IND_RANGE): On draws that took the remembered vertex range of GPU-dirty indices (no hash, no scan) / found none for their key /
+	// draws the prepare compute zeroed for an index outside the range; shadow: the CPU scan equal / different from the remembered range, and the
+	// different ones that lie inside it (the GPU check would not have fired).
+	PvIndRangeReuseN, PvIndRangeMissN, PvIndRangeViolationN, PvIndRangeEqN, PvIndRangeNeN, PvIndRangeNeWithinN,
 	Count,
 };
 

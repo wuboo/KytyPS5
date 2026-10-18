@@ -98,6 +98,9 @@ struct PvIndirectDraw {
 	uint32_t            entry_id = 0;
 	PvIndirect::Decline why      = PvIndirect::Decline::Other; // out, with `declined`
 	bool                declined = false;                      // out: nothing has been drawn, take the old path
+	// S413 (KYTY_PV_IND_RANGE): a draw on the old path (mode Off) of a learned entry hands over its entry so the scan of its indices is remembered
+	// (the CPU has read the args, so the drain is done and the index bytes are fresh; its key equals the key of the On draw).
+	bool range_record = false;
 };
 
 struct DrawIndexArgs {
@@ -300,6 +303,8 @@ private:
 	[[nodiscard]] PvIndirectDraw PvIndirectDecide(const PvIndirectRequest& request, bool pv_candidate);
 	// Moves the status rows to the current flip and applies what the GPU wrote two flips ago.
 	void PvIndirectAdvance();
+	// S413: the vertex range of the indices the CPU scanned, kept on the entry of the args address.
+	[[nodiscard]] PvIndirect::RangeEntry* PvIndirectRangeEntry(uint32_t entry_id);
 	// Notes the plan of a prepared draw (cap limit of the entry, the dry plan of a shadow draw).
 	void PvIndirectNotePlan(const PvIndirectDraw& draw, const PvVsStorePlan& cap_plan, const PvVsStorePlan& real_plan,
 	                        uint32_t stride_vec4);

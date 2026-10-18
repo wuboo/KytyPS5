@@ -16,6 +16,11 @@
 //   shadow  the old path (CPU reads the args); everything of the new path but the draw: learn, decision, prepare compute recorded next
 //           to the draw, the dry plan with cap; the prepared args are compared with what the CPU read in the same flip
 //   1       a learned entry in state `use` draws from the prepared args; every other case takes the old path and learns
+// S413 (KYTY_PV_IND_RANGE=0|1|shadow, unset = 0): a draw in mode On whose index bytes the GPU wrote does not read them on the CPU (the XXH3 of the
+// VS-store scan drains the queue: ~9 ms/flip, RESULT-413). The vertex range [first, end) the CPU scan found is remembered per args address,
+// with the key it was found for; the next On draw with the same key and GPU-dirty indices takes it as it is. The prepare compute then checks
+// every index of the draw against the range (same arithmetic as RangeCheck): a violation zeroes the draw and sends the entry back to the CPU
+// read like a mismatch. shadow: the CPU scan runs as today and is compared with the remembered range. 0: the path of S412, bit for bit.
 // Pure part; tests/PvIndirectTests.cpp pins it (the GLSL of pv_indirect_prepare.comp has the same arithmetic as PrepareArgs).
 
 #include "graphics/host_gpu/renderer/indirectGpu.h"
@@ -30,6 +35,8 @@
 namespace Libs::Graphics::PvIndirect {
 
 enum class Mode : uint8_t { Off, On, Shadow };
+// S413 KYTY_PV_IND_RANGE: same three values.
+using RangeMode = Mode;
 
 inline Mode ParseMode(const char* text) {
 	if (text == nullptr) return Mode::Off;
@@ -39,6 +46,13 @@ inline Mode ParseMode(const char* text) {
 }
 inline Mode EnvMode() {
 	static const Mode mode = ParseMode(std::getenv("KYTY_PV_INDIRECT"));
+	return mode;
+}
+inline RangeMode ParseRangeMode(const char* text) {
+	return ParseMode(text);
+}
+inline RangeMode EnvRangeMode() {
+	static const RangeMode mode = ParseRangeMode(std::getenv("KYTY_PV_IND_RANGE"));
 	return mode;
 }
 
@@ -94,6 +108,7 @@ struct Status {
 	uint32_t overflow     = 0; // draws with more instances than cap
 	uint32_t max_instance = 0; // largest instance_count of a draw whose fields matched
 	uint32_t draws        = 0;
+	uint32_t range_violation = 0; // S413: draws with an index outside the remembered vertex range (zeroed like a mismatch)
 	bool     operator==(const Status&) const = default;
 };
 struct Prepared {
@@ -125,6 +140,110 @@ constexpr Prepared PrepareArgs(const Args& in, const Fields& expected, uint32_t 
 	return result;
 }
 
+// ---- S413: the remembered vertex range of the index bytes ----
+// What the range was found for. All of it is known to the CPU without reading the indices: the bound index range of an On draw is
+// [args-independent base, expected.index_count indices) and the vertex offset is the learned one.
+struct RangeKey {
+	uint64_t index_addr    = 0;
+	uint64_t index_bytes   = 0;
+	uint32_t element_size  = 0;
+	uint32_t index_count   = 0;
+	uint32_t vertex_offset = 0; // bits of the signed offset
+	bool     operator==(const RangeKey&) const = default;
+};
+// [first, end) of the vertex numbers (index + vertex_offset) a scan of the indices found; end is exclusive.
+struct Range {
+	uint64_t first = 0;
+	uint64_t end   = 0;
+	bool     operator==(const Range&) const = default;
+};
+struct RangeEntry {
+	bool     known = false;
+	RangeKey key;
+	Range    range;
+};
+
+constexpr bool RangeKeyEqual(const RangeKey& a, const RangeKey& b) {
+#if defined(KYTY_PVINDIRECT_MUTANT_RANGE_REUSE_IGNORES_KEY)
+	return a.index_addr == b.index_addr && a.index_bytes == b.index_bytes && a.element_size == b.element_size &&
+	       a.vertex_offset == b.vertex_offset; // index_count not compared
+#else
+	return a == b;
+#endif
+}
+
+// A scan result worth remembering: derivable, nothing dropped, at least one vertex.
+constexpr bool RangeRecordable(bool known, bool dropped, uint64_t first, uint64_t end) {
+	return known && !dropped && first < end && end <= 0xffffffffull;
+}
+inline void RecordRange(RangeEntry& entry, const RangeKey& key, uint64_t first, uint64_t end) {
+	entry.known = true;
+	entry.key   = key;
+	entry.range = {first, end};
+}
+
+enum class RangeDecision : uint8_t {
+	NotApplicable, // mode 0 / shadow / not an On draw / indices not GPU-dirty: the CPU scan, nothing counted
+	Miss,          // On, dirty indices, but nothing remembered for this key: the CPU scan (and it is remembered)
+	Reuse,         // the remembered range, no read of the indices
+};
+constexpr RangeDecision DecideRangeReuse(RangeMode mode, bool pvi_on, bool dirty, const RangeEntry& entry, const RangeKey& key) {
+	if (mode != RangeMode::On || !pvi_on || !dirty) return RangeDecision::NotApplicable;
+	if (!entry.known || !RangeKeyEqual(entry.key, key)) return RangeDecision::Miss;
+	return RangeDecision::Reuse;
+}
+
+// shadow: the remembered range against the scan done this time.
+enum class RangeCompare : uint8_t { NoEntry, KeyDiffers, Equal, NotEqualWithin, NotEqual };
+constexpr RangeCompare CompareRange(const RangeEntry& entry, const RangeKey& key, const Range& scanned) {
+	if (!entry.known) return RangeCompare::NoEntry;
+	if (!RangeKeyEqual(entry.key, key)) return RangeCompare::KeyDiffers;
+	if (entry.range == scanned) return RangeCompare::Equal;
+	// the scan is inside the remembered range: the GPU check would not have fired
+	if (scanned.first >= entry.range.first && scanned.end <= entry.range.end) return RangeCompare::NotEqualWithin;
+	return RangeCompare::NotEqual;
+}
+
+// The arithmetic of the range check of pv_indirect_prepare.comp: every index + vertex_offset (32-bit wrap, as the shader adds it) of the
+// first `count` indices lies in [first, end). element_size 2 or 4.
+inline bool RangeCheck(const void* indices, uint32_t count, uint32_t element_size, uint32_t vertex_offset, const Range& range) {
+	const auto* bytes = static_cast<const uint8_t*>(indices);
+	for (uint32_t i = 0; i < count; ++i) {
+		uint32_t raw = 0;
+		if (element_size == 4) {
+			std::memcpy(&raw, bytes + size_t {i} * 4u, 4);
+		} else {
+			uint16_t half = 0;
+			std::memcpy(&half, bytes + size_t {i} * 2u, 2);
+			raw = half;
+		}
+		const int32_t vertex = static_cast<int32_t>(raw + vertex_offset);
+		if (vertex < 0) return false;
+		const uint64_t v = static_cast<uint32_t>(vertex);
+#if defined(KYTY_PVINDIRECT_MUTANT_RANGECHECK_OFF_BY_ONE)
+		if (v < range.first || v > range.end) return false;
+#else
+		if (v < range.first || v >= range.end) return false;
+#endif
+	}
+	return true;
+}
+
+// PrepareArgs plus the range check (the shader with the indices bound): a violation zeroes the draw and counts range_violation only.
+inline Prepared PrepareArgsChecked(const Args& in, const Fields& expected, uint32_t cap, const void* indices, uint32_t element_size,
+                                   const Range* range) {
+	auto result = PrepareArgs(in, expected, cap);
+	if (range == nullptr || result.status.mismatch != 0) return result;
+	const uint32_t count = std::min(in.index_count, expected.index_count);
+	if (!RangeCheck(indices, count, element_size, expected.vertex_offset, *range)) {
+		Prepared violated;
+		violated.status.draws           = 1;
+		violated.status.range_violation = 1;
+		return violated;
+	}
+	return result;
+}
+
 // ---- what the CPU keeps per args address ----
 struct Entry {
 	bool     learned        = false;
@@ -134,6 +253,7 @@ struct Entry {
 	uint32_t max_seen       = 0;
 	uint64_t cooldown_until = 0; // flips < this take the old path
 	uint32_t id             = 0; // status slot
+	RangeEntry range;            // S413
 };
 
 constexpr uint32_t InitialCap(uint32_t max_seen, uint32_t env_cap) {
@@ -171,9 +291,10 @@ constexpr Verdict Decide(const Entry& entry, uint64_t flip) {
 
 // The status of the draws of one flip, read two flips later.
 struct StatusEffect {
-	bool cooldown = false;
-	bool grew     = false;
-	bool off      = false;
+	bool cooldown        = false;
+	bool grew            = false;
+	bool off             = false;
+	bool range_violation = false; // S413
 };
 inline StatusEffect OnStatus(Entry& entry, const Status& status, uint64_t flip, uint32_t cap_limit) {
 	StatusEffect effect;
@@ -182,6 +303,13 @@ inline StatusEffect OnStatus(Entry& entry, const Status& status, uint64_t flip, 
 		entry.cooldown_until = flip + kCooldownFlips;
 #endif
 		effect.cooldown = true;
+	}
+	if (status.range_violation != 0) {
+		// S413: the remembered range was wrong for a draw: forget it (the CPU read of the cooldown remembers the current one) and go back to the CPU read.
+		entry.cooldown_until  = flip + kCooldownFlips;
+		entry.range.known     = false;
+		effect.cooldown       = true;
+		effect.range_violation = true;
 	}
 	entry.max_seen = std::max(entry.max_seen, status.max_instance);
 	if (status.overflow != 0) {

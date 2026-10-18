@@ -22,7 +22,7 @@ public:
 	static constexpr uint32_t kSlotBytes     = 32; // 5 dwords, padded
 	static constexpr uint32_t kStatusRows    = 8;
 	static constexpr uint32_t kStatusDwords  = 16; // [0] mismatch [1] overflow [2] max instance [3] draws [4..8] in [9..13] out
-	static constexpr uint32_t kPushDwords    = 8;
+	static constexpr uint32_t kPushDwords    = 13; // S413: + range_first, range_end, idx_first, idx_count, flags
 
 	PvIndirectRuntime(GraphicContext& graphics, CommandScheduler& scheduler);
 	~PvIndirectRuntime();
@@ -37,13 +37,22 @@ public:
 		uint32_t             cap      = 0;
 		uint32_t             entry_id = 0;
 		uint64_t             flip     = 0;
+		// S413 (KYTY_PV_IND_RANGE=1, reuse): the compute checks the draw's indices (the binding the VS-store reads) against `range`.
+		bool                 range_check       = false;
+		PvIndirect::Range    range;
+		vk::Buffer           index_buffer      = nullptr;
+		uint64_t             index_offset      = 0; // aligned down, as the VS-store descriptor
+		uint64_t             index_range       = 0;
+		uint32_t             index_first       = 0; // elements between the descriptor offset and the first index of the draw
+		uint32_t             index_count       = 0;
+		bool                 index32           = false;
 	};
 	struct Prepared {
 		bool                                  ok = false;
 		vk::Buffer                            out_buffer = nullptr; // for vkCmdDrawIndexedIndirect
 		uint64_t                              out_offset = 0;
 		std::array<uint32_t, kPushDwords>     push {};
-		std::array<vk::DescriptorBufferInfo, 3> infos {};
+		std::array<vk::DescriptorBufferInfo, 4> infos {};
 	};
 	// The status of one entry in one flip, as the shader wrote it.
 	struct Report {

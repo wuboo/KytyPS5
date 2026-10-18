@@ -18,6 +18,10 @@ PvIndirectRuntime& RenderExecutor::PvIndirectRt() {
 	return *m_pvi_rt;
 }
 
+PvIndirect::RangeEntry* RenderExecutor::PvIndirectRangeEntry(uint32_t entry_id) {
+	return entry_id < m_pvi_count ? &m_pvi_entries[entry_id].entry.range : nullptr;
+}
+
 PvIndirectDraw RenderExecutor::PvIndirectDecide(const PvIndirectRequest& request, bool pv_candidate) {
 	using C = FrameTiming::Counter;
 	PvIndirectDraw draw;
@@ -63,6 +67,12 @@ PvIndirectDraw RenderExecutor::PvIndirectDecide(const PvIndirectRequest& request
 	if (request.have_cpu_args) {
 		// The old path: the CPU has read the args. Learn them (also during a cooldown, so the fields are the current ones when it ends).
 		const bool learned = PvIndirect::Learn(entry, request.cpu_args, request.index_buffer_size, PvIndirect::EnvCap());
+		if (learned && PvIndirect::EnvRangeMode() != PvIndirect::RangeMode::Off) {
+			// S413: this draw's index scan runs after the args drain; its key (base, learned count and offset) is the key of the On draw.
+			draw.range_record = true;
+			draw.args_addr    = request.args_addr;
+			draw.entry_id     = entry.id;
+		}
 		if (request.mode != PvIndirect::Mode::Shadow) return draw;
 		count(verdict);
 		auto& seen = state->seen[flip % state->seen.size()];
@@ -110,6 +120,7 @@ void RenderExecutor::PvIndirectAdvance() {
 		const auto  expected = state.entry.fields;
 		const auto  cap_before = state.entry.cap;
 		const auto  effect = PvIndirect::OnStatus(state.entry, status, now, state.cap_limit);
+		FrameTiming::Add(C::PvIndRangeViolationN, status.range_violation);
 		FrameTiming::Set(C::PvIndCap, state.entry.cap);
 		FrameTiming::Max(C::PvIndMaxInstance, status.max_instance);
 		static std::atomic<uint32_t> logged {0};
@@ -136,13 +147,13 @@ void RenderExecutor::PvIndirectAdvance() {
 			FrameTiming::Add(C::PvIndMismatchN, status.mismatch);
 			FrameTiming::Add(C::PvIndOverflowN, status.overflow);
 		}
-		if ((status.mismatch != 0 || status.overflow != 0) && logged.fetch_add(1, std::memory_order_relaxed) < 20) {
+		if ((status.mismatch != 0 || status.overflow != 0 || status.range_violation != 0) && logged.fetch_add(1, std::memory_order_relaxed) < 20) {
 			LOGF("[pv-ind-status] flip=%" PRIu64 " addr=0x%" PRIx64 " draws=%u mismatch=%u overflow=%u max_instance=%u expected=%u,%u,%u,%u "
-			     "in=%u,%u,%u,%u,%u cap=%u->%u cooldown=%d off=%d\n",
+			     "in=%u,%u,%u,%u,%u cap=%u->%u cooldown=%d off=%d range_violation=%u\n",
 			     report.flip, state.addr, status.draws, status.mismatch, status.overflow, status.max_instance, expected.index_count,
 			     expected.first_index, expected.vertex_offset, expected.first_instance, report.last_in.index_count,
 			     report.last_in.instance_count, report.last_in.first_index, report.last_in.vertex_offset, report.last_in.first_instance,
-			     cap_before, state.entry.cap, effect.cooldown ? 1 : 0, effect.off ? 1 : 0);
+			     cap_before, state.entry.cap, effect.cooldown ? 1 : 0, effect.off ? 1 : 0, status.range_violation);
 		}
 	});
 }
