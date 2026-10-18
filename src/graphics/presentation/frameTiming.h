@@ -159,6 +159,20 @@ enum class Counter : uint32_t {
 	DescAssertCachedN,
 	DescAssertRunN, DescAssertSkipN, DescAssertReadsN,
 	DescAssertNs,
+	// S398 (KYTY_DIAG_SYNC=1): readbacks by call site (SyncCensus::Site order: dcc, rf_gpu, rf_guest, write_fault, spec, other).
+	SyncDccN, SyncRfGpuN, SyncRfGuestN, SyncWriteFaultN, SyncSpecN, SyncOtherN,
+	SyncDccNs, SyncRfGpuNs, SyncRfGuestNs, SyncWriteFaultNs, SyncSpecNs, SyncOtherNs,
+	SyncEagerHitDccN, SyncEagerHitRfGpuN, SyncEagerHitRfGuestN, SyncEagerHitWriteFaultN, SyncEagerHitSpecN, SyncEagerHitOtherN,
+	SyncLag0N,          // downloads whose newest writer sat in the buffer being recorded (nothing to wait for but the submit)
+	SyncLagSum,         // sum of the writer lag in ticks over downloads
+	SyncWriterDoneN,    // downloads whose newest writer had already completed on the GPU
+	SyncWriterDoneNs,   // ... and the time those readbacks spent in ReadMemory (what a read-after-writer would save)
+	SyncDccRepeatN,     // DCC metadata ranges read again in the same flip
+	SyncDccRepeatSameN, // ... of which the bytes the CPU saw were identical to the previous read
+	// S398 (KYTY_DIAG_INDIRECT=1): DrawIndirectMulti calls.
+	IndirectN, IndirectDirtyN, IndirectDirtyWaitNs, IndirectRegsPatchedN, IndirectPvN, IndirectArgsChangedN,
+	// S398: largest color target of the current flip.
+	RtMaxW, RtMaxH,
 	Count,
 };
 

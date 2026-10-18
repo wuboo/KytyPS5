@@ -18,6 +18,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
+#include "graphics/host_gpu/renderer/syncCensus.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
 #include "graphics/shader/shader.h"
@@ -29,12 +30,15 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cinttypes>
+#include <cstring>
 #include <cstdio>
 #include <deque>
 #include <memory>
 #include <mutex>
 #include <semaphore>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -996,6 +1000,67 @@ static void PatchIndirectDrawOffsets(CommandProcessor& cp, IndirectDrawRegisters
 	write(registers.index_offset, first_index);
 }
 
+namespace {
+// S398: what DrawIndirectMulti saw before its first read of the args (KYTY_DIAG_INDIRECT=1).
+struct IndirectDiag {
+	bool     count_dirty  = false;
+	bool     args_dirty   = false;
+	uint64_t wait_ns      = 0;
+	uint32_t regs_patched = 0;
+	uint32_t args_changed = 0;
+	uint32_t clamped      = 0;
+	uint64_t pv_before    = 0;
+	uint64_t pv_draws     = 0;
+};
+
+// True when the args at this address differ from the ones last seen in an earlier flip.
+bool NoteIndirectArgsChanged(uint64_t args_addr, uint64_t size) {
+	struct Entry {
+		uint64_t flip = 0;
+		uint32_t words[5] {};
+	};
+	static std::unordered_map<uint64_t, Entry> seen;
+	if (size > sizeof(Entry::words)) {
+		return false;
+	}
+	const auto flip  = FrameTiming::GuestFlips();
+	auto&      entry = seen[args_addr];
+	const bool changed = entry.flip != 0 && entry.flip < flip &&
+	                     std::memcmp(entry.words, reinterpret_cast<const void*>(args_addr), size) != 0;
+	if (entry.flip != flip) {
+		entry.flip = flip;
+		std::memcpy(entry.words, reinterpret_cast<const void*>(args_addr), size);
+	}
+	if (seen.size() > 8192) {
+		seen.clear();
+	}
+	return changed;
+}
+
+void LogIndirectDiag(const IndirectDiag& probe, bool indexed, bool has_count, uint32_t draw_count, uint32_t index_type,
+                     uint32_t index_buffer_size, uint64_t args_addr) {
+	FrameTiming::Add(FrameTiming::Counter::IndirectN, draw_count);
+	if (probe.args_dirty || probe.count_dirty) {
+		FrameTiming::Add(FrameTiming::Counter::IndirectDirtyN);
+	}
+	FrameTiming::Add(FrameTiming::Counter::IndirectDirtyWaitNs, probe.wait_ns);
+	FrameTiming::Add(FrameTiming::Counter::IndirectRegsPatchedN, static_cast<uint64_t>(probe.regs_patched) * draw_count);
+	FrameTiming::Add(FrameTiming::Counter::IndirectPvN, probe.pv_draws);
+	FrameTiming::Add(FrameTiming::Counter::IndirectArgsChangedN, probe.args_changed);
+	static std::atomic<uint64_t> logged {0};
+	const auto                   flip = FrameTiming::GuestFlips();
+	if (logged.fetch_add(1, std::memory_order_relaxed) >= 200 && !(flip >= 6300 && flip <= 6310)) {
+		return;
+	}
+	LOGF("[indirect] flip=%" PRIu64 " indexed=%d count_addr=%d draws=%u args=0x%016" PRIx64
+	     " count_dirty=%d args_dirty=%d wait_us=%" PRIu64 " regs=%u index_type=%u index_buffer_size=%u clamped=%u pv=%" PRIu64
+	     " changed=%u\n",
+	     flip, indexed ? 1 : 0, has_count ? 1 : 0, draw_count, args_addr, probe.count_dirty ? 1 : 0,
+	     probe.args_dirty ? 1 : 0, probe.wait_ns / 1000, probe.regs_patched, index_type, index_buffer_size, probe.clamped,
+	     probe.pv_draws, probe.args_changed);
+}
+} // namespace
+
 void CommandProcessor::DrawIndirect(uint32_t data_offset, IndirectDrawRegisters registers,
                                     uint32_t draw_initiator, bool indexed) {
 	const auto args_size = indexed ? sizeof(DrawIndexedIndirectArgs) : sizeof(DrawIndirectArgs);
@@ -1009,9 +1074,21 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	EXIT_NOT_IMPLEMENTED((draw_initiator & ~0x20u) != (indexed ? 0u : 2u));
 	EXIT_NOT_IMPLEMENTED(m_draw_indirect_args_base_addr == 0);
 
+	// S398 (KYTY_DIAG_INDIRECT=1): state of the count and the args before the CPU reads them.
+	const bool diag = SyncCensus::IndirectEnabled();
+	IndirectDiag probe {};
+	if (diag) {
+		probe.count_dirty = count_addr != nullptr &&
+		                    m_renderer.GetBufferCache().HasGpuDirtyBytes(reinterpret_cast<uint64_t>(count_addr), sizeof(uint32_t));
+	}
+
 	uint32_t draw_count = max_count_or_count;
 	if (count_addr != nullptr) {
+		const auto count_begin = diag && probe.count_dirty ? FrameTiming::SteadyNowNs() : 0;
 		draw_count = *count_addr;
+		if (count_begin != 0) {
+			probe.wait_ns += static_cast<uint64_t>(FrameTiming::SteadyNowNs() - count_begin);
+		}
 		if (draw_count > max_count_or_count) {
 			draw_count = max_count_or_count;
 		}
@@ -1024,6 +1101,22 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 
 	const auto args_size = indexed ? sizeof(DrawIndexedIndirectArgs) : sizeof(DrawIndirectArgs);
 	EXIT_NOT_IMPLEMENTED(stride_in_bytes < args_size);
+	if (diag) {
+		const auto args_first = m_draw_indirect_args_base_addr + data_offset;
+		probe.args_dirty = m_renderer.GetBufferCache().HasGpuDirtyBytes(
+		    args_first, static_cast<uint64_t>(draw_count - 1) * stride_in_bytes + args_size);
+		probe.pv_before = FrameTiming::Get(FrameTiming::Counter::PvVsStoreDraws) +
+		                  FrameTiming::Get(FrameTiming::Counter::PrototypeDraws);
+		// The first CPU read of the args takes the read fault (GPU thread) when they are GPU-written.
+		const auto begin = FrameTiming::SteadyNowNs();
+		(void)*reinterpret_cast<const volatile uint32_t*>(args_first);
+		if (probe.args_dirty) {
+			probe.wait_ns += static_cast<uint64_t>(FrameTiming::SteadyNowNs() - begin);
+		}
+		for (const auto reg: {registers.vertex_offset, registers.instance_offset, registers.index_offset}) {
+			probe.regs_patched += reg != Pm4::SH_NOP ? 1u : 0u;
+		}
+	}
 
 	uint64_t index_size = 0;
 	if (indexed) {
@@ -1038,6 +1131,9 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	for (uint32_t i = 0; i < draw_count; i++) {
 		const auto args_addr = m_draw_indirect_args_base_addr + data_offset +
 		                       static_cast<uint64_t>(i) * stride_in_bytes;
+		if (diag && NoteIndirectArgsChanged(args_addr, args_size)) {
+			probe.args_changed++;
+		}
 
 		if (!indexed) {
 			auto* args = reinterpret_cast<const DrawIndirectArgs*>(args_addr);
@@ -1072,6 +1168,9 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 			}
 		}
 
+		if (diag && index_count != args->index_count_per_instance) {
+			probe.clamped++;
+		}
 		m_num_instances = args->instance_count;
 		DrawIndex({.index_count    = index_count,
 		           .index_addr     = index_addr,
@@ -1079,6 +1178,12 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		           .base_vertex    = static_cast<int32_t>(args->base_vertex_location),
 		           .first_instance = args->start_instance_location,
 		           .offset_source  = DrawOffsetSource::IndirectArgs});
+	}
+	if (diag) {
+		probe.pv_draws = FrameTiming::Get(FrameTiming::Counter::PvVsStoreDraws) +
+		                 FrameTiming::Get(FrameTiming::Counter::PrototypeDraws) - probe.pv_before;
+		LogIndirectDiag(probe, indexed, count_addr != nullptr, draw_count, m_index_type_and_size, m_index_buffer_size,
+		                m_draw_indirect_args_base_addr + data_offset);
 	}
 }
 

@@ -2,6 +2,7 @@
 #include <SDL3/SDL_vulkan.h>
 
 #include "common/assert.h"
+#include "graphics/host_gpu/renderer/syncCensus.h"
 #include "common/common.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -535,7 +536,23 @@ static vk::Device VulkanCreateDevice(GraphicContext&                 graphics,
 		supported_min_lod.pNext   = supported_features2.pNext;
 		supported_features2.pNext = &supported_min_lod;
 	}
+	// S398 (KYTY_DIAG_INDIRECT=1): maintenance5 is only queried for the feature line below.
+	const bool diag_indirect = SyncCensus::IndirectEnabled();
+	const bool maintenance5_extension =
+	    diag_indirect && HasExtension(device_extensions, VK_KHR_MAINTENANCE_5_EXTENSION_NAME);
+	vk::PhysicalDeviceMaintenance5FeaturesKHR supported_maintenance5 {};
+	if (maintenance5_extension) {
+		supported_maintenance5.pNext = supported_features2.pNext;
+		supported_features2.pNext    = &supported_maintenance5;
+	}
 	physical_device.getFeatures2(&supported_features2);
+	if (diag_indirect) {
+		LOGF("[indirect-features] drawIndirectCount=%d multiDrawIndirect=%d drawIndirectFirstInstance=%d maintenance5=%d "
+		     "robustBufferAccess2=%d\n",
+		     supported_features12.drawIndirectCount ? 1 : 0, supported_features2.features.multiDrawIndirect ? 1 : 0,
+		     supported_features2.features.drawIndirectFirstInstance ? 1 : 0, supported_maintenance5.maintenance5 ? 1 : 0,
+		     supported_robustness2.robustBufferAccess2 ? 1 : 0);
+	}
 	const bool barycentric_supported =
 	    barycentric_extension && supported_barycentric.fragmentShaderBarycentric == VK_TRUE;
 	if (!barycentric_supported) {
