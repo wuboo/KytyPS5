@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
+#include "graphics/host_gpu/renderer/cpWaitDiag.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/eagerSubmit.h"
@@ -286,6 +287,7 @@ void CommandScheduler::Flush(SubmitInfo& submit) {
 }
 
 void CommandScheduler::FlushAndWait() {
+	const CpWait::CauseScope cause(CpWait::Cause::Drain);
 	m_next_reason = GpuDone::SubmitReason::Drain;
 	NoteDrainBegin();
 	const auto tick = Submit();
@@ -295,6 +297,7 @@ void CommandScheduler::FlushAndWait() {
 }
 
 void CommandScheduler::Finish() {
+	const CpWait::CauseScope cause(CpWait::Cause::Drain);
 	CheckActive();
 	NoteDrainBegin();
 	FrameTiming::Add(FrameTiming::Counter::Finishes);

@@ -5,6 +5,7 @@
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/renderer/cpWaitDiag.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 
 #include <cstring>
@@ -322,6 +323,7 @@ bool StreamBuffer::WaitPendingOperations(const std::vector<Watch>& watches,
 		if (!Scheduler().IsFree(watch.tick) && !allow_wait) {
 			return false;
 		}
+		const CpWait::CauseScope cause(CpWait::Cause::Stream);
 		Scheduler().Wait(watch.tick);
 		if (Usage() == MemoryUsage::Download) {
 			Scheduler().WaitPriorityOperations(watch.tick);

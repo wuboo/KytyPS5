@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/renderer/cpWaitDiag.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -161,6 +162,7 @@ void BufferCache::DeleteBuffer(BufferId id) {
 	if (m_scheduler.Active()) {
 		m_scheduler.DeferOperation([this, id] {
 			if (m_graphics.device_address_destruction_waits_for_queue) {
+				const CpWait::CauseScope cause(CpWait::Cause::DeleteDrain);
 				// Every command buffer submitted so far may reference this device-address buffer.
 				// ponytail: drains the queue per deletion batch; a per-buffer retire tick would
 				// need the driver to stop referencing buffers the work does not use.
@@ -424,6 +426,7 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		     vaddr, size);
 	}
 	FrameTiming::Add(FrameTiming::Counter::Readbacks);
+	const CpWait::CauseScope wait_cause(CpWait::CauseOfSite(SyncCensus::CurrentSite())); // S413: explicit readback by its SyncCensus tag
 	const bool census = SyncCensus::Enabled();
 	const auto site   = census ? SyncCensus::CurrentSite() : SyncCensus::Site::Other;
 	// KYTY_DCC_EAGER: the requesting thread's tag says whether this is a DCC metadata read (the GPU-thread lambda below has its own).
@@ -807,6 +810,7 @@ void BufferCache::NoteEagerProbe(const SyncCensus::Probe& probe) {
 }
 
 bool BufferCache::WaitEagerReadback(uint64_t vaddr, uint64_t size, bool dcc, SyncCensus::Probe* probe) {
+	const CpWait::CauseScope wait_cause(CpWait::Cause::Eager);
 	if (!EagerReadbackEnabled() || CommandScheduler::InDeferredOperation()) {
 		return false;
 	}
@@ -852,6 +856,7 @@ void BufferCache::NoteEagerWait(SyncCensus::Probe& probe, uint64_t tick) {
 // flight, and no page is GPU-modified again once the newest of those downloads has landed (a GPU write after the download
 // keeps its page marked; that range takes the synchronous path).
 bool BufferCache::WaitEagerReadbackPages(uint64_t vaddr, uint64_t size, SyncCensus::Probe* probe) {
+	const CpWait::CauseScope wait_cause(CpWait::Cause::Eager);
 	const auto first = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 	const auto last  = Common::AlignDown(vaddr + size - 1, TRACKER_PAGE_SIZE);
 	std::vector<EagerPages::PageState> pages;

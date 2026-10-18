@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
+#include "graphics/host_gpu/renderer/cpWaitDiag.h"
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -7,6 +8,9 @@
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
 
+#include "common/logging/log.h"
+
+#include <atomic>
 #include <optional>
 
 namespace Libs::Graphics {
@@ -60,10 +64,43 @@ void MasterSemaphore::Wait(uint64_t tick) {
 	// S132: only the command-processor thread's blocking time is cp_wait_gpu_ns.
 	std::optional<FrameTiming::ScopedCounterNs> cp_wait;
 	if (GuestGpu::IsGpuThread()) cp_wait.emplace(FrameTiming::Counter::CpWaitGpuNs);
-	CpPhases::Scope phase(CpPhases::Phase::Wait);
-	const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
-	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
-	Refresh();
+	// S413 (KYTY_DIAG_CP_WAIT=1): the site that asked (read before the Wait phase replaces it), the ticks the GPU is behind, the time.
+	const bool     diag = GuestGpu::IsGpuThread() && CpWait::Enabled();
+	uint32_t       diag_site = 0;
+	uint64_t       diag_lag = 0;
+	int64_t        diag_begin = 0;
+	if (diag) {
+		diag_site  = CpSampler::CpSite().load(std::memory_order_relaxed);
+		diag_lag   = tick > m_gpu_tick.load(std::memory_order_relaxed) ? tick - m_gpu_tick.load(std::memory_order_relaxed) : 0;
+		diag_begin = FrameTiming::SteadyNowNs();
+	}
+	{
+		CpPhases::Scope phase(CpPhases::Phase::Wait);
+		const auto result = m_graphics.device.waitSemaphores(&wait_info, UINT64_MAX);
+		EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+		Refresh();
+	}
+	if (diag) {
+		const auto     ns    = FrameTiming::ElapsedNs(diag_begin, FrameTiming::SteadyNowNs());
+		const auto     cause = CpWait::CurrentCause();
+		FrameTiming::Add(static_cast<FrameTiming::Counter>(static_cast<uint32_t>(FrameTiming::Counter::CpWaitCauseRfGpuNs) +
+		                                                   static_cast<uint32_t>(cause)),
+		                 ns);
+		if (ns / 1000 >= CpWait::kMinWaitUs) {
+			static std::atomic<uint64_t> logged {0};
+			CpWait::Event                event;
+			event.flip = FrameTiming::GuestFlips();
+			if (CpWait::ShouldLog(logged.fetch_add(1, std::memory_order_relaxed), event.flip, ns / 1000)) {
+				event.opcode  = RfOp::CurrentPacket().opcode != RfOp::kNoOpcode ? RfOp::CurrentPacket().opcode
+				                                                                : CpSampler::CpOpcode().load(std::memory_order_relaxed);
+				event.site    = RfOp::SiteLabel(diag_site);
+				event.cause   = cause;
+				event.wait_us = ns / 1000;
+				event.lag     = diag_lag;
+				LOGF("%s\n", CpWait::FormatLine(event).c_str());
+			}
+		}
+	}
 }
 
 } // namespace Libs::Graphics

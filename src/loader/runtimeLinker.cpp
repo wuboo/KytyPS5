@@ -703,7 +703,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 				return false;
 		}
 		if (Libs::Graphics::RfOp::Enabled()) {
-			Libs::Graphics::RfOp::FaultPcRef() = info->exception_address; // S412 (KYTY_DIAG_RFOP)
+			Libs::Graphics::RfOp::FaultCtxRef() = {info->exception_address, info->rsp, info->rbp}; // S412/S413 (KYTY_DIAG_RFOP)
 		}
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);

@@ -83,6 +83,21 @@ int main() {
 		Check(a > 27.0 && a < 33.0, "site A is 30% +-3");
 		Check(b > 67.0 && b < 73.0, "site B is 70% +-3");
 	}
+	// S413: a wait is attributed to the site that was current when the Wait site was entered.
+	{
+		Histogram h;
+		{
+			SiteScope parent(SiteId(Site::PvIndexHash));
+			SiteScope wait(kWaitSite);
+			Check(WaitParent().load() == SiteId(Site::PvIndexHash), "SiteScope(Wait) records its parent site");
+			h.Add(CpSite().load(), 0x25, WaitParent().load());
+		}
+		Check(h.Cell(kWaitSite, 0x25) == 1 && h.WaitCell(SiteId(Site::PvIndexHash), 0x25) == 1, "wait sample counted under its parent");
+		Check(h.WaitCell(SiteId(Site::None), 0x25) == 0, "not under none");
+		Check(h.Wait() == 1, "wait total");
+		h.Clear();
+		Check(h.WaitCell(SiteId(Site::PvIndexHash), 0x25) == 0, "Clear resets the parents");
+	}
 	if (g_failures != 0) return 1;
 	std::fprintf(stderr, "CpSamplerTests: ok\n");
 	return 0;

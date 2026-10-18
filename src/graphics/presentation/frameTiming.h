@@ -255,6 +255,11 @@ enum class Counter : uint32_t {
 	// indirect_buffer, other opcode, none = outside a handler).
 	RfOpWaitRegMemN, RfOpCondExecN, RfOpDrawIndirectMultiN, RfOpDrawIndexIndirectMultiN, RfOpDispatchIndirectN, RfOpSetPredicationN,
 	RfOpEventWriteEopN, RfOpIndirectBufferN, RfOpOtherN, RfOpNoneN,
+	// S413 (KYTY_DIAG_RFOP=1): time of the drains inside the faults (all opcodes), and the faults / drain time of IT_DRAW_INDEX_INDIRECT (0x25).
+	RfOpWaitNs, RfOpDrawIndexIndirectN, RfOpDrawIndexIndirectWaitNs,
+	// S413 (KYTY_DIAG_CP_WAIT=1): ns the CP thread waited in MasterSemaphore::Wait by cause (order of CpWait::Cause).
+	CpWaitCauseRfGpuNs, CpWaitCauseSpecNs, CpWaitCauseDccNs, CpWaitCauseReadMemNs, CpWaitCauseEagerNs, CpWaitCauseDeleteDrainNs,
+	CpWaitCauseDrainNs, CpWaitCauseStreamNs, CpWaitCauseDescHeapNs, CpWaitCauseOtherNs,
 	Count,
 };
 

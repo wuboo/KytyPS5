@@ -94,6 +94,11 @@ inline std::atomic<uint32_t>& CpSite() {
 	static std::atomic<uint32_t> site {SiteId(Site::None)};
 	return site;
 }
+// S413: the site that was current when the CP thread entered the Wait site (its parent), so a wait is attributed to what asked for it.
+inline std::atomic<uint32_t>& WaitParent() {
+	static std::atomic<uint32_t> parent {SiteId(Site::None)};
+	return parent;
+}
 inline std::atomic<uint32_t>& CpOpcode() {
 	static std::atomic<uint32_t> opcode {kNoOpcode};
 	return opcode;
@@ -103,14 +108,21 @@ inline std::atomic<uint32_t>& CpOpcode() {
 class Histogram {
 public:
 	static constexpr size_t kOps = 257;
-	void Add(uint32_t site, uint32_t opcode) {
+	// wait_parent: the site the CP thread was in when it entered the Wait site; only read when site == kWaitSite.
+	void Add(uint32_t site, uint32_t opcode, uint32_t wait_parent = SiteId(Site::None)) {
 		if (site >= kSiteCount) site = SiteId(Site::None);
 		const size_t op = opcode == kNoOpcode ? kOps - 1 : (opcode & 0xFFu);
 		m_cells[site * kOps + op]++;
 		m_total++;
-		if (site == kWaitSite) m_wait++;
+		if (site == kWaitSite) {
+			if (wait_parent >= kSiteCount || wait_parent == kWaitSite) wait_parent = SiteId(Site::None);
+			m_wait_cells[wait_parent * kOps + op]++;
+			m_wait++;
+		}
 	}
 	uint64_t Cell(uint32_t site, size_t op) const { return m_cells[site * kOps + op]; }
+	// Samples in the Wait site whose parent site was `parent`.
+	uint64_t WaitCell(uint32_t parent, size_t op) const { return m_wait_cells[parent * kOps + op]; }
 	uint64_t SiteTotal(uint32_t site) const {
 		uint64_t sum = 0;
 		for (size_t op = 0; op < kOps; op++) sum += Cell(site, op);
@@ -120,12 +132,14 @@ public:
 	uint64_t Wait() const { return m_wait; }
 	void Clear() {
 		m_cells.fill(0);
+		m_wait_cells.fill(0);
 		m_total = 0;
 		m_wait  = 0;
 	}
 
 private:
 	std::array<uint64_t, kSiteCount * kOps> m_cells {};
+	std::array<uint64_t, kSiteCount * kOps> m_wait_cells {};
 	uint64_t                                m_total = 0;
 	uint64_t                                m_wait  = 0;
 };
@@ -140,6 +154,7 @@ public:
 		}
 		auto& cell = CpSite();
 		m_prev     = cell.load(std::memory_order_relaxed);
+		if (site == kWaitSite) WaitParent().store(m_prev, std::memory_order_relaxed);
 		cell.store(site, std::memory_order_relaxed);
 	}
 	~SiteScope() {
@@ -210,7 +225,8 @@ private:
 			next += std::chrono::microseconds(period_us);
 #endif
 			if (on_sample != nullptr && !on_sample(m_hist)) continue;
-			m_hist.Add(CpSite().load(std::memory_order_relaxed), CpOpcode().load(std::memory_order_relaxed));
+			const auto site = CpSite().load(std::memory_order_relaxed);
+			m_hist.Add(site, CpOpcode().load(std::memory_order_relaxed), WaitParent().load(std::memory_order_relaxed));
 		}
 	}
 
