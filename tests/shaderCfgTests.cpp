@@ -16795,6 +16795,51 @@ void TestPvVsStoreEmission() {
           "fixed-stride VS reads the dynamic stride");
   }
 
+  // S409 (KYTY_PV_VSSTORE_COMPACT=1): the VS stores a location only when its bit is set in the PS mask (a specialization constant), under
+  // the rank of the bit; the literal is patched per pair. A VS with a parameter at location 3 needs three adds for the rank.
+  {
+    const uint32_t code3[] = {EncodeExp0(0x0c, 0xf), EncodeExp1(0, 1, 2, 3),
+                              EncodeExp0(0x23, 0xf), EncodeExp1(4, 5, 6, 7), EncodeSopp(0x01)};
+    auto vs3 = RecompileForTest(code3, vs_options);
+    uint32_t location = UINT32_MAX;
+    for (const auto &output : vs3.program.info.outputs) {
+      if (output.kind == IR::StageOutputKind::Parameter) location = output.location;
+    }
+    Check(location == 3, "compact test VS must export parameter 3 at location 3");
+    uint32_t mask = 0, spec_id = 0;
+    Spirv::PvStoreInfo compact;
+    compact.role = Spirv::PvStoreInfo::Role::Vertex;
+    compact.location_mask = &mask;
+    compact.compact_spec = true;
+    compact.compact_mask_id = &spec_id;
+    auto words = Spirv::EmitProgram(vs3.program, vs_options.input_info, 0, false, false, nullptr, &compact);
+    CheckSpirvBinaryValidates(words);
+    const auto compact_text = DisassembleSpirvBinary(words);
+    Check(mask == (1u << 3) && spec_id != 0, "compact VS did not report its location or the specialization constant");
+    Check(compact_text.find("SpecId 0") != std::string::npos &&
+              compact_text.find("OpSpecConstant %uint 2147483647") != std::string::npos,
+          "compact VS lacks the PS mask specialization constant");
+    Check(count(compact_text, "OpSpecConstantOp %uint IAdd") == 3,
+          "compact slot is not the rank of the mask bit");
+    Spirv::PvStoreInfo plain;
+    plain.role = Spirv::PvStoreInfo::Role::Vertex;
+    const auto plain_text = DisassembleSpirvBinary(
+        Spirv::EmitProgram(vs3.program, vs_options.input_info, 0, false, false, nullptr, &plain));
+    Check(count(compact_text, "OpSelectionMerge") == count(plain_text, "OpSelectionMerge") + 1 &&
+              compact_text.find("OpSpecConstantOp %bool INotEqual") != std::string::npos,
+          "compact VS must branch once on the mask bit of the location");
+    Check(compact_text.find("%vsharp %uint_1 %uint_7") != std::string::npos,
+          "compact VS does not read the record stride from push dword 7");
+    auto patched = words;
+    Check(PvCompactPatchMask(patched, spec_id, 0x8) && patched != words, "mask literal not patched");
+    CheckSpirvBinaryValidates(patched);
+    Check(DisassembleSpirvBinary(patched).find("OpSpecConstant %uint 8") != std::string::npos,
+          "patched module does not carry the PS mask");
+    // not compact: the module has none of it
+    Check(plain_text.find("OpSpecConstant") == std::string::npos && plain_text.find("SpecId") == std::string::npos,
+          "non-compact VS-store VS carries specialization constants");
+  }
+
   // --- pixel side
   auto options = MakeCompileOptions(ShaderType::Pixel);
   const uint32_t ps_code[] = {
@@ -16882,6 +16927,21 @@ void TestPvVsStoreEmission() {
           "dynamic-stride PS did not report its per-vertex locations");
     Check(DisassembleSpirvBinary(dynamic_words).find("%vsharp %uint_1 %uint_7") != std::string::npos,
           "dynamic stride is not read from push dword 7");
+  }
+  // S409: a compact PS ranks its locations in its own mask (here the single location 0: slot 0, stride 1, no push stride).
+  {
+    Spirv::PvStoreInfo compact;
+    compact.role = Spirv::PvStoreInfo::Role::Pixel;
+    FillPvCompactPixelInfo(compact, 1u, 0x1fu);
+    Check(compact.record_stride_vec4 == 1 && compact.parameter_slots.size() == 1 && compact.parameter_slots.at(0) == 0,
+          "compact PS record is not the rank in the PS mask");
+    const auto compact_words = Spirv::EmitProgram(ps.program, options.input_info, 0, false, false, nullptr, &compact);
+    CheckSpirvBinaryValidates(compact_words);
+    Check(DisassembleSpirvBinary(compact_words) == text, "compact PS of a one-location mask differs from the fixed-stride PS");
+    FillPvCompactPixelInfo(compact, 0x205u, 0x7ffu);
+    Check(compact.record_stride_vec4 == 3 && compact.parameter_slots.at(0) == 0 && compact.parameter_slots.at(2) == 1 &&
+              compact.parameter_slots.at(9) == 2,
+          "compact PS record is not the rank in the PS mask");
   }
   // Corner k of the guest read must be element k of the primitive: the order of the vertex
   // numbers in the PerVertexKHR array accesses equals the order of the corner constants added to

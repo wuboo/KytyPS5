@@ -34,6 +34,9 @@ struct PvStoreInfo;
 void RememberPvVsStoreShader(const ShaderProgram& program, ShaderRecompiler::CompileResult& result,
                              const ShaderRecompiler::CompileOptions& options,
                              uint32_t push_data_start_dword, bool maintenance8_enabled);
+// S409: the PS side of a compact record: stride = locations of ps_mask, slot = rank of the location in it. vs_mask only feeds the
+// harness mutant (COMPACT_PS_USES_VS_SLOT).
+void FillPvCompactPixelInfo(ShaderRecompiler::Spirv::PvStoreInfo& info, uint32_t ps_mask, uint32_t vs_mask);
 // Re-emits `program` as the VS-store variant; leaves program.bindings as emitted.
 std::vector<uint32_t> EmitPvVsStoreVariant(ShaderRecompiler::IR::Program&          program,
                                            const ShaderRecompiler::CompileOptions& options,
@@ -57,6 +60,7 @@ struct PvVsStorePrograms {
 	uint32_t                        vs_mask = 0; // host locations the VS stores
 	uint32_t                        ps_mask = 0; // host locations the PS reads per vertex
 	uint32_t                        corners = 0; // bit k: the PS reads corner k (P0 / P10 / P20), i.e. uses gl_PrimitiveID
+	bool                            compact = false; // S409: KYTY_PV_VSSTORE_COMPACT=1 record (stride_vec4 = locations of ps_mask)
 	mutable bool                    first_use_logged = false;
 };
 

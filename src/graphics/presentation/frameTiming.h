@@ -247,6 +247,9 @@ enum class Counter : uint32_t {
 	Eager3MidN, Eager3FlushN, EagerLowwaterN,
 	// S410 (KYTY_DIAG_STARVE=1): why the eager policy did not split although KnownGpuTick said idle (no extra Refresh).
 	EagerDeclinePassOpenN, EagerDeclineAgeN, EagerDeclineNoWorkN, EagerDeclineMidLimitN, EagerDeclineFirstCbOnlyN,
+	// S409 (both KYTY_PV_VSSTORE_COMPACT modes): bytes of the VS-store records bound by the draws of the flip (records * stride * 16) /
+	// draws that used the compact record (stride = locations the PS reads).
+	PvVsstoreRecordBytes, PvCompactDrawsN,
 	Count,
 };
 
