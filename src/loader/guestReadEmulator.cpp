@@ -21,6 +21,19 @@ constexpr int kLengthSkew = 1;
 constexpr int kLengthSkew = 0;
 #endif
 
+// S427 mutants: VEX_NO_ZERO_UPPER leaves bits 128..255 of the destination alone (legacy-SSE semantics), VEX_IGNORE_VVVV accepts vvvv != 1111b.
+// Zydis itself refuses a memory-load form with vvvv != 1111b (DecodeFailed), so the mutant has to hide the field from it first (see Decode).
+#if defined(KYTY_GUESTREAD_MUTANT_VEX_NO_ZERO_UPPER)
+constexpr bool kZeroUpper = false;
+#else
+constexpr bool kZeroUpper = true;
+#endif
+#if defined(KYTY_GUESTREAD_MUTANT_VEX_IGNORE_VVVV)
+constexpr bool kCheckVvvv = false;
+#else
+constexpr bool kCheckVvvv = true;
+#endif
+
 Mode ParseMode(const char* text) {
 	if (text == nullptr) {
 		return Mode::Off;
@@ -89,6 +102,30 @@ struct Regs {
 			default: return nullptr;
 		}
 	}
+	// Upper YMM halves exist only in the AVX layout of the saved context; the size of the saved context says which one the kernel (Rosetta) wrote.
+	[[nodiscard]] bool HasYmmh() const { return Valid() && native->uc_mcsize >= sizeof(_STRUCT_MCONTEXT_AVX64); }
+	[[nodiscard]] void* Ymmh(uint8_t index) const {
+		auto* fs = &reinterpret_cast<_STRUCT_MCONTEXT_AVX64*>(native->uc_mcontext)->__fs;
+		switch (index) {
+			case 0: return &fs->__fpu_ymmh0;
+			case 1: return &fs->__fpu_ymmh1;
+			case 2: return &fs->__fpu_ymmh2;
+			case 3: return &fs->__fpu_ymmh3;
+			case 4: return &fs->__fpu_ymmh4;
+			case 5: return &fs->__fpu_ymmh5;
+			case 6: return &fs->__fpu_ymmh6;
+			case 7: return &fs->__fpu_ymmh7;
+			case 8: return &fs->__fpu_ymmh8;
+			case 9: return &fs->__fpu_ymmh9;
+			case 10: return &fs->__fpu_ymmh10;
+			case 11: return &fs->__fpu_ymmh11;
+			case 12: return &fs->__fpu_ymmh12;
+			case 13: return &fs->__fpu_ymmh13;
+			case 14: return &fs->__fpu_ymmh14;
+			case 15: return &fs->__fpu_ymmh15;
+			default: return nullptr;
+		}
+	}
 #else
 	ucontext_t* native;
 
@@ -103,6 +140,8 @@ struct Regs {
 	[[nodiscard]] void* Xmm(uint8_t index) const {
 		return native->uc_mcontext.fpregs == nullptr ? nullptr : native->uc_mcontext.fpregs->_xmm[index].element;
 	}
+	[[nodiscard]] bool  HasYmmh() const { return false; }
+	[[nodiscard]] void* Ymmh(uint8_t) const { return nullptr; }
 #endif
 };
 constexpr bool kHaveRegs = true;
@@ -114,6 +153,8 @@ struct Regs {
 	void                    Advance(uint64_t) const {}
 	[[nodiscard]] uint64_t& Gpr(uint8_t) const { static uint64_t dummy; return dummy; }
 	[[nodiscard]] void*     Xmm(uint8_t) const { return nullptr; }
+	[[nodiscard]] bool      HasYmmh() const { return false; }
+	[[nodiscard]] void*     Ymmh(uint8_t) const { return nullptr; }
 };
 constexpr bool kHaveRegs = false;
 #endif
@@ -169,19 +210,44 @@ Plan Decode(void* native_context, uint64_t fault_address) {
 	if ((rip & (kPageSize - 1)) + available > kPageSize) {
 		available = kPageSize - (rip & (kPageSize - 1));
 	}
+	const uint8_t* code = reinterpret_cast<const uint8_t*>(rip);
+#if defined(KYTY_GUESTREAD_MUTANT_VEX_IGNORE_VVVV)
+	uint8_t code_copy[ZYDIS_MAX_INSTRUCTION_LENGTH] = {};
+	std::memcpy(code_copy, code, available);
+	for (size_t i = 0; i + 2 < available; ++i) {
+		if (code_copy[i] == 0xc5 || code_copy[i] == 0xc4) { // the VEX prefix: force vvvv to 1111b
+			code_copy[i + (code_copy[i] == 0xc5 ? 1 : 2)] |= 0x78;
+			break;
+		}
+	}
+	code = code_copy;
+#endif
 	ZydisDecoder            decoder {};
 	ZydisDecodedInstruction instruction {};
 	ZydisDecodedOperand     operands[ZYDIS_MAX_OPERAND_COUNT] {};
 	if (!ZYAN_SUCCESS(ZydisDecoderInit(&decoder, ZYDIS_MACHINE_MODE_LONG_64, ZYDIS_STACK_WIDTH_64)) ||
-	    !ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, reinterpret_cast<const void*>(rip), available, &instruction, operands))) {
+	    !ZYAN_SUCCESS(ZydisDecoderDecodeFull(&decoder, code, available, &instruction, operands))) {
 		return Refuse(plan, Why::DecodeFailed);
 	}
 	const char* name = ZydisMnemonicGetString(instruction.mnemonic);
 	std::snprintf(plan.mnemonic, sizeof(plan.mnemonic), "%s", name != nullptr ? name : "?");
 	SetShape(plan, instruction, operands);
 
-	if (instruction.encoding != ZYDIS_INSTRUCTION_ENCODING_LEGACY) {
-		return Refuse(plan, Why::Vex);
+	const bool is_vex = instruction.encoding == ZYDIS_INSTRUCTION_ENCODING_VEX;
+	if (instruction.encoding != ZYDIS_INSTRUCTION_ENCODING_LEGACY && !is_vex) {
+		return Refuse(plan, Why::Vex); // EVEX, XOP, MVEX
+	}
+	if (is_vex) {
+		// VEX.128 only (L = 0), and vvvv must be 1111b: the memory-load forms have no second source, anything else is #UD on hardware.
+		// The field is stored inverted in the prefix; the raw byte is read from the code, not from Zydis' interpretation of it.
+		const uint8_t* prefix = code + instruction.raw.vex.offset;
+		const uint8_t  l_vvvv = prefix[0] == 0xc5 ? prefix[1] : prefix[2];
+		const bool     l_bit  = (l_vvvv & 0x04u) != 0;
+		const uint8_t  vvvv   = static_cast<uint8_t>((l_vvvv >> 3) & 0x0fu);
+		if (l_bit || (kCheckVvvv && vvvv != 0x0fu)) {
+			return Refuse(plan, Why::Vex);
+		}
+		plan.vex = true;
 	}
 	if ((instruction.attributes & ZYDIS_ATTRIB_HAS_LOCK) != 0 || instruction.address_width != 64) {
 		return Refuse(plan, Why::Prefix);
@@ -230,6 +296,10 @@ Plan Decode(void* native_context, uint64_t fault_address) {
 			}
 			plan.kind = instruction.mnemonic == ZYDIS_MNEMONIC_MOVZX ? Kind::GprZext : Kind::GprSext;
 			break;
+		case ZYDIS_MNEMONIC_VMOVSS:
+		case ZYDIS_MNEMONIC_VMOVSD:
+		case ZYDIS_MNEMONIC_VMOVD:
+		case ZYDIS_MNEMONIC_VMOVQ:
 		case ZYDIS_MNEMONIC_MOVSS:
 		case ZYDIS_MNEMONIC_MOVSD:
 		case ZYDIS_MNEMONIC_MOVD:
@@ -239,9 +309,15 @@ Plan Decode(void* native_context, uint64_t fault_address) {
 			}
 			plan.kind = Kind::XmmScalar;
 			break;
+		case ZYDIS_MNEMONIC_VMOVAPS:
+		case ZYDIS_MNEMONIC_VMOVAPD:
+		case ZYDIS_MNEMONIC_VMOVDQA:
 		case ZYDIS_MNEMONIC_MOVAPS:
 		case ZYDIS_MNEMONIC_MOVAPD:
 		case ZYDIS_MNEMONIC_MOVDQA: aligned_only = true; [[fallthrough]];
+		case ZYDIS_MNEMONIC_VMOVUPS:
+		case ZYDIS_MNEMONIC_VMOVUPD:
+		case ZYDIS_MNEMONIC_VMOVDQU:
 		case ZYDIS_MNEMONIC_MOVUPS:
 		case ZYDIS_MNEMONIC_MOVUPD:
 		case ZYDIS_MNEMONIC_MOVDQU:
@@ -253,6 +329,9 @@ Plan Decode(void* native_context, uint64_t fault_address) {
 		default: return Refuse(plan, Why::NotALoad);
 	}
 	plan.dst_bytes = dst_is_gpr ? static_cast<uint8_t>(operands[0].size / 8) : 16;
+	if (plan.vex && (!dst_is_xmm || !regs.HasYmmh())) {
+		return Refuse(plan, dst_is_xmm ? Why::VexNoAvx : Why::NotALoad);
+	}
 
 	ZydisRegisterContext registers {};
 	for (uint8_t i = 0; i < 16; ++i) {
@@ -311,6 +390,11 @@ void Commit(void* native_context, const Plan& plan, const uint8_t* bytes) {
 				uint8_t value[16] = {};
 				std::memcpy(value, bytes, plan.size);
 				std::memcpy(xmm, value, sizeof(value));
+			}
+			if (plan.vex && kZeroUpper) {
+				if (void* ymmh = regs.Ymmh(plan.dst); ymmh != nullptr) {
+					std::memset(ymmh, 0, 16); // VEX.128 zeroes bits 128..255; legacy SSE leaves them
+				}
 			}
 			break;
 		case Kind::None: return;

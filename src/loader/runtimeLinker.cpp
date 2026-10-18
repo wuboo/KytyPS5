@@ -732,6 +732,9 @@ static bool TryGuestReadEmulation(const Common::HostException::ExceptionInfo* in
 	Attempt attempt;
 	if (!Prepare(info->native_context, info->access_violation_vaddr, GfEmuReadBacking, &attempt)) {
 		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuFallbackN);
+		if (attempt.plan.why == Why::VexNoAvx) {
+			Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuVexNoAvxN); // S427
+		}
 		static std::atomic<uint32_t> logged {0};
 		if (logged.fetch_add(1, std::memory_order_relaxed) < 50) {
 			LOGF("[gf-emu-fallback] pc=0x%016" PRIx64 " addr=0x%016" PRIx64 " mnemonic=%s operands=%s why=%u\n", info->exception_address,
