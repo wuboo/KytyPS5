@@ -2263,6 +2263,34 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 			add_dependencies(kyty_tests ${patch_cache_target})
 		endif()
 	endforeach()
+	# S433 (S440): KYTY_PIPELINE_SAVE_ASYNC, the worker that writes the driver pipeline cache. Mutants (WILL_FAIL): SAVE_ON_CALLER, NO_RENAME,
+	# NO_COALESCE, DROP_FLUSH.
+	foreach(mutant IN ITEMS "" SAVE_ON_CALLER NO_RENAME NO_COALESCE DROP_FLUSH)
+		if(mutant STREQUAL "")
+			set(pcsaver_target pipeline_cache_saver_tests)
+			set(pcsaver_test pipeline_cache_saver)
+		else()
+			string(TOLOWER ${mutant} mutant_lower)
+			set(pcsaver_target pipeline_cache_saver_mutant_${mutant_lower}_tests)
+			set(pcsaver_test pipeline_cache_saver_mutant_${mutant_lower})
+		endif()
+		add_executable(${pcsaver_target} EXCLUDE_FROM_ALL
+			"${KYTY_TESTS_DIR}/PipelineCacheSaverTests.cpp"
+			"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pipeline/pipelineCacheSaver.cpp"
+		)
+		target_include_directories(${pcsaver_target} PRIVATE ${inc_headers})
+		if(NOT mutant STREQUAL "")
+			target_compile_definitions(${pcsaver_target} PRIVATE KYTY_PCSAVER_MUTANT_${mutant}=1)
+		endif()
+		if(BUILD_TESTING)
+			add_test(NAME ${pcsaver_test} COMMAND $<TARGET_FILE:${pcsaver_target}>)
+			set_tests_properties(${pcsaver_test} PROPERTIES TIMEOUT 60)
+			if(NOT mutant STREQUAL "")
+				set_tests_properties(${pcsaver_test} PROPERTIES WILL_FAIL TRUE)
+			endif()
+			add_dependencies(kyty_tests ${pcsaver_target})
+		endif()
+	endforeach()
 	add_executable(macos_wide_store_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/macosWideStoreTests.cpp"
 		"${KYTY_SOURCE_DIR}/loader/x64InstructionEmulator.cpp"
