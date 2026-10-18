@@ -320,12 +320,17 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	                       vk::PipelineStageFlagBits::eAllCommands |
 	                           vk::PipelineStageFlagBits::eHost,
 	                       {}, 0, nullptr, 1, &after, 0, nullptr);
+	// S418: from here until the backing is written the range is neither GPU-modified nor current in the backing.
+	for (const auto& copy: copies) {
+		m_inflight_download_ranges.Add(buffer_address + copy.srcOffset, copy.size);
+	}
 	auto publish = [this, mapped, offset, total_size, buffer_address,
 	                copies = std::move(copies), owner = std::move(temporary)] {
 		(owner ? *owner : m_download_buffer).Invalidate(offset, total_size);
 		for (const auto& copy: copies) {
 			Libs::LibKernel::Memory::WriteBacking(buffer_address + copy.srcOffset,
 			                                      mapped + (copy.dstOffset - offset), copy.size);
+			m_inflight_download_ranges.Remove(buffer_address + copy.srcOffset, copy.size);
 		}
 	};
 	if constexpr (async) {
@@ -1243,6 +1248,19 @@ MemoryTracker::PageGeneration BufferCache::QueryPageGeneration(uint64_t vaddr, u
 
 bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 	return m_gpu_modified_ranges.Intersects(vaddr, size);
+}
+
+bool BufferCache::HasInflightDownloadBytes(uint64_t vaddr, uint64_t size) const {
+	return m_inflight_download_ranges.Intersects(vaddr, size);
+}
+
+bool BufferCache::CanReadBacking(uint64_t vaddr, uint64_t size, int* reason) {
+	const bool dirty    = HasGpuDirtyBytes(vaddr, size);
+	const bool inflight = HasInflightDownloadBytes(vaddr, size);
+	if (reason != nullptr) {
+		*reason = dirty ? 1 : (inflight ? 2 : 0);
+	}
+	return CanReadBackingDecision(dirty, inflight);
 }
 
 bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {

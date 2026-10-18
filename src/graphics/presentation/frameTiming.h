@@ -267,6 +267,9 @@ enum class Counter : uint32_t {
 	// S417 (KYTY_PV_IDX_BACKING): draws whose indices were copied from the backing (and the bytes), clean-looking draws that stayed on the guest read
 	// (GPU-dirty bytes or an unreadable backing); shadow: the copy equal / different from the old read.
 	PvIdxBackingN, PvIdxBackingBytes, PvIdxBackingFallbackN, PvIdxBackingEqN, PvIdxBackingNeN,
+	// S418: backing reads refused because a recorded GPU->host copy of the bytes had not been published yet (tracker already clear):
+	// F3 index bytes, the zero-args dispatch skip of DispatchIndirect.
+	PvIdxBackingInflightN, DispIndirectBackingInflightN,
 	Count,
 };
 
