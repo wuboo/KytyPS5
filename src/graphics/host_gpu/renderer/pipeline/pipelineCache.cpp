@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/cpSampler.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/presentation/srtFast.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/ir/passes/specCond.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
@@ -283,6 +284,7 @@ void RunSpecShadowBefore(const ShaderRecompiler::IR::ResourcePlan& plan, const S
 	run.stale_reader = {.mode = SpecShadow::ReadMode::Stale, .backing = ShadowBacking, .dirty = ShadowDirty};
 	auto shadow_runtime                       = runtime;
 	shadow_runtime.read_specialization_memory = SpecShadow::ShadowRead;
+	shadow_runtime.fast_mode                  = ShaderRecompiler::IR::SrtFastMode::Off; // S425: diag copy, no memo
 	shadow_runtime.userdata                   = &run.stale_reader;
 	SpecShadow::Materialize(plan, shadow_runtime, run.stale);
 	if (run.stale_reader.DirtyTotal() == 0) return;
@@ -351,7 +353,14 @@ void NoteSpecShadow(const ShaderRecompiler::IR::ResourcePlan& plan, const SpecSh
 	     verdict.super_ok ? 1 : 0, verdict.extra_sources, verdict.new_images, perm_same ? 1 : 0, dirty);
 }
 
-bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
+// S425: one per Get(): the SRT pass of a draw stage (KYTY_SRT_FAST).
+struct ShaderReadContext {
+	ShaderRecompiler::IR::SrtFastMode    mode = ShaderRecompiler::IR::SrtFastMode::Off;
+	Libs::LibKernel::Memory::SrtReadPass pass;
+	uint32_t                             page_mismatch = 0;
+};
+
+bool ReadShaderGuestMemory(void* userdata, uint64_t address, std::span<uint32_t> values) {
 	// S408 (KYTY_SPEC_COND=superset): a condition read of GPU-dirty bytes on the hit / refresh path fails without draining; the
 	// walker then follows both successors. See specCond.h. Mode 0 never asks for the dirty state.
 	const auto cond_mode = ShaderRecompiler::IR::SpecCond::EnvMode();
@@ -369,8 +378,52 @@ bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) 
 	// Scalar and unformatted buffer dependencies use the same backing as native raw loads.
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
 	const SyncCensus::SiteScope site_tag(SyncCensus::Site::Spec);
-	return !values.empty() &&
-	       Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
+	if (values.empty()) {
+		return false;
+	}
+	auto* context = static_cast<ShaderReadContext*>(userdata);
+	if (context == nullptr || context->mode == ShaderRecompiler::IR::SrtFastMode::Off) {
+		return Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
+	}
+	if (context->mode == ShaderRecompiler::IR::SrtFastMode::On) {
+		return Libs::LibKernel::Memory::TryReadBufferBackingPass(address, values.data(), values.size_bytes(), &context->pass);
+	}
+	// Shadow: the page-memoized read first (so it cannot profit from a sync the full read does), the full one is the result.
+	std::array<uint32_t, 32> fast_small;
+	std::vector<uint32_t>    fast_large;
+	std::span<uint32_t>      fast = values.size() <= fast_small.size() ? std::span(fast_small).first(values.size())
+	                                                                    : (fast_large.resize(values.size()), std::span(fast_large));
+	const bool fast_ok = Libs::LibKernel::Memory::TryReadBufferBackingPass(address, fast.data(), fast.size_bytes(), &context->pass);
+	const bool ok      = Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
+	if (fast_ok != ok || (ok && !std::ranges::equal(fast, values))) {
+		++context->page_mismatch;
+	}
+	return ok;
+}
+
+// S425: counters of one MaterializeResources and, in shadow mode, the first 16 mismatches (hash, stage, flat slot).
+void NoteSrtMemo(const ShaderRecompiler::IR::ResourceSnapshot& snapshot, const ShaderReadContext& context, uint64_t hash,
+                 ShaderType stage) {
+	using ShaderRecompiler::IR::SrtMemoOutcome;
+	if (context.mode == ShaderRecompiler::IR::SrtFastMode::Off) {
+		return;
+	}
+	switch (snapshot.srt_outcome) {
+		case SrtMemoOutcome::Hit: FrameTiming::Add(FrameTiming::Counter::SrtMemoHit); break;
+		case SrtMemoOutcome::Miss: FrameTiming::Add(FrameTiming::Counter::SrtMemoMiss); break;
+		case SrtMemoOutcome::Mismatch: FrameTiming::Add(FrameTiming::Counter::SrtMemoMismatch); break;
+		case SrtMemoOutcome::None: break;
+	}
+	FrameTiming::Add(FrameTiming::Counter::SrtPagesChecked, context.pass.pages_checked);
+	FrameTiming::Add(FrameTiming::Counter::SrtPageHit, context.pass.page_hits);
+	if (context.page_mismatch != 0) {
+		FrameTiming::Add(FrameTiming::Counter::SrtMemoMismatch, context.page_mismatch);
+	}
+	static std::atomic_uint logged = 0;
+	if ((snapshot.srt_outcome == SrtMemoOutcome::Mismatch || context.page_mismatch != 0) && logged.fetch_add(1) < 16) {
+		PipelineCacheLog("[srt-shadow] mismatch hash={:016x} stage={} slot={} {}", hash, static_cast<int>(stage),
+		                 snapshot.srt_mismatch, context.page_mismatch != 0 ? "page-read" : "memo");
+	}
 }
 
 bool ReadBackingForShader(void*, uint64_t address, void* data, uint64_t size, bool* gpu_dirty) {
@@ -704,11 +757,17 @@ struct PipelineCache::ProgramCache {
 		const SyncCensus::ReaderScope reader_tag(
 		    params.hash, SyncStageName(stage),
 		    entry == programs.end() ? "miss" : (entry->second.call_source ? "refresh" : "hit"));
+		// S425: programs with a retained call source re-extract / edit their plan in place (RefreshCallSource), so the memo
+		// (keyed by the plan address) is off for them.
+		ShaderReadContext                            read_context {
+		    .mode = (entry != programs.end() && entry->second.call_source) ? ShaderRecompiler::IR::SrtFastMode::Off : SrtFast::Mode()};
 		ShaderRecompiler::IR::SrtRuntime             runtime {
 		    .user_data                  = user_data,
 		    .shader_base                = params.Base(),
+		    .userdata                   = &read_context,
 		    .read_specialization_memory = ReadShaderGuestMemory,
 		    .min_lod_remap              = graphics.min_lod_remap,
+		    .fast_mode                  = read_context.mode,
 		};
 		// RefreshCallSource feeds this same runtime to RefreshShaderSource, which walks through
 		// CleanRuntime. That replaces read_memory with read_specialization_memory, so call-target
@@ -730,6 +789,7 @@ struct PipelineCache::ProgramCache {
 				if (!source_changed) permutation = cached.FindPermutation<true>(runtime, push_data_cursor);
 			} else {
 				permutation = cached.FindPermutation<false>(runtime, push_data_cursor);
+				NoteSrtMemo(cached.resources, read_context, params.hash, stage);
 			}
 			if (permutation != nullptr) {
 				KYTY_CP_SITE(ShProgramsRest);
@@ -802,9 +862,12 @@ struct PipelineCache::ProgramCache {
 			auto retained = source.call ? std::make_unique<ShaderRecompiler::ShaderSource>(std::move(source)) : nullptr;
 			entry = programs.try_emplace(lookup_key,
 			    ShaderRecompiler::IR::ExtractResourcePlan(translated.program), std::move(retained)).first;
+			if (entry->second.call_source) read_context.mode = runtime.fast_mode = ShaderRecompiler::IR::SrtFastMode::Off;
+			read_context.pass = {};
 			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
 			    entry->second.resource_plan, runtime, entry->second.resources,
 			    entry->second.specialization));
+			NoteSrtMemo(entry->second.resources, read_context, params.hash, stage);
 		} else if (source_changed) {
 			entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
 			entry->second.m_matmemo_mask_valid = false;

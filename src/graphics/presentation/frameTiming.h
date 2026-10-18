@@ -281,6 +281,12 @@ enum class Counter : uint32_t {
 	EqueueReceivedN, EqueueRecvGraphicsN, EqueueRecvAmprN, EqueueRecvVideoOutN,
 	// S421 (KYTY_DIAG_GUEST_FAULT=1): read faults of non-CP (guest) threads, ns they waited in ReadMemory, of those the page the CP had read from the backing in the same flip.
 	GfN, GfWaitNs, GfAfterBackingN,
+	// S425 (KYTY_SRT_FAST=1|shadow): MaterializeResources memo; pages whose sync state was queried / reads served from a quiet page.
+	SrtMemoHit,
+	SrtMemoMiss,
+	SrtMemoMismatch,      // shadow: the memo would have reused a snapshot the walk did not reproduce
+	SrtPagesChecked,
+	SrtPageHit,
 	Count,
 };
 

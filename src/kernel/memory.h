@@ -5,6 +5,7 @@
 #include "common/common.h"
 #include "common/virtualMemory.h"
 #include "graphics/host_gpu/renderer/cpReadBacking.h"
+#include "kernel/srtReadPass.h"
 
 #include <string>
 #include <vector>
@@ -137,6 +138,10 @@ int UnmapAmmMemory(uint64_t vaddr, size_t size);
 bool                   TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size);
 bool                   TryReadBacking(uint64_t vaddr, void* data, uint64_t size);
 bool                   TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size);
+// S425 (KYTY_SRT_FAST): reads of one SRT pass. A 4 KiB page that holds no GPU-dirty bytes and (KYTY_CP_READ_BACKING != 0) no
+// in-flight GPU->host copy is checked once; later reads inside it go straight to TryReadBacking, exactly what
+// TryReadBufferBacking would have done for them. Not safe across a submit: make a new pass per walk.
+bool                   TryReadBufferBackingPass(uint64_t vaddr, void* data, uint64_t size, SrtReadPass* pass);
 // True when the GPU thread still has unflushed bytes for this range (S419, KYTY_CP_READ_BACKING != 0: or a GPU->host copy of it is not published yet).
 // Safe off that thread: returns false.
 bool                   QueryShaderGpuDirty(uint64_t vaddr, uint64_t size);
