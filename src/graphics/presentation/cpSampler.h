@@ -34,6 +34,7 @@ enum class Site : uint8_t {
 	ShMaterializeRest,
 	ShPermSearch,
 	ShProgramsRest,
+	ShSpecRead, // S430: ReadShaderGuestMemory (the strict reader), a child of ShWalk / ShPermSearch
 	// DrawBind
 	BindResolveTexture,
 	BindSamplers,
@@ -41,6 +42,10 @@ enum class Site : uint8_t {
 	BindRebindImages,
 	BindRebindBuffers,
 	BindNativeUpload,
+	// S430: children of BindResolveTexture (ResolveTexture)
+	BindResolveDescCopy,
+	BindResolveFindImage,
+	BindResolveValidate,
 	// PvStore
 	PvIndexHash,
 	PvRangeScan,
@@ -71,8 +76,8 @@ inline const char* SiteName(uint32_t id) {
 	    "parse", "handler", "draw_shaders", "draw_bind", "draw_pipeline", "draw_targets", "draw_desc", "draw_vkcmd", "pvstore",
 	    "dispatch", "eop", "barrier", "readback_cpu", "gc", "submit_cpu", "cmds", "wait",
 	    "none",
-	    "sh.static_key_find", "sh.refresh_call_source", "sh.walk", "sh.materialize_rest", "sh.perm_search", "sh.programs_rest",
-	    "bind.resolve_texture", "bind.samplers", "bind.find_buffers", "bind.rebind_images", "bind.rebind_buffers", "bind.native_upload",
+	    "sh.static_key_find", "sh.refresh_call_source", "sh.walk", "sh.materialize_rest", "sh.perm_search", "sh.programs_rest", "sh.spec_read",
+	    "bind.resolve_texture", "bind.samplers", "bind.find_buffers", "bind.rebind_images", "bind.rebind_buffers", "bind.native_upload", "bind.resolve.desc_copy", "bind.resolve.find_image", "bind.resolve.validate",
 	    "pv.index_hash", "pv.range_scan", "pv.obtain_tail", "pv.place",
 	    "disp.bind", "disp.desc", "disp.fill_resolve", "disp.record",
 	    "draw.vertex_buffers", "draw.index_buffer", "draw.render_state", "draw.flush_proto", "draw.eager_split",

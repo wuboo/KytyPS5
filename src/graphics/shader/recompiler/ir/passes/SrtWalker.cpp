@@ -1,5 +1,6 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
+#include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
 
 #include "common/abi.h"
 #include "graphics/shader/nullDescDiag.h"
@@ -1368,9 +1369,14 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 		if (m_program.srt_code->getCode<Walker>()(m_runtime.user_data.data(), flat.data(),
 		                                          m_context.values.data(), m_context.generation,
 		                                          m_runtime.user_data.size())) {
+			SrtWalkPaths::Note(SrtWalkPaths::Path::Tree);
 			return true;
 		}
+		SrtWalkPaths::Note(SrtWalkPaths::Path::TreeFail);
+	} else if (m_program.srt_code && m_runtime.read_memory != nullptr) {
+		SrtWalkPaths::Note(SrtWalkPaths::Path::Capture);
 	}
+	SrtWalkPaths::Note(SrtWalkPaths::Path::InterpWalk);
 	// Compiled slots read mapped memory directly, as the ordinary reader of a capture does.
 	auto*      captured = SrtReadCapture::DirectRanges(m_runtime);
 	const bool compiled = m_program.srt_read_code && m_active_mask.IsEmpty() &&
@@ -1394,8 +1400,12 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 				}
 			}
 			// A failed read is evaluated again below, with the walker's own result.
-			if (ok) return true;
+			if (ok) {
+				SrtWalkPaths::Note(SrtWalkPaths::Path::SlotJit);
+				return true;
+			}
 		}
+		SrtWalkPaths::Note(SrtWalkPaths::Path::InterpSlots);
 		const auto& read = m_program.srt_reads[slot];
 		const auto* inst = read.value.ResolveInstruction();
 		const bool clean = inst != nullptr && inst->Flags<SrtReadFlags>().clean != 0u;

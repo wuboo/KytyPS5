@@ -402,6 +402,14 @@ constexpr const char* kCounterNames[] = {
     "eop_irq_deferred_n",
     "eop_irq_coalesced_n",
     "eop_coalesce_would_n",
+    "srt_walk_tree_n",
+    "srt_walk_tree_fail_n",
+    "srt_walk_capture_n",
+    "srt_walk_slot_jit_n",
+    "srt_walk_interp_n",
+    "srt_interp_slots_n",
+    "spec_read_n",
+    "spec_read_xpage_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

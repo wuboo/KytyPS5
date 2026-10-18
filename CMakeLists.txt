@@ -1977,6 +1977,26 @@ foreach(mutant IN ITEMS COALESCE_ACROSS_TICKS DROP_CONTEXT)
 	endif()
 endforeach()
 
+# S430 DIAG: SrtWalker path counters + sampler site names (pure CPU). Mutant (WILL_FAIL): NO_GATE.
+add_executable(srt_walk_paths_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SrtWalkPathsTests.cpp")
+target_include_directories(srt_walk_paths_tests PRIVATE ${inc_headers})
+if(BUILD_TESTING)
+	add_test(NAME srt_walk_paths COMMAND $<TARGET_FILE:srt_walk_paths_tests>)
+	set_tests_properties(srt_walk_paths PROPERTIES TIMEOUT 30)
+	add_dependencies(kyty_tests srt_walk_paths_tests)
+endif()
+foreach(mutant IN ITEMS NO_GATE)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(srt_walk_paths_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SrtWalkPathsTests.cpp")
+	target_include_directories(srt_walk_paths_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(srt_walk_paths_mutant_${mutant_lower}_tests PRIVATE KYTY_SRTWALKPATHS_MUTANT_${mutant}=1)
+	if(BUILD_TESTING)
+		add_test(NAME srt_walk_paths_mutant_${mutant_lower} COMMAND $<TARGET_FILE:srt_walk_paths_mutant_${mutant_lower}_tests>)
+		set_tests_properties(srt_walk_paths_mutant_${mutant_lower} PROPERTIES TIMEOUT 30 WILL_FAIL TRUE)
+		add_dependencies(kyty_tests srt_walk_paths_mutant_${mutant_lower}_tests)
+	endif()
+endforeach()
+
 # S426: KYTY_GF_EMULATE, the guest read fault emulator (real SIGSEGVs on a PROT_NONE page). Mutants (WILL_FAIL): EMU_IGNORES_DIRTY, EMU_WRONG_RIP, S427: VEX_NO_ZERO_UPPER, VEX_IGNORE_VVVV.
 if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 		(NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")))

@@ -818,7 +818,10 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		}
 	}
 	// A copy: the cache lookups below must not depend on the memo's storage.
-	auto  described     = FindTextureDescription(resource, value);
+	auto  described     = [&] {
+		KYTY_CP_SITE(BindResolveDescCopy); // S430
+		return FindTextureDescription(resource, value);
+	}();
 	auto& desc          = described.desc;
 	const bool  storage             = resource.written;
 	if (described.null) {
@@ -860,9 +863,14 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	const auto  type                = TextureType(descriptor);
 	const auto  tile                = descriptor.TileMode();
 	const auto  max_mip             = resource.r128 ? last_level : descriptor.MaxMip();
-	auto        id                  = texture_cache.FindImage(desc, described.shader_conversion);
+	auto        id                  = [&] {
+		KYTY_CP_SITE(BindResolveFindImage); // S430
+		return texture_cache.FindImage(desc, described.shader_conversion);
+	}();
 	auto*       image               = &texture_cache.GetImage(id);
 	const bool  stencil_association = static_cast<bool>(image->depth_id);
+	{
+	KYTY_CP_SITE(BindResolveValidate); // S430
 	if (stencil_association) {
 		id    = image->depth_id;
 		image = &texture_cache.GetImage(id);
@@ -878,6 +886,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	} else {
 		(void)SelectSampledColorView(image->info.pixel_format, described.pixel_format,
 		                             descriptor.DstSelXYZW());
+	}
 	}
 	const bool diag_once = ps_hash != 0 && DiagDump::WantsTex(ps_hash, slot);
 	const bool diag_all  = ps_hash != 0 && DiagDump::WantsTexAll(ps_hash, slot);
