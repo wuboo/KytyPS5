@@ -9,7 +9,7 @@
 //      settles whether gl_VertexIndex includes vertex_offset and gl_InstanceIndex first_instance.
 // Cases: 16-bit and 32-bit indices, vertex_offset > 0 and < 0, first_instance != 0, 2 instances, an index
 // buffer bound at an offset that is not a multiple of minStorageBufferOffsetAlignment.
-// Run: per_vertex_vsstore_gpu_tests [--dump] [--stress]  (--stress: 2M triangles x 2..4 instances, parameter-buffer overflow)
+// Run: per_vertex_vsstore_gpu_tests [--dump] [--stress] [--compact]  (--compact, S409: layouts with gaps in the PS mask, old and compact record)  (--stress: 2M triangles x 2..4 instances, parameter-buffer overflow)
 //   previously:  per_vertex_vsstore_gpu_tests [--dump]   (--dump needs no GPU: prints the emitted SPIR-V).
 // NOT the prototype: the prototype chain is compared in the game (A/B frames); this harness compares
 // with the CPU model of the per-vertex semantics. The emitter mutant (KYTY_PVVS_MUTANT_FIRST_THIRD)
@@ -20,11 +20,11 @@
 #include "common/subsystems.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/renderer/perVertexVsStore.h"
+#include "graphics/host_gpu/renderer/perVertexVsStoreRuntime.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/ir/IREmitter.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
-#include "graphics/shader/recompiler/ir/passes/BindingLayout.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "graphics/shader/shader.h"
 #include "graphics/shader/shaderCompiler.h"
@@ -101,15 +101,52 @@ struct Shaders {
 	std::vector<uint32_t> vs;
 	std::vector<uint32_t> ps;
 	uint32_t              stride_vec4 = 0;
+	uint32_t              vs_mask = 0;
+	uint32_t              ps_mask = 0;
+	int32_t               ids_slot = -1; // slot of the {vertex, instance} output in a record; -1: not stored (compact)
 };
 
-// VS: position = attr0, param0 = attr1 with `+ instance` added to the bits of x (a 1 ulp difference
-// per instance shows a record of the wrong instance), param1 = {gl_VertexIndex, gl_InstanceIndex, 0, 0}.
-// PS: out = {corner0.x, corner1.y, corner2.z, corner0.w} of param0.
-Shaders BuildShaders() {
+// S409: which host locations the VS writes and the PS reads. The PS reads corner0.x and corner0.w of the first location, corner1.y of
+// the second and corner2.z of the third (a layout with one read location reads all four from it). Location k of the reads holds
+// the vertex color with `add[k]` added to the bits of every component (+ the instance index to x of the first), so a slot or a
+// location mixed up by the PS shows in the image. The ids location holds {gl_VertexIndex, gl_InstanceIndex} and is read by nobody;
+// `junk` locations hold a constant and are read by nobody.
+struct Layout {
+	const char* name;
+	uint32_t    reads[3];  // host locations the PS reads
+	uint32_t    read_count;
+	uint32_t    add[3];
+	uint32_t    ids;
+	uint32_t    junk[2];
+	uint32_t    junk_count;
+};
+const Layout kLayouts[] = {
+    {"orig: VS {0,1}, PS {0}", {0, 0, 0}, 1, {0, 0, 0}, 1, {0, 0}, 0},
+    {"gap: VS {0,3,5}, PS {3}", {3, 0, 0}, 1, {0, 0, 0}, 5, {0, 0}, 1},
+    {"gap: VS {0,2,4,9}, PS {0,2,9} (mask 0x205)", {0, 2, 9}, 3, {0, 7, 13}, 4, {0, 0}, 0},
+    {"gap: VS {1,2,6,9,12}, PS {2,9} (mask 0x204)", {2, 9, 0}, 2, {0, 7, 0}, 12, {1, 6}, 2},
+};
+const Layout* g_layout = &kLayouts[0];
+
+// VS: position = attr0, the read locations hold attr1 (see Layout), the ids location {gl_VertexIndex, gl_InstanceIndex, 0, 0}.
+// PS: out = {corner0.x, corner1.y, corner2.z, corner0.w} of the read locations.
+// compact (S409): the record holds the locations of the PS mask only: the VS gets the mask as its specialization literal and the
+// PS ranks its locations in its own mask.
+Shaders BuildShaders(const Layout& layout, bool compact) {
 	using IR::Value;
 	using O = IR::ValueOpcode;
 	Shaders out;
+
+	// distinct locations written by the VS, in guest parameter index order
+	struct Param { uint32_t location; int kind; uint32_t add; }; // kind 0 = color, 1 = ids, 2 = junk
+	std::vector<Param> params;
+	for (uint32_t k = 0; k < layout.read_count; ++k) {
+		bool seen = false;
+		for (const auto& p: params) seen = seen || p.location == layout.reads[k];
+		if (!seen) params.push_back({layout.reads[k], 0, layout.add[k]});
+	}
+	params.push_back({layout.ids, 1, 0});
+	for (uint32_t k = 0; k < layout.junk_count; ++k) params.push_back({layout.junk[k], 2, 0});
 
 	IR::Program vs;
 	vs.stage                  = ShaderType::Vertex;
@@ -117,17 +154,16 @@ Shaders BuildShaders() {
 	vs.srt_plan_complete      = vs.resource_tracking_complete = vs.shader_info_complete = true;
 	vs.block_storage.push_back(std::make_unique<IR::Block>());
 	vs.blocks.push_back(vs.block_storage.back().get());
-	vs.block_info.emplace_back();
 	vs.info.inputs  = {{IR::StageInputKind::VertexIndex},
 	                   {IR::StageInputKind::InstanceIndex},
 	                   {IR::StageInputKind::Parameter, 0, 4},
 	                   {IR::StageInputKind::Parameter, 1, 4}};
-	vs.info.outputs = {{IR::StageOutputKind::Position},
-	                   {IR::StageOutputKind::Parameter, 0, 0},
-	                   {IR::StageOutputKind::Parameter, 1, 1}};
-	vs.export_info  = {{.kind = IR::ExportTargetKind::Position, .en = 15},
-	                   {.kind = IR::ExportTargetKind::Parameter, .index = 0, .en = 15},
-	                   {.kind = IR::ExportTargetKind::Parameter, .index = 1, .en = 15}};
+	vs.info.outputs = {{IR::StageOutputKind::Position}};
+	vs.export_info  = {{.kind = IR::ExportTargetKind::Position, .en = 15}};
+	for (uint32_t i = 0; i < params.size(); ++i) {
+		vs.info.outputs.push_back({IR::StageOutputKind::Parameter, i, params[i].location});
+		vs.export_info.push_back({.kind = IR::ExportTargetKind::Parameter, .index = i, .en = 15});
+	}
 	IR::IREmitter emit(vs.blocks.front());
 	const auto vertex   = emit.Emit(O::GetBuiltin, {Value(static_cast<uint32_t>(IR::StageInputKind::VertexIndex)), Value(0u)});
 	const auto instance = emit.Emit(O::GetBuiltin, {Value(static_cast<uint32_t>(IR::StageInputKind::InstanceIndex)), Value(0u)});
@@ -136,34 +172,49 @@ Shaders BuildShaders() {
 	for (uint32_t c = 0; c < 4; c++) color[c] = emit.Emit(O::GetAttribute, {Value(1u), Value(c)});
 	const auto pos = emit.Emit(O::CompositeConstructU32x4, {position[0], position[1], position[2], position[3]});
 	emit.Emit(O::SetAttribute, {pos, Value(true)}, IR::ExportFlags {0});
-	const auto x      = emit.Emit(O::IAdd32, {color[0], instance});
-	const auto param0 = emit.Emit(O::CompositeConstructU32x4, {x, color[1], color[2], color[3]});
-	emit.Emit(O::SetAttribute, {param0, Value(true)}, IR::ExportFlags {1});
-	const auto param1 = emit.Emit(O::CompositeConstructU32x4, {vertex, instance, Value(0u), Value(0u)});
-	emit.Emit(O::SetAttribute, {param1, Value(true)}, IR::ExportFlags {2});
-	IR::AllocateBindings(vs);
+	for (uint32_t i = 0; i < params.size(); ++i) {
+		Value value;
+		if (params[i].kind == 0) {
+			std::array<Value, 4> c4 = color;
+			if (params[i].add != 0) {
+				for (uint32_t c = 0; c < 4; c++) c4[c] = emit.Emit(O::IAdd32, {color[c], Value(params[i].add)});
+			}
+			// the first read location also carries the instance index in x
+			if (params[i].location == layout.reads[0]) c4[0] = emit.Emit(O::IAdd32, {c4[0], instance});
+			value = emit.Emit(O::CompositeConstructU32x4, {c4[0], c4[1], c4[2], c4[3]});
+		} else if (params[i].kind == 1) {
+			value = emit.Emit(O::CompositeConstructU32x4, {vertex, instance, Value(0u), Value(0u)});
+		} else {
+			value = emit.Emit(O::CompositeConstructU32x4, {Value(0x1234u), Value(0x5678u), Value(0u), Value(0u)});
+		}
+		emit.Emit(O::SetAttribute, {value, Value(true)}, IR::ExportFlags {i + 1});
+	}
 	static const ShaderVertexInputInfo vertex_info {};
 	ShaderStageInputInfo               vs_input {.vertex = &vertex_info};
 
-	uint32_t vs_mask = 0;
+	uint32_t vs_mask = 0, spec_id = 0;
 	Spirv::PvStoreInfo vs_store;
 	vs_store.role          = Spirv::PvStoreInfo::Role::Vertex;
 	vs_store.coherent      = true;
 	vs_store.location_mask = &vs_mask;
-	out.vs                 = Spirv::EmitProgram(vs, vs_input, nullptr, &vs_store);
+	vs_store.compact_spec    = compact;
+	vs_store.compact_mask_id = &spec_id;
+	out.vs                 = Spirv::EmitProgram(vs, vs_input, 0, false, false, nullptr, &vs_store);
 
 	// PS (the interpolation setup of TestPvVsStoreEmission): v_interp_mov_f32 with P0 / P10 / P20.
-	const uint32_t ps_code[] = {EncodeVintrp(2, 12, 0, 0, 2), EncodeVintrp(2, 13, 0, 1, 0),
-	                            EncodeVintrp(2, 14, 0, 2, 1), EncodeVintrp(2, 15, 0, 3, 2),
+	const uint32_t a1 = layout.read_count > 1 ? 1 : 0, a2 = layout.read_count > 2 ? 2 : 0;
+	const uint32_t ps_code[] = {EncodeVintrp(2, 12, 0, 0, 2), EncodeVintrp(2, 13, a1, 1, 0),
+	                            EncodeVintrp(2, 14, a2, 2, 1), EncodeVintrp(2, 15, 0, 3, 2),
 	                            EncodeExp0(0x00, 0xf),        EncodeExp1(12, 13, 14, 15),
 	                            EncodeSopp(0x01)};
 	static ShaderPixelInputInfo ps_info {};
-	ps_info.input_num                 = 1;
+	ps_info = {};
+	ps_info.input_num                 = layout.read_count;
 	ps_info.ps_system_input_base      = 2;
-	ps_info.custom_interpolation_mask = 1;
+	ps_info.custom_interpolation_mask = (1u << layout.read_count) - 1u;
 	ps_info.ps_perspective_center_vgpr = 0;
 	for (uint32_t i = 0; i < std::size(ps_info.interpolator_settings); i++) ps_info.interpolator_settings[i] = i;
-	ps_info.interpolator_settings[0] = 0x00000420u;
+	for (uint32_t i = 0; i < layout.read_count; i++) ps_info.interpolator_settings[i] = 0x00000420u | layout.reads[i];
 	static const std::array<uint32_t, 64> user_data = [] {
 		std::array<uint32_t, 64> data {};
 		data[3] = 3u << 28u;
@@ -187,12 +238,27 @@ Shaders BuildShaders() {
 	ps_store.role          = Spirv::PvStoreInfo::Role::Pixel;
 	ps_store.coherent      = true;
 	ps_store.location_mask = &ps_mask;
-	out.ps                 = Spirv::EmitProgram(compiled.program, options.input_info, nullptr, &ps_store);
+	out.ps                 = Spirv::EmitProgram(compiled.program, options.input_info, 0, false, false, nullptr, &ps_store);
 
 	Check(ClassifyPvVsStoreInterface(vs_mask, ps_mask) == PvVsStoreInterfaceVerdict::Use, "VS/PS pair is not a VS-store candidate");
-	out.stride_vec4 = PvVsStoreStrideFor(vs_mask);
-	if (out.stride_vec4 != 2) std::fprintf(stderr, "VS location mask %08x, PS location mask %08x\n", vs_mask, ps_mask);
-	Check(out.stride_vec4 == 2, "expected stride 2 (locations 0 and 1)");
+	uint32_t expect_ps = 0;
+	for (uint32_t k = 0; k < layout.read_count; ++k) expect_ps |= 1u << layout.reads[k];
+	if (ps_mask != expect_ps) std::fprintf(stderr, "PS location mask %08x, expected %08x\n", ps_mask, expect_ps);
+	Check(ps_mask == expect_ps, "the PS does not read the locations of the layout");
+	out.vs_mask = vs_mask;
+	out.ps_mask = ps_mask;
+	if (compact) {
+		// the PS of a compact record takes its slots from its own mask; the VS gets the mask of the pair
+		FillPvCompactPixelInfo(ps_store, ps_mask, vs_mask);
+		ps_store.location_mask = nullptr;
+		out.ps = Spirv::EmitProgram(compiled.program, options.input_info, 0, false, false, nullptr, &ps_store);
+		Check(spec_id != 0 && PvCompactPatchMask(out.vs, spec_id, ps_mask), "the VS has no mask specialization constant");
+		out.stride_vec4 = PvCompactStride(ps_mask);
+		out.ids_slot    = -1;
+	} else {
+		out.stride_vec4 = PvVsStoreStrideFor(vs_mask);
+		out.ids_slot    = static_cast<int32_t>(layout.ids);
+	}
 	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
 	Check(tools.Validate(out.vs), "VS-store VS does not validate");
 	Check(tools.Validate(out.ps), "VS-store PS does not validate");
@@ -254,10 +320,11 @@ std::array<uint32_t, 4> ExpectedPixel(const std::array<Vertex, kVertices>& v, co
 	const uint32_t last_instance = c.first_instance + c.instance_count - 1;
 	const auto     vertex = [&](uint32_t corner) { return static_cast<uint32_t>(static_cast<int32_t>(c.indices[tri * 3 + corner]) + c.vertex_offset); };
 	std::array<uint32_t, 4> out {};
-	out[0] = Bits(v[vertex(0)].color[0]) + last_instance;
-	out[1] = Bits(v[vertex(1)].color[1]);
-	out[2] = Bits(v[vertex(2)].color[2]);
-	out[3] = Bits(v[vertex(0)].color[3]);
+	const auto& add = g_layout->add;
+	out[0] = Bits(v[vertex(0)].color[0]) + add[0] + last_instance;
+	out[1] = Bits(v[vertex(1)].color[1]) + (g_layout->read_count > 1 ? add[1] : 0u);
+	out[2] = Bits(v[vertex(2)].color[2]) + (g_layout->read_count > 2 ? add[2] : 0u);
+	out[3] = Bits(v[vertex(0)].color[3]) + add[0];
 	return out;
 }
 
@@ -401,8 +468,7 @@ Gpu InitGpu() {
 	return gpu;
 }
 
-int RunGpu(const Shaders& shaders) {
-	const Gpu  gpu      = InitGpu();
+int RunGpu(const Gpu& gpu, const Shaders& shaders) {
 	const auto vertices = MakeVertices();
 	auto       module   = [&](const std::vector<uint32_t>& words, const char* what) {
         VkShaderModuleCreateInfo info {VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
@@ -692,7 +758,7 @@ int RunGpu(const Shaders& shaders) {
 				}
 			}
 		}
-		// cap: record(instance, vertex) holds {vertex, instance, 0, 0} in slot 1, the color in slot 0
+		// cap: record(instance, vertex) holds {vertex, instance, 0, 0} in the slot of the ids location (not stored by a compact record)
 		const auto* cap_words = static_cast<const uint32_t*>(cap.mapped);
 		std::vector<bool> used_vertex(last + 1, false);
 		for (auto idx: c.indices) used_vertex[static_cast<uint32_t>(static_cast<int32_t>(idx) + c.vertex_offset)] = true;
@@ -700,7 +766,8 @@ int RunGpu(const Shaders& shaders) {
 			for (uint32_t vtx = first; vtx <= last; ++vtx) {
 				if (!used_vertex[vtx]) continue;
 				const uint32_t record = PvVsStoreVertexRecord(draw.base, draw.span, draw.first, draw.first_instance, c.first_instance + i, vtx);
-				const uint32_t* slot1 = cap_words + (record * shaders.stride_vec4 + 1) * 4;
+				if (shaders.ids_slot < 0) continue;
+				const uint32_t* slot1 = cap_words + (record * shaders.stride_vec4 + static_cast<uint32_t>(shaders.ids_slot)) * 4;
 				if (slot1[0] != vtx || slot1[1] != c.first_instance + i) {
 					if (bad_records++ < 6) {
 						std::fprintf(stderr, "  [%s] record(inst %u, vertex %u): VS stored {vertex %u, instance %u}\n", c.name,
@@ -709,10 +776,18 @@ int RunGpu(const Shaders& shaders) {
 				}
 			}
 		}
-		std::printf("%s: %s (pixels bad %d, records bad %d)\n", bad_pixels == 0 && bad_records == 0 ? "PASS" : "FAIL", c.name, bad_pixels, bad_records);
-		failures += (bad_pixels != 0) + (bad_records != 0);
+		// nothing outside the region of the draw was written: the stride is what the shaders use, a store above it would land here
+		int overrun = 0;
+		for (size_t w = 0; w < cap.size / 4; ++w) {
+			const size_t record_word = w / (shaders.stride_vec4 * 4u);
+			const bool   inside      = record_word >= draw.base && record_word < draw.base + records;
+			if (!inside && cap_words[w] != 0xA5A5A5A5u) overrun++;
+		}
+		std::printf("%s: %s (pixels bad %d, records bad %d, words written outside the region %d)\n",
+		            bad_pixels == 0 && bad_records == 0 && overrun == 0 ? "PASS" : "FAIL", c.name, bad_pixels, bad_records, overrun);
+		failures += (bad_pixels != 0) + (bad_records != 0) + (overrun != 0);
 	}
-	std::printf("per_vertex_vsstore_gpu_tests: %s\n", failures == 0 ? "PASS" : "FAIL");
+	std::printf("arm result: %s\n", failures == 0 ? "PASS" : "FAIL");
 	return failures == 0 ? 0 : 1;
 }
 
@@ -721,11 +796,27 @@ int RunGpu(const Shaders& shaders) {
 
 int main(int argc, char** argv) {
 	using namespace Libs::Graphics;
-	for (int i = 1; i < argc; ++i)
+	bool compact_run = false, dump = false;
+	for (int i = 1; i < argc; ++i) {
 		if (std::strcmp(argv[i], "--stress") == 0) g_stress = true;
+		if (std::strcmp(argv[i], "--compact") == 0) compact_run = true;
+		if (std::strcmp(argv[i], "--dump") == 0) dump = true;
+	}
 	EnsureConfigInitialized();
-	const Shaders shaders = BuildShaders();
-	if (argc > 1 && std::strcmp(argv[1], "--dump") == 0) {
+	// default: the layout of S150 with the old record. --compact (S409): every layout with the old and with the compact record,
+	// all against the same CPU model, so the pixels of the compact arm equal those of the old one.
+	struct Arm { const Layout* layout; bool compact; };
+	std::vector<Arm> arms;
+	if (compact_run) {
+		for (const auto& layout: kLayouts) {
+			arms.push_back({&layout, false});
+			arms.push_back({&layout, true});
+		}
+	} else {
+		arms.push_back({&kLayouts[0], false});
+	}
+	if (dump) {
+		const Shaders shaders = BuildShaders(*arms.back().layout, arms.back().compact);
 		spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
 		std::string          text;
 		for (const auto* words: {&shaders.vs, &shaders.ps}) {
@@ -734,5 +825,15 @@ int main(int argc, char** argv) {
 		}
 		return 0;
 	}
-	return RunGpu(shaders);
+	const Gpu gpu = InitGpu();
+	int failures = 0;
+	for (const auto& arm: arms) {
+		g_layout = arm.layout;
+		const Shaders shaders = BuildShaders(*arm.layout, arm.compact);
+		std::printf("==== %s, %s record: VS mask 0x%x, PS mask 0x%x, stride %u\n", arm.layout->name, arm.compact ? "compact" : "old",
+		            shaders.vs_mask, shaders.ps_mask, shaders.stride_vec4);
+		failures += RunGpu(gpu, shaders);
+	}
+	std::printf("per_vertex_vsstore_gpu_tests (%zu arms): %s\n", arms.size(), failures == 0 ? "PASS" : "FAIL");
+	return failures == 0 ? 0 : 1;
 }

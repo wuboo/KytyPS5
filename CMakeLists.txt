@@ -512,6 +512,9 @@ add_kyty_full_emulator_test(per_vertex_vsstore_gpu_mutant_first_third_tests "${K
 target_compile_definitions(per_vertex_vsstore_gpu_mutant_first_third_tests PRIVATE KYTY_PVVS_MUTANT_FIRST_THIRD=1)
 add_kyty_full_emulator_test(per_vertex_vsstore_gpu_mutant_range_tests "${KYTY_TESTS_DIR}/PerVertexVsStoreGpuTests.cpp")
 target_compile_definitions(per_vertex_vsstore_gpu_mutant_range_tests PRIVATE KYTY_PVVS_MUTANT_INDEX_RANGE_NO_ROUND=1)
+# S409: the PS of a compact record ranks its locations in the VS mask; `per_vertex_vsstore_gpu_mutant_compact_ps_slot_tests --compact` must fail.
+add_kyty_full_emulator_test(per_vertex_vsstore_gpu_mutant_compact_ps_slot_tests "${KYTY_TESTS_DIR}/PerVertexVsStoreGpuTests.cpp")
+target_compile_definitions(per_vertex_vsstore_gpu_mutant_compact_ps_slot_tests PRIVATE KYTY_PVVS_MUTANT_COMPACT_PS_USES_VS_SLOT=1)
 # Keeps device-address buffers alive until queued MoltenVK work completes (the game lost the device
 # otherwise). Needs a real Vulkan driver through SDL_VULKAN_LIBRARY, so it stays opt-in.
 add_executable(device_address_lifetime_gpu_tests EXCLUDE_FROM_ALL
