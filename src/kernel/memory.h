@@ -4,6 +4,7 @@
 #include "common/abi.h"
 #include "common/common.h"
 #include "common/virtualMemory.h"
+#include "graphics/host_gpu/renderer/cpReadBacking.h"
 
 #include <string>
 #include <vector>
@@ -136,8 +137,13 @@ int UnmapAmmMemory(uint64_t vaddr, size_t size);
 bool                   TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size);
 bool                   TryReadBacking(uint64_t vaddr, void* data, uint64_t size);
 bool                   TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size);
-// True when the GPU thread still has unflushed bytes for this range. Safe off that thread: returns false.
+// True when the GPU thread still has unflushed bytes for this range (S419, KYTY_CP_READ_BACKING != 0: or a GPU->host copy of it is not published yet).
+// Safe off that thread: returns false.
 bool                   QueryShaderGpuDirty(uint64_t vaddr, uint64_t size);
+// S419 (KYTY_CP_READ_BACKING=0|1|shadow): the CP thread reads `size` bytes of a guest table into `dst`. 0: the plain read through the guest address.
+// 1: a range that is neither GPU-dirty nor in flight is copied from the backing (no fault, no drain); anything else is read as in 0.
+// shadow: both reads, compared; `dst` holds the guest read. Counters cp_read_backing_*; `site` selects the per-site columns.
+void                   CpGuestRead(Graphics::CpReadBacking::Site site, uint64_t vaddr, void* dst, uint64_t size);
 bool                   TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size);
 bool                   CopySparseMemory(uint64_t vaddr, void* data, uint64_t size);
 [[nodiscard]] uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size);

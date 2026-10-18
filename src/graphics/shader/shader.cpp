@@ -15,9 +15,11 @@
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "graphics/shader/shaderVertexMetadata.h"
+#include "kernel/memory.h"
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstdio>
 #include <memory>
@@ -300,6 +302,30 @@ static bool ShaderGetStaticVertexInputInfo(uint64_t shader_addr, const HW::UserS
 			LOGF("ShaderGetVertexInputInfo(): null vertex table pointer shader=0x%016" PRIx64 "\n",
 			     shader_addr);
 			return false;
+		}
+		// S419 (KYTY_CP_READ_BACKING): the two tables are read through CpGuestRead (the backing when the bytes are current, no fault); 0 keeps the pointers.
+		std::array<uint32_t, 256>                           attrib_copy;
+		std::array<uint32_t, ShaderVertexInputInfo::RES_MAX * 4> buffer_copy;
+		if (CpReadBacking::EnvMode() != CpReadBacking::Mode::Off) {
+			uint32_t attrib_dwords = 0;
+			for (const auto& in: metadata.input_semantics) {
+				attrib_dwords = std::max<uint32_t>(attrib_dwords, in.semantic + 1u);
+			}
+			if (attrib_dwords != 0) {
+				LibKernel::Memory::CpGuestRead(CpReadBacking::Site::VertexAttribTable, reinterpret_cast<uint64_t>(attrib),
+				                               attrib_copy.data(), attrib_dwords * sizeof(uint32_t));
+				uint32_t buffer_dwords = 0;
+				for (const auto& in: metadata.input_semantics) {
+					const uint32_t index = attrib_copy[in.semantic] & 0x1fu;
+					if (index < ShaderVertexInputInfo::RES_MAX) buffer_dwords = std::max(buffer_dwords, (index + 1u) * 4u);
+				}
+				if (buffer_dwords != 0) {
+					LibKernel::Memory::CpGuestRead(CpReadBacking::Site::VertexBufferTable, reinterpret_cast<uint64_t>(buffer),
+					                               buffer_copy.data(), buffer_dwords * sizeof(uint32_t));
+					attrib = attrib_copy.data();
+					buffer = buffer_copy.data();
+				}
+			}
 		}
 		ShaderApplyAttribSemantics(info, metadata.input_semantics, attrib, buffer);
 		ShaderDetectBuffers(info);

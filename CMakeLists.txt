@@ -753,6 +753,16 @@ foreach(mutant IN ITEMS BACKING_IGNORES_DIRTY SHADOW_SKIPS_RAW FIRSTDIFF_SKIPS_L
 	target_compile_definitions(pv_index_backing_mutant_${mutant_lower}_tests PRIVATE KYTY_PVINDEXBACKING_MUTANT_${mutant}=1)
 endforeach()
 
+# S419: KYTY_CP_READ_BACKING decisions. Mutants: the backing read although the bytes are GPU-dirty / a copy is in flight; shadow without the old read; a difference in the last byte missed.
+add_executable(cp_read_backing_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpReadBackingTests.cpp")
+target_include_directories(cp_read_backing_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS READ_BACKING_IGNORES_DIRTY READ_BACKING_IGNORES_INFLIGHT SHADOW_SKIPS_RAW FIRSTDIFF_SKIPS_LAST)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(cp_read_backing_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpReadBackingTests.cpp")
+	target_include_directories(cp_read_backing_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_read_backing_mutant_${mutant_lower}_tests PRIVATE KYTY_CPREADBACKING_MUTANT_${mutant}=1)
+endforeach()
+
 # S418: in-flight GPU->host copies and the backing-read decision. Mutants: the backing read although a copy is in flight; a publish ends every overlapping entry.
 add_executable(inflight_ranges_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/InflightRangesTests.cpp")
 target_include_directories(inflight_ranges_tests PRIVATE ${inc_headers})
@@ -1412,6 +1422,11 @@ if(BUILD_TESTING)
 		add_test(NAME pv_index_backing_mutant_${mutant} COMMAND $<TARGET_FILE:pv_index_backing_mutant_${mutant}_tests>)
 		set_tests_properties(pv_index_backing_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
+	add_test(NAME cp_read_backing COMMAND $<TARGET_FILE:cp_read_backing_tests>)
+	foreach(mutant IN ITEMS read_backing_ignores_dirty read_backing_ignores_inflight shadow_skips_raw firstdiff_skips_last)
+		add_test(NAME cp_read_backing_mutant_${mutant} COMMAND $<TARGET_FILE:cp_read_backing_mutant_${mutant}_tests>)
+		set_tests_properties(cp_read_backing_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME inflight_ranges COMMAND $<TARGET_FILE:inflight_ranges_tests>)
 	foreach(mutant IN ITEMS backing_ignores_inflight remove_all_overlapping)
 		add_test(NAME inflight_ranges_mutant_${mutant} COMMAND $<TARGET_FILE:inflight_ranges_mutant_${mutant}_tests>)
@@ -1639,6 +1654,11 @@ if(BUILD_TESTING)
 		pv_index_backing_mutant_backing_ignores_dirty_tests
 		pv_index_backing_mutant_shadow_skips_raw_tests
 		pv_index_backing_mutant_firstdiff_skips_last_tests
+		cp_read_backing_tests
+		cp_read_backing_mutant_read_backing_ignores_dirty_tests
+		cp_read_backing_mutant_read_backing_ignores_inflight_tests
+		cp_read_backing_mutant_shadow_skips_raw_tests
+		cp_read_backing_mutant_firstdiff_skips_last_tests
 		inflight_ranges_tests
 		inflight_ranges_mutant_backing_ignores_inflight_tests
 		inflight_ranges_mutant_remove_all_overlapping_tests

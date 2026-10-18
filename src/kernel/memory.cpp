@@ -9,6 +9,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/cpPhaseScope.h"
+#include "graphics/presentation/frameTiming.h"
 #include "kernel/guestDriverMemory.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
@@ -875,7 +876,13 @@ bool QueryShaderGpuDirty(uint64_t vaddr, uint64_t size) {
 	if (!Graphics::GuestGpu::IsGpuThread()) {
 		return false;
 	}
-	return GetGpuResources().GetBufferCache().HasGpuDirtyBytes(vaddr, size);
+	auto& buffers = GetGpuResources().GetBufferCache();
+	if (buffers.HasGpuDirtyBytes(vaddr, size)) {
+		return true;
+	}
+	// S419: a recorded GPU->host copy that is not published yet leaves the tracker clear and the backing stale (S418).
+	return Graphics::CpReadBacking::EnvMode() != Graphics::CpReadBacking::Mode::Off &&
+	       buffers.HasInflightDownloadBytes(vaddr, size);
 }
 
 bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
@@ -887,8 +894,101 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 		if (buffers.HasGpuDirtyBytes(vaddr, size)) {
 			buffers.ReadMemory(vaddr, size);
 		}
+		// S419: the download of the range is recorded but its publish (WriteBacking) has not run; wait for it instead of returning stale bytes.
+		if (Graphics::CpReadBacking::EnvMode() != Graphics::CpReadBacking::Mode::Off &&
+		    buffers.HasInflightDownloadBytes(vaddr, size)) {
+			Graphics::FrameTiming::Add(Graphics::FrameTiming::Counter::SpecBackingInflightN);
+			buffers.WaitInflightDownloads();
+		}
 	}
 	return TryReadBacking(vaddr, data, size);
+}
+
+void CpGuestRead(Graphics::CpReadBacking::Site site, uint64_t vaddr, void* dst, uint64_t size) {
+	using namespace Graphics::CpReadBacking;
+	using C = Graphics::FrameTiming::Counter;
+	if (size == 0) {
+		return;
+	}
+	const auto mode = EnvMode();
+	if (mode == Mode::Off) {
+		std::memcpy(dst, reinterpret_cast<const void*>(vaddr), size);
+		return;
+	}
+	const bool attrib = site == Site::VertexAttribTable;
+	// Per-site statistics: calls, copied, kept on the guest read, of which in flight, shadow equal / different.
+	static std::atomic<uint64_t> stats[static_cast<size_t>(Site::Count)][6] = {};
+	auto&                        st = stats[static_cast<size_t>(site)];
+	const auto                   calls = st[0].fetch_add(1, std::memory_order_relaxed) + 1;
+	if ((calls & (calls - 1)) == 0) {
+		LOGF("[cp-read-backing] site=%s mode=%s calls=%" PRIu64 " copied=%" PRIu64 " fallback=%" PRIu64 " inflight=%" PRIu64
+		     " eq=%" PRIu64 " ne=%" PRIu64 "\n",
+		     SiteName(site), mode == Mode::Shadow ? "shadow" : "1", calls, st[1].load(), st[2].load(), st[3].load(), st[4].load(),
+		     st[5].load());
+	}
+
+	auto source   = Source::Raw;
+	bool inflight = false;
+	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size) && Graphics::GuestGpu::IsGpuThread()) {
+		// S418: the backing is current only when the GPU has not written the bytes AND no copy of them is still in flight.
+		int reason = 0;
+		(void)GetGpuResources().GetBufferCache().CanReadBacking(vaddr, size, &reason);
+		inflight = reason == 2;
+		source   = Decide(mode, reason == 1, inflight);
+	}
+	const auto fallback = [&] {
+		st[2].fetch_add(1, std::memory_order_relaxed);
+		Graphics::FrameTiming::Add(C::CpReadBackingFallbackN);
+		Graphics::FrameTiming::Add(attrib ? C::CpReadBackingAttribFallbackN : C::CpReadBackingBufferFallbackN);
+		if (inflight) {
+			st[3].fetch_add(1, std::memory_order_relaxed);
+			Graphics::FrameTiming::Add(C::CpReadBackingInflightN);
+		}
+		std::memcpy(dst, reinterpret_cast<const void*>(vaddr), size);
+	};
+	const auto copied = [&] {
+		st[1].fetch_add(1, std::memory_order_relaxed);
+		Graphics::FrameTiming::Add(C::CpReadBackingN);
+		Graphics::FrameTiming::Add(C::CpReadBackingBytes, size);
+		Graphics::FrameTiming::Add(attrib ? C::CpReadBackingAttribN : C::CpReadBackingBufferN);
+	};
+	if (source == Source::Raw) {
+		fallback();
+		return;
+	}
+	if (source == Source::Backing) {
+		if (TryReadBacking(vaddr, dst, size)) {
+			copied();
+		} else {
+			fallback();
+		}
+		return;
+	}
+	// shadow: the backing copy first, then the guest read the caller uses.
+	thread_local std::vector<uint8_t> copy;
+	copy.resize(size);
+	const bool ok = TryReadBacking(vaddr, copy.data(), size);
+	std::memcpy(dst, reinterpret_cast<const void*>(vaddr), size);
+	if (!ok) {
+		st[2].fetch_add(1, std::memory_order_relaxed);
+		Graphics::FrameTiming::Add(C::CpReadBackingFallbackN);
+		Graphics::FrameTiming::Add(attrib ? C::CpReadBackingAttribFallbackN : C::CpReadBackingBufferFallbackN);
+		return;
+	}
+	copied();
+	const auto first_diff = FirstDiff(copy.data(), dst, size);
+	if (first_diff == size) {
+		st[4].fetch_add(1, std::memory_order_relaxed);
+		Graphics::FrameTiming::Add(C::CpReadBackingEqN);
+	} else {
+		st[5].fetch_add(1, std::memory_order_relaxed);
+		Graphics::FrameTiming::Add(C::CpReadBackingNeN);
+		static std::atomic<uint32_t> ne_logged {0};
+		if (ne_logged.fetch_add(1, std::memory_order_relaxed) < 20) {
+			LOGF("[cp-read-backing-ne] flip=%" PRIu64 " site=%s addr=0x%" PRIx64 " size=%" PRIu64 " first_diff=%" PRIu64 "\n",
+			     Graphics::FrameTiming::GuestFlips(), SiteName(site), vaddr, size, first_diff);
+		}
+	}
 }
 
 uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size) {
