@@ -154,7 +154,9 @@ private:
 	uint64_t m_seg_wait_base = 0;     // cp_wait_guest_ns + cp_wait_gpu_ns at the segment start
 	void ConsumeSegPassEnd();
 	bool     EagerSplitNow(bool pass_closing, bool* closed_pass, bool mid_pass, GpuDone::SubmitReason reason);
+	bool     Eager3FlushNow();        // S410: RequestFlush with an idle GPU (KYTY_EAGER_SUBMIT=3)
 	uint32_t m_seg_mid_splits = 0;    // S328: mid-pass eager splits in this segment
+	uint32_t m_flip_mid3      = 0;    // S410: mid-pass splits of mode 3 since the last flip
 	GpuDone::SubmitReason m_next_reason = GpuDone::SubmitReason::Other; // S410
 	bool     m_starve_diag    = false;  // S410
 	int64_t  m_open_since_ns = 0;     // when the open buffer began (eager policy age)

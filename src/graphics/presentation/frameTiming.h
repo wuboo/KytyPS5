@@ -242,6 +242,9 @@ enum class Counter : uint32_t {
 	// the buffer was submitted (order of GpuDone::SubmitReason).
 	GpuStarveNs, GpuStarveWorkNs, GpuStarveN, GpuStarveGe1msN,
 	GpuStarveWorkDrainNs, GpuStarveWorkLazyMaxNs, GpuStarveWorkLazy1msNs, GpuStarveWorkLazyIdleNs, GpuStarveWorkEagerNs, GpuStarveWorkEagerPassNs, GpuStarveWorkEagerMidNs, GpuStarveWorkEager3MidNs, GpuStarveWorkEager3FlushNs, GpuStarveWorkLowwaterNs, GpuStarveWorkFlipNs, GpuStarveWorkOtherNs,
+	// S410 (KYTY_EAGER_SUBMIT=3): mid-pass splits in any buffer / RequestFlush submits with an idle GPU / splits while the GPU ran the last
+	// submitted buffer (KYTY_EAGER_LOWWATER=1).
+	Eager3MidN, Eager3FlushN, EagerLowwaterN,
 	// S410 (KYTY_DIAG_STARVE=1): why the eager policy did not split although KnownGpuTick said idle (no extra Refresh).
 	EagerDeclinePassOpenN, EagerDeclineAgeN, EagerDeclineNoWorkN, EagerDeclineMidLimitN, EagerDeclineFirstCbOnlyN,
 	Count,

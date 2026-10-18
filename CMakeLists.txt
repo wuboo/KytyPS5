@@ -663,6 +663,17 @@ add_executable(eager_submit_mutant_clear_reopen_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(eager_submit_mutant_clear_reopen_tests PRIVATE ${inc_headers})
 target_compile_definitions(eager_submit_mutant_clear_reopen_tests PRIVATE KYTY_EAGER_MUTANT_CLEAR_REOPEN=1)
+# S410 mutants: per-flip limit of the mode-3 mid-pass split ignored; low-water at any backlog. Must be caught (WILL_FAIL).
+add_executable(eager_submit_mutant_eager3_no_limit_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/EagerSubmitTests.cpp"
+)
+target_include_directories(eager_submit_mutant_eager3_no_limit_tests PRIVATE ${inc_headers})
+target_compile_definitions(eager_submit_mutant_eager3_no_limit_tests PRIVATE KYTY_EAGER_MUTANT_EAGER3_NO_LIMIT=1)
+add_executable(eager_submit_mutant_lowwater_any_backlog_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/EagerSubmitTests.cpp"
+)
+target_include_directories(eager_submit_mutant_lowwater_any_backlog_tests PRIVATE ${inc_headers})
+target_compile_definitions(eager_submit_mutant_lowwater_any_backlog_tests PRIVATE KYTY_EAGER_MUTANT_LOWWATER_ANY_BACKLOG=1)
 add_executable(gpu_gap_mutant_clock_max_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GpuGapTests.cpp"
 )
@@ -1359,6 +1370,9 @@ if(BUILD_TESTING)
 	add_test(NAME eager_submit_mutant_mid_any_cb COMMAND $<TARGET_FILE:eager_submit_mutant_mid_any_cb_tests>)
 	add_test(NAME eager_submit_mutant_mid_no_limit COMMAND $<TARGET_FILE:eager_submit_mutant_mid_no_limit_tests>)
 	add_test(NAME eager_submit_mutant_clear_reopen COMMAND $<TARGET_FILE:eager_submit_mutant_clear_reopen_tests>)
+	add_test(NAME eager_submit_mutant_eager3_no_limit COMMAND $<TARGET_FILE:eager_submit_mutant_eager3_no_limit_tests>)
+	add_test(NAME eager_submit_mutant_lowwater_any_backlog COMMAND $<TARGET_FILE:eager_submit_mutant_lowwater_any_backlog_tests>)
+	set_tests_properties(eager_submit_mutant_eager3_no_limit eager_submit_mutant_lowwater_any_backlog PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME gpu_gap_mutant_clock_max COMMAND $<TARGET_FILE:gpu_gap_mutant_clock_max_tests>)
 	set_tests_properties(eager_submit_mutant_pass_open eager_submit_mutant_busy eager_submit_mutant_no_age eager_submit_mutant_no_closing gpu_gap_mutant_arm_first eager_submit_mutant_mid_any_cb eager_submit_mutant_mid_no_limit eager_submit_mutant_clear_reopen gpu_gap_mutant_clock_max PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME pad_script_parser COMMAND $<TARGET_FILE:pad_script_parser_tests>)
@@ -1567,6 +1581,8 @@ if(BUILD_TESTING)
 		eager_submit_mutant_mid_any_cb_tests
 		eager_submit_mutant_mid_no_limit_tests
 		eager_submit_mutant_clear_reopen_tests
+		eager_submit_mutant_eager3_no_limit_tests
+		eager_submit_mutant_lowwater_any_backlog_tests
 		gpu_gap_mutant_clock_max_tests
 		push_descriptor_policy_tests
 		null_descriptor_policy_tests
