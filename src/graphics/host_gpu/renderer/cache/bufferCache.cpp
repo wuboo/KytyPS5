@@ -170,6 +170,77 @@ void BufferCache::DeleteBuffer(BufferId id) {
 	}
 }
 
+BufferCache::KnownFillPlan BufferCache::PlanKnownFill(uint64_t vaddr, uint64_t size) {
+	KnownFillPlan plan;
+	// The same pieces DownloadBufferMemory would copy: GPU-modified bytes of the tracker pages of the range.
+	m_memory_tracker.ForEachDownloadRange<false>(vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
+		m_gpu_modified_ranges.ForEachInRange(address, bytes, [&](uint64_t start, uint64_t end) {
+			plan.pieces.push_back({start, end - start, 0});
+		});
+	});
+	if (plan.pieces.empty()) {
+		return plan;
+	}
+	for (auto& piece: plan.pieces) {
+		const auto decision = DccFillPublish::Decide(m_write_ledger.QueryFill(piece.address, piece.size),
+		                                             HasPendingDownload(piece.address, piece.size));
+		if (!decision.publish) {
+			FrameTiming::Add(FrameTiming::Counter::DccPublishFallbackN);
+			plan.pieces.clear();
+			return plan;
+		}
+		piece.value = decision.value;
+	}
+	plan.active = true;
+	return plan;
+}
+
+void BufferCache::PublishKnownFill(const KnownFillPlan& plan) {
+	for (const auto& piece: plan.pieces) {
+		DccFillPublish::Apply(
+		    piece.address, piece.size, piece.value,
+		    [](uint64_t address, const uint8_t* bytes, uint64_t bytes_size) {
+			    Libs::LibKernel::Memory::WriteBacking(address, bytes, bytes_size);
+		    },
+		    [this](uint64_t address, uint64_t bytes_size) {
+			    m_gpu_modified_ranges.Subtract(address, bytes_size);
+			    m_write_ledger.Trim(address, bytes_size);
+			    m_memory_tracker.UnmarkRegionAsGpuModified(address, bytes_size);
+		    });
+		FrameTiming::Add(FrameTiming::Counter::DccPublishN);
+	}
+}
+
+void BufferCache::ShadowCompareKnownFill(const KnownFillPlan& plan) {
+	static std::atomic<uint32_t> logged {0};
+	for (const auto& piece: plan.pieces) {
+		std::vector<uint8_t> actual(static_cast<size_t>(piece.size));
+		if (!Libs::LibKernel::Memory::TryReadBacking(piece.address, actual.data(), actual.size())) {
+			continue;
+		}
+		FrameTiming::Add(FrameTiming::Counter::DccKnownWouldHitN);
+		const auto diff = DccFillPublish::FirstDifference(piece.value, piece.address, actual.data(), piece.size);
+		if (diff == piece.size) {
+			continue;
+		}
+		FrameTiming::Add(FrameTiming::Counter::DccKnownMismatchN);
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+			LOGF("[dcc-known-mismatch] addr=0x%016" PRIx64 " size=0x%" PRIx64 " value=0x%08" PRIx32 " first_diff=0x%" PRIx64 "\n",
+			     piece.address, piece.size, piece.value, diff);
+		}
+	}
+}
+
+bool BufferCache::HasPendingDownload(uint64_t vaddr, uint64_t size) {
+	std::lock_guard lock(m_eager_mutex);
+	for (const auto& [page, entry]: m_eager_pages) {
+		if (entry.tick != 0 && page < vaddr + size && vaddr < page + TRACKER_PAGE_SIZE) {
+			return true;
+		}
+	}
+	return false;
+}
+
 template <bool async>
 bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
 	CpPhases::Scope phase(CpPhases::Phase::ReadbackCpu);
@@ -186,6 +257,9 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			    total_size += Common::AlignUp(end - start, 64);
 		    });
 		    m_gpu_modified_ranges.Subtract(address, bytes);
+		    if (DccFillPublish::EnvMode() != DccFillPublish::Mode::Off) {
+			    m_write_ledger.Forget(address, bytes);
+		    }
 	    });
 	if (copies.empty()) {
 		return false;
@@ -306,11 +380,16 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	if (!GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: invalid memory-invalidation range\n");
 	}
+	// With KYTY_DCC_KNOWN the fill must still be known when the readback decides, so the CPU write forgets it afterwards.
+	const bool known = DccFillPublish::EnvMode() != DccFillPublish::Mode::Off;
 	m_memory_tracker.InvalidateRegion(vaddr, size, [this, vaddr, size] {
 		FrameTiming::Add(FrameTiming::Counter::ReadbackWriteFault);
 		const SyncCensus::SiteScope site_tag(SyncCensus::Site::WriteFault);
 		ReadMemory(vaddr, size, true);
 	});
+	if (known) {
+		m_write_ledger.Forget(vaddr, size); // a CPU write: remembered fills of the range are stale
+	}
 }
 
 namespace {
@@ -372,9 +451,24 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 			m_scheduler.GetMasterSemaphore().Refresh();
 			probe.done = SyncCensus::WriterDone(probe.writer, m_scheduler.GetMasterSemaphore().KnownGpuTick());
 		}
-		if (DownloadBufferMemory<false>(buffer, vaddr, size)) {
+		const auto    known_mode = DccFillPublish::EnvMode();
+		KnownFillPlan fill_plan;
+		if (known_mode != DccFillPublish::Mode::Off) {
+			fill_plan = PlanKnownFill(vaddr, size);
+		}
+		if (known_mode == DccFillPublish::Mode::On && fill_plan.active) {
+			// A range that is one known fill: no copy, no wait for the queue.
+			PublishKnownFill(fill_plan);
+			m_memory_tracker.UnmarkRegionAsGpuModified(vaddr, size);
+			if (census) {
+				m_sync_ticks.Forget(vaddr, size);
+			}
+		} else if (DownloadBufferMemory<false>(buffer, vaddr, size)) {
 			FrameTiming::Add(FrameTiming::Counter::ReadbackDownloads);
 			m_memory_tracker.UnmarkRegionAsGpuModified(vaddr, size);
+			if (known_mode == DccFillPublish::Mode::Shadow && fill_plan.active) {
+				ShadowCompareKnownFill(fill_plan);
+			}
 			if (census) {
 				probe.downloaded = true;
 				m_sync_ticks.Forget(vaddr, size);
@@ -775,6 +869,15 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
 		m_gpu_modified_ranges.Add(vaddr, size);
+		if (DccFillPublish::EnvMode() != DccFillPublish::Mode::Off) {
+			// Any other GPU write hides a remembered fill of these bytes.
+			m_write_ledger.RecordWrite(vaddr, size);
+			if (m_shadow_fill.size != 0 && m_shadow_fill.vaddr == vaddr && m_shadow_fill.size == size) {
+				// shadow: the dispatch that replaces nothing writes the fill value; remember it as a fill (the prediction).
+				m_write_ledger.RecordFill(vaddr, size, m_shadow_fill.value);
+				m_shadow_fill = {};
+			}
+		}
 		if (SyncCensus::Enabled()) {
 			m_sync_ticks.Note(vaddr, size, m_scheduler.CurrentTick());
 		}
@@ -808,7 +911,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferForImage(uint64_t vaddr, u
 	});
 }
 
-void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool is_gds) {
+void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool is_gds, bool force_gpu) {
 	if ((vaddr & 3u) != 0 || size == 0 || (size & 3u) != 0 || size > UINT64_MAX - vaddr) {
 		EXIT("BufferCache: fill range must be dword aligned\n");
 	}
@@ -823,7 +926,7 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 		EXIT("BufferCache: invalid fill memory address\n");
 	}
 	(void)m_texture_cache.ClearMeta(vaddr);
-	if (!IsRegionGpuModified(vaddr, size)) {
+	if (!force_gpu && !IsRegionGpuModified(vaddr, size)) {
 		// Access the guest mapping so write faults invalidate cached buffers and images.
 		auto* destination = reinterpret_cast<uint32_t*>(vaddr);
 		std::fill(destination, destination + size / sizeof(uint32_t), value);
@@ -833,6 +936,10 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 	m_texture_cache.InvalidateMemoryFromGPU(vaddr, size);
 	auto [dst, dst_offset] = ObtainBuffer(vaddr, size, true, true);
 	dst->Fill(dst_offset, size, value);
+	if (DccFillPublish::EnvMode() == DccFillPublish::Mode::On) {
+		// Newest entry: the buffer cache now knows these bytes (DCC clear codes need no readback).
+		m_write_ledger.RecordFill(vaddr, size, value);
+	}
 }
 
 void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,

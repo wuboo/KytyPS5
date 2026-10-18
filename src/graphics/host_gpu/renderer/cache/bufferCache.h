@@ -7,7 +7,9 @@
 #include "common/slotVector.h"
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
+#include "graphics/host_gpu/renderer/cache/dccFillPublish.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
+#include "graphics/host_gpu/renderer/cache/gpuWriteLedger.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
@@ -75,7 +77,17 @@ public:
 	[[nodiscard]] Buffer* GetBdaPageTableBuffer() noexcept { return &m_bda_pagetable_buffer; }
 	[[nodiscard]] Buffer* GetFaultBuffer() noexcept { return m_fault_manager.GetFaultBuffer(); }
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBufferForImage(uint64_t vaddr, uint64_t size);
-	void FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool is_gds);
+	// force_gpu: write on the GPU even when no GPU-modified range is tracked there (a CPU fill of a tracked range takes a
+	// write fault per page); used by KYTY_DCC_KNOWN=1 to replace a uniform-fill dispatch.
+	void FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool is_gds, bool force_gpu = false);
+	// KYTY_DCC_KNOWN=1: true when the newest GPU write to every byte of the range was one FillBuffer (any other GPU write,
+	// download or CPU write to the range hides it), so the bytes equal *value without a readback.
+	[[nodiscard]] bool LatestGpuWriteIsFill(uint64_t vaddr, uint64_t size, uint32_t* value) const {
+		return m_write_ledger.LatestIsFill(vaddr, size, value);
+	}
+	// KYTY_DCC_KNOWN=shadow: the dispatch that follows writes `value` over the range; the ledger records the fill when the
+	// dispatch binds exactly that range for writing (the dispatch itself still runs).
+	void NoteShadowFill(uint64_t vaddr, uint64_t size, uint32_t value) { m_shadow_fill = {vaddr, size, value}; }
 	void CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t size, bool dst_gds,
 	                bool src_gds);
 	// Cache-index and exact dirty-range queries require GPU-thread serialization.
@@ -139,6 +151,20 @@ private:
 	void NoteGpuWrite(uint64_t vaddr, uint64_t size);
 	void FlushEagerReadbacks();
 	[[nodiscard]] bool WaitEagerReadback(uint64_t vaddr, uint64_t size);
+	// KYTY_DCC_KNOWN: the GPU-modified pieces of a range, each with the fill value that describes all of it.
+	struct KnownFillPiece {
+		uint64_t address;
+		uint64_t size;
+		uint32_t value;
+	};
+	struct KnownFillPlan {
+		bool                        active = false; // every piece is a known fill: the range can be published without a copy
+		std::vector<KnownFillPiece> pieces;
+	};
+	[[nodiscard]] KnownFillPlan PlanKnownFill(uint64_t vaddr, uint64_t size);
+	void                        PublishKnownFill(const KnownFillPlan& plan);
+	void                        ShadowCompareKnownFill(const KnownFillPlan& plan);
+	[[nodiscard]] bool          HasPendingDownload(uint64_t vaddr, uint64_t size);
 	void LogSyncReadback(SyncCensus::Site site, uint64_t vaddr, uint64_t size, uint64_t wait_ns,
 	                     const SyncCensus::Probe& probe, bool eager);
 
@@ -171,6 +197,13 @@ private:
 	std::vector<uint64_t>                  m_eager_pending;          // GPU thread
 	std::mutex                             m_eager_mutex;
 	std::unordered_map<uint64_t, EagerPage> m_eager_pages; // hot tracker pages, m_eager_mutex
+	GpuWriteLedger m_write_ledger; // KYTY_DCC_KNOWN != 0 only
+	struct ShadowFill {
+		uint64_t vaddr = 0;
+		uint64_t size  = 0;
+		uint32_t value = 0;
+	};
+	ShadowFill m_shadow_fill; // GPU thread
 	// S398 (KYTY_DIAG_SYNC=1), GPU thread only.
 	SyncCensus::TickPages     m_sync_ticks;
 	SyncCensus::RepeatTracker m_sync_repeat;

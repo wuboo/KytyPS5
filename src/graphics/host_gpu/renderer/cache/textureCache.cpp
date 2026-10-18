@@ -1176,16 +1176,37 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 	}
 	// Finish native metadata writes before reading backing bytes. This can submit the scheduler,
 	// so discovery runs before final draw uploads and never holds the texture lock across it.
-	if (m_buffer_cache.IsRegionGpuModified(range.address, range.size)) {
+	const auto slice_size = range.size / layers;
+	// KYTY_DCC_KNOWN=1: metadata written by a recognized fill is known without reading it back.
+	std::vector<uint32_t> known_values;
+	const bool            gpu_modified = m_buffer_cache.IsRegionGpuModified(range.address, range.size);
+	if (gpu_modified && DccFillPublish::EnvMode() == DccFillPublish::Mode::On) {
+		known_values.resize(count);
+		for (uint32_t slice = 0; slice < count; slice++) {
+			if (!m_buffer_cache.LatestGpuWriteIsFill(range.address + slice_size * (first + slice), slice_size,
+			                                         &known_values[slice])) {
+				known_values.clear();
+				break;
+			}
+		}
+		if (!known_values.empty()) {
+			FrameTiming::Add(FrameTiming::Counter::DccKnownFromFill);
+		}
+	}
+	const bool known = !known_values.empty();
+	if (gpu_modified && !known) {
 		FrameTiming::Add(FrameTiming::Counter::ReadbackDcc);
 		const SyncCensus::SiteScope site_tag(SyncCensus::Site::Dcc);
 		m_buffer_cache.ReadMemory(range.address, range.size, false);
 	}
-	const auto slice_size = range.size / layers;
 	for (uint32_t slice = 0; slice < count; slice++) {
 		const auto address = range.address + slice_size * (first + slice);
 		uint8_t code = 0;
-		if (!LibKernel::Memory::TryReadBacking(address, &code, sizeof(code))) {
+		if (known) {
+			if (!DccFillPublish::CodeFromFill(known_values[slice], &code)) {
+				continue; // not one code repeated: no fast clear
+			}
+		} else if (!LibKernel::Memory::TryReadBacking(address, &code, sizeof(code))) {
 			EXIT("TextureCache: failed to read color metadata backing\n");
 		}
 		vk::ClearValue clear {};
@@ -1193,11 +1214,13 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 			continue;
 		}
 		std::vector<uint8_t> bytes(slice_size);
-		if (!LibKernel::Memory::TryReadBacking(address, bytes.data(), bytes.size())) {
-			EXIT("TextureCache: failed to read color metadata slice\n");
-		}
-		if (!std::all_of(bytes.begin(), bytes.end(), [code](uint8_t byte) { return byte == code; })) {
-			continue;
+		if (!known) {
+			if (!LibKernel::Memory::TryReadBacking(address, bytes.data(), bytes.size())) {
+				EXIT("TextureCache: failed to read color metadata slice\n");
+			}
+			if (!std::all_of(bytes.begin(), bytes.end(), [code](uint8_t byte) { return byte == code; })) {
+				continue;
+			}
 		}
 		{
 			std::scoped_lock lock {m_lock};
@@ -1215,7 +1238,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		// Publish the conversion's expanded keys without treating them as guest writes
 		// to overlapping image data. Invalidate the buffer before updating its backing.
 		if (desc.type != BindingType::VideoOut) {
-			std::fill(bytes.begin(), bytes.end(), uint8_t {0xff});
+			std::fill(bytes.begin(), bytes.end(), DccFillPublish::kMetadataKeyByte);
 			m_buffer_cache.InvalidateMemory(address, slice_size);
 			LibKernel::Memory::WriteBacking(address, bytes.data(), bytes.size());
 		}
