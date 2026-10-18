@@ -1936,7 +1936,7 @@ if(BUILD_TESTING)
 	endforeach()
 endif()
 
-# S426: KYTY_GF_EMULATE, the guest read fault emulator (real SIGSEGVs on a PROT_NONE page). Mutants (WILL_FAIL): EMU_IGNORES_DIRTY, EMU_WRONG_RIP.
+# S426: KYTY_GF_EMULATE, the guest read fault emulator (real SIGSEGVs on a PROT_NONE page). Mutants (WILL_FAIL): EMU_IGNORES_DIRTY, EMU_WRONG_RIP, S427: VEX_NO_ZERO_UPPER, VEX_IGNORE_VVVV.
 if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 		(NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")))
 	add_executable(guest_read_emulator_tests EXCLUDE_FROM_ALL
@@ -1950,7 +1950,7 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 		set_tests_properties(guest_read_emulator PROPERTIES TIMEOUT 30)
 		add_dependencies(kyty_tests guest_read_emulator_tests)
 	endif()
-	foreach(mutant IN ITEMS EMU_IGNORES_DIRTY EMU_WRONG_RIP)
+	foreach(mutant IN ITEMS EMU_IGNORES_DIRTY EMU_WRONG_RIP VEX_NO_ZERO_UPPER VEX_IGNORE_VVVV)
 		string(TOLOWER ${mutant} mutant_lower)
 		add_executable(guest_read_emulator_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL
 			"${KYTY_TESTS_DIR}/GuestReadEmulatorTests.cpp"

@@ -4,7 +4,9 @@
 // S426 (KYTY_GF_EMULATE=0|1|shadow): a guest read fault on a protected page whose bytes are clean in the backing is served by executing the
 // faulting load in the signal handler: the bytes come from the backing, go to the destination register of the saved context, RIP moves past
 // the instruction, and the page stays protected (no drain). Only plain loads of <= 16 bytes that do not cross a page are handled; everything
-// else is a fallback to the ordinary fault path.
+// else is a fallback to the ordinary fault path. S427: the VEX.128 forms of the xmm loads (vmovss/sd/d/q/ups/upd/dqu/aps/apd/dqa, VEX.L = 0,
+// vvvv = 1111b) are handled too; they also zero bits 128..255 of the register, which needs the AVX layout of the saved context (under Rosetta the
+// signal context is always _STRUCT_MCONTEXT_AVX64, uc_mcsize = 1032); without it the load is a fallback (Why::VexNoAvx).
 //
 // This file is the decoder / executor. It knows nothing about the GPU: the caller supplies the function that reads the backing (and refuses
 // when the bytes are GPU-dirty or in flight). tests/GuestReadEmulatorTests.cpp pins it with real SIGSEGVs.
@@ -37,7 +39,8 @@ enum class Why : uint8_t {
 	DecodeFailed,
 	NotALoad,       // not one of the supported mnemonics / operand shapes
 	Prefix,         // LOCK, REP, a segment override (fs/gs), 32-bit address size
-	Vex,            // VEX / EVEX encoded
+	Vex,            // EVEX / XOP, or a VEX form that is not VEX.128 with vvvv = 1111b (VEX.L = 1 is a fallback, vvvv != 1111b is #UD)
+	VexNoAvx,       // VEX.128 load, but the saved context has no upper YMM halves to zero (S427, gf_emu_vex_noavx_n)
 	HighByteReg,    // AH/BH/CH/DH
 	Size,           // memory operand wider than 16 bytes or zero
 	Misaligned,     // aligned-only form on a misaligned address
@@ -54,6 +57,7 @@ struct Plan {
 	uint8_t  size      = 0; // bytes read from memory
 	uint8_t  dst       = 0; // register index (GPR 0..15 in encoding order, XMM 0..15)
 	uint8_t  dst_bytes = 0; // GPR kinds: width of the destination register
+	bool     vex       = false; // VEX.128 form: bits 128..255 of the YMM register are zeroed (S427)
 	uint64_t address   = 0; // effective address of the memory operand
 	char     mnemonic[16] = {};
 	char     operands[48] = {}; // "r32, m32" style shape for the DIAG line (no code bytes)

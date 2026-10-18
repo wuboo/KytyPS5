@@ -392,6 +392,7 @@ constexpr const char* kCounterNames[] = {
     "gf_emu_fallback_n",
     "gf_emu_eq_n",
     "gf_emu_ne_n",
+    "gf_emu_vex_noavx_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

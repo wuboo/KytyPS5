@@ -4,6 +4,8 @@
 //  - with real SIGSEGVs on a PROT_NONE page: the handler serves the load from a separate "backing" buffer (value in the register == backing,
 //    not the page), the page stays protected (the second run faults again), dirty bytes and unsupported forms take the ordinary path.
 // Mutants (WILL_FAIL): EMU_IGNORES_DIRTY (emulates GPU-dirty bytes), EMU_WRONG_RIP (RIP skips one byte too many).
+// S427: the VEX.128 forms (vmovss/sd/d/q/ups/upd/dqu/aps/apd/dqa). Bits 128..255 of the YMM register are zeroed (legacy SSE leaves them), vvvv must be
+// 1111b, L = 1 / EVEX are fallbacks, a context without the AVX layout is a fallback. Mutants (WILL_FAIL): VEX_NO_ZERO_UPPER, VEX_IGNORE_VVVV.
 
 #include "common/hostException.h"
 #include "loader/guestReadEmulator.h"
@@ -74,9 +76,20 @@ uint64_t Sx(const uint8_t* p, unsigned n) {
 // ---------------------------------------------------------------------------------------------------------------------------------------
 // Fabricated context.
 struct Fake {
-	_STRUCT_MCONTEXT64 mc {};
-	ucontext_t         uc {};
-	Fake() { uc.uc_mcontext = &mc; }
+	_STRUCT_MCONTEXT_AVX64 mc {};
+	ucontext_t             uc {};
+	// `avx` = false plays a signal context without the upper YMM halves (the plain _STRUCT_MCONTEXT64 size).
+	explicit Fake(bool avx = true) {
+		uc.uc_mcontext = reinterpret_cast<_STRUCT_MCONTEXT64*>(&mc);
+		uc.uc_mcsize   = avx ? sizeof(_STRUCT_MCONTEXT_AVX64) : sizeof(_STRUCT_MCONTEXT64);
+	}
+	void* Ymmh(uint8_t id) {
+		void* x[] = {&mc.__fs.__fpu_ymmh0, &mc.__fs.__fpu_ymmh1, &mc.__fs.__fpu_ymmh2,  &mc.__fs.__fpu_ymmh3,
+		             &mc.__fs.__fpu_ymmh4, &mc.__fs.__fpu_ymmh5, &mc.__fs.__fpu_ymmh6,  &mc.__fs.__fpu_ymmh7,
+		             &mc.__fs.__fpu_ymmh8, &mc.__fs.__fpu_ymmh9, &mc.__fs.__fpu_ymmh10, &mc.__fs.__fpu_ymmh11,
+		             &mc.__fs.__fpu_ymmh12, &mc.__fs.__fpu_ymmh13, &mc.__fs.__fpu_ymmh14, &mc.__fs.__fpu_ymmh15};
+		return x[id];
+	}
 	uint64_t& Reg(uint8_t id) {
 		uint64_t* r[] = {&mc.__ss.__rax, &mc.__ss.__rcx, &mc.__ss.__rdx, &mc.__ss.__rbx, &mc.__ss.__rsp, &mc.__ss.__rbp,
 		                 &mc.__ss.__rsi, &mc.__ss.__rdi, &mc.__ss.__r8,  &mc.__ss.__r9,  &mc.__ss.__r10, &mc.__ss.__r11,
@@ -102,6 +115,7 @@ struct Case {
 	unsigned             offset;    // of the operand from rdi (and from g_base)
 	unsigned             dst_bytes; // GPR width, or 0
 	bool                 sign;
+	bool                 vex = false; // VEX.128: the upper YMM half is zeroed
 };
 
 constexpr uint64_t kSentinel = 0xfedcba9876543210ull;
@@ -121,6 +135,7 @@ void RunFake(const Case& c) {
 			fake.Reg(i) = kSentinel;
 		}
 		std::memset(fake.Xmm(i), 0xee, 16);
+		std::memset(fake.Ymmh(i), 0xee, 16);
 	}
 	const uint64_t fault = g_base + c.offset;
 	Attempt        attempt;
@@ -150,8 +165,13 @@ void RunFake(const Case& c) {
 				uint8_t untouched[16];
 				std::memset(untouched, 0xee, 16);
 				Check(std::memcmp(fake.Xmm(i), untouched, 16) == 0, "other xmm registers untouched");
+				Check(std::memcmp(fake.Ymmh(i), untouched, 16) == 0, "other ymm upper halves untouched");
 			}
 		}
+		uint8_t upper[16];
+		std::memset(upper, c.vex ? 0x00 : 0xee, 16);
+		std::snprintf(text, sizeof(text), "%s: the upper half of ymm%d is %s", c.name, c.dst, c.vex ? "zeroed (VEX)" : "untouched (legacy SSE)");
+		Check(std::memcmp(fake.Ymmh(c.dst), upper, 16) == 0, text);
 		return;
 	}
 	uint64_t expect = 0;
@@ -203,6 +223,20 @@ void TestSupportedForms() {
 	    {"movapd xmm0,[rdi]", {0x66, 0x0f, 0x28, 0x07}, Kind::Xmm128, 0, true, 16, 0, 0, false},
 	    {"movdqa xmm0,[rdi+32]", {0x66, 0x0f, 0x6f, 0x47, 0x20}, Kind::Xmm128, 0, true, 16, 32, 0, false},
 	    {"movups xmm9,[rdi]", {0x44, 0x0f, 0x10, 0x0f}, Kind::Xmm128, 9, true, 16, 0, 0, false},
+	    // S427: VEX.128
+	    {"vmovss xmm0,[rdi]", {0xc5, 0xfa, 0x10, 0x07}, Kind::XmmScalar, 0, true, 4, 0, 0, false, true},
+	    {"vmovsd xmm0,[rdi]", {0xc5, 0xfb, 0x10, 0x07}, Kind::XmmScalar, 0, true, 8, 0, 0, false, true},
+	    {"vmovd xmm0,[rdi]", {0xc5, 0xf9, 0x6e, 0x07}, Kind::XmmScalar, 0, true, 4, 0, 0, false, true},
+	    {"vmovq xmm0,[rdi] (F3 0F 7E)", {0xc5, 0xfa, 0x7e, 0x07}, Kind::XmmScalar, 0, true, 8, 0, 0, false, true},
+	    {"vmovq xmm0,[rdi] (VEX.W1 6E)", {0xc4, 0xe1, 0xf9, 0x6e, 0x07}, Kind::XmmScalar, 0, true, 8, 0, 0, false, true},
+	    {"vmovups xmm0,[rdi]", {0xc5, 0xf8, 0x10, 0x07}, Kind::Xmm128, 0, true, 16, 0, 0, false, true},
+	    {"vmovupd xmm1,[rdi+16]", {0xc5, 0xf9, 0x10, 0x4f, 0x10}, Kind::Xmm128, 1, true, 16, 16, 0, false, true},
+	    {"vmovdqu xmm0,[rdi]", {0xc5, 0xfa, 0x6f, 0x07}, Kind::Xmm128, 0, true, 16, 0, 0, false, true},
+	    {"vmovaps xmm0,[rdi]", {0xc5, 0xf8, 0x28, 0x07}, Kind::Xmm128, 0, true, 16, 0, 0, false, true},
+	    {"vmovapd xmm0,[rdi+16]", {0xc5, 0xf9, 0x28, 0x47, 0x10}, Kind::Xmm128, 0, true, 16, 16, 0, false, true},
+	    {"vmovdqa xmm0,[rdi+32]", {0xc5, 0xf9, 0x6f, 0x47, 0x20}, Kind::Xmm128, 0, true, 16, 32, 0, false, true},
+	    {"vmovss xmm12,[rdi+4] (3-byte VEX)", {0xc4, 0x61, 0x7a, 0x10, 0x67, 0x04}, Kind::XmmScalar, 12, true, 4, 4, 0, false, true},
+	    {"vmovdqu xmm9,[rdi]", {0xc5, 0x7a, 0x6f, 0x0f}, Kind::Xmm128, 9, true, 16, 0, 0, false, true},
 	};
 	for (const auto& c: cases) {
 		RunFake(c);
@@ -241,8 +275,18 @@ void TestRefusals() {
 	    {"mov [rdi],eax", {0x89, 0x07}, Why::NotALoad, 0, 0},
 	    {"movups [rdi],xmm0", {0x0f, 0x11, 0x07}, Why::NotALoad, 0, 0},
 	    {"mov ah,[rdi]", {0x8a, 0x27}, Why::HighByteReg, 0, 0},
-	    {"vmovups xmm0,[rdi]", {0xc5, 0xf8, 0x10, 0x07}, Why::Vex, 0, 0},
-	    {"vmovdqu ymm0,[rdi]", {0xc5, 0xfe, 0x6f, 0x07}, Why::Vex, 0, 0},
+	    {"vmovdqu ymm0,[rdi] (VEX.L = 1)", {0xc5, 0xfe, 0x6f, 0x07}, Why::Vex, 0, 0},
+	    {"vmovups ymm0,[rdi] (VEX.L = 1)", {0xc5, 0xfc, 0x10, 0x07}, Why::Vex, 0, 0},
+	    {"vmovss xmm0,[rdi] with VEX.L = 1", {0xc5, 0xfe, 0x10, 0x07}, Why::Vex, 0, 0},
+	    // vvvv != 1111b is #UD; Zydis refuses to decode it (DecodeFailed), the decoder's own check is the second line (VEX_IGNORE_VVVV hides it from both).
+	    {"vmovss xmm0,[rdi] with vvvv != 1111b", {0xc5, 0xf2, 0x10, 0x07}, Why::DecodeFailed, 0, 0},
+	    {"vmovdqu xmm0,[rdi] with vvvv != 1111b (3-byte)", {0xc4, 0xe1, 0x72, 0x6f, 0x07}, Why::DecodeFailed, 0, 0},
+	    {"evex vmovups xmm0,[rdi]", {0x62, 0xf1, 0x7c, 0x08, 0x10, 0x07}, Why::Vex, 0, 0},
+	    {"vmovups [rdi],xmm0 (store)", {0xc5, 0xf8, 0x11, 0x07}, Why::NotALoad, 0, 0},
+	    {"vpxor xmm0,xmm0,[rdi]", {0xc5, 0xf9, 0xef, 0x07}, Why::NotALoad, 0, 0},
+	    {"vmovaps xmm0,[rdi+4] misaligned", {0xc5, 0xf8, 0x28, 0x47, 0x04}, Why::Misaligned, 4, 0},
+	    {"vmovdqa xmm0,[rdi+8] misaligned", {0xc5, 0xf9, 0x6f, 0x47, 0x08}, Why::Misaligned, 8, 0},
+	    {"vmovdqu xmm0,[rdi+4088] crosses the page", {0xc5, 0xfa, 0x6f, 0x87, 0xf8, 0x0f, 0x00, 0x00}, Why::PageCross, 4088, 0},
 	    {"mov eax,fs:[rdi]", {0x64, 0x8b, 0x07}, Why::Prefix, 0, 0},
 	    {"mov eax,[edi]", {0x67, 0x8b, 0x07}, Why::Prefix, 0, 0},
 	    {"mov rax,[rdi+4092] crosses the page", {0x48, 0x8b, 0x87, 0xfc, 0x0f, 0x00, 0x00}, Why::PageCross, 4092, 0},
@@ -273,6 +317,27 @@ void TestRefusals() {
 	Check(Decode(nullptr, 0).why == Why::NoContext, "a null context is refused");
 	ucontext_t no_mcontext {};
 	Check(Decode(&no_mcontext, 0).why == Why::NoContext, "a context without mcontext is refused");
+}
+
+// S427: a saved context without the AVX layout cannot take the zeroed upper half; the VEX load is a fallback, the legacy one is not.
+void TestVexNeedsAvxContext() {
+	FillBacking();
+	const std::vector<uint8_t> vex_code = {0xc5, 0xfa, 0x10, 0x07, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+	const std::vector<uint8_t> sse_code = {0xf3, 0x0f, 0x10, 0x07, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90};
+	g_base                              = 0x400000;
+	for (const bool vex: {true, false}) {
+		Fake fake(false);
+		fake.mc.__ss.__rip = reinterpret_cast<uint64_t>((vex ? vex_code : sse_code).data());
+		fake.mc.__ss.__rdi = g_base;
+		Attempt attempt;
+		const bool ok = Prepare(&fake.uc, g_base, TestRead, &attempt);
+		if (vex) {
+			Check(!ok && attempt.plan.why == Why::VexNoAvx, "VEX load without the AVX context layout: refused with VexNoAvx");
+			Check(fake.mc.__ss.__rip == reinterpret_cast<uint64_t>(vex_code.data()), "refused VEX load leaves RIP alone");
+		} else {
+			Check(ok, "a legacy SSE load does not need the AVX context layout");
+		}
+	}
 }
 
 void TestDiagText() {
@@ -332,6 +397,22 @@ std::vector<uint8_t> Wrap(const std::vector<uint8_t>& insn) {
 	                                   0x48, 0x89, 0x06,             // mov [rsi],rax
 	                                   0xf3, 0x0f, 0x7f, 0x46, 0x10, // movdqu [rsi+16],xmm0
 	                                   0x88, 0x4e, 0x20,             // mov [rsi+32],cl
+	                                   0xc3};
+	code.insert(code.end(), tail.begin(), tail.end());
+	return code;
+}
+
+// Same, with a 256-bit view: ymm0 = all ones before (VEX vpcmpeqd), vmovdqu ymm0 stored after. Out layout: rax at 0, ymm0 at 16..47, CF at 48.
+std::vector<uint8_t> WrapYmm(const std::vector<uint8_t>& insn) {
+	std::vector<uint8_t> code = {0x48, 0xc7, 0xc0, 0xff, 0xff, 0xff, 0xff, // mov rax,-1
+	                             0xc5, 0xfd, 0x76, 0xc0,                   // vpcmpeqd ymm0,ymm0,ymm0
+	                             0xf9};                                    // stc
+	code.insert(code.end(), insn.begin(), insn.end());
+	const std::vector<uint8_t> tail = {0x0f, 0x92, 0xc1,             // setc cl
+	                                   0x48, 0x89, 0x06,             // mov [rsi],rax
+	                                   0xc5, 0xfe, 0x7f, 0x46, 0x10, // vmovdqu [rsi+16],ymm0
+	                                   0x88, 0x4e, 0x30,             // mov [rsi+48],cl
+	                                   0xc5, 0xf8, 0x77,             // vzeroupper
 	                                   0xc3};
 	code.insert(code.end(), tail.begin(), tail.end());
 	return code;
@@ -433,6 +514,81 @@ void TestRealFaults() {
 	}
 }
 
+// S427: the VEX.128 loads on a real fault: the xmm half holds the backing, the upper half of ymm0 (all ones before) is ZERO; the legacy SSE
+// load of the same bytes leaves the upper half alone. RIP, flags and the protected page as in TestRealFaults.
+void TestRealVexFaults() {
+	FillBacking();
+	g_base = reinterpret_cast<uint64_t>(g_page);
+	struct Item {
+		const char*          name;
+		std::vector<uint8_t> insn;
+		unsigned             size;
+		bool                 scalar;
+		bool                 vex;
+	};
+	const std::vector<Item> items = {
+	    {"vmovss xmm0,[rdi]", {0xc5, 0xfa, 0x10, 0x07}, 4, true, true},
+	    {"vmovsd xmm0,[rdi]", {0xc5, 0xfb, 0x10, 0x07}, 8, true, true},
+	    {"vmovd xmm0,[rdi]", {0xc5, 0xf9, 0x6e, 0x07}, 4, true, true},
+	    {"vmovq xmm0,[rdi]", {0xc5, 0xfa, 0x7e, 0x07}, 8, true, true},
+	    {"vmovups xmm0,[rdi]", {0xc5, 0xf8, 0x10, 0x07}, 16, false, true},
+	    {"vmovupd xmm0,[rdi]", {0xc5, 0xf9, 0x10, 0x07}, 16, false, true},
+	    {"vmovdqu xmm0,[rdi]", {0xc5, 0xfa, 0x6f, 0x07}, 16, false, true},
+	    {"vmovaps xmm0,[rdi]", {0xc5, 0xf8, 0x28, 0x07}, 16, false, true},
+	    {"vmovapd xmm0,[rdi]", {0xc5, 0xf9, 0x28, 0x07}, 16, false, true},
+	    {"vmovdqa xmm0,[rdi]", {0xc5, 0xf9, 0x6f, 0x07}, 16, false, true},
+	    {"movss xmm0,[rdi] (legacy keeps the upper half)", {0xf3, 0x0f, 0x10, 0x07}, 4, true, false},
+	    {"movdqu xmm0,[rdi] (legacy keeps the upper half)", {0xf3, 0x0f, 0x6f, 0x07}, 16, false, false},
+	};
+	for (const auto& item: items) {
+		Fn fn = MapCode(WrapYmm(item.insn));
+		for (int round = 0; round < 2; ++round) {
+			ArmPage();
+			g_emulated = 0;
+			g_fallback = 0;
+			alignas(32) uint8_t out[64] = {};
+			fn(g_page, out);
+			char text[160];
+			std::snprintf(text, sizeof(text), "%s round %d: served by the emulator (emulated=%d fallback=%d)", item.name, round,
+			              g_emulated.load(), g_fallback.load());
+			Check(g_emulated == 1 && g_fallback == 0, text);
+			uint8_t lo[16];
+			uint8_t hi[16];
+			std::memset(lo, 0xff, sizeof(lo));
+			std::memset(hi, item.vex ? 0x00 : 0xff, sizeof(hi));
+			if (item.scalar) {
+				std::memset(lo, 0, sizeof(lo));
+				std::memcpy(lo, g_backing.data(), item.size);
+			} else {
+				std::memcpy(lo, g_backing.data(), 16);
+			}
+			std::snprintf(text, sizeof(text), "%s: low half of ymm0 == backing", item.name);
+			Check(std::memcmp(out + 16, lo, 16) == 0, text);
+			std::snprintf(text, sizeof(text), "%s: bits 128..255 of ymm0 are %s", item.name, item.vex ? "zero" : "untouched");
+			Check(std::memcmp(out + 32, hi, 16) == 0, text);
+			uint64_t rax = 0;
+			std::memcpy(&rax, out, 8);
+			Check(rax == ~uint64_t {0}, "rax untouched by an xmm load");
+			Check(out[48] == 1, "the flags (CF) are untouched by the emulated load");
+		}
+	}
+	// VEX.L = 1 (a 256-bit load) is a fallback: the instruction re-executes against the released page and loads the page bytes.
+	{
+		Fn fn = MapCode(WrapYmm({0xc5, 0xfe, 0x6f, 0x07})); // vmovdqu ymm0,[rdi]
+		ArmPage();
+		g_emulated = 0;
+		g_fallback = 0;
+		alignas(32) uint8_t out[64] = {};
+		fn(g_page, out);
+		Check(g_emulated == 0 && g_fallback == 1, "vmovdqu ymm0,[rdi]: the 256-bit form takes the ordinary path");
+		uint8_t raw[16];
+		for (size_t i = 0; i < 16; ++i) {
+			raw[i] = static_cast<uint8_t>(~g_backing[i]);
+		}
+		Check(std::memcmp(out + 16, raw, 16) == 0, "vmovdqu ymm0: the page bytes (ordinary path), not the backing");
+	}
+}
+
 void TestRealFallbacks() {
 	FillBacking();
 	g_base = reinterpret_cast<uint64_t>(g_page);
@@ -495,12 +651,14 @@ int main() {
 	TestSupportedForms();
 	TestRipRelative();
 	TestRefusals();
+	TestVexNeedsAvxContext();
 	TestDiagText();
 	void* page = ::mmap(nullptr, kPageSize, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
 	Check(page != MAP_FAILED, "map data page");
 	g_page = static_cast<uint8_t*>(page);
 	Check(Common::HostException::InstallHandler(Handler), "install host exception handler");
 	TestRealFaults();
+	TestRealVexFaults();
 	TestRealFallbacks();
 	std::printf("GuestReadEmulatorTests: all passed\n");
 	return 0;
