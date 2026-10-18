@@ -270,6 +270,11 @@ enum class Counter : uint32_t {
 	// S418: backing reads refused because a recorded GPU->host copy of the bytes had not been published yet (tracker already clear):
 	// F3 index bytes, the zero-args dispatch skip of DispatchIndirect.
 	PvIdxBackingInflightN, DispIndirectBackingInflightN,
+	// S419 (KYTY_CP_READ_BACKING): CP table reads copied from the backing (and the bytes), reads that stayed on the guest read (GPU-dirty / in-flight /
+	// unreadable) of which in flight; shadow: the copy equal / different from the old read. Per site (CpReadBacking::Site order): copied / fallback.
+	// SpecBackingInflightN: shader-spec backing reads (TryReadBufferBacking) that found a GPU->host copy of the range not published yet.
+	CpReadBackingN, CpReadBackingBytes, CpReadBackingFallbackN, CpReadBackingInflightN, CpReadBackingEqN, CpReadBackingNeN,
+	CpReadBackingAttribN, CpReadBackingAttribFallbackN, CpReadBackingBufferN, CpReadBackingBufferFallbackN, SpecBackingInflightN,
 	Count,
 };
 

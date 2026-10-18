@@ -1254,6 +1254,13 @@ bool BufferCache::HasInflightDownloadBytes(uint64_t vaddr, uint64_t size) const 
 	return m_inflight_download_ranges.Intersects(vaddr, size);
 }
 
+void BufferCache::WaitInflightDownloads() {
+	// S419: the copies were recorded into the current command buffer; submit it and let their publishes run.
+	const auto tick = m_scheduler.CurrentTick();
+	m_scheduler.Wait(tick);
+	m_scheduler.WaitPriorityOperations(tick);
+}
+
 bool BufferCache::CanReadBacking(uint64_t vaddr, uint64_t size, int* reason) {
 	const bool dirty    = HasGpuDirtyBytes(vaddr, size);
 	const bool inflight = HasInflightDownloadBytes(vaddr, size);

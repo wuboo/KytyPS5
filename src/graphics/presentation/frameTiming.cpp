@@ -362,6 +362,17 @@ constexpr const char* kCounterNames[] = {
     "pv_idx_backing_ne_n",
     "pv_idx_backing_inflight_n",
     "disp_indirect_backing_inflight_n",
+    "cp_read_backing_n",
+    "cp_read_backing_bytes",
+    "cp_read_backing_fallback_n",
+    "cp_read_backing_inflight_n",
+    "cp_read_backing_eq_n",
+    "cp_read_backing_ne_n",
+    "cp_read_backing_attrib_n",
+    "cp_read_backing_attrib_fallback_n",
+    "cp_read_backing_buffer_n",
+    "cp_read_backing_buffer_fallback_n",
+    "spec_backing_inflight_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

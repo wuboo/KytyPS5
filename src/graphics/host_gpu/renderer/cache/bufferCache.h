@@ -98,6 +98,8 @@ public:
 	[[nodiscard]] bool HasGpuDirtyBytes(uint64_t vaddr, uint64_t size);
 	// S418: a recorded GPU->host copy of the range has not reached the backing yet (the tracker no longer lists it as GPU-modified).
 	[[nodiscard]] bool HasInflightDownloadBytes(uint64_t vaddr, uint64_t size) const;
+	// S419: blocks until every recorded GPU->host copy is published to the backing (GPU thread only).
+	void WaitInflightDownloads();
 	// S418: the physical backing holds the current bytes: no GPU write and no copy in flight. `reason` (optional): 1 = GPU-dirty, 2 = in flight.
 	[[nodiscard]] bool CanReadBacking(uint64_t vaddr, uint64_t size, int* reason = nullptr);
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
