@@ -99,8 +99,9 @@ uint32_t CompactStored(EmitterState& state, uint32_t location) {
 	                              CompactBit(state, location), C(state, 0));
 }
 
-uint32_t CapComponentPointer(EmitterState& state, uint32_t record, uint32_t slot_id,
-                             uint32_t component) {
+// `slot_id` (S409): a spec constant to use instead of the constant `slot`, which is declared where it always was.
+uint32_t CapComponentPointer(EmitterState& state, uint32_t record, uint32_t slot, uint32_t component,
+                             uint32_t slot_id = 0) {
 	// S150: stride 0 = the stride comes with the draw (the two variants are emitted independently).
 #if defined(KYTY_PVVS_MUTANT_STRIDE_DWORD)
 	constexpr uint32_t kStrideDword = kPvPushSpan;
@@ -110,7 +111,7 @@ uint32_t CapComponentPointer(EmitterState& state, uint32_t record, uint32_t slot
 	const auto stride = state.pv_store->record_stride_vec4 != 0
 	                        ? C(state, state.pv_store->record_stride_vec4)
 	                        : Push(state, kStrideDword);
-	const auto element = U(state, spv::OpIAdd, U(state, spv::OpIMul, record, stride), slot_id);
+	const auto element = U(state, spv::OpIAdd, U(state, spv::OpIMul, record, stride), slot_id != 0 ? slot_id : C(state, slot));
 	const auto pointer = state.builder.AllocateId();
 	if (component == UINT32_MAX) {
 		state.builder.AddFunction(
@@ -254,16 +255,14 @@ void EmitPvStoreParameter(EmitterState& state, uint32_t host_location, uint32_t 
 	EXIT_IF(state.pv_store == nullptr || !IsVertex(state) || state.pv_vertex_record == 0);
 	const bool compact = state.pv_store->compact_spec;
 	// S409: SlotOf still reports the location to location_mask; the slot itself is the rank of the location in the PS mask.
-	const auto slot_id = [&] {
-		const auto host_slot = SlotOf(state, host_location);
-		return compact ? CompactSlotId(state, host_location) : C(state, host_slot);
-	};
+	const auto host_slot = SlotOf(state, host_location);
 	const auto store = [&] {
 		const auto bits = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpBitcast, TypeU32Vector(state, 4), bits, value);
 		state.builder.AddFunction(
 		    spv::OpStore,
-		    CapComponentPointer(state, state.pv_vertex_record, slot_id(), UINT32_MAX),
+		    CapComponentPointer(state, state.pv_vertex_record, host_slot, UINT32_MAX,
+		                        compact ? CompactSlotId(state, host_location) : 0),
 		    bits);
 		if (state.pv_store->coherent) {
 			state.builder.AddFunction(spv::OpMemoryBarrier, C(state, spv::ScopeDevice),
@@ -318,7 +317,7 @@ uint32_t EmitPvLoadCorner(EmitterState& state, uint32_t host_location, uint32_t 
 		state.builder.AddFunction(spv::OpStore, state.pv_oob_flag, merged);
 		record = Select(state, TypeU32(state), outside, Push(state, kPvPushBase), record);
 	}
-	const auto pointer = CapComponentPointer(state, record, C(state, SlotOf(state, host_location)), chan);
+	const auto pointer = CapComponentPointer(state, record, SlotOf(state, host_location), chan);
 	const auto bits    = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpLoad, TypeU32(state), bits, pointer);
 	const auto value = state.builder.AllocateId();
