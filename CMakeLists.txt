@@ -844,6 +844,15 @@ foreach(mutant IN LISTS KYTY_SPEC_SHADOW_MUTANTS)
 	target_include_directories(spec_shadow_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(spec_shadow_mutant_${mutant_lower}_tests PRIVATE KYTY_SPECSHADOW_MUTANT_${mutant}=1)
 endforeach()
+# S408: the production reader of KYTY_SPEC_COND (specCond.h) is tested in the same executable; its mutants use the KYTY_SPECCOND_ prefix.
+set(KYTY_SPEC_COND_MUTANTS SUPERSET_ALL_PURPOSES SUPERSET_CLEAN)
+foreach(mutant IN LISTS KYTY_SPEC_COND_MUTANTS)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(spec_cond_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SpecShadowTests.cpp" ${KYTY_SPEC_SHADOW_SOURCES})
+	target_link_libraries(spec_cond_mutant_${mutant_lower}_tests fmt::fmt xbyak::xbyak)
+	target_include_directories(spec_cond_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(spec_cond_mutant_${mutant_lower}_tests PRIVATE KYTY_SPECCOND_MUTANT_${mutant}=1)
+endforeach()
 
 add_executable(mem_events_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/MemEventsTests.cpp")
 target_include_directories(mem_events_tests PRIVATE ${inc_headers})
@@ -1369,6 +1378,11 @@ if(BUILD_TESTING)
 		add_test(NAME spec_shadow_mutant_${mutant_lower} COMMAND $<TARGET_FILE:spec_shadow_mutant_${mutant_lower}_tests>)
 		set_tests_properties(spec_shadow_mutant_${mutant_lower} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
+	foreach(mutant IN LISTS KYTY_SPEC_COND_MUTANTS)
+		string(TOLOWER ${mutant} mutant_lower)
+		add_test(NAME spec_cond_mutant_${mutant_lower} COMMAND $<TARGET_FILE:spec_cond_mutant_${mutant_lower}_tests>)
+		set_tests_properties(spec_cond_mutant_${mutant_lower} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME diag_tex COMMAND $<TARGET_FILE:diag_tex_tests>)
 	add_test(NAME min_lod_view COMMAND $<TARGET_FILE:min_lod_view_tests>)
 	add_test(NAME apple_drop COMMAND $<TARGET_FILE:apple_drop_tests>)
@@ -1656,6 +1670,8 @@ if(BUILD_TESTING)
 		spec_shadow_mutant_tag_ignored_tests
 		spec_shadow_mutant_shadow_fresh_tests
 		spec_shadow_mutant_superset_reads_stale_tests
+		spec_cond_mutant_superset_all_purposes_tests
+		spec_cond_mutant_superset_clean_tests
 		cp_phases_mutant_keep_children_tests
 		cp_phases_mutant_drop_parse_tests
 		mem_events_tests

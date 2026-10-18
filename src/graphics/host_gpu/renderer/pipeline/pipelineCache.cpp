@@ -23,6 +23,7 @@
 #include "graphics/presentation/cpSampler.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
+#include "graphics/shader/recompiler/ir/passes/specCond.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
 #include "graphics/shader/recompiler/rtMiss.h"
 #include "graphics/shader/nullDescDiag.h"
@@ -291,9 +292,44 @@ void RunSpecShadowBefore(const ShaderRecompiler::IR::ResourcePlan& plan, const S
 	run.active = true;
 }
 
-void NoteSpecShadow(const SpecShadowRun& run, const SpecShadow::Outcome& fresh, bool perm_same, uint64_t program_hash,
-                    const char* stage) {
+bool ShadowReadable(uint64_t address) {
+	uint32_t word = 0;
+	return Libs::LibKernel::Memory::TryReadBacking(address, &word, sizeof(word));
+}
+
+// S408: what the superset adds over the fresh run (kinds, written, addresses outside guest memory, new drains of other purposes).
+void NoteSpecSuperExtra(const ShaderRecompiler::IR::ResourcePlan& plan, const SpecShadowRun& run, const SpecShadow::Outcome& fresh,
+                        bool super_perm_same, uint64_t program_hash, const char* stage) {
 	using C = FrameTiming::Counter;
+	if (run.superset.ok) {
+		if (super_perm_same) FrameTiming::Add(C::SpecSuperPermSameN);
+		if (run.superset.specialization == fresh.specialization) FrameTiming::Add(C::SpecSuperSpecEqN);
+	}
+	FrameTiming::Add(C::SpecSuperDirtyNoncondN,
+	                 SpecShadow::DirtyNonCondAdded(run.super_reader.DirtyNonCond(), run.stale_reader.DirtyNonCond()));
+	const auto extra = SpecShadow::ClassifyExtra(plan, run.superset, fresh, ShadowReadable);
+	FrameTiming::Add(C::SpecSuperExtraBufferN, extra.buffers);
+	FrameTiming::Add(C::SpecSuperExtraImageN, extra.images);
+	FrameTiming::Add(C::SpecSuperExtraSamplerN, extra.samplers);
+	FrameTiming::Add(C::SpecSuperExtraWrittenN, extra.written);
+	FrameTiming::Add(C::SpecSuperExtraBadAddrN, extra.bad_addr);
+	static std::atomic<uint32_t> logged {0};
+	for (const auto& item: extra.list) {
+		if (logged.fetch_add(1, std::memory_order_relaxed) >= 50) return;
+		const uint32_t size = item.kind == 'b' && item.index < run.superset.snapshot.buffers.size()
+		                          ? run.superset.snapshot.buffers[item.index].dwords[2]
+		                          : 0u;
+		LOGF("[spec-super-extra] flip=%" PRIu64 " program=0x%016" PRIx64 " stage=%s kind=%c source=%u index=%u addr=0x%" PRIx64
+		     " size=%u written=%d bad_addr=%d\n",
+		     FrameTiming::GuestFlips(), program_hash, stage, item.kind, item.source, item.index, item.address, size, item.written ? 1 : 0,
+		     item.bad ? 1 : 0);
+	}
+}
+
+void NoteSpecShadow(const ShaderRecompiler::IR::ResourcePlan& plan, const SpecShadowRun& run, const SpecShadow::Outcome& fresh,
+                    bool perm_same, bool super_perm_same, uint64_t program_hash, const char* stage) {
+	using C = FrameTiming::Counter;
+	NoteSpecSuperExtra(plan, run, fresh, super_perm_same, program_hash, stage);
 	const auto verdict = SpecShadow::Compare(run.stale, run.superset, fresh);
 	FrameTiming::Add(verdict.StaleEqual() ? C::SpecDecStaleEqN : C::SpecDecStaleNeN);
 	FrameTiming::Add(verdict.super_ok ? C::SpecDecSuperOkN : C::SpecDecSuperFailN);
@@ -316,6 +352,20 @@ void NoteSpecShadow(const SpecShadowRun& run, const SpecShadow::Outcome& fresh, 
 }
 
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
+	// S408 (KYTY_SPEC_COND=superset): a condition read of GPU-dirty bytes on the hit / refresh path fails without draining; the
+	// walker then follows both successors. See specCond.h. Mode 0 never asks for the dirty state.
+	const auto cond_mode = ShaderRecompiler::IR::SpecCond::EnvMode();
+	if (cond_mode != ShaderRecompiler::IR::SpecCond::Mode::Off && !values.empty()) {
+		using C            = FrameTiming::Counter;
+		const auto action = ShaderRecompiler::IR::SpecCond::Decide(
+		    cond_mode, SpecShadow::CurrentPurpose(), ShaderRecompiler::IR::SpecCond::IsMissPath(SyncCensus::CurrentReaderRef().path),
+		    [&] { return Libs::LibKernel::Memory::QueryShaderGpuDirty(address, values.size_bytes()); });
+		if (action == ShaderRecompiler::IR::SpecCond::Action::Fail) {
+			FrameTiming::Add(C::SpecCondSupersetN);
+			return false;
+		}
+		if (action == ShaderRecompiler::IR::SpecCond::Action::SkipMiss) FrameTiming::Add(C::SpecCondSupersetSkipMissN);
+	}
 	// Scalar and unformatted buffer dependencies use the same backing as native raw loads.
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
 	const SyncCensus::SiteScope site_tag(SyncCensus::Site::Spec);
@@ -532,23 +582,28 @@ struct PipelineCache::ProgramCache {
 				fresh.snapshot       = resources;
 				fresh.specialization = specialization;
 				fresh.active         = resource_plan.active_sources;
-				// Would the stale specialization have picked the same permutation?
-				bool perm_same = shadow.stale.ok && shadow.stale.specialization == specialization;
-				if (shadow.stale.ok && !perm_same && found != nullptr) {
-					uint32_t at = 0;
-					for (auto& candidate: permutations) {
-						const auto& layout = candidate.program.bindings;
-						if (layout.push_data_start_dword == ShaderRecompiler::IR::PushData::StartFor(
-						        push_data_cursor, layout.ShaderDataDwords()) &&
-						    candidate.specialization == shadow.stale.specialization) {
-							perm_same = at == found_index;
-							break;
+				// Would the stale / the superset specialization have picked the same permutation?
+				const auto same_permutation = [&](const SpecShadow::Outcome& other) {
+					bool same = other.ok && other.specialization == specialization;
+					if (other.ok && !same && found != nullptr) {
+						uint32_t at = 0;
+						for (auto& candidate: permutations) {
+							const auto& layout = candidate.program.bindings;
+							if (layout.push_data_start_dword == ShaderRecompiler::IR::PushData::StartFor(
+							        push_data_cursor, layout.ShaderDataDwords()) &&
+							    candidate.specialization == other.specialization) {
+								same = at == found_index;
+								break;
+							}
+							at++;
 						}
-						at++;
 					}
-				}
+					return same;
+				};
+				const bool perm_same       = same_permutation(shadow.stale);
+				const bool super_perm_same = same_permutation(shadow.superset);
 				const auto stage_name = resource_plan.stage == ShaderType::Pixel ? "ps" : (resource_plan.stage == ShaderType::Compute ? "cs" : "vs");
-				NoteSpecShadow(shadow, fresh, perm_same, resource_plan.shader_hash, stage_name);
+				NoteSpecShadow(resource_plan, shadow, fresh, perm_same, super_perm_same, resource_plan.shader_hash, stage_name);
 			}
 			return found;
 		}
@@ -814,6 +869,11 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
     : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics)),
       m_next_driver_cache_save(std::chrono::steady_clock::now() + DriverCacheSaveInterval) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	// S408: stale reads of the condition word are only allowed with a verification of the used bytes after GPU-done (plan-chainA 1b),
+	// which is not built. Not a silent 0.
+	if (ShaderRecompiler::IR::SpecCond::EnvMode() == ShaderRecompiler::IR::SpecCond::Mode::Stale) {
+		EXIT("KYTY_SPEC_COND=stale is not implemented (it needs the GPU-done verification of the stale bytes); use 0 or superset\n");
+	}
 	InitializeDriverCache();
 }
 
