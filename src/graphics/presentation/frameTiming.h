@@ -277,6 +277,8 @@ enum class Counter : uint32_t {
 	CpReadBackingAttribN, CpReadBackingAttribFallbackN, CpReadBackingBufferN, CpReadBackingBufferFallbackN, SpecBackingInflightN,
 	EqueueCoalescedN, // S420: GRAPHICS equeue triggers merged into the last pending entry (queue at its cap)
 	EqueuePendingMax, // S420: largest pending_events size seen on an interrupt event
+	// S421: events handed to the guest by KernelWaitEqueue (all / GRAPHICS / AMPR / VIDEO_OUT); set from the kernel's own atomics once per presented frame.
+	EqueueReceivedN, EqueueRecvGraphicsN, EqueueRecvAmprN, EqueueRecvVideoOutN,
 	Count,
 };
 

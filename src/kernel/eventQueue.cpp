@@ -104,6 +104,7 @@ int KernelEqueuePrivate::GetTriggeredEvents(KernelEvent* ev, int num) {
 		bool  erase = false;
 		while (event.triggered) {
 			ev[ret++] = event.event;
+			NoteReceived(event.event.filter);
 			if ((event.event.flags & EV_ONESHOT) != 0) {
 				erase = true;
 				break;
@@ -271,7 +272,7 @@ static void AmprEventTriggerFunc(KernelEqueueEvent* event, void* trigger_data) {
 	auto triggered_event = event->event;
 	triggered_event.data = static_cast<intptr_t>(reinterpret_cast<uintptr_t>(trigger_data));
 	if (event->triggered) {
-		event->pending_events.push_back(triggered_event);
+		(void)PushPendingEvent(*event, triggered_event); // S421: bounded like the GRAPHICS event
 	} else {
 		event->event     = triggered_event;
 		event->triggered = true;

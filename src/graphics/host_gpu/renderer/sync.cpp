@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/sync.h"
+#include "graphics/host_gpu/renderer/interruptEvent.h"
 
 #include "common/assert.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
@@ -72,26 +73,19 @@ uint64_t PrepareVideoOutFlip(CommandBuffer& buffer, int handle, int index, int f
 
 static void InterruptEventResetFunc(LibKernel::EventQueue::KernelEqueueEvent* event) {
 	EXIT_IF(event == nullptr);
-	event->triggered    = false;
-	event->event.fflags = 0;
-	event->event.data   = 0;
+	Interrupt::Reset(event);
 }
 
 static void InterruptEventTriggerFunc(LibKernel::EventQueue::KernelEqueueEvent* event,
                                       void*                                     trigger_data) {
 	EXIT_IF(event == nullptr);
 
-	auto triggered_event = event->event;
-	triggered_event.fflags++;
-	triggered_event.data = reinterpret_cast<intptr_t>(trigger_data);
-	if (event->triggered) {
-		if (LibKernel::EventQueue::PushPendingEvent(*event, triggered_event)) {
+	const auto result = Interrupt::Trigger(event, trigger_data);
+	if (result.queued) {
+		if (result.coalesced) {
 			FrameTiming::Add(FrameTiming::Counter::EqueueCoalescedN);
 		}
-		FrameTiming::Max(FrameTiming::Counter::EqueuePendingMax, event->pending_events.size());
-	} else {
-		event->event     = triggered_event;
-		event->triggered = true;
+		FrameTiming::Max(FrameTiming::Counter::EqueuePendingMax, result.pending);
 	}
 }
 
