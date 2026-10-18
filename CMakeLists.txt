@@ -743,6 +743,16 @@ foreach(mutant IN ITEMS IGNORE_STAMP DEFAULT_OFF)
 	target_compile_definitions(pv_range_gen_mutant_${mutant_lower}_tests PRIVATE KYTY_PVRANGEGEN_MUTANT_${mutant}=1)
 endforeach()
 
+# S417: KYTY_PV_IDX_BACKING decisions. Mutants: the backing read although the bytes are GPU-dirty; shadow without the old read; a difference in the last byte missed.
+add_executable(pv_index_backing_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PvIndexBackingTests.cpp")
+target_include_directories(pv_index_backing_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS BACKING_IGNORES_DIRTY SHADOW_SKIPS_RAW FIRSTDIFF_SKIPS_LAST)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(pv_index_backing_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PvIndexBackingTests.cpp")
+	target_include_directories(pv_index_backing_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(pv_index_backing_mutant_${mutant_lower}_tests PRIVATE KYTY_PVINDEXBACKING_MUTANT_${mutant}=1)
+endforeach()
+
 add_executable(shader_vertex_metadata_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ShaderVertexMetadataTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
@@ -1387,6 +1397,11 @@ if(BUILD_TESTING)
 		add_test(NAME pv_range_gen_mutant_${mutant} COMMAND $<TARGET_FILE:pv_range_gen_mutant_${mutant}_tests>)
 		set_tests_properties(pv_range_gen_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
+	add_test(NAME pv_index_backing COMMAND $<TARGET_FILE:pv_index_backing_tests>)
+	foreach(mutant IN ITEMS backing_ignores_dirty shadow_skips_raw firstdiff_skips_last)
+		add_test(NAME pv_index_backing_mutant_${mutant} COMMAND $<TARGET_FILE:pv_index_backing_mutant_${mutant}_tests>)
+		set_tests_properties(pv_index_backing_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
 	add_test(NAME trophy_system COMMAND $<TARGET_FILE:trophy_system_tests>)
@@ -1604,6 +1619,10 @@ if(BUILD_TESTING)
 		pv_range_gen_tests
 		pv_range_gen_mutant_ignore_stamp_tests
 		pv_range_gen_mutant_default_off_tests
+		pv_index_backing_tests
+		pv_index_backing_mutant_backing_ignores_dirty_tests
+		pv_index_backing_mutant_shadow_skips_raw_tests
+		pv_index_backing_mutant_firstdiff_skips_last_tests
 		page_manager_tests
 		archive_file_tests
 		trophy_system_tests

@@ -264,6 +264,9 @@ enum class Counter : uint32_t {
 	// draws the prepare compute zeroed for an index outside the range; shadow: the CPU scan equal / different from the remembered range, and the
 	// different ones that lie inside it (the GPU check would not have fired).
 	PvIndRangeReuseN, PvIndRangeMissN, PvIndRangeViolationN, PvIndRangeEqN, PvIndRangeNeN, PvIndRangeNeWithinN,
+	// S417 (KYTY_PV_IDX_BACKING): draws whose indices were copied from the backing (and the bytes), clean-looking draws that stayed on the guest read
+	// (GPU-dirty bytes or an unreadable backing); shadow: the copy equal / different from the old read.
+	PvIdxBackingN, PvIdxBackingBytes, PvIdxBackingFallbackN, PvIdxBackingEqN, PvIdxBackingNeN,
 	Count,
 };
 
