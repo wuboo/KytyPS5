@@ -260,8 +260,8 @@ void TestCompact() {
 	}
 	// the stride never exceeds the old one: the whole point of the layout
 	Check(PvCompactStride(0x205) < PvVsStoreStrideFor(0x205), "gapped mask is smaller than the highest-location stride");
-	bool compact = true;
-	Check(ParsePvVsStoreCompact(nullptr, compact) && !compact, "COMPACT unset = 0");
+	bool compact = false;
+	Check(ParsePvVsStoreCompact(nullptr, compact) && compact, "COMPACT unset = 1 (default since S411)");
 	Check(ParsePvVsStoreCompact("1", compact) && compact, "COMPACT=1");
 	Check(ParsePvVsStoreCompact("0", compact) && !compact, "COMPACT=0");
 	Check(!ParsePvVsStoreCompact("2", compact), "COMPACT=2 is rejected");

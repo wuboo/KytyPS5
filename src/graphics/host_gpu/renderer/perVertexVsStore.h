@@ -75,9 +75,17 @@ inline bool ParsePvVsStoreGuard(const char* text, bool& guard) {
 	return false;
 }
 
-// Parser of KYTY_PV_VSSTORE_COMPACT (0|1, unset = 0; the grammar of the guard).
+// Parser of KYTY_PV_VSSTORE_COMPACT (0|1, unset = 1 since S411; the grammar of the guard).
 inline bool ParsePvVsStoreCompact(const char* text, bool& compact) {
-	return ParsePvVsStoreGuard(text, compact);
+	compact = true;
+	if (text == nullptr) return true;
+	const std::string_view value {text};
+	if (value == "1") return true;
+	if (value == "0") {
+		compact = false;
+		return true;
+	}
+	return false;
 }
 
 // Which index element corner k of a triangle reads (the PerVertexKHR order of the guest PS).
