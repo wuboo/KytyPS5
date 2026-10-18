@@ -388,6 +388,10 @@ constexpr const char* kCounterNames[] = {
     "srt_memo_mismatch",
     "srt_pages_checked",
     "srt_page_hit",
+    "gf_emu_n",
+    "gf_emu_fallback_n",
+    "gf_emu_eq_n",
+    "gf_emu_ne_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

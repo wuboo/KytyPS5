@@ -1936,6 +1936,37 @@ if(BUILD_TESTING)
 	endforeach()
 endif()
 
+# S426: KYTY_GF_EMULATE, the guest read fault emulator (real SIGSEGVs on a PROT_NONE page). Mutants (WILL_FAIL): EMU_IGNORES_DIRTY, EMU_WRONG_RIP.
+if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
+		(NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")))
+	add_executable(guest_read_emulator_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/GuestReadEmulatorTests.cpp"
+		"${KYTY_SOURCE_DIR}/loader/guestReadEmulator.cpp"
+	)
+	target_link_libraries(guest_read_emulator_tests common fmt::fmt Zydis::Zydis)
+	target_include_directories(guest_read_emulator_tests PRIVATE ${inc_headers})
+	if(BUILD_TESTING)
+		add_test(NAME guest_read_emulator COMMAND $<TARGET_FILE:guest_read_emulator_tests>)
+		set_tests_properties(guest_read_emulator PROPERTIES TIMEOUT 30)
+		add_dependencies(kyty_tests guest_read_emulator_tests)
+	endif()
+	foreach(mutant IN ITEMS EMU_IGNORES_DIRTY EMU_WRONG_RIP)
+		string(TOLOWER ${mutant} mutant_lower)
+		add_executable(guest_read_emulator_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL
+			"${KYTY_TESTS_DIR}/GuestReadEmulatorTests.cpp"
+			"${KYTY_SOURCE_DIR}/loader/guestReadEmulator.cpp"
+		)
+		target_link_libraries(guest_read_emulator_mutant_${mutant_lower}_tests common fmt::fmt Zydis::Zydis)
+		target_include_directories(guest_read_emulator_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+		target_compile_definitions(guest_read_emulator_mutant_${mutant_lower}_tests PRIVATE KYTY_GUESTREAD_MUTANT_${mutant}=1)
+		if(BUILD_TESTING)
+			add_test(NAME guest_read_emulator_mutant_${mutant_lower} COMMAND $<TARGET_FILE:guest_read_emulator_mutant_${mutant_lower}_tests>)
+			set_tests_properties(guest_read_emulator_mutant_${mutant_lower} PROPERTIES TIMEOUT 30 WILL_FAIL TRUE)
+			add_dependencies(kyty_tests guest_read_emulator_mutant_${mutant_lower}_tests)
+		endif()
+	endforeach()
+endif()
+
 # Test Darwin signal-context restoration for SSE4a instructions.
 if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 		(NOT CMAKE_OSX_ARCHITECTURES AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")))

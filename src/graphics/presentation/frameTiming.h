@@ -287,6 +287,9 @@ enum class Counter : uint32_t {
 	SrtMemoMismatch,      // shadow: the memo would have reused a snapshot the walk did not reproduce
 	SrtPagesChecked,
 	SrtPageHit,
+	// S426 (KYTY_GF_EMULATE=1|shadow): guest read faults served by executing the load on the backing / handed to the ordinary drain (unsupported form,
+	// dirty or in-flight bytes); shadow: the emulated bytes equal / different from the raw read after the drain.
+	GfEmuN, GfEmuFallbackN, GfEmuEqN, GfEmuNeN,
 	Count,
 };
 
