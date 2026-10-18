@@ -462,6 +462,28 @@ add_executable(per_vertex_transform_tests EXCLUDE_FROM_ALL
 target_include_directories(per_vertex_transform_tests PRIVATE ${inc_headers})
 target_link_libraries(per_vertex_transform_tests common fmt::fmt xxhash)
 
+# S432: KYTY_PV_LAYOUT_FAST, the vertex layout from the SPIR-V words against the friendly-names disassembly. Mutants (WILL_FAIL): DROP_ATTR, CLIP_IGNORED,
+# KEEP_BUILTIN_VARS, NO_OUTPUT_FILTER.
+foreach(mutant IN ITEMS "" DROP_ATTR CLIP_IGNORED KEEP_BUILTIN_VARS NO_OUTPUT_FILTER)
+	if(mutant STREQUAL "")
+		set(pv_layout_target pv_layout_fast_tests)
+		set(pv_layout_test pv_layout_fast)
+	else()
+		string(TOLOWER ${mutant} mutant_lower)
+		set(pv_layout_target pv_layout_fast_mutant_${mutant_lower}_tests)
+		set(pv_layout_test pv_layout_fast_mutant_${mutant_lower})
+	endif()
+	add_executable(${pv_layout_target} EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/PvLayoutFastTests.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/perVertexTransform.cpp"
+	)
+	target_include_directories(${pv_layout_target} PRIVATE ${inc_headers})
+	target_link_libraries(${pv_layout_target} common fmt::fmt xxhash spirv-tools)
+	if(NOT mutant STREQUAL "")
+		target_compile_definitions(${pv_layout_target} PRIVATE KYTY_PVLAYOUT_MUTANT_${mutant}=1)
+	endif()
+endforeach()
+
 # S134: KYTY_PV_UNIQUE planner, record model and range flag (CPU). Mutants (each must be caught, WILL_FAIL): the instance term and the "- first" of the record dropped; the 0.7 share, the writes fallback and the dropped fallback removed; the range never reports dropped corners.
 add_executable(per_vertex_unique_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PerVertexUniqueTests.cpp"
@@ -1397,6 +1419,21 @@ if(BUILD_TESTING)
 	add_test(NAME shader_cfg_ngg_mutant_active
 	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_ngg_mutant_active_tests> 2>&1 | grep -q 'synthetic lanes must default to the full wave'")
 	add_test(NAME per_vertex_transform COMMAND $<TARGET_FILE:per_vertex_transform_tests>)
+	foreach(mutant IN ITEMS "" DROP_ATTR CLIP_IGNORED KEEP_BUILTIN_VARS NO_OUTPUT_FILTER)
+		if(mutant STREQUAL "")
+			set(pv_layout_target pv_layout_fast_tests)
+			set(pv_layout_test pv_layout_fast)
+		else()
+			string(TOLOWER ${mutant} mutant_lower)
+			set(pv_layout_target pv_layout_fast_mutant_${mutant_lower}_tests)
+			set(pv_layout_test pv_layout_fast_mutant_${mutant_lower})
+		endif()
+		add_test(NAME ${pv_layout_test} COMMAND $<TARGET_FILE:${pv_layout_target}>)
+		set_tests_properties(${pv_layout_test} PROPERTIES TIMEOUT 120)
+		if(NOT mutant STREQUAL "")
+			set_tests_properties(${pv_layout_test} PROPERTIES WILL_FAIL TRUE)
+		endif()
+	endforeach()
 	add_test(NAME per_vertex_unique COMMAND $<TARGET_FILE:per_vertex_unique_tests>)
 	add_test(NAME per_vertex_vsstore COMMAND $<TARGET_FILE:per_vertex_vsstore_tests>)
 	add_test(NAME push_descriptor_policy COMMAND $<TARGET_FILE:push_descriptor_policy_tests>)
@@ -1943,6 +1980,7 @@ if(BUILD_TESTING)
 	foreach(mutant IN LISTS KYTY_KW_MUTANTS)
 		add_dependencies(kyty_tests gpu_keepwarm_mutant_${mutant}_tests)
 	endforeach()
+	add_dependencies(kyty_tests pv_layout_fast_tests pv_layout_fast_mutant_drop_attr_tests pv_layout_fast_mutant_clip_ignored_tests pv_layout_fast_mutant_keep_builtin_vars_tests pv_layout_fast_mutant_no_output_filter_tests)
 	add_dependencies(kyty_tests indirect_gpu_tests indirect_gpu_mutant_IGNORE_PV_tests indirect_gpu_mutant_DEFAULT_OFF_tests sync_census_tests dcc_known_tests eager_pages_tests eager_pages_mutant_one_page_tests)
 	add_dependencies(kyty_tests rfop_diag_tests rfop_diag_mutant_no_opcode_tests rfop_diag_mutant_no_site_tests
 	                 rfop_diag_mutant_walk_no_grow_tests cp_wait_diag_tests cp_wait_diag_mutant_no_cause_tests)

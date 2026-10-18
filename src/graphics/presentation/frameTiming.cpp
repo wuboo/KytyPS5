@@ -414,6 +414,10 @@ constexpr const char* kCounterNames[] = {
     "srt_interp_slots_n",
     "spec_read_n",
     "spec_read_xpage_n",
+    "pv_layout_fast_n",
+    "pv_layout_ne_n",
+    "pv_validate_skipped_n",
+    "pv_validate_ne_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

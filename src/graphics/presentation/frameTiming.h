@@ -303,6 +303,9 @@ enum class Counter : uint32_t {
 	// is GPU-dirty or in flight now (stale, must be 0) / reads whose ok or bytes differ from the full read (mismatch, must be 0).
 	SpecFastHitN, SpecFastMissN, SpecFastStaleN, SpecFastMismatchN,
 	SrtWalkTreeN, SrtWalkTreeFailN, SrtWalkCaptureN, SrtWalkSlotJitN, SrtWalkInterpN, SrtInterpSlotsN, SpecReadN, SpecReadXpageN,
+	// S432 (KYTY_PV_LAYOUT_FAST=1|shadow): vertex layouts taken from the SPIR-V words / Validate calls skipped on the capture and VS-store variants;
+	// shadow: layouts that differ from the disassembly route (must be 0) / variants Validate rejected (must be 0).
+	PvLayoutFastN, PvLayoutNeN, PvValidateSkippedN, PvValidateNeN,
 	Count,
 };
 

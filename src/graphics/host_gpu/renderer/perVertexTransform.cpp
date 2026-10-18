@@ -80,6 +80,104 @@ static void ScanVertexOutputs(const std::string& vs_source, std::set<std::string
 	}
 }
 
+// The slots of the capture record, from the parameter locations and the clip distance of the vertex outputs.
+static bool FinishVertexLayout(const std::set<std::string>& vs_outputs,
+                               const std::map<uint32_t, std::string>& vs_param_vars,
+                               PerVertexLayout& layout) {
+	const bool has_clip = vs_outputs.find("%gl_ClipDistance") != vs_outputs.end();
+
+	layout.has_clip   = has_clip;
+	layout.num_params = static_cast<uint32_t>(vs_param_vars.size());
+	layout.param_locations_and_slots.clear();
+	layout.location_to_slot.clear();
+
+	uint32_t current_slot = 1;
+	for (const auto& [loc, var_name]: vs_param_vars) {
+		layout.location_to_slot[loc] = current_slot;
+		layout.param_locations_and_slots.push_back({loc, current_slot});
+		current_slot++;
+	}
+
+	if (has_clip) {
+		layout.clip_slot          = current_slot;
+		layout.record_stride_vec4 = current_slot + 1;
+	} else {
+		layout.clip_slot          = UINT32_MAX;
+		layout.record_stride_vec4 = current_slot;
+	}
+	if (layout.location_to_slot.find(31) != layout.location_to_slot.end()) {
+		return false;
+	}
+	return true;
+}
+
+
+static std::string FriendlyName(const std::string& name) {
+	std::string out = "%";
+	for (const char c: name) out += std::isalnum(static_cast<unsigned char>(c)) || c == '_' ? c : '_';
+	return out;
+}
+
+bool DerivePerVertexVertexLayoutFromSpirv(std::span<const uint32_t> words, PerVertexLayout& layout,
+                                          std::map<uint32_t, std::string>& vs_param_vars) {
+	vs_param_vars.clear();
+	if (words.size() < 5 || words[0] != spv::MagicNumber) return false;
+	std::map<uint32_t, std::string> names;
+	std::vector<uint32_t>           output_ids;
+	std::map<uint32_t, uint32_t>    locations; // first Location decoration of an id
+	for (size_t offset = 5; offset < words.size();) {
+		const uint32_t count = words[offset] >> 16;
+		const auto     op    = static_cast<spv::Op>(words[offset] & 0xffffu);
+		if (count == 0 || offset + count > words.size()) return false;
+		const uint32_t* w = words.data() + offset;
+		if (op == spv::OpName && count >= 3) {
+			const char* text = reinterpret_cast<const char*>(w + 2);
+			names.emplace(w[1], std::string(text, strnlen(text, (count - 2) * sizeof(uint32_t))));
+		} else if (op == spv::OpVariable && count == 4 && w[3] == spv::StorageClassOutput) {
+#ifdef KYTY_PVLAYOUT_MUTANT_NO_OUTPUT_FILTER
+		}
+		if (op == spv::OpVariable && count == 4) {
+#endif
+			output_ids.push_back(w[2]);
+		} else if (op == spv::OpDecorate && count == 4 && w[2] == spv::DecorationLocation) {
+			locations.emplace(w[1], w[3]);
+		}
+		offset += count;
+	}
+	std::set<std::string>           vs_outputs;
+	std::map<std::string, uint32_t> var_locations;
+	for (const uint32_t id: output_ids) {
+		const auto name = names.find(id);
+		const auto var  = name != names.end() ? FriendlyName(name->second) : "%" + std::to_string(id);
+		vs_outputs.insert(var);
+		if (const auto location = locations.find(id); location != locations.end()) var_locations.emplace(var, location->second);
+	}
+	if (vs_outputs.empty()) return false;
+	for (const auto& var: vs_outputs) {
+#ifndef KYTY_PVLAYOUT_MUTANT_KEEP_BUILTIN_VARS
+		if (var == "%outPerVertex" || var == "%gl_ClipDistance" || var == "%gl_PointSize") continue;
+#endif
+		if (const auto it = var_locations.find(var); it != var_locations.end()) vs_param_vars[it->second] = var;
+	}
+#ifdef KYTY_PVLAYOUT_MUTANT_DROP_ATTR
+	if (!vs_param_vars.empty()) vs_param_vars.erase(std::prev(vs_param_vars.end()));
+#endif
+	const bool ok = FinishVertexLayout(vs_outputs, vs_param_vars, layout);
+#ifdef KYTY_PVLAYOUT_MUTANT_CLIP_IGNORED
+	layout.has_clip           = false;
+	layout.clip_slot          = UINT32_MAX;
+	layout.record_stride_vec4 = layout.num_params + 1;
+#endif
+	return ok;
+}
+
+PvLayoutFastMode ParsePvLayoutFastMode(const char* text) {
+	if (text == nullptr || text[0] == '\0') return PvLayoutFastMode::Off;
+	if (std::strcmp(text, "1") == 0) return PvLayoutFastMode::On;
+	if (std::strcmp(text, "shadow") == 0) return PvLayoutFastMode::Shadow;
+	return PvLayoutFastMode::Off;
+}
+
 bool DerivePerVertexVertexLayout(const std::string& vs_source, PerVertexLayout& layout,
                                  std::map<uint32_t, std::string>& vs_param_vars) {
 	// KYTY_OPT_OFF=pv_layout_scan restores the regex implementation.
@@ -121,31 +219,7 @@ bool DerivePerVertexVertexLayout(const std::string& vs_source, PerVertexLayout& 
 			}
 		}
 	}
-	const bool has_clip = vs_outputs.find("%gl_ClipDistance") != vs_outputs.end();
-
-	layout.has_clip   = has_clip;
-	layout.num_params = static_cast<uint32_t>(vs_param_vars.size());
-	layout.param_locations_and_slots.clear();
-	layout.location_to_slot.clear();
-
-	uint32_t current_slot = 1;
-	for (const auto& [loc, var_name]: vs_param_vars) {
-		layout.location_to_slot[loc] = current_slot;
-		layout.param_locations_and_slots.push_back({loc, current_slot});
-		current_slot++;
-	}
-
-	if (has_clip) {
-		layout.clip_slot          = current_slot;
-		layout.record_stride_vec4 = current_slot + 1;
-	} else {
-		layout.clip_slot          = UINT32_MAX;
-		layout.record_stride_vec4 = current_slot;
-	}
-	if (layout.location_to_slot.find(31) != layout.location_to_slot.end()) {
-		return false;
-	}
-	return true;
+	return FinishVertexLayout(vs_outputs, vs_param_vars, layout);
 }
 
 bool DerivePerVertexLayout(const std::string& vs_source, const std::string& ps_source,
