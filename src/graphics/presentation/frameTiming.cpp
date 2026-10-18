@@ -380,6 +380,9 @@ constexpr const char* kCounterNames[] = {
     "equeue_recv_graphics_n",
     "equeue_recv_ampr_n",
     "equeue_recv_videoout_n",
+    "gf_n",
+    "gf_wait_ns",
+    "gf_after_backing_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

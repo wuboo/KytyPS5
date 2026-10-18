@@ -19,6 +19,7 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/diagDump.h"
+#include "graphics/host_gpu/renderer/gfDiag.h"
 #include "graphics/host_gpu/renderer/rtDump.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
@@ -1600,6 +1601,9 @@ bool RenderExecutor::TryPvVsStoreDraw(const DrawCallInfo& draw, const DrawRender
 					idx_copy.resize(index_source.size);
 					if (Libs::LibKernel::Memory::TryReadBacking(index_source.address, idx_copy.data(), index_source.size)) {
 						copy_bytes = idx_copy.data();
+						if (GuestFault::Enabled()) { // S421
+							GuestFault::Reads().Note(index_source.address, index_source.size, GuestFault::Site::IndexBytes, FrameTiming::GuestFlips());
+						}
 						FrameTiming::Add(FrameTiming::Counter::PvIdxBackingN);
 						FrameTiming::Add(FrameTiming::Counter::PvIdxBackingBytes, index_source.size);
 						if (source == PvIndexBacking::Source::Backing) idx_bytes = copy_bytes;

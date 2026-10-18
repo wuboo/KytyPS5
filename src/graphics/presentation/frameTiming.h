@@ -279,6 +279,8 @@ enum class Counter : uint32_t {
 	EqueuePendingMax, // S420: largest pending_events size seen on an interrupt event
 	// S421: events handed to the guest by KernelWaitEqueue (all / GRAPHICS / AMPR / VIDEO_OUT); set from the kernel's own atomics once per presented frame.
 	EqueueReceivedN, EqueueRecvGraphicsN, EqueueRecvAmprN, EqueueRecvVideoOutN,
+	// S421 (KYTY_DIAG_GUEST_FAULT=1): read faults of non-CP (guest) threads, ns they waited in ReadMemory, of those the page the CP had read from the backing in the same flip.
+	GfN, GfWaitNs, GfAfterBackingN,
 	Count,
 };
 

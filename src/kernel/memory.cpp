@@ -7,6 +7,7 @@
 #include "common/threads.h"
 #include "common/virtualMemory.h"
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/host_gpu/renderer/gfDiag.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
@@ -904,6 +905,13 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 	return TryReadBacking(vaddr, data, size);
 }
 
+// S421 (KYTY_DIAG_GUEST_FAULT): remember the backing reads of the command processor for the [gf] line.
+static void NoteGfBackingRead(uint64_t vaddr, uint64_t size, Graphics::GuestFault::Site site) {
+	if (Graphics::GuestFault::Enabled()) {
+		Graphics::GuestFault::Reads().Note(vaddr, size, site, Graphics::FrameTiming::GuestFlips());
+	}
+}
+
 void CpGuestRead(Graphics::CpReadBacking::Site site, uint64_t vaddr, void* dst, uint64_t size) {
 	using namespace Graphics::CpReadBacking;
 	using C = Graphics::FrameTiming::Counter;
@@ -958,6 +966,7 @@ void CpGuestRead(Graphics::CpReadBacking::Site site, uint64_t vaddr, void* dst, 
 	}
 	if (source == Source::Backing) {
 		if (TryReadBacking(vaddr, dst, size)) {
+			NoteGfBackingRead(vaddr, size, attrib ? Graphics::GuestFault::Site::VertexAttribTable : Graphics::GuestFault::Site::VertexBufferTable);
 			copied();
 		} else {
 			fallback();
@@ -975,6 +984,7 @@ void CpGuestRead(Graphics::CpReadBacking::Site site, uint64_t vaddr, void* dst, 
 		Graphics::FrameTiming::Add(attrib ? C::CpReadBackingAttribFallbackN : C::CpReadBackingBufferFallbackN);
 		return;
 	}
+	NoteGfBackingRead(vaddr, size, attrib ? Graphics::GuestFault::Site::VertexAttribTable : Graphics::GuestFault::Site::VertexBufferTable);
 	copied();
 	const auto first_diff = FirstDiff(copy.data(), dst, size);
 	if (first_diff == size) {
