@@ -208,6 +208,9 @@ private:
 	ShadowFill m_shadow_fill; // GPU thread
 	// S398 (KYTY_DIAG_SYNC=1), GPU thread only.
 	SyncCensus::TickPages     m_sync_ticks;
+	SyncCensus::TickPages     m_sync_seq;       // S402: write sequence number per page (spec log)
+	uint64_t                  m_sync_seq_next = 0;
+	std::unordered_map<uint64_t, uint64_t> m_spec_last_seq; // S402: per spec-read range, the write sequence seen by the previous read
 	SyncCensus::RepeatTracker m_sync_repeat;
 };
 
