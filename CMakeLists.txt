@@ -632,6 +632,25 @@ foreach(mutant IN ITEMS noreads_ignores_userdata cb_wrong_offset)
 	target_compile_definitions(srt_jit_cover_mutant_${mutant}_tests PRIVATE KYTY_SRTCOVER_MUTANT_${mutant_upper}=1)
 endforeach()
 
+# S445: KYTY_SRT_SLOT_BATCH (srtSlotBatch.h). Mutants: SKIP_MEMO_CHECK, NO_FAIL_POS, ORDER_SWAP, IGNORE_CLEAN, SHADOW_REAL_MEMO, ALL_BLOCKS.
+set(SRT_SLOT_BATCH_TEST_SOURCES
+	"${KYTY_TESTS_DIR}/SrtSlotBatchTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
+)
+add_executable(srt_slot_batch_tests EXCLUDE_FROM_ALL ${SRT_SLOT_BATCH_TEST_SOURCES})
+target_link_libraries(srt_slot_batch_tests fmt::fmt xbyak::xbyak common)
+target_include_directories(srt_slot_batch_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS skip_memo_check no_fail_pos order_swap ignore_clean shadow_real_memo all_blocks)
+	string(TOUPPER ${mutant} mutant_upper)
+	add_executable(srt_slot_batch_mutant_${mutant}_tests EXCLUDE_FROM_ALL ${SRT_SLOT_BATCH_TEST_SOURCES})
+	target_link_libraries(srt_slot_batch_mutant_${mutant}_tests fmt::fmt xbyak::xbyak common)
+	target_include_directories(srt_slot_batch_mutant_${mutant}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(srt_slot_batch_mutant_${mutant}_tests PRIVATE KYTY_SRTBATCH_MUTANT_${mutant_upper}=1)
+endforeach()
+
 add_executable(guest_driver_memory_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GuestDriverMemoryTests.cpp"
 )
@@ -1738,6 +1757,11 @@ if(BUILD_TESTING)
 	add_test(NAME srt_tree_reject COMMAND $<TARGET_FILE:srt_tree_reject_tests>)
 	add_test(NAME srt_tree_reject_mutant_all_one_row COMMAND $<TARGET_FILE:srt_tree_reject_mutant_all_one_row_tests>)
 	set_tests_properties(srt_tree_reject_mutant_all_one_row PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME srt_slot_batch COMMAND $<TARGET_FILE:srt_slot_batch_tests>)
+	foreach(mutant IN ITEMS skip_memo_check no_fail_pos order_swap ignore_clean shadow_real_memo all_blocks)
+		add_test(NAME srt_slot_batch_mutant_${mutant} COMMAND $<TARGET_FILE:srt_slot_batch_mutant_${mutant}_tests>)
+		set_tests_properties(srt_slot_batch_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME srt_jit_cover COMMAND $<TARGET_FILE:srt_jit_cover_tests>)
 	foreach(mutant IN ITEMS noreads_ignores_userdata cb_wrong_offset)
 		add_test(NAME srt_jit_cover_mutant_${mutant} COMMAND $<TARGET_FILE:srt_jit_cover_mutant_${mutant}_tests>)
@@ -1978,6 +2002,13 @@ if(BUILD_TESTING)
 		srt_reader_mutant_no_record_tests
 		srt_tree_reject_tests
 		srt_tree_reject_mutant_all_one_row_tests
+		srt_slot_batch_tests
+		srt_slot_batch_mutant_skip_memo_check_tests
+		srt_slot_batch_mutant_no_fail_pos_tests
+		srt_slot_batch_mutant_order_swap_tests
+		srt_slot_batch_mutant_ignore_clean_tests
+		srt_slot_batch_mutant_shadow_real_memo_tests
+		srt_slot_batch_mutant_all_blocks_tests
 		srt_jit_cover_tests
 		srt_jit_cover_mutant_noreads_ignores_userdata_tests
 		srt_jit_cover_mutant_cb_wrong_offset_tests

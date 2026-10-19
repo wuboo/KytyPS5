@@ -23,6 +23,7 @@
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/cpSampler.h"
 #include "graphics/shader/recompiler/ir/passes/srtJitCover.h"
+#include "graphics/shader/recompiler/ir/passes/srtSlotBatch.h"
 #include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
 #include "kernel/specPageCache.h"
 #include "graphics/presentation/frameTiming.h"
@@ -381,6 +382,10 @@ bool SpecDiagOn() {
 		const auto fast = Libs::LibKernel::Memory::SpecFastEnvMode();
 		LOGF("[spec-read-fast] mode=%s\n", fast == Libs::LibKernel::Memory::SpecFastMode::On ? "1"
 		                                    : fast == Libs::LibKernel::Memory::SpecFastMode::Shadow ? "shadow" : "0");
+		{
+			const auto batch = ShaderRecompiler::IR::SrtSlotBatch::Current();
+			LOGF("[srt-slot-batch] mode=%s\n", batch == ShaderRecompiler::IR::SrtSlotBatch::Mode::On ? "1" : batch == ShaderRecompiler::IR::SrtSlotBatch::Mode::Shadow ? "shadow" : "0");
+		}
 		if (diag) ShaderRecompiler::IR::SrtWalkPaths::Active().store(true, std::memory_order_relaxed);
 		if (CpSampler::Pc::Enabled()) CpSampler::Pc::WalkActive().store(true, std::memory_order_relaxed); // S439 DIAG
 		return diag;
@@ -399,6 +404,21 @@ void DrainSrtJitCover() {
 	FrameTiming::Add(C::SrtCoverCbN, cells[static_cast<size_t>(Cell::ConstBuffer)]);
 	FrameTiming::Add(C::SrtCoverCaptureN, cells[static_cast<size_t>(Cell::Capture)]);
 	FrameTiming::Add(C::SrtJitCoverNeN, cells[static_cast<size_t>(Cell::Ne)]);
+}
+
+// S445: KYTY_SRT_SLOT_BATCH cells (ungated: the cells only move while the mode is not 0).
+void DrainSrtSlotBatch() {
+	namespace Batch = ShaderRecompiler::IR::SrtSlotBatch;
+	using Cell      = Batch::Cell;
+	using C         = FrameTiming::Counter;
+	if (Batch::Current() == Batch::Mode::Off) return;
+	Batch::LogSink() = +[](const char* text) { LOGF("%s", text); };
+	const auto cells = Batch::Drain();
+	FrameTiming::Add(C::SrtBatchRunsN, cells[static_cast<size_t>(Cell::Runs)]);
+	FrameTiming::Add(C::SrtBatchSlotsN, cells[static_cast<size_t>(Cell::Slots)]);
+	FrameTiming::Add(C::SrtBatchSingleN, cells[static_cast<size_t>(Cell::Single)]);
+	FrameTiming::Add(C::SrtBatchFailN, cells[static_cast<size_t>(Cell::Fail)]);
+	FrameTiming::Add(C::SrtBatchMismatchN, cells[static_cast<size_t>(Cell::Mismatch)]);
 }
 
 void DrainSrtWalkPaths() {
@@ -539,6 +559,7 @@ void NoteSrtMemo(const ShaderRecompiler::IR::ResourceSnapshot& snapshot, const S
 	using ShaderRecompiler::IR::SrtMemoOutcome;
 	DrainSrtWalkPaths();
 	DrainSrtJitCover();
+	DrainSrtSlotBatch();
 	if (Libs::LibKernel::Memory::SpecFastEnvMode() != Libs::LibKernel::Memory::SpecFastMode::Off) FlushSpecFastCounts(); // S437: nothing to flush when off
 	if (context.mode == ShaderRecompiler::IR::SrtFastMode::Off) {
 		return;

@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
 #include "graphics/shader/recompiler/ir/passes/srtJitCover.h"
+#include "graphics/shader/recompiler/ir/passes/srtSlotBatch.h"
 #include "graphics/shader/recompiler/ir/passes/srtTreeReject.h"
 #include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
 #include "graphics/presentation/cpPcSampler.h"
@@ -472,6 +473,241 @@ std::string DiagSlotReject(const ResourcePlan& program, const Inst* inst, uint32
 	return "compilable";
 }
 
+// S445: the compute path of one memoized read (after a memo miss): the DWORD ends in eax, recorded in the address cursor (r11) and memoized as
+// EvaluateRawRead does; `source_value(source)` leaves the DWORD of a pointer word that is not user data in eax (a call of its routine, or its inlined
+// code), `finish()` ends the path (ret, or a jump past the inlined code). Shared by the per-slot routines and the S445 batch entries.
+template <class SourceValue, class Finish>
+void EmitComputePath(Xbyak::CodeGenerator& code, const ResourcePlan& program, const Inst* inst, Xbyak::Label& failed, const SourceValue& source_value, const Finish& finish) {
+	using Entry       = ResourcePlan::EvaluationContext::Entry;
+	const auto memo   = inst->EvaluationIndex(program.evaluation_value_count) * sizeof(Entry);
+	const auto* handle = inst->Arg(0).Resolve().TryInstruction();
+	if (inst->GetOpcode() == ValueOpcode::ReadConstBuffer) {
+		// S442: ReadConstBuffer as EvaluateRawRead does it: V# words low, high (stride in bits 16..29), records, word 3 (evaluated, unused); the DWORD
+		// is at base + byte offset when byte offset + 4 <= size, else 0. A null table falls back to the interpreter (it notes it).
+		for (size_t word = 0; word < 4; ++word) {
+			const auto* source = handle->Arg(word).Resolve().TryInstruction();
+			if (IsUserDataWord(program, *source)) {
+				const auto index = RegIndex(source->Arg(0).ScalarRegister()) - program.user_data_base;
+				code.cmp(code.r8, index);
+				code.jbe(failed, Xbyak::CodeGenerator::T_NEAR);
+				code.mov(code.eax, code.dword[code.rdi + index * sizeof(uint32_t)]);
+			} else {
+				source_value(*source);
+			}
+			code.push(code.rax);
+		}
+		// [rsp] word 3, [rsp + 8] records, [rsp + 16] high, [rsp + 24] low
+		const auto& cb_memory = program.memory_info[inst->Flags<SrtReadFlags>().index];
+		uint64_t    byte_offset = (static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(cb_memory.offset))) & ~uint64_t {3}) +
+		                       (inst->Arg(1).Resolve().U32() & ~3u);
+#ifdef KYTY_SRTCOVER_MUTANT_CB_WRONG_OFFSET
+		byte_offset += 4;
+#endif
+		Xbyak::Label no_stride;
+		Xbyak::Label outside;
+		Xbyak::Label store;
+		code.mov(code.eax, code.dword[code.rsp + 8]);
+		code.mov(code.r10d, code.dword[code.rsp + 16]);
+		code.shr(code.r10d, 16);
+		code.and_(code.r10d, 0x3fff);
+		code.jz(no_stride);
+		code.imul(code.rax, code.r10);
+		code.L(no_stride);
+		code.mov(code.r10, byte_offset);
+		code.cmp(code.rax, code.r10);
+		code.jb(outside, Xbyak::CodeGenerator::T_NEAR);
+		code.sub(code.rax, code.r10);
+		code.cmp(code.rax, static_cast<uint32_t>(sizeof(uint32_t)));
+		code.jb(outside, Xbyak::CodeGenerator::T_NEAR);
+		code.mov(code.eax, code.dword[code.rsp + 24]);
+		code.mov(code.r10d, code.dword[code.rsp + 16]);
+		code.shl(code.r10, 32);
+		code.or_(code.rax, code.r10);
+		code.mov(code.r10, AddressMask & ~uint64_t {3});
+		code.and_(code.rax, code.r10);
+		code.mov(code.r10, GUEST_MEMORY_MIN);
+		code.cmp(code.rax, code.r10);
+		code.jb(failed, Xbyak::CodeGenerator::T_NEAR);
+		code.mov(code.r10, byte_offset);
+		code.add(code.rax, code.r10);
+		code.mov(code.qword[code.r11], code.rax);
+		code.add(code.r11, sizeof(uint64_t));
+		code.mov(code.eax, code.dword[code.rax]);
+		code.jmp(store);
+		code.L(outside);
+		code.xor_(code.eax, code.eax);
+		code.L(store);
+		code.mov(code.qword[code.rdx + memo + offsetof(Entry, value)], code.rax);
+		code.mov(code.qword[code.rdx + memo + offsetof(Entry, generation)], code.rcx);
+		code.add(code.rsp, 4 * sizeof(uint64_t));
+		finish();
+		return;
+	}
+	for (size_t word = 0; word < 2; ++word) {
+		const auto* source = handle->Arg(word).Resolve().TryInstruction();
+		if (IsUserDataWord(program, *source)) {
+			const auto index =
+			    RegIndex(source->Arg(0).ScalarRegister()) - program.user_data_base;
+			code.cmp(code.r8, index);
+			code.jbe(failed, Xbyak::CodeGenerator::T_NEAR);
+			code.mov(code.eax, code.dword[code.rdi + index * sizeof(uint32_t)]);
+		} else {
+			source_value(*source);
+		}
+		if (word == 0) code.push(code.rax);
+	}
+	code.mov(code.r10d, code.eax);
+	code.pop(code.rax);
+	code.shl(code.r10, 32);
+	code.or_(code.rax, code.r10);
+	code.mov(code.r10, AddressMask & ~uint64_t {3});
+	code.and_(code.rax, code.r10);
+	// A table below guest memory (a null pointer) falls back to the interpreted read, which
+	// reads zero there instead of faulting the host.
+	code.mov(code.r10, GUEST_MEMORY_MIN);
+	code.cmp(code.rax, code.r10);
+	code.jb(failed, Xbyak::CodeGenerator::T_NEAR);
+	const auto& memory = program.memory_info[inst->Flags<SrtReadFlags>().index];
+	const auto  relative =
+	    (static_cast<int64_t>(static_cast<int32_t>(memory.offset)) & ~int64_t {3}) +
+	    static_cast<int64_t>(inst->Arg(1).Resolve().U32() & ~3u);
+	if (relative < 0) {
+		code.mov(code.r10, -relative);
+		code.cmp(code.rax, code.r10);
+		code.jb(failed, Xbyak::CodeGenerator::T_NEAR);
+		code.sub(code.rax, code.r10);
+	} else if (relative > 0) {
+		code.mov(code.r10, AddressMask - static_cast<uint64_t>(relative));
+		code.cmp(code.rax, code.r10);
+		code.ja(failed, Xbyak::CodeGenerator::T_NEAR);
+		code.mov(code.r10, relative);
+		code.add(code.rax, code.r10);
+	}
+	code.mov(code.qword[code.r11], code.rax);
+	code.add(code.r11, sizeof(uint64_t));
+	code.mov(code.eax, code.dword[code.rax]);
+	code.mov(code.qword[code.rdx + memo + offsetof(Entry, value)], code.rax);
+	code.mov(code.qword[code.rdx + memo + offsetof(Entry, generation)], code.rcx);
+	finish();
+}
+
+// S445 (KYTY_SRT_SLOT_BATCH=1|shadow): per control-flow block, the compiled slots that follow each other in block.srt_reads form a run; every run of two or
+// more is one entry into generated code (rdi user data, rsi flat buffer, rdx memo, rcx generation, r8 user data count, r9 address cursor, as the per-slot
+// entries). The pointer chain of a slot is inlined: a memo check, then the compute path of EmitComputePath; a node that an earlier slot of the run already
+// ensured is read from the memo without a check (the memo holds it for this generation on every path that got there). Returns 0 when every slot is
+// filled, else the 1-based position of the slot that failed (its partial reads stay in the cursor, as with the per-slot entry).
+void CompileSrtBatch(ResourcePlan& program, const std::vector<const Inst*>& slots) {
+	using Entry = ResourcePlan::EvaluationContext::Entry;
+	if (program.control_flow.empty()) return;
+	const auto compiled = [&](uint32_t slot) { return slot < slots.size() && slots[slot] != nullptr; };
+	program.srt_block_runs.assign(program.control_flow.size(), {});
+	bool any = false;
+	for (size_t block = 0; block < program.control_flow.size(); ++block) {
+		const auto& list = program.control_flow[block].srt_reads;
+		for (size_t i = 0; i < list.size();) {
+			if (!compiled(list[i])) {
+				++i;
+				continue;
+			}
+			size_t j = i;
+#ifdef KYTY_SRTBATCH_MUTANT_IGNORE_CLEAN
+			while (j < list.size()) ++j; // an uncompiled (clean) slot does not end the run: it is dropped from it
+#else
+			while (j < list.size() && compiled(list[j])) ++j;
+#endif
+			ResourcePlan::SrtBatchRun run;
+			run.first = static_cast<uint32_t>(i);
+			run.count = static_cast<uint32_t>(j - i);
+			run.entry = UINT32_MAX;
+			for (size_t k = i; k < j; ++k)
+				if (compiled(list[k]) && list[k] < program.srt_read_cb.size() && program.srt_read_cb[list[k]] != 0u) ++run.cb;
+			program.srt_block_runs[block].push_back(run);
+			any = any || run.count >= SrtSlotBatch::kMinRun;
+			i = j;
+		}
+	}
+	if (!any) {
+		program.srt_block_runs.clear();
+		return;
+	}
+	program.srt_batch_code = std::make_unique<Xbyak::CodeGenerator>(4096, Xbyak::AutoGrow);
+	auto&  code            = *program.srt_batch_code;
+	size_t max_addresses   = 0;
+	for (size_t block = 0; block < program.control_flow.size(); ++block) {
+		const auto& list = program.control_flow[block].srt_reads;
+		for (auto& run: program.srt_block_runs[block]) {
+			if (run.count < SrtSlotBatch::kMinRun) continue;
+			run.entry = static_cast<uint32_t>(code.getSize());
+			code.push(code.rbp);
+			code.mov(code.rbp, code.rsp);
+			code.mov(code.r11, code.qword[code.r9]);
+			std::vector<Xbyak::Label> fails(run.count);
+			std::vector<const Inst*>  ensured; // nodes that are in the memo for this generation at this point of the run
+			size_t                    emitted = 0;
+			const auto                ensure  = [&](auto&& self, const Inst* inst, Xbyak::Label& fail) -> void {
+				const auto memo = inst->EvaluationIndex(program.evaluation_value_count) * sizeof(Entry);
+#ifndef KYTY_SRTBATCH_MUTANT_SKIP_MEMO_CHECK
+				if (std::find(ensured.begin(), ensured.end(), inst) != ensured.end()) {
+					code.mov(code.eax, code.dword[code.rdx + memo + offsetof(Entry, value)]);
+					return;
+				}
+				Xbyak::Label done;
+				const auto   mark = ensured.size();
+				Xbyak::Label compute;
+				code.cmp(code.rcx, code.qword[code.rdx + memo + offsetof(Entry, generation)]);
+				code.jne(compute, Xbyak::CodeGenerator::T_NEAR);
+				code.mov(code.eax, code.dword[code.rdx + memo + offsetof(Entry, value)]);
+				code.jmp(done, Xbyak::CodeGenerator::T_NEAR);
+				code.L(compute);
+#else
+				Xbyak::Label done;
+				const auto   mark = ensured.size();
+#endif
+				++emitted;
+				EmitComputePath(code, program, inst, fail, [&](const Inst& source) { self(self, &source, fail); }, [&] { code.jmp(done, Xbyak::CodeGenerator::T_NEAR); });
+				code.L(done);
+				// What the compute path ensured holds only on that path (the memo-hit path did not run it).
+				ensured.resize(mark);
+#ifndef KYTY_SRTBATCH_MUTANT_SKIP_MEMO_CHECK
+				ensured.push_back(inst);
+#endif
+			};
+			for (uint32_t step = 0; step < run.count; ++step) {
+#ifdef KYTY_SRTBATCH_MUTANT_ORDER_SWAP
+				const uint32_t k = run.count - 1u - step; // the slots of the run in reverse order: the captured addresses change order
+#else
+				const uint32_t k = step;
+#endif
+				const uint32_t slot = list[run.first + k];
+				if (!compiled(slot)) continue; // only with the IGNORE_CLEAN mutant
+				ensure(ensure, slots[slot], fails[k]);
+				code.mov(code.dword[code.rsi + program.srt_reads[slot].flat_offset * sizeof(uint32_t)], code.eax);
+			}
+			code.mov(code.qword[code.r9], code.r11);
+			code.xor_(code.eax, code.eax);
+			code.pop(code.rbp);
+			code.ret();
+			for (uint32_t k = 0; k < run.count; ++k) {
+				code.L(fails[k]);
+				code.mov(code.qword[code.r9], code.r11);
+#ifdef KYTY_SRTBATCH_MUTANT_NO_FAIL_POS
+				code.mov(code.eax, 1u);
+#else
+				code.mov(code.eax, k + 1u);
+#endif
+				code.mov(code.rsp, code.rbp);
+				code.pop(code.rbp);
+				code.ret();
+			}
+			max_addresses = std::max(max_addresses, emitted);
+		}
+	}
+	code.readyRE();
+	EXIT_IF(Xbyak::GetError() != 0);
+	if (CpSampler::Pc::Enabled()) CpSampler::Pc::RegisterJit(code.getCode(), code.getSize(), CpSampler::Pc::JitKind::Slots, program.shader_hash); // S439 DIAG
+	if (program.srt_read_addresses.size() < max_addresses) program.srt_read_addresses.resize(max_addresses);
+}
+
 // Compiles the SRT slots of plans the whole-plan walker rejects (block conditions, captured
 // reads): one entry per slot, one memoized routine per read. Other slots stay interpreted.
 void CompileSrtReads(ResourcePlan& program) {
@@ -544,120 +780,13 @@ void CompileSrtReads(ResourcePlan& program) {
 		code.mov(code.eax, code.dword[code.rdx + memo + offsetof(Entry, value)]);
 		code.ret();
 		code.L(compute);
-		const auto* handle = inst->Arg(0).Resolve().TryInstruction();
-		if (inst->GetOpcode() == ValueOpcode::ReadConstBuffer) {
-			// S442: ReadConstBuffer as EvaluateRawRead does it: V# words low, high (stride in bits 16..29), records, word 3 (evaluated, unused); the DWORD
-			// is at base + byte offset when byte offset + 4 <= size, else 0. A null table falls back to the interpreter (it notes it).
-			for (size_t word = 0; word < 4; ++word) {
-				const auto* source = handle->Arg(word).Resolve().TryInstruction();
-				if (IsUserDataWord(program, *source)) {
-					const auto index = RegIndex(source->Arg(0).ScalarRegister()) - program.user_data_base;
-					code.cmp(code.r8, index);
-					code.jbe(failed, Xbyak::CodeGenerator::T_NEAR);
-					code.mov(code.eax, code.dword[code.rdi + index * sizeof(uint32_t)]);
-				} else {
-					code.call(routine(source));
-				}
-				code.push(code.rax);
-			}
-			// [rsp] word 3, [rsp + 8] records, [rsp + 16] high, [rsp + 24] low
-			const auto& cb_memory = program.memory_info[inst->Flags<SrtReadFlags>().index];
-			uint64_t    byte_offset = (static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(cb_memory.offset))) & ~uint64_t {3}) +
-			                       (inst->Arg(1).Resolve().U32() & ~3u);
-#ifdef KYTY_SRTCOVER_MUTANT_CB_WRONG_OFFSET
-			byte_offset += 4;
-#endif
-			Xbyak::Label no_stride;
-			Xbyak::Label outside;
-			Xbyak::Label store;
-			code.mov(code.eax, code.dword[code.rsp + 8]);
-			code.mov(code.r10d, code.dword[code.rsp + 16]);
-			code.shr(code.r10d, 16);
-			code.and_(code.r10d, 0x3fff);
-			code.jz(no_stride);
-			code.imul(code.rax, code.r10);
-			code.L(no_stride);
-			code.mov(code.r10, byte_offset);
-			code.cmp(code.rax, code.r10);
-			code.jb(outside, Xbyak::CodeGenerator::T_NEAR);
-			code.sub(code.rax, code.r10);
-			code.cmp(code.rax, static_cast<uint32_t>(sizeof(uint32_t)));
-			code.jb(outside, Xbyak::CodeGenerator::T_NEAR);
-			code.mov(code.eax, code.dword[code.rsp + 24]);
-			code.mov(code.r10d, code.dword[code.rsp + 16]);
-			code.shl(code.r10, 32);
-			code.or_(code.rax, code.r10);
-			code.mov(code.r10, AddressMask & ~uint64_t {3});
-			code.and_(code.rax, code.r10);
-			code.mov(code.r10, GUEST_MEMORY_MIN);
-			code.cmp(code.rax, code.r10);
-			code.jb(failed, Xbyak::CodeGenerator::T_NEAR);
-			code.mov(code.r10, byte_offset);
-			code.add(code.rax, code.r10);
-			code.mov(code.qword[code.r11], code.rax);
-			code.add(code.r11, sizeof(uint64_t));
-			code.mov(code.eax, code.dword[code.rax]);
-			code.jmp(store);
-			code.L(outside);
-			code.xor_(code.eax, code.eax);
-			code.L(store);
-			code.mov(code.qword[code.rdx + memo + offsetof(Entry, value)], code.rax);
-			code.mov(code.qword[code.rdx + memo + offsetof(Entry, generation)], code.rcx);
-			code.add(code.rsp, 4 * sizeof(uint64_t));
-			code.ret();
-			continue;
-		}
-		for (size_t word = 0; word < 2; ++word) {
-			const auto* source = handle->Arg(word).Resolve().TryInstruction();
-			if (IsUserDataWord(program, *source)) {
-				const auto index =
-				    RegIndex(source->Arg(0).ScalarRegister()) - program.user_data_base;
-				code.cmp(code.r8, index);
-				code.jbe(failed, Xbyak::CodeGenerator::T_NEAR);
-				code.mov(code.eax, code.dword[code.rdi + index * sizeof(uint32_t)]);
-			} else {
-				code.call(routine(source));
-			}
-			if (word == 0) code.push(code.rax);
-		}
-		code.mov(code.r10d, code.eax);
-		code.pop(code.rax);
-		code.shl(code.r10, 32);
-		code.or_(code.rax, code.r10);
-		code.mov(code.r10, AddressMask & ~uint64_t {3});
-		code.and_(code.rax, code.r10);
-		// A table below guest memory (a null pointer) falls back to the interpreted read, which
-		// reads zero there instead of faulting the host.
-		code.mov(code.r10, GUEST_MEMORY_MIN);
-		code.cmp(code.rax, code.r10);
-		code.jb(failed, Xbyak::CodeGenerator::T_NEAR);
-		const auto& memory = program.memory_info[inst->Flags<SrtReadFlags>().index];
-		const auto  relative =
-		    (static_cast<int64_t>(static_cast<int32_t>(memory.offset)) & ~int64_t {3}) +
-		    static_cast<int64_t>(inst->Arg(1).Resolve().U32() & ~3u);
-		if (relative < 0) {
-			code.mov(code.r10, -relative);
-			code.cmp(code.rax, code.r10);
-			code.jb(failed, Xbyak::CodeGenerator::T_NEAR);
-			code.sub(code.rax, code.r10);
-		} else if (relative > 0) {
-			code.mov(code.r10, AddressMask - static_cast<uint64_t>(relative));
-			code.cmp(code.rax, code.r10);
-			code.ja(failed, Xbyak::CodeGenerator::T_NEAR);
-			code.mov(code.r10, relative);
-			code.add(code.rax, code.r10);
-		}
-		code.mov(code.qword[code.r11], code.rax);
-		code.add(code.r11, sizeof(uint64_t));
-		code.mov(code.eax, code.dword[code.rax]);
-		code.mov(code.qword[code.rdx + memo + offsetof(Entry, value)], code.rax);
-		code.mov(code.qword[code.rdx + memo + offsetof(Entry, generation)], code.rcx);
-		code.ret();
+		EmitComputePath(code, program, inst, failed, [&](const Inst& source) { code.call(routine(&source)); }, [&] { code.ret(); });
 	}
 	code.readyRE();
 	EXIT_IF(Xbyak::GetError() != 0);
 	if (CpSampler::Pc::Enabled()) CpSampler::Pc::RegisterJit(code.getCode(), code.getSize(), CpSampler::Pc::JitKind::Slots, program.shader_hash); // S439 DIAG
 	program.srt_read_addresses.resize(routines.size());
+	if (SrtSlotBatch::Current() != SrtSlotBatch::Mode::Off) CompileSrtBatch(program, slots);
 }
 
 void CompileTreeWalker(ResourcePlan& program) {
@@ -1558,11 +1687,15 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	// S442 shadow: the constant-buffer JIT of a slot runs on a scratch memo and flat buffer; the interpreter's value is the result and must equal it.
 	std::vector<ResourcePlan::EvaluationContext::Entry> cover_memo;
 	std::vector<uint32_t>                               cover_flat;
-	const auto refresh = [&](uint32_t slot) {
+	// S445 shadow: where the per-slot path records the addresses it read and the first slot whose compiled read failed (null / UINT32_MAX: not recording).
+	std::vector<uint64_t>* shadow_addresses = nullptr;
+	uint32_t               shadow_failed    = UINT32_MAX;
+	size_t                 shadow_cut       = 0; // addresses recorded up to and including the failing slot
+	const auto refresh = [&](uint32_t slot, bool allow_jit = true) {
 		if (slot >= m_program.srt_reads.size()) return false;
 		bool     cover_compared = false;
 		uint32_t cover_word     = 0;
-		if (compiled && m_program.srt_read_entries[slot] != UINT32_MAX) {
+		if (allow_jit && compiled && m_program.srt_read_entries[slot] != UINT32_MAX) {
 			using Read = bool KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*,
 			                                    ResourcePlan::EvaluationContext::Entry*, uint64_t,
 			                                    size_t, uint64_t**);
@@ -1590,6 +1723,13 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 				if (captured != nullptr) {
 					for (const auto* address = addresses; address != cursor; ++address) {
 						captured->emplace_back(*address, sizeof(uint32_t));
+					}
+				}
+				if (shadow_addresses != nullptr) {
+					shadow_addresses->insert(shadow_addresses->end(), addresses, cursor);
+					if (!ok && shadow_failed == UINT32_MAX) {
+						shadow_failed = slot;
+						shadow_cut    = shadow_addresses->size();
 					}
 				}
 				// A failed read is evaluated again below, with the walker's own result.
@@ -1636,6 +1776,130 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 			}
 		}
 		return evaluated;
+	};
+	// S445 (KYTY_SRT_SLOT_BATCH): the runs of compiled slots of a visited block. Not with the S442 constant-buffer shadow (its per-slot path compares scratch results).
+	const auto batch_mode = (compiled && !m_program.srt_block_runs.empty() && cover != SrtJitCover::Mode::Shadow) ? SrtSlotBatch::Current() : SrtSlotBatch::Mode::Off;
+	using BatchEntry      = uint32_t KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*, ResourcePlan::EvaluationContext::Entry*, uint64_t, size_t, uint64_t**);
+	std::vector<ResourcePlan::EvaluationContext::Entry> batch_memo; // shadow scratch
+	std::vector<uint32_t>                               batch_flat;
+	std::vector<uint64_t>                               batch_addresses;
+	std::vector<uint64_t>                               batch_reference;
+	// Fills one run with one entry on `memo` / `out` / `addresses`; returns 0 or the 1-based position of the slot that failed, and the cursor.
+	const auto enter_batch = [&](const ResourcePlan::SrtBatchRun& run, ResourcePlan::EvaluationContext::Entry* memo, uint32_t* out, uint64_t* addresses, uint64_t*& cursor) {
+		cursor = addresses;
+		return reinterpret_cast<BatchEntry>(m_program.srt_batch_code->getCode<uint8_t*>() + run.entry)(
+		    m_runtime.user_data.data(), out, memo, m_context.generation, m_runtime.user_data.size(), &cursor);
+	};
+	// Counts of a finished run that filled `done` slots (the failing one is not among them).
+	const auto note_batch = [&](const ResourcePlan::SrtBatchRun& run, const std::vector<uint32_t>& list, uint32_t done, bool failed) {
+		SrtSlotBatch::Note(SrtSlotBatch::Cell::Runs);
+		SrtSlotBatch::Note(SrtSlotBatch::Cell::Slots, done);
+		if (failed) SrtSlotBatch::Note(SrtSlotBatch::Cell::Fail);
+		SrtWalkPaths::Note(SrtWalkPaths::Path::SlotJit, done);
+		if (cover != SrtJitCover::Mode::Off) {
+			uint64_t cb = run.cb;
+			if (failed) {
+				cb = 0;
+				for (uint32_t k = 0; k < done; ++k)
+					if (list[run.first + k] < m_program.srt_read_cb.size() && m_program.srt_read_cb[list[run.first + k]] != 0u) ++cb;
+			}
+			if (cb != 0u) SrtJitCover::Note(SrtJitCover::Cell::ConstBuffer, cb);
+			if (m_program.capture_specialization_reads && done != 0u) SrtJitCover::Note(SrtJitCover::Cell::Capture, done);
+		}
+	};
+	// KYTY_SRT_SLOT_BATCH=1: one entry for the run. A slot that fails goes to the interpreter (no second try of its JIT), the rest of the run through the per-slot entries.
+	const auto refresh_run = [&](const ResourceBlock& block, const ResourcePlan::SrtBatchRun& run) {
+		auto* const addresses = m_program.srt_read_addresses.data();
+		uint64_t*   cursor    = nullptr;
+		const auto  result    = enter_batch(run, m_context.values.data(), flat.data(), addresses, cursor);
+		if (pc_diag) { // S439 DIAG
+			CpSampler::Pc::Tally().jit_slot_calls += run.count;
+			CpSampler::Pc::NoteReads(addresses, static_cast<size_t>(cursor - addresses), sizeof(uint32_t));
+		}
+		if (captured != nullptr) {
+			for (const auto* address = addresses; address != cursor; ++address) captured->emplace_back(*address, sizeof(uint32_t));
+		}
+		const uint32_t done = result == 0u ? run.count : result - 1u;
+		note_batch(run, block.srt_reads, done, result != 0u);
+		if (result == 0u) return true;
+		if (!refresh(block.srt_reads[run.first + done], false)) return false;
+		for (uint32_t k = done + 1u; k < run.count; ++k)
+			if (!refresh(block.srt_reads[run.first + k])) return false;
+		return true;
+	};
+	// KYTY_SRT_SLOT_BATCH=shadow: the run on a scratch copy of the memo, then the per-slot path (the result) with its addresses recorded; the two must agree.
+	const auto shadow_run = [&](const ResourceBlock& block, const ResourcePlan::SrtBatchRun& run) {
+		const auto& list = block.srt_reads;
+#ifdef KYTY_SRTBATCH_MUTANT_SHADOW_REAL_MEMO
+		auto* const memo = m_context.values.data();
+#else
+		batch_memo.assign(m_context.values.begin(), m_context.values.end());
+		auto* const memo = batch_memo.data();
+#endif
+		batch_flat.assign(flat.size(), 0u);
+		batch_addresses.assign(m_program.srt_read_addresses.size(), 0u);
+		uint64_t*  cursor = nullptr;
+		const auto result = enter_batch(run, memo, batch_flat.data(), batch_addresses.data(), cursor);
+		const uint32_t done = result == 0u ? run.count : result - 1u;
+		const std::vector<uint64_t> shadow_seen(batch_addresses.data(), cursor);
+		note_batch(run, list, done, result != 0u);
+		batch_reference.clear();
+		shadow_addresses = &batch_reference;
+		shadow_failed    = UINT32_MAX;
+		shadow_cut       = 0;
+		bool ok          = true;
+		for (uint32_t k = 0; k < run.count && ok; ++k) ok = refresh(list[run.first + k]);
+		shadow_addresses = nullptr;
+		const char* why  = nullptr;
+		uint32_t    at   = 0;
+		const uint32_t expect_failed = result == 0u ? UINT32_MAX : list[run.first + result - 1u];
+		if (ok) {
+			if (shadow_failed != expect_failed) why = "fail";
+			for (uint32_t k = 0; k < done && why == nullptr; ++k) {
+				const auto offset = m_program.srt_reads[list[run.first + k]].flat_offset;
+				if (flat[offset] != batch_flat[offset]) {
+					why = "flat";
+					at  = k;
+				}
+			}
+			// The batch stops at its failing slot: compare with the per-slot reads up to the same slot.
+			if (shadow_failed != UINT32_MAX) batch_reference.resize(shadow_cut);
+			if (why == nullptr && shadow_seen != batch_reference) why = "addr";
+		}
+		if (why != nullptr) {
+			SrtSlotBatch::Note(SrtSlotBatch::Cell::Mismatch);
+			if (SrtSlotBatch::ShouldLog()) {
+				char line[200];
+				std::snprintf(line, sizeof(line), "[srt-batch-shadow] hash=0x%016llx first=%u count=%u slot=%u why=%s batch_reads=%zu slot_reads=%zu\n",
+				              static_cast<unsigned long long>(m_program.shader_hash), run.first, run.count, list[run.first + at], why, shadow_seen.size(), batch_reference.size());
+				SrtSlotBatch::LogSink()(line);
+			}
+		}
+		return ok;
+	};
+	// The slots of a visited block: runs of two or more through refresh_run / shadow_run, everything else per slot.
+	const auto refresh_block = [&](uint32_t index, const ResourceBlock& block) {
+		if (batch_mode == SrtSlotBatch::Mode::Off || index >= m_program.srt_block_runs.size() || m_program.srt_block_runs[index].empty()) {
+			for (const auto slot: block.srt_reads)
+				if (!refresh(slot)) return false;
+			return true;
+		}
+		const auto& runs = m_program.srt_block_runs[index];
+		size_t      next = 0;
+		for (uint32_t position = 0; position < block.srt_reads.size();) {
+			if (next < runs.size() && runs[next].first == position) {
+				const auto& run = runs[next++];
+				if (run.entry != UINT32_MAX && run.count >= SrtSlotBatch::kMinRun) {
+					if (batch_mode == SrtSlotBatch::Mode::On ? !refresh_run(block, run) : !shadow_run(block, run)) return false;
+					position += run.count;
+					continue;
+				}
+				SrtSlotBatch::Note(SrtSlotBatch::Cell::Single, run.count);
+			}
+			if (!refresh(block.srt_reads[position])) return false;
+			++position;
+		}
+		return true;
 	};
 	auto& active = m_program.active_sources;
 	if (m_program.control_flow.empty()) {
@@ -1690,11 +1954,17 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	for (const auto& block: m_program.control_flow)
 		for (const auto source: block.sources) active.at(source) = 0u;
 	for (uint32_t index = 0; index < visited.size(); ++index) {
+#ifdef KYTY_SRTBATCH_MUTANT_ALL_BLOCKS
+		if (!visited[index] && batch_mode == SrtSlotBatch::Mode::On && index < m_program.srt_block_runs.size()) { // the batch also fills the slots of unvisited blocks
+			const auto& hidden = m_program.control_flow[index];
+			for (const auto& run: m_program.srt_block_runs[index])
+				if (run.entry != UINT32_MAX && !refresh_run(hidden, run)) return false;
+		}
+#endif
 		if (!visited[index]) continue;
 		const auto& block = m_program.control_flow[index];
 		for (const auto source: block.sources) active[source] = 1u;
-		for (const auto slot: block.srt_reads)
-			if (!refresh(slot)) return false;
+		if (!refresh_block(index, block)) return false;
 	}
 	return true;
 }

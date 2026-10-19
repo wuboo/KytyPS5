@@ -367,6 +367,9 @@ enum class Counter : uint32_t {
 	// (shadow: compared with the interpreter) / slots the per-slot JIT served in plans that capture specialization reads; shadow: flat buffers that differ
 	// from the walk (must be 0).
 	SrtCoverNoreadsN, SrtCoverCbN, SrtCoverCaptureN, SrtJitCoverNeN,
+	// S445 (KYTY_SRT_SLOT_BATCH=1|shadow): batch entries / slots they filled / compiled slots left to the per-slot entry (a run of one) / runs that stopped at a failing
+	// slot / shadow: results that differ from the per-slot path (must be 0).
+	SrtBatchRunsN, SrtBatchSlotsN, SrtBatchSingleN, SrtBatchFailN, SrtBatchMismatchN,
 	Count,
 };
 
