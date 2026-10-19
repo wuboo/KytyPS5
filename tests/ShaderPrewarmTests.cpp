@@ -253,12 +253,17 @@ void TestDefaultWaitIsShort() {
 		return 1;
 	});
 	started.get_future().wait();
+	std::thread releaser([&] { // the worker finishes after 900 ms, the default wait is over long before
+		std::this_thread::sleep_for(900ms);
+		release.set_value();
+	});
 	const auto begin   = std::chrono::steady_clock::now();
 	auto       claimed = box.Claim(K(40));
 	const auto took    = std::chrono::steady_clock::now() - begin;
-	Check(!claimed.payload && took < 2000ms, "CP stopped waiting on its own");
+	Check(!claimed.payload && took < 700ms, "CP stopped waiting on its own, long before the worker finished");
+	Check(took >= 200ms, "and not before the default wait (a short wait gives the worker a chance)");
 	Check(box.Stats().timeout == 1, "timeout counter");
-	release.set_value();
+	releaser.join();
 	box.Drain();
 }
 
