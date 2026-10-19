@@ -7,6 +7,15 @@
 #include <fstream>
 #include <xxhash.h>
 
+#ifndef KYTY_PATCHER_SIGNATURE
+#if __has_include("kytyGitVersion.h")
+#include "kytyGitVersion.h"
+#endif
+#endif
+#ifndef KYTY_PATCHER_SIGNATURE
+#define KYTY_PATCHER_SIGNATURE "unknown"
+#endif
+
 namespace Loader::PatchCache {
 
 namespace {
@@ -93,6 +102,28 @@ void KeyBuilder::Add(const void* data, size_t size) {
 
 void KeyBuilder::AddU64(uint64_t value) {
 	Add(&value, sizeof(value));
+}
+
+void KeyBuilder::AddSignature(std::string_view signature) {
+	AddU64(signature.size());
+	Add(signature.data(), signature.size());
+}
+
+std::string_view BuildSignature() {
+	return KYTY_PATCHER_SIGNATURE;
+}
+
+void AddBuildSignature(KeyBuilder& key, std::string_view signature) {
+#ifndef KYTY_PATCHCACHE_MUTANT_SIGNATURE_IGNORED
+	key.AddSignature(signature);
+#else
+	(void)key;
+	(void)signature;
+#endif
+}
+
+void AddBuildSignature(KeyBuilder& key) {
+	AddBuildSignature(key, BuildSignature());
 }
 
 Key KeyBuilder::Finish() {

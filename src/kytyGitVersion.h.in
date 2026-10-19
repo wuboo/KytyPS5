@@ -9,6 +9,8 @@
 #define KYTY_PER_VERTEX_TRANSFORM_SIGNATURE "@KYTY_PER_VERTEX_TRANSFORM_SIGNATURE@"
 // S433: hash of the recompiler / per-vertex generator sources and the SPIR-V library pins (src/recompiler_signature.cmake). Key of pv_*.bin.
 #define KYTY_RECOMPILER_SIGNATURE "@KYTY_RECOMPILER_SIGNATURE@"
+// S437: hash of the guest patcher sources and the Zydis / xbyak pins (src/patcher_signature.cmake). Part of the KYTY_PATCH_CACHE key.
+#define KYTY_PATCHER_SIGNATURE "@KYTY_PATCHER_SIGNATURE@"
 
 /* Build provenance, shown in the window title and in crash reports. */
 #if defined(KYTY_OFFICIAL_BUILD)

@@ -13,12 +13,13 @@
 // The cache directory belongs to the variant (like _ShaderCache); it holds game code and never goes to git or a RESULT.
 //
 // Mutants (tests/PatchCacheTests.cpp): KYTY_PATCHCACHE_MUTANT_{CACHE_IGNORES_KEY, APPLY_SKIPS_TRAMPOLINE, APPLY_NO_ORIGINAL_CHECK,
-// CAPTURE_DROPS_LAST_RANGE, SERIALIZE_DROPS_TRAPS, CHECKSUM_IGNORED}.
+// CAPTURE_DROPS_LAST_RANGE, SERIALIZE_DROPS_TRAPS, CHECKSUM_IGNORED, SIGNATURE_IGNORED}.
 
 #include <cstdint>
 #include <filesystem>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -48,11 +49,21 @@ public:
 	KeyBuilder& operator=(const KeyBuilder&) = delete;
 	void Add(const void* data, size_t size);
 	void AddU64(uint64_t value);
+	// S437: length and bytes of the build signature (see BuildSignature).
+	void AddSignature(std::string_view signature);
 	[[nodiscard]] Key Finish();
 
 private:
 	void* m_state = nullptr;
 };
+
+// S437: KYTY_PATCHER_SIGNATURE of this build (SHA256 of the patcher sources and the Zydis / xbyak pins, src/patcher_signature.cmake), "unknown" when
+// the build does not have one. It is part of every key, so an entry written by a build with other patchers is never applied: PatchVersion is no
+// longer the only guard. A build without a signature must not use the cache (the caller checks).
+[[nodiscard]] std::string_view BuildSignature();
+// Adds the signature of this build, or `signature` when given (tests).
+void AddBuildSignature(KeyBuilder& key);
+void AddBuildSignature(KeyBuilder& key, std::string_view signature);
 
 struct Range {
 	uint64_t             addr = 0;
