@@ -62,5 +62,8 @@ endif()
 # S433: the key of the per-vertex disk cache (replaces KYTY_GIT_REVISION there).
 include("${CMAKE_CURRENT_LIST_DIR}/recompiler_signature.cmake")
 kyty_recompiler_signature("${GIT_WORKING_DIRECTORY}" KYTY_RECOMPILER_SIGNATURE)
+# S437: the key of the patch cache (_PatchCache): sources of the guest patchers.
+include("${CMAKE_CURRENT_LIST_DIR}/patcher_signature.cmake")
+kyty_patcher_signature("${GIT_WORKING_DIRECTORY}" KYTY_PATCHER_SIGNATURE)
 
 configure_file("${INPUT_FILE}" "${OUTPUT_FILE}")

@@ -201,9 +201,35 @@ void TestModeParsing() {
 	Check(Loader::PatchCache::ParseMode("bogus") == Mode::Off, "unknown -> off");
 }
 
+// S437: the patcher signature of the build is part of the key (an entry of a build with other patchers is not found), and the key stays stable for one signature.
+void TestSignatureInKey() {
+	using namespace Loader::PatchCache;
+	Check(BuildSignature() == "test-signature", "the build signature comes from KYTY_PATCHER_SIGNATURE");
+	const auto make = [](std::string_view signature) {
+		KeyBuilder key;
+		key.AddU64(PatchVersion);
+		AddBuildSignature(key, signature);
+		return key.Finish();
+	};
+	Check(!(make("signature-a") == make("signature-b")), "another patcher signature gives another key");
+	Check(make("signature-a") == make("signature-a"), "the same signature gives the same key");
+	KeyBuilder own;
+	own.AddU64(PatchVersion);
+	AddBuildSignature(own);
+	Check(own.Finish() == make("test-signature"), "AddBuildSignature(key) adds the signature of this build");
+	// a signature moved between two fields must not give the same key as the concatenation (length prefix)
+	KeyBuilder split_a, split_b;
+	AddBuildSignature(split_a, "ab");
+	split_a.AddU64(1);
+	AddBuildSignature(split_b, "a");
+	split_b.AddU64(1);
+	Check(!(split_a.Finish() == split_b.Finish()), "different signatures differ even when followed by the same data");
+}
+
 } // namespace
 
 int main() {
+	TestSignatureInKey();
 	TestApplyReproducesImage();
 	TestChangedSourceRejected();
 	TestSerialization();

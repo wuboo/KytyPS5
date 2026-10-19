@@ -2270,8 +2270,8 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 	add_rosettacmp_mutant(KIND_IGNORED "(amd_kinds & Common::AmdPatchRosettaCmp) != 0 && IsRosettaCompareSite(decoded)" "IsRosettaCompareSite(decoded)")
 	add_rosettacmp_mutant(LEGACY_VEX_MOVE "generator.movaps(destination, destination);" "generator.vmovaps(destination, destination);")
 	# S432: KYTY_PATCH_CACHE, the cached effect of the patchers (real AMD patcher + wide store split on a synthetic module). Mutants (WILL_FAIL):
-	# CACHE_IGNORES_KEY, APPLY_SKIPS_TRAMPOLINE, APPLY_NO_ORIGINAL_CHECK, CAPTURE_DROPS_LAST_RANGE, SERIALIZE_DROPS_TRAPS, CHECKSUM_IGNORED.
-	foreach(mutant IN ITEMS "" CACHE_IGNORES_KEY APPLY_SKIPS_TRAMPOLINE APPLY_NO_ORIGINAL_CHECK CAPTURE_DROPS_LAST_RANGE SERIALIZE_DROPS_TRAPS CHECKSUM_IGNORED)
+	# CACHE_IGNORES_KEY, APPLY_SKIPS_TRAMPOLINE, APPLY_NO_ORIGINAL_CHECK, CAPTURE_DROPS_LAST_RANGE, SERIALIZE_DROPS_TRAPS, CHECKSUM_IGNORED, SIGNATURE_IGNORED (S437).
+	foreach(mutant IN ITEMS "" CACHE_IGNORES_KEY APPLY_SKIPS_TRAMPOLINE APPLY_NO_ORIGINAL_CHECK CAPTURE_DROPS_LAST_RANGE SERIALIZE_DROPS_TRAPS CHECKSUM_IGNORED SIGNATURE_IGNORED)
 		if(mutant STREQUAL "")
 			set(patch_cache_target patch_cache_tests)
 			set(patch_cache_test patch_cache)
@@ -2288,6 +2288,7 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 		)
 		target_link_libraries(${patch_cache_target} common fmt::fmt Zydis::Zydis xbyak::xbyak xxhash)
 		target_include_directories(${patch_cache_target} PRIVATE ${inc_headers})
+		target_compile_definitions(${patch_cache_target} PRIVATE KYTY_PATCHER_SIGNATURE="test-signature")
 		if(NOT mutant STREQUAL "")
 			target_compile_definitions(${patch_cache_target} PRIVATE KYTY_PATCHCACHE_MUTANT_${mutant}=1)
 		endif()
@@ -2512,6 +2513,26 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 			set_tests_properties(${sig_test} PROPERTIES TIMEOUT 60)
 			if(NOT mutant STREQUAL "")
 				set_tests_properties(${sig_test} PROPERTIES WILL_FAIL TRUE)
+			endif()
+		endif()
+	endforeach()
+	# S437: KYTY_PATCHER_SIGNATURE (src/patcher_signature.cmake), a cmake -P test on a synthetic tree. Mutants (WILL_FAIL): IGNORE_EMULATOR,
+	# IGNORE_PATCHER, HASH_WHOLE_LOADER, PATH_IGNORED, IGNORE_PINS.
+	foreach(mutant IN ITEMS "" IGNORE_EMULATOR IGNORE_PATCHER HASH_WHOLE_LOADER PATH_IGNORED IGNORE_PINS)
+		if(mutant STREQUAL "")
+			set(psig_test patcher_signature)
+			set(psig_mutant_arg "")
+		else()
+			string(TOLOWER ${mutant} mutant_lower)
+			set(psig_test patcher_signature_mutant_${mutant_lower})
+			set(psig_mutant_arg -DKYTY_SIG_MUTANT=${mutant})
+		endif()
+		if(BUILD_TESTING)
+			add_test(NAME ${psig_test}
+			         COMMAND ${CMAKE_COMMAND} -DSIG_DIR=${KYTY_SOURCE_DIR} ${psig_mutant_arg} -P ${KYTY_TESTS_DIR}/PatcherSignatureTest.cmake)
+			set_tests_properties(${psig_test} PROPERTIES TIMEOUT 60)
+			if(NOT mutant STREQUAL "")
+				set_tests_properties(${psig_test} PROPERTIES WILL_FAIL TRUE)
 			endif()
 		endif()
 	endforeach()

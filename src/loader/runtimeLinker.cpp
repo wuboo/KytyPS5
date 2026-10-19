@@ -1202,6 +1202,7 @@ static PatchCache::Key MakePatchCacheKey(const Program* program, const std::stri
                                          bool emulate_amd, bool split_wide_stores) {
 	PatchCache::KeyBuilder key;
 	key.AddU64(PatchCache::PatchVersion);
+	PatchCache::AddBuildSignature(key); // S437: the patcher sources of this build
 	key.Add(module_name.data(), module_name.size());
 	key.AddU64(program->base_vaddr);
 	key.AddU64(program->base_size_aligned);
@@ -2118,7 +2119,11 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 
 		// S432 KYTY_PATCH_CACHE: the effect of the patchers below, kept on disk (see patchCache.h).
 		ModulePatchStats stats;
-		const auto       cache_mode = PatchCache::EnvMode();
+		auto             cache_mode = PatchCache::EnvMode();
+		if (cache_mode != PatchCache::Mode::Off && PatchCache::BuildSignature() == "unknown") {
+			Log::WriteToConsoleAndLog("[patch-cache] off: the build has no patcher signature (a cache from another build could not be told apart)\n");
+			cache_mode = PatchCache::Mode::Off;
+		}
 		PatchCache::Key   cache_key {};
 		PatchCache::Entry cached;
 		bool              have_cached = false;
