@@ -1328,14 +1328,46 @@ ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
 	return association;
 }
 
-ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
+TexMemo::Verdict TextureCache::ReuseImage(const TexMemo::Entry<ImageId>& entry, const ImageDesc& desc,
+                                          uint32_t metadata_base_layer, bool commit) {
+	struct Hooks {
+		TextureCache&    cache;
+		const ImageDesc& desc;
+		uint32_t         base_layer;
+		std::scoped_lock<TrackingSpinLock> Lock() { return std::scoped_lock<TrackingSpinLock> {cache.m_lock}; }
+		TexMemo::ImageState State(ImageId id) {
+			const auto* image = cache.m_slot_images.try_get(id);
+			if (image == nullptr) return {};
+			return {true, image->registered, image->binding.needs_rebind};
+		}
+		bool RegistrationsSince(uint64_t generation) {
+			return cache.RegistrationsSince(desc.info.data.address, desc.info.data.size, generation);
+		}
+		void Touch(ImageId id) {
+			auto& image              = cache.m_slot_images[id];
+			image.tick_accessed_last = cache.m_scheduler.CurrentTick();
+			cache.TouchImage(image);
+		}
+		void ColorClear(ImageId id) { cache.MaterializeColorClear(id, desc, base_layer); }
+	};
+	Hooks hooks {*this, desc, metadata_base_layer};
+	return TexMemo::Reuse(entry, hooks, commit);
+}
+
+ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format, FindImageInfo* info) {
 	auto& command = m_scheduler.Current();
 	if (command.IsInvalid()) {
 		EXIT("TextureCache: image lookup requires a valid command buffer\n");
 	}
 	ValidateImageDesc(desc);
+	if (info != nullptr) {
+		*info = {};
+	}
 	if (desc.info.data.Empty()) {
 		std::scoped_lock lock {m_lock};
+		if (info != nullptr) {
+			info->null_image = true;
+		}
 		return GetNullImage(desc);
 	}
 	const auto metadata_base_layer = desc.view_info.base_layer;
@@ -1453,6 +1485,12 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format) {
 			m_exact_images[key] = {result, m_registration_generation};
 		}
 		auto& image = m_slot_images[result];
+		if (info != nullptr) {
+			info->exact         = exact_match && !alias_left();
+			info->view_adjusted = view_mip >= 0 || view_layer >= 0;
+			info->video_out     = desc.type == BindingType::VideoOut;
+			info->generation    = m_registration_generation;
+		}
 		if (view_mip >= 0) {
 			desc.view_info.base_level = static_cast<uint32_t>(view_mip);
 		}
