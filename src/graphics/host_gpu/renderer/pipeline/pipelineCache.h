@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCacheSaver.h"
+#include "graphics/host_gpu/renderer/pipeline/pipelineSaveGate.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/shader.h"
@@ -183,15 +184,17 @@ private:
 	std::unique_ptr<ProgramCache> m_program_cache;
 	vk::PipelineCache             m_driver_cache = nullptr;
 	std::filesystem::path         m_driver_cache_path;
-	std::chrono::steady_clock::time_point m_next_driver_cache_save;
-	std::atomic<bool>             m_driver_cache_dirty = false;
+	PipelineSaveGate              m_save_gate; // S437: CP thread only
+	std::atomic<bool>             m_save_failed = false; // set by the saver thread, read by CP
+	std::atomic<size_t>           m_last_saved_size = 0; // driver cache size of the last file written (or loaded)
+	std::atomic<bool>             m_save_same_size = false; // the last job found the size unchanged and wrote nothing
 	std::unique_ptr<PipelineCacheSaver> m_saver;
 	std::unordered_map<GraphicsPipelineKey, std::unique_ptr<Pipeline>, GraphicsPipelineKeyHash>
 	                                                        m_graphics_pipelines;
 	std::unordered_map<uint64_t, std::unique_ptr<Pipeline>> m_compute_pipelines;
 
 	void InitializeDriverCache();
-	void CheckpointDriverCache();
+	void CheckpointDriverCache(PipelineCacheUse use);
 };
 
 std::string PipelineCacheTitleId();
@@ -203,10 +206,12 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
                             const ShaderPixelInputInfo*            ps_input_info,
                             const PipelineCache::GraphicsPrograms& programs,
                             const PipelineStaticParameters&        static_params,
-                            vk::PipelineCache                      driver_cache);
+                            vk::PipelineCache                      driver_cache,
+                            PipelineCacheUse*                      cache_use = nullptr);
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const ShaderComputeInputInfo& input_info,
-                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache);
+                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache,
+                            PipelineCacheUse* cache_use = nullptr);
 
 } // namespace Libs::Graphics
 
