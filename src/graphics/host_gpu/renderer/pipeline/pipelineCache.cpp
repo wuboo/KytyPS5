@@ -921,7 +921,18 @@ struct PipelineCache::ProgramCache {
 	}
 
 	// S435 (KYTY_SHADER_PREWARM=1|shadow, programs of the previous runs from prewarm_v1.lst are translated on a worker as soon as the game maps them).
-	static constexpr uint32_t kPrewarmMaxReady = 64; // finished translations waiting for CP (memory)
+	// S441: finished translations waiting for CP are limited in (estimated) bytes, not in pieces, and nothing is evicted: at the limit the worker waits
+	// (S437's "drop the oldest" threw away the very result CP needed next: hit 163 -> ~100). KYTY_SHADER_PREWARM_MAX_MB, default 256, 0 = no limit.
+	static uint64_t PrewarmMaxBytes() {
+		uint64_t mb = 256;
+		if (const char* text = std::getenv("KYTY_SHADER_PREWARM_MAX_MB"); text != nullptr && *text != 0) mb = std::strtoull(text, nullptr, 10);
+		return mb << 20;
+	}
+	// A translation holds the decoded source, the IR and the resource plan: about 64 bytes per word of guest code plus a fixed part (an estimate, the
+	// real size is not measured).
+	static uint64_t PrewarmEstimateBytes(const std::unique_ptr<PrewarmProgram>& program) {
+		return 65536ull + 64ull * 4ull * program->entry.code_size_words;
+	}
 	struct PrewarmState {
 		ShaderPrewarm::Mode                                                       mode = ShaderPrewarm::Mode::Off;
 		std::filesystem::path                                                     path;
@@ -957,7 +968,7 @@ struct PipelineCache::ProgramCache {
                 pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
 #endif
             },
-            kPrewarmMaxReady);
+            0, PrewarmMaxBytes(), [](const std::unique_ptr<PrewarmProgram>& program) { return PrewarmEstimateBytes(program); });
 		auto*      box    = prewarm.box.get();
 		const bool shadow = mode == ShaderPrewarm::Mode::Shadow;
 		ShaderPrewarm::SetMappedHook([this, box, shadow](uint64_t hash, std::shared_ptr<const std::vector<uint32_t>> code) {
@@ -991,6 +1002,9 @@ struct PipelineCache::ProgramCache {
 		FrameTiming::Add(C::PrewarmTimeoutN, now.timeout - was.timeout);
 		FrameTiming::Add(C::PrewarmEvictN, now.evicted - was.evicted);
 		FrameTiming::Max(C::PrewarmReadyPeak, now.ready_peak);
+		FrameTiming::Add(C::PrewarmDeferredN, now.deferred - was.deferred);
+		FrameTiming::Max(C::PrewarmReadyBytesPeak, now.ready_bytes_peak);
+		FrameTiming::Set(C::PrewarmReadyBytes, now.ready_bytes);
 		prewarm.reported = now;
 	}
 

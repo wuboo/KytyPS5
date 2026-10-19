@@ -346,6 +346,9 @@ enum class Counter : uint32_t {
 	// pages whose hash was unchanged (no upload; shadow: would be skipped) / changed (uploaded); shadow: clean hot pages whose hash differs from their last
 	// upload (a write the tracker never saw, must be 0); pages that changed between the last hash and the return of the protection (uploaded after all).
 	WfHotPagesN, WfHotPromoteN, WfHotDemoteN, WfHotHashN, WfHotHashNs, WfHotSkipN, WfHotChangedN, WfHotNeN, WfHotRaceN,
+	// S441 (KYTY_SHADER_PREWARM_MAX_MB): times the prewarm worker stopped at the byte limit instead of evicting (jobs wait in the queue) / estimated bytes of
+	// the finished results waiting for CP (gauge) / their peak.
+	PrewarmDeferredN, PrewarmReadyBytes, PrewarmReadyBytesPeak,
 	Count,
 };
 

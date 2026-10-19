@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <future>
 #include <map>
 #include <string>
@@ -240,6 +241,45 @@ void TestReadyCap() {
 	Check(box2.Stats().evicted == 0 && box2.Claim(K(601)).payload && box2.Claim(K(602)).payload, "a taken result frees its slot: nothing evicted");
 }
 
+bool WaitUntil(const std::function<bool()>& condition) {
+	for (int i = 0; i < 400; i++) { // up to 2 s
+		if (condition()) return true;
+		std::this_thread::sleep_for(5ms);
+	}
+	return condition();
+}
+
+// S441: max_bytes results waiting stop the worker (jobs stay queued); nothing is evicted, so every result CP asks for is there, and the worker goes on
+// when CP takes one.
+void TestByteLimitDefersInsteadOfEvicting() {
+	Mailbox<int>     box(1, 30000ms, {}, 0, 100, [](const int&) -> uint64_t { return 40; });
+	std::atomic<int> ran {0};
+	for (int i = 0; i < 6; i++) {
+		box.Submit(K(700 + i), [&, i]() -> std::optional<int> {
+			ran++;
+			return i;
+		});
+	}
+	Check(WaitUntil([&] { return box.Stats().ready == 3; }), "three results of 40 bytes reach the 100-byte limit");
+	std::this_thread::sleep_for(50ms);
+	auto stats = box.Stats();
+	Check(ran.load() == 3 && stats.ready == 3, "the worker stops at the limit: no fourth job starts");
+	Check(stats.evicted == 0, "nothing is evicted at the byte limit");
+	Check(stats.deferred >= 1, "the stop is counted (prewarm_deferred_n)");
+	Check(stats.ready_bytes == 120 && stats.ready_bytes_peak == 120, "ready_bytes follows the sizer");
+	// the OLDEST result, the one CP asks for first, is still there
+	auto first = box.Claim(K(700));
+	Check(first.payload && *first.payload == 0, "the oldest untaken result is not thrown away");
+	Check(WaitUntil([&] { return ran.load() == 4; }), "taking one result lets the worker start the next job");
+	for (int i = 1; i < 6; i++) {
+		Check(WaitUntil([&] { return ran.load() > i; }), "the job of the key CP asks for next has run");
+		auto got = box.Claim(K(700 + i));
+		Check(got.payload && *got.payload == i, "every key CP asks for is delivered in full");
+	}
+	stats = box.Stats();
+	Check(stats.evicted == 0 && stats.ready_bytes == 0 && stats.hit + stats.waited + stats.cancelled == 6, "all six keys passed through, no eviction, bytes back at 0");
+}
+
 // CP never waits for a building key longer than 250 ms by default.
 void TestDefaultWaitIsShort() {
 	Check(kDefaultMaxWait <= 250ms, "the default wait for a Building key is at most 250 ms");
@@ -433,6 +473,7 @@ int main(int argc, char** argv) {
 		TestWaitIsBounded();
 		TestFailedWork();
 		TestReadyCap();
+		TestByteLimitDefersInsteadOfEvicting();
 		TestDefaultWaitIsShort();
 		TestEveryKeyBuiltOnce();
 		TestManifest();
