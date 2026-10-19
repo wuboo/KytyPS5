@@ -624,7 +624,7 @@ set(SRT_JIT_COVER_TEST_SOURCES
 add_executable(srt_jit_cover_tests EXCLUDE_FROM_ALL ${SRT_JIT_COVER_TEST_SOURCES})
 target_link_libraries(srt_jit_cover_tests fmt::fmt xbyak::xbyak common)
 target_include_directories(srt_jit_cover_tests PRIVATE ${inc_headers})
-foreach(mutant IN ITEMS noreads_ignores_userdata)
+foreach(mutant IN ITEMS noreads_ignores_userdata cb_wrong_offset)
 	string(TOUPPER ${mutant} mutant_upper)
 	add_executable(srt_jit_cover_mutant_${mutant}_tests EXCLUDE_FROM_ALL ${SRT_JIT_COVER_TEST_SOURCES})
 	target_link_libraries(srt_jit_cover_mutant_${mutant}_tests fmt::fmt xbyak::xbyak common)
@@ -1701,7 +1701,7 @@ if(BUILD_TESTING)
 	add_test(NAME srt_tree_reject_mutant_all_one_row COMMAND $<TARGET_FILE:srt_tree_reject_mutant_all_one_row_tests>)
 	set_tests_properties(srt_tree_reject_mutant_all_one_row PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME srt_jit_cover COMMAND $<TARGET_FILE:srt_jit_cover_tests>)
-	foreach(mutant IN ITEMS noreads_ignores_userdata)
+	foreach(mutant IN ITEMS noreads_ignores_userdata cb_wrong_offset)
 		add_test(NAME srt_jit_cover_mutant_${mutant} COMMAND $<TARGET_FILE:srt_jit_cover_mutant_${mutant}_tests>)
 		set_tests_properties(srt_jit_cover_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
@@ -1928,6 +1928,7 @@ if(BUILD_TESTING)
 		srt_tree_reject_mutant_all_one_row_tests
 		srt_jit_cover_tests
 		srt_jit_cover_mutant_noreads_ignores_userdata_tests
+		srt_jit_cover_mutant_cb_wrong_offset_tests
 		guest_driver_memory_tests
 		pad_script_parser_tests
 		shader_vertex_metadata_tests

@@ -415,24 +415,42 @@ bool IsUserDataWord(const ResourcePlan& program, const Inst& inst) {
 	       RegIndex(inst.Arg(0).ScalarRegister()) >= program.user_data_base;
 }
 
-// A scalar-address read with a constant offset whose pointer words are user data or such reads.
-// Clean reads keep the strict reader of the clean evaluator.
+// A scalar-address read (S442, KYTY_SRT_JIT_COVER: or a constant-buffer read) with a constant offset whose pointer words (the four words of a V#) are
+// user data or such reads. Clean reads keep the strict reader of the clean evaluator.
 bool IsCompiledRead(const ResourcePlan& program, const Inst& inst, uint32_t depth = 0) {
-	if (depth > 16 || inst.GetOpcode() != ValueOpcode::LoadAddressU32 || inst.NumArgs() < 2 ||
+	const auto op = inst.GetOpcode();
+	const bool cb = op == ValueOpcode::ReadConstBuffer && SrtJitCover::Current() != SrtJitCover::Mode::Off;
+	if (depth > 16 || (op != ValueOpcode::LoadAddressU32 && !cb) || inst.NumArgs() < 2 ||
 	    !IsRawRead(program, inst) || inst.Flags<SrtReadFlags>().clean != 0u)
 		return false;
 	const auto  offset = inst.Arg(1).Resolve();
 	const auto* handle = inst.Arg(0).Resolve().TryInstruction();
+	const size_t words = cb ? 4 : 2;
 	if (!offset.IsImmediate() || offset.GetType() != Type::U32 || handle == nullptr ||
-	    handle->GetOpcode() != ValueOpcode::GetAddressResource || handle->NumArgs() != 2)
+	    handle->GetOpcode() != (cb ? ValueOpcode::GetBufferResource : ValueOpcode::GetAddressResource) || handle->NumArgs() != words)
 		return false;
-	for (size_t word = 0; word < 2; ++word) {
+	// The interpreter fails the walk on a negative immediate of a constant-buffer read; keep that path.
+	if (cb && static_cast<int32_t>(program.memory_info[inst.Flags<SrtReadFlags>().index].offset) < 0) return false;
+	for (size_t word = 0; word < words; ++word) {
 		const auto* source = handle->Arg(word).Resolve().TryInstruction();
 		if (source == nullptr ||
 		    (!IsUserDataWord(program, *source) && !IsCompiledRead(program, *source, depth + 1)))
 			return false;
 	}
 	return true;
+}
+
+// S442: the tree of a compiled read contains a constant-buffer read.
+bool UsesConstBuffer(const Inst& inst) {
+	if (inst.GetOpcode() == ValueOpcode::ReadConstBuffer) return true;
+	const auto* handle = inst.Arg(0).Resolve().TryInstruction();
+	for (size_t word = 0; handle != nullptr && word < handle->NumArgs(); ++word) {
+		const auto* source = handle->Arg(word).Resolve().TryInstruction();
+		if (source != nullptr && (source->GetOpcode() == ValueOpcode::LoadAddressU32 || source->GetOpcode() == ValueOpcode::ReadConstBuffer) &&
+		    UsesConstBuffer(*source))
+			return true;
+	}
+	return false;
 }
 
 // S441 DIAG: why IsCompiledRead refuses a slot (same conditions, same order).
@@ -493,8 +511,10 @@ void CompileSrtReads(ResourcePlan& program) {
 		return found->second;
 	};
 	program.srt_read_entries.assign(slots.size(), UINT32_MAX);
+	program.srt_read_cb.assign(slots.size(), 0u);
 	for (uint32_t slot = 0; slot < slots.size(); ++slot) {
 		if (slots[slot] == nullptr) continue;
+		program.srt_read_cb[slot] = UsesConstBuffer(*slots[slot]) ? 1u : 0u;
 		program.srt_read_entries[slot] = static_cast<uint32_t>(code.getSize());
 		code.push(code.rbp);
 		code.mov(code.rbp, code.rsp);
@@ -527,6 +547,68 @@ void CompileSrtReads(ResourcePlan& program) {
 		code.ret();
 		code.L(compute);
 		const auto* handle = inst->Arg(0).Resolve().TryInstruction();
+		if (inst->GetOpcode() == ValueOpcode::ReadConstBuffer) {
+			// S442: ReadConstBuffer as EvaluateRawRead does it: V# words low, high (stride in bits 16..29), records, word 3 (evaluated, unused); the DWORD
+			// is at base + byte offset when byte offset + 4 <= size, else 0. A null table falls back to the interpreter (it notes it).
+			for (size_t word = 0; word < 4; ++word) {
+				const auto* source = handle->Arg(word).Resolve().TryInstruction();
+				if (IsUserDataWord(program, *source)) {
+					const auto index = RegIndex(source->Arg(0).ScalarRegister()) - program.user_data_base;
+					code.cmp(code.r8, index);
+					code.jbe(failed, Xbyak::CodeGenerator::T_NEAR);
+					code.mov(code.eax, code.dword[code.rdi + index * sizeof(uint32_t)]);
+				} else {
+					code.call(routine(source));
+				}
+				code.push(code.rax);
+			}
+			// [rsp] word 3, [rsp + 8] records, [rsp + 16] high, [rsp + 24] low
+			const auto& cb_memory = program.memory_info[inst->Flags<SrtReadFlags>().index];
+			uint64_t    byte_offset = (static_cast<uint64_t>(static_cast<int64_t>(static_cast<int32_t>(cb_memory.offset))) & ~uint64_t {3}) +
+			                       (inst->Arg(1).Resolve().U32() & ~3u);
+#ifdef KYTY_SRTCOVER_MUTANT_CB_WRONG_OFFSET
+			byte_offset += 4;
+#endif
+			Xbyak::Label no_stride;
+			Xbyak::Label outside;
+			Xbyak::Label store;
+			code.mov(code.eax, code.dword[code.rsp + 8]);
+			code.mov(code.r10d, code.dword[code.rsp + 16]);
+			code.shr(code.r10d, 16);
+			code.and_(code.r10d, 0x3fff);
+			code.jz(no_stride);
+			code.imul(code.rax, code.r10);
+			code.L(no_stride);
+			code.mov(code.r10, byte_offset);
+			code.cmp(code.rax, code.r10);
+			code.jb(outside, Xbyak::CodeGenerator::T_NEAR);
+			code.sub(code.rax, code.r10);
+			code.cmp(code.rax, static_cast<uint32_t>(sizeof(uint32_t)));
+			code.jb(outside, Xbyak::CodeGenerator::T_NEAR);
+			code.mov(code.eax, code.dword[code.rsp + 24]);
+			code.mov(code.r10d, code.dword[code.rsp + 16]);
+			code.shl(code.r10, 32);
+			code.or_(code.rax, code.r10);
+			code.mov(code.r10, AddressMask & ~uint64_t {3});
+			code.and_(code.rax, code.r10);
+			code.mov(code.r10, GUEST_MEMORY_MIN);
+			code.cmp(code.rax, code.r10);
+			code.jb(failed, Xbyak::CodeGenerator::T_NEAR);
+			code.mov(code.r10, byte_offset);
+			code.add(code.rax, code.r10);
+			code.mov(code.qword[code.r11], code.rax);
+			code.add(code.r11, sizeof(uint64_t));
+			code.mov(code.eax, code.dword[code.rax]);
+			code.jmp(store);
+			code.L(outside);
+			code.xor_(code.eax, code.eax);
+			code.L(store);
+			code.mov(code.qword[code.rdx + memo + offsetof(Entry, value)], code.rax);
+			code.mov(code.qword[code.rdx + memo + offsetof(Entry, generation)], code.rcx);
+			code.add(code.rsp, 4 * sizeof(uint64_t));
+			code.ret();
+			continue;
+		}
 		for (size_t word = 0; word < 2; ++word) {
 			const auto* source = handle->Arg(word).Resolve().TryInstruction();
 			if (IsUserDataWord(program, *source)) {
@@ -1476,31 +1558,53 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	const bool compiled = m_program.srt_read_code && m_active_mask.IsEmpty() &&
 	                      (m_runtime.read_memory == nullptr || captured != nullptr);
 	if (compiled) m_context.values.resize(m_program.evaluation_value_count);
+	const auto cover = SrtJitCover::Current(); // S442
+	// S442 shadow: the constant-buffer JIT of a slot runs on a scratch memo and flat buffer; the interpreter's value is the result and must equal it.
+	std::vector<ResourcePlan::EvaluationContext::Entry> cover_memo;
+	std::vector<uint32_t>                               cover_flat;
 	const auto refresh = [&](uint32_t slot) {
 		if (slot >= m_program.srt_reads.size()) return false;
+		bool     cover_compared = false;
+		uint32_t cover_word     = 0;
 		if (compiled && m_program.srt_read_entries[slot] != UINT32_MAX) {
 			using Read = bool KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*,
 			                                    ResourcePlan::EvaluationContext::Entry*, uint64_t,
 			                                    size_t, uint64_t**);
-			auto* const       addresses = m_program.srt_read_addresses.data();
-			auto*             cursor    = addresses;
-			const bool ok = reinterpret_cast<Read>(m_program.srt_read_code->getCode<uint8_t*>() +
-			                                       m_program.srt_read_entries[slot])(
-			    m_runtime.user_data.data(), flat.data(), m_context.values.data(),
-			    m_context.generation, m_runtime.user_data.size(), &cursor);
-			if (pc_diag) { // S439 DIAG: the JIT slot reads are the 32-bit loads listed in the address cursor
-				CpSampler::Pc::Tally().jit_slot_calls++;
-				CpSampler::Pc::NoteReads(addresses, static_cast<size_t>(cursor - addresses), sizeof(uint32_t));
-			}
-			if (captured != nullptr) {
-				for (const auto* address = addresses; address != cursor; ++address) {
-					captured->emplace_back(*address, sizeof(uint32_t));
+			const bool cover_cb = cover != SrtJitCover::Mode::Off && slot < m_program.srt_read_cb.size() && m_program.srt_read_cb[slot] != 0u;
+			if (cover_cb && cover == SrtJitCover::Mode::Shadow) {
+				// shadow: scratch memo and flat buffer, nothing captured; the interpreter below is the result.
+				cover_memo.assign(m_program.evaluation_value_count, {});
+				cover_flat.assign(flat.size(), 0u);
+				auto* const addresses = m_program.srt_read_addresses.data();
+				auto*       cursor    = addresses;
+				cover_compared = reinterpret_cast<Read>(m_program.srt_read_code->getCode<uint8_t*>() + m_program.srt_read_entries[slot])(
+				    m_runtime.user_data.data(), cover_flat.data(), cover_memo.data(), m_context.generation, m_runtime.user_data.size(), &cursor);
+				if (cover_compared) cover_word = cover_flat[m_program.srt_reads[slot].flat_offset];
+			} else {
+				auto* const       addresses = m_program.srt_read_addresses.data();
+				auto*             cursor    = addresses;
+				const bool ok = reinterpret_cast<Read>(m_program.srt_read_code->getCode<uint8_t*>() +
+				                                       m_program.srt_read_entries[slot])(
+				    m_runtime.user_data.data(), flat.data(), m_context.values.data(),
+				    m_context.generation, m_runtime.user_data.size(), &cursor);
+				if (pc_diag) { // S439 DIAG: the JIT slot reads are the 32-bit loads listed in the address cursor
+					CpSampler::Pc::Tally().jit_slot_calls++;
+					CpSampler::Pc::NoteReads(addresses, static_cast<size_t>(cursor - addresses), sizeof(uint32_t));
 				}
-			}
-			// A failed read is evaluated again below, with the walker's own result.
-			if (ok) {
-				SrtWalkPaths::Note(SrtWalkPaths::Path::SlotJit);
-				return true;
+				if (captured != nullptr) {
+					for (const auto* address = addresses; address != cursor; ++address) {
+						captured->emplace_back(*address, sizeof(uint32_t));
+					}
+				}
+				// A failed read is evaluated again below, with the walker's own result.
+				if (ok) {
+					SrtWalkPaths::Note(SrtWalkPaths::Path::SlotJit);
+					if (cover != SrtJitCover::Mode::Off) { // S442
+						if (cover_cb) SrtJitCover::Note(SrtJitCover::Cell::ConstBuffer);
+						if (m_program.capture_specialization_reads) SrtJitCover::Note(SrtJitCover::Cell::Capture);
+					}
+					return true;
+				}
 			}
 		}
 		SrtWalkPaths::Note(SrtWalkPaths::Path::InterpSlots);
@@ -1522,7 +1626,17 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 			return false;
 		auto& evaluator = clean ? *m_clean_evaluator : *this;
 		SpecShadow::PurposeScope purpose(clean ? SpecShadow::Purpose::Slot : SpecShadow::CurrentPurpose()); // S406
-		return read.flat_offset < flat.size() && evaluator.Evaluate(read.value, flat[read.flat_offset]);
+		const bool evaluated = read.flat_offset < flat.size() && evaluator.Evaluate(read.value, flat[read.flat_offset]);
+		if (cover_compared && evaluated) { // S442 shadow
+			SrtJitCover::Note(SrtJitCover::Cell::ConstBuffer);
+			if (cover_word != flat[read.flat_offset]) {
+				SrtJitCover::Note(SrtJitCover::Cell::Ne);
+				if (SrtJitCover::ShouldLogNe())
+					LOGF("[srt-cover-ne] cb plan=0x%016llx slot=%u jit=0x%08x walk=0x%08x\n", static_cast<unsigned long long>(m_program.shader_hash), slot,
+					     cover_word, flat[read.flat_offset]);
+			}
+		}
+		return evaluated;
 	};
 	auto& active = m_program.active_sources;
 	if (m_program.control_flow.empty()) {

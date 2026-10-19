@@ -691,6 +691,7 @@ struct ResourcePlan {
 	// and room for the addresses one slot reads.
 	std::unique_ptr<Xbyak::CodeGenerator> srt_read_code;
 	std::vector<uint32_t>                 srt_read_entries;
+	std::vector<uint8_t>                  srt_read_cb; // S442: the compiled slot reads a constant buffer (KYTY_SRT_JIT_COVER)
 	mutable std::vector<uint64_t>         srt_read_addresses;
 	// GPU-thread scratch for nested clean/EXEC memos, activity and material keys.
 	mutable std::deque<EvaluationContext> evaluation_contexts;
