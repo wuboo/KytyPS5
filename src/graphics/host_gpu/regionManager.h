@@ -2,12 +2,15 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_REGIONMANAGER_H_
 
 #include "common/assert.h"
+#include "graphics/host_gpu/hotPages.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/regionDefinitions.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <memory>
 #include <mutex>
 #include <utility>
 
@@ -175,9 +178,231 @@ public:
 		}
 	}
 
+	// S440 (KYTY_WF_HOT_UNPROTECT): everything below runs with `lock` held.
+	[[nodiscard]] bool HasHot() const { return m_hot_state != nullptr && m_hot_state->count != 0; }
+	[[nodiscard]] uint32_t HotCountRelaxed() const { return m_hot_count.load(std::memory_order_relaxed); }
+	[[nodiscard]] bool IsHot(size_t page) const { return m_hot_state != nullptr && m_hot_state->hot.Get(page); }
+
+	// A write fault released [vaddr, vaddr + size): count one more flip for each page (hot after kHotStreak flips in a row).
+	void NoteWriteFault(uint64_t vaddr, uint64_t size) {
+		if (HotPages::CurrentMode() == HotPages::Mode::Off) {
+			return;
+		}
+		const auto [start, end] = GetPageRange(vaddr, size);
+		auto&      hs           = EnsureHot();
+		const auto epoch        = HotPages::Epoch();
+		for (size_t page = start; page < end; ++page) {
+			if (hs.streak[page] != 0 && hs.last_fault[page] == epoch) {
+				continue;
+			}
+			hs.streak[page] = (hs.streak[page] != 0 && hs.last_fault[page] + 1 == epoch) ? static_cast<uint8_t>(std::min<uint32_t>(255u, hs.streak[page] + 1u)) : 1;
+			hs.last_fault[page] = epoch;
+			if (hs.streak[page] >= HotPages::kHotStreak && !hs.hot.Get(page)) {
+				hs.hot.Set(page);
+				hs.hash_valid.Unset(page); // the buffer holds whatever the last (unhashed) upload gave it
+				hs.last_change[page] = epoch;
+				SetHotCount(hs, hs.count + 1);
+				HotPages::GetStats().promote.fetch_add(1, std::memory_order_relaxed);
+				HotPages::GetStats().hot_pages.fetch_add(1, std::memory_order_relaxed);
+			}
+		}
+	}
+
+	// An explicit CPU-modification (MarkRegionAsCpuModified, UntrackMemory): whatever the buffer holds for these pages is not what the hash describes.
+	void InvalidateHashes(uint64_t vaddr, uint64_t size) {
+		if (m_hot_state == nullptr) {
+			return;
+		}
+		const auto [start, end] = GetPageRange(vaddr, size);
+		m_hot_state->hash_valid.UnsetRange(start, end);
+	}
+
+	// The GPU is about to own these pages: hot pages in the range become ordinary dirty pages (the caller consumed them already).
+	void ReleaseHot(uint64_t vaddr, uint64_t size) {
+		if (!HasHot()) {
+			return;
+		}
+		const auto [start, end] = GetPageRange(vaddr, size);
+		auto&      hs           = *m_hot_state;
+		bool       any          = false;
+		for (size_t page = start; page < end; ++page) {
+			if (hs.hot.Get(page)) {
+				DropHot(hs, page);
+				m_cpu_dirty.Unset(page);
+				any = true;
+			}
+		}
+		if (any) {
+			UpdateProtection<true, false>();
+		}
+	}
+
+	// Shadow: hot pages that are clean (protected, nothing dirty) must still hash like their last upload.
+	void ShadowCheckClean(uint64_t vaddr, uint64_t size) {
+		if (!HasHot() || HotPages::CurrentMode() != HotPages::Mode::Shadow) {
+			return;
+		}
+		const auto [start, end] = GetPageRange(vaddr, size);
+		auto&      hs           = *m_hot_state;
+		for (size_t page = start; page < end; ++page) {
+			if (!hs.hot.Get(page) || m_cpu_dirty.Get(page) || m_gpu_dirty.Get(page) || !hs.hash_valid.Get(page)) {
+				continue;
+			}
+			uint64_t hash = 0;
+			if (HashPage(page, &hash) && hash != hs.hash[page]) {
+				HotPages::GetStats().ne.fetch_add(1, std::memory_order_relaxed);
+				hs.hash[page] = hash;
+			}
+		}
+	}
+
+	// ForEachModifiedRange<Cpu, true> that knows hot pages. keep_hot: the caller will not hand the pages to the GPU for writing.
+	template <typename Func>
+	void ConsumeCpuDirty(uint64_t vaddr, uint64_t size, bool keep_hot, Func&& func) {
+		if (!HasHot()) {
+			ForEachModifiedRange<DirtySource::Cpu, true>(vaddr, size, func);
+			return;
+		}
+		const auto [start, end] = GetPageRange(vaddr, size);
+		if (m_cpu_dirty.FirstRangeFrom(start).first >= end) {
+			return;
+		}
+		const RegionBits mask(m_cpu_dirty, start, end);
+		RegionBits       report = mask;
+		RegionBits       clear  = mask;
+		RegionBits       recheck;
+		recheck.Clear();
+		auto&      hs    = *m_hot_state;
+		const auto mode  = HotPages::CurrentMode();
+		const auto epoch = HotPages::Epoch();
+		const auto t0    = std::chrono::steady_clock::now();
+		uint64_t   hashed = 0;
+		for (size_t page = start; page < end; ++page) {
+			if (!mask.Get(page) || !hs.hot.Get(page)) {
+				continue;
+			}
+#if defined(KYTY_MEMTRACKER_MUTANT_HOT_SKIPS_HASH)
+			const bool changed = !hs.hash_valid.Get(page);
+#else
+			uint64_t hash = 0;
+			const bool ok = HashPage(page, &hash);
+			hashed++;
+			const bool changed = !ok || !hs.hash_valid.Get(page) || hs.hash[page] != hash;
+#endif
+			if (changed) {
+#if defined(KYTY_MEMTRACKER_MUTANT_HOT_SKIPS_HASH)
+				hs.hash_valid.Set(page); // the first upload is the last: no later change is ever noticed
+#else
+				hs.hash[page] = ok ? hash : 0;
+				hs.hash_valid.Unset(page);
+				if (ok) {
+					hs.hash_valid.Set(page);
+				}
+#endif
+				hs.last_change[page] = epoch;
+				HotPages::GetStats().changed.fetch_add(1, std::memory_order_relaxed);
+			} else {
+				if (mode == HotPages::Mode::On) {
+					report.Unset(page); // shadow reports the page as ever
+				}
+				HotPages::GetStats().skip.fetch_add(1, std::memory_order_relaxed);
+			}
+			if (mode != HotPages::Mode::On) {
+				continue; // shadow: the page is consumed and protected as ever; the hash is only remembered
+			}
+#if defined(KYTY_MEMTRACKER_MUTANT_HOT_NEVER_REPROTECT)
+			const bool cold = false;
+#else
+			const bool cold = !changed && epoch - hs.last_change[page] >= HotPages::kColdAfter;
+#endif
+			if (keep_hot && !cold) {
+				clear.Unset(page); // stays dirty, so unprotected
+			} else {
+				DropHot(hs, page);
+				if (!changed) {
+					recheck.Set(page);
+				}
+			}
+		}
+		if (hashed != 0) {
+			HotPages::GetStats().hash.fetch_add(hashed, std::memory_order_relaxed);
+			HotPages::GetStats().hash_ns.fetch_add(static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()), std::memory_order_relaxed);
+		}
+		for (size_t page = start; page < end; ++page) {
+			if (clear.Get(page)) {
+				m_cpu_dirty.Unset(page);
+			}
+		}
+		UpdateProtection<true, false>();
+		// The protection is in force: a write before it went unseen by the hash, so look again and upload the page if it differs.
+		for (size_t page = start; page < end; ++page) {
+			if (!recheck.Get(page)) {
+				continue;
+			}
+			uint64_t hash = 0;
+			if (!HashPage(page, &hash) || hash != hs.hash[page]) {
+				HotPages::GetStats().race.fetch_add(1, std::memory_order_relaxed);
+				report.Set(page);
+			}
+		}
+		for (const auto [first, last]: report) {
+			func(m_cpu_addr + first * TRACKER_PAGE_SIZE, (last - first) * TRACKER_PAGE_SIZE);
+		}
+	}
+
+	// Appends the hot pages to `add(address, bytes)` (their writes raise no fault, so nothing else tells the BDA buffers about them).
+	template <typename AddFn>
+	void ForEachHotPage(AddFn&& add) {
+		if (!HasHot()) {
+			return;
+		}
+		for (const auto [first, last]: m_hot_state->hot) {
+			add(m_cpu_addr + first * TRACKER_PAGE_SIZE, (last - first) * TRACKER_PAGE_SIZE);
+		}
+	}
+
 	TrackingSpinLock lock;
 
 private:
+
+	struct HotState {
+		RegionBits                                 hot;
+		RegionBits                                 hash_valid; // `hash` is the hash of the page as the buffer last received it
+		std::array<uint8_t, TRACKER_REGION_PAGES>  streak {};
+		std::array<uint32_t, TRACKER_REGION_PAGES> last_fault {};
+		std::array<uint32_t, TRACKER_REGION_PAGES> last_change {};
+		std::array<uint64_t, TRACKER_REGION_PAGES> hash {};
+		uint32_t                                   count = 0;
+	};
+
+	HotState& EnsureHot() {
+		if (m_hot_state == nullptr) {
+			m_hot_state = std::make_unique<HotState>();
+			m_hot_state->hot.Clear();
+			m_hot_state->hash_valid.Clear();
+		}
+		return *m_hot_state;
+	}
+
+	void SetHotCount(HotState& hs, uint32_t count) {
+		hs.count = count;
+		m_hot_count.store(count, std::memory_order_relaxed);
+	}
+
+	void DropHot(HotState& hs, size_t page) {
+		hs.hot.Unset(page);
+		hs.hash_valid.Unset(page); // later uploads of the page are not hashed: the stored hash describes an older buffer
+		hs.streak[page] = 0;
+		SetHotCount(hs, hs.count - 1);
+		HotPages::GetStats().demote.fetch_add(1, std::memory_order_relaxed);
+		HotPages::GetStats().hot_pages.fetch_sub(1, std::memory_order_relaxed);
+	}
+
+	bool HashPage(size_t page, uint64_t* hash) const {
+		const auto fn = HotPages::HasherSource().load(std::memory_order_relaxed);
+		return fn != nullptr && fn(m_cpu_addr + page * TRACKER_PAGE_SIZE, hash);
+	}
+
 	template <bool track, bool is_read>
 	void UpdateProtection() {
 		const auto protection = is_read ? ~m_gpu_dirty : m_cpu_dirty;
@@ -225,6 +450,8 @@ private:
 	RegionBits   m_writable;
 	RegionBits   m_readable;
 	std::array<uint64_t, TRACKER_REGION_PAGES> m_stamps {};
+	std::unique_ptr<HotState>                  m_hot_state;
+	std::atomic<uint32_t>                      m_hot_count {0};
 };
 
 } // namespace Libs::Graphics

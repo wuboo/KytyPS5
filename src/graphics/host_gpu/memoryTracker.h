@@ -41,6 +41,8 @@ public:
 	// before the dirty pages it describes become visible.
 	void                   QueueBdaSync(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] RangeSet TakeBdaSync();
+	// S440: pages the tracker no longer protects (HotPages) raise no fault; this adds them to `set`.
+	void AddHotPages(RangeSet& set);
 	// Removes protection from a range and flushes GPU-owned data when required.
 	template <typename Flush>
 	void InvalidateRegion(uint64_t vaddr, uint64_t size, Flush&& on_flush) noexcept {
@@ -57,6 +59,7 @@ public:
 					return true;
 				}
 				manager->ChangeState<DirtySource::Cpu, true>(manager->GetCpuAddr() + offset, bytes);
+				manager->NoteWriteFault(manager->GetCpuAddr() + offset, bytes); // S440: a page written in many flips in a row goes hot
 				return false;
 			}();
 			if (should_flush) {
@@ -98,8 +101,8 @@ public:
 		const auto* previous_upload_owner = std::exchange(s_upload_owner, this);
 		Iterate<true>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 			manager->lock.lock();
-			manager->ForEachModifiedRange<DirtySource::Cpu, true>(manager->GetCpuAddr() + offset,
-			                                                      bytes, range_func);
+			manager->ShadowCheckClean(manager->GetCpuAddr() + offset, bytes);
+			manager->ConsumeCpuDirty(manager->GetCpuAddr() + offset, bytes, !is_written, range_func);
 			if (!is_written) {
 				manager->lock.unlock();
 			}

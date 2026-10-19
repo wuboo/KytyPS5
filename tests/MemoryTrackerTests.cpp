@@ -1,5 +1,6 @@
 #include "common/hostException.h"
 #include "common/virtualMemory.h"
+#include "graphics/host_gpu/hotPages.h"
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
 
@@ -52,7 +53,8 @@ using Libs::Graphics::TRACKER_ADDRESS_SIZE;
 void Check(bool value, const char *text) {
   if (!value) {
     std::fprintf(stderr, "MemoryTrackerTests: failed: %s\n", text);
-#if defined(KYTY_MEMTRACKER_MUTANT_NO_BUMP_CPU) || defined(KYTY_MEMTRACKER_MUTANT_NO_BUMP_GPU)
+#if defined(KYTY_MEMTRACKER_MUTANT_NO_BUMP_CPU) || defined(KYTY_MEMTRACKER_MUTANT_NO_BUMP_GPU) || \
+    defined(KYTY_MEMTRACKER_MUTANT_HOT_SKIPS_HASH) || defined(KYTY_MEMTRACKER_MUTANT_HOT_NEVER_REPROTECT)
     std::_Exit(1); // a mutant must fail with an exit code (an abort is not inverted by WILL_FAIL)
 #else
     std::abort();
@@ -1329,6 +1331,169 @@ bool ProtectGuestHostMemory(uint64_t vaddr, uint64_t size,
 
 } // namespace Libs::LibKernel::Memory
 
+// S440 (KYTY_WF_HOT_UNPROTECT): a page written in kHotStreak flips in a row stops being protected; the hash of the page at every upload decides
+// whether it changed; kColdAfter flips without a change protect it again. Mutants HOT_SKIPS_HASH / HOT_NEVER_REPROTECT must fail here.
+uint64_t g_hot_epoch = 0;
+
+uint64_t HotEpoch() { return g_hot_epoch; }
+
+bool HotHash(uint64_t page, uint64_t *hash) {
+  const auto *bytes = reinterpret_cast<const uint8_t *>(page);
+  uint64_t value = 1469598103934665603ull;
+  for (uint64_t i = 0; i < 4096; i++) {
+    value = (value ^ bytes[i]) * 1099511628211ull;
+  }
+  *hash = value;
+  return true;
+}
+
+uint32_t HotUpload(MemoryTracker &tracker, uint64_t address, uint64_t size,
+                   bool is_written = false) {
+  uint32_t ranges = 0;
+  tracker.ForEachUploadRange(
+      address, size, is_written,
+      [&](uint64_t, uint64_t) noexcept { ranges++; }, []() noexcept {});
+  return ranges;
+}
+
+void HotFault(MemoryTracker &tracker, uint64_t address, uint64_t size) {
+  tracker.InvalidateRegion(address, size, [] {});
+}
+
+void TestHotPages() {
+  using Libs::Graphics::HotPages::GetStats;
+  using Libs::Graphics::HotPages::Mode;
+  Libs::Graphics::HotPages::EpochSource().store(&HotEpoch);
+  Libs::Graphics::HotPages::HasherSource().store(&HotHash);
+  Libs::Graphics::HotPages::ModeOverride().store(static_cast<int>(Mode::On));
+  auto &stats = GetStats();
+  const auto promote0 = stats.promote.load();
+  const auto demote0 = stats.demote.load();
+
+  TrackerHarness harness;
+  auto &tracker = harness.tracker;
+  const auto page_size = harness.page_manager.GetPageSize();
+  auto *memory = Allocate(harness.page_manager, 4);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+  const auto page = address + page_size; // page 1; page 0 and 2 stay ordinary
+  g_hot_epoch = 0;
+  Check(HotUpload(tracker, address, page_size * 4) == 1,
+        "first upload did not report the new region");
+
+  // Written and uploaded in kHotStreak flips in a row: still protected before the last one, unprotected after it.
+  for (uint32_t flip = 1; flip <= Libs::Graphics::HotPages::kHotStreak; flip++) {
+    g_hot_epoch = flip;
+    HotFault(tracker, page, 1);
+    memory[page_size] = static_cast<uint8_t>(flip);
+    Check(HotUpload(tracker, page, 1) == 1, "write before the page was hot was not uploaded");
+    if (flip < Libs::Graphics::HotPages::kHotStreak) {
+      Check(!IsWritable(memory + page_size), "page unprotected before it was hot");
+    }
+  }
+  Check(stats.promote.load() == promote0 + 1 && stats.hot_pages.load() == 1,
+        "page did not become hot after kHotStreak flips");
+  Check(IsWritable(memory + page_size) && tracker.IsRegionCpuModified(page, 1),
+        "hot page was protected again by its upload");
+  Check(HotUpload(tracker, address, page_size) == 0 && IsWritable(memory) == false,
+        "ordinary neighbour page changed");
+
+  // The hash decides: a write that raised no fault is uploaded once, an unchanged page is not uploaded.
+  uint64_t last_change = Libs::Graphics::HotPages::kHotStreak;
+  g_hot_epoch = last_change + 1;
+  memory[page_size + 7] = 0x5a;
+  Check(HotUpload(tracker, page, 1) == 1, "hash did not notice a write without a fault");
+  last_change = g_hot_epoch;
+  Check(HotUpload(tracker, page, 1) == 0 && IsWritable(memory + page_size),
+        "unchanged hot page was uploaded or protected");
+  const auto skip0 = stats.skip.load();
+  Check(HotUpload(tracker, page, 1) == 0 && stats.skip.load() == skip0 + 1,
+        "unchanged hot page was not counted as skipped");
+
+  // Hot pages are reported for BDA synchronisation although they raise no fault.
+  (void)tracker.TakeBdaSync();
+  Check(tracker.TakeBdaSync().Intersects(page, 1), "hot page missing from BDA sync");
+
+  // An explicit CPU modification makes the next upload happen although the bytes did not change.
+  tracker.MarkRegionAsCpuModified(page, 1);
+  (void)tracker.TakeBdaSync();
+  Check(HotUpload(tracker, page, 1) == 1 && HotUpload(tracker, page, 1) == 0,
+        "explicit CPU modification did not force an upload of a hot page");
+
+  // kColdAfter flips without a change: the last unprotected upload is one flip earlier.
+  g_hot_epoch = last_change + Libs::Graphics::HotPages::kColdAfter - 1;
+  Check(HotUpload(tracker, page, 1) == 0 && IsWritable(memory + page_size) && stats.demote.load() == demote0,
+        "hot page was protected too early");
+  g_hot_epoch = last_change + Libs::Graphics::HotPages::kColdAfter;
+  Check(HotUpload(tracker, page, 1) == 0 && !IsWritable(memory + page_size) &&
+            !tracker.IsRegionCpuModified(page, 1) && stats.demote.load() == demote0 + 1 &&
+            stats.hot_pages.load() == 0,
+        "unchanged hot page was not protected again");
+  // ...and an ordinary write is seen by the fault again.
+  g_hot_epoch++;
+  HotFault(tracker, page, 1);
+  memory[page_size + 1] = 0x33;
+  Check(HotUpload(tracker, page, 1) == 1, "write after the page went cold was not uploaded");
+
+  // The GPU takes a hot page for writing: hot state ends, ownership moves without a conflict.
+  for (uint32_t flip = 0; flip < Libs::Graphics::HotPages::kHotStreak; flip++) {
+    g_hot_epoch++;
+    HotFault(tracker, page, 1);
+    memory[page_size + 2] = static_cast<uint8_t>(g_hot_epoch);
+    Check(HotUpload(tracker, page, 1) == 1, "second streak was not uploaded");
+  }
+  Check(stats.hot_pages.load() == 1 && IsWritable(memory + page_size), "page did not turn hot a second time");
+  (void)HotUpload(tracker, page, 1, true);
+  Check(stats.hot_pages.load() == 0 && tracker.IsRegionGpuModified(page, 1) &&
+            !IsWritable(memory + page_size) && !tracker.IsRegionCpuModified(page, 1),
+        "GPU write ownership of a hot page failed");
+  tracker.UnmarkRegionAsGpuModified(page, 1);
+
+  // A hash from an earlier hot period must not decide a later one: A (hashed) -> cold -> B uploaded unhashed -> hot again with A written back.
+  {
+    const auto aba = address + 3 * page_size;
+    const auto first_epoch = g_hot_epoch + 10;
+    for (uint32_t flip = 0; flip < Libs::Graphics::HotPages::kHotStreak; flip++) {
+      g_hot_epoch = first_epoch + flip;
+      HotFault(tracker, aba, 1);
+      memory[3 * page_size] = static_cast<uint8_t>(0xa1);
+      (void)HotUpload(tracker, aba, 1);
+    }
+    g_hot_epoch += Libs::Graphics::HotPages::kColdAfter;
+    Check(HotUpload(tracker, aba, 1) == 0 && !IsWritable(memory + 3 * page_size), "ABA page did not go cold");
+    for (uint32_t flip = 0; flip < Libs::Graphics::HotPages::kHotStreak; flip++) {
+      g_hot_epoch++;
+      HotFault(tracker, aba, 1);
+      memory[3 * page_size] = flip + 1 < Libs::Graphics::HotPages::kHotStreak ? 0xb2 : 0xa1;
+      Check(HotUpload(tracker, aba, 1) == 1, "page written back to its old value was not uploaded after a cold period");
+    }
+    tracker.UntrackMemory(aba, 1);
+  }
+
+  // Shadow: protection and uploads are as ever; unchanged hot pages are counted; a write the tracker never saw is counted in ne.
+  Libs::Graphics::HotPages::ModeOverride().store(static_cast<int>(Mode::Shadow));
+  tracker.UntrackMemory(address, page_size * 4);
+  (void)HotUpload(tracker, address, page_size * 4);
+  const auto skip1 = stats.skip.load();
+  const auto ne0 = stats.ne.load();
+  for (uint32_t flip = 0; flip < Libs::Graphics::HotPages::kHotStreak + 2; flip++) {
+    g_hot_epoch++;
+    HotFault(tracker, page, 1);
+    Check(HotUpload(tracker, page, 1) == 1 && !IsWritable(memory + page_size),
+          "shadow changed the uploads or the protection");
+  }
+  Check(stats.skip.load() > skip1 && stats.ne.load() == ne0, "shadow did not count unchanged hot pages");
+  Check(HotUpload(tracker, page, 1) == 0 && stats.ne.load() == ne0, "shadow counted a clean unchanged page");
+  DWORD old = 0;
+  Check(VirtualProtect(memory + page_size, page_size, PAGE_READWRITE, &old) != 0, "VirtualProtect failed");
+  memory[page_size + 3] ^= 0xff;
+  (void)HotUpload(tracker, page, 1);
+  Check(stats.ne.load() == ne0 + 1, "shadow missed a write that raised no fault");
+
+  Libs::Graphics::HotPages::ModeOverride().store(-1);
+  tracker.UntrackMemory(address, page_size * 4);
+  Release(memory);
+}
+
 int main(int argc, char **argv) {
   if (argc == 3 && std::strcmp(argv[1], "--death") == 0) {
     RunDeathCase(argv[2]);
@@ -1357,6 +1522,7 @@ int main(int argc, char **argv) {
   TestDownloadDoesNotSerializeDisjointRegion();
   TestGpuUnmarkUsesRegionMask();
   TestFullRegionGpuUnmarkBatching();
+  TestHotPages();
   TestFatalPaths();
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
   TestFaultOnProtectedStack();

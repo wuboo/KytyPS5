@@ -75,8 +75,31 @@ void MemoryTracker::QueueBdaSync(uint64_t vaddr, uint64_t size) {
 }
 
 RangeSet MemoryTracker::TakeBdaSync() {
-	std::lock_guard lock(m_bda_sync_mutex);
-	return std::exchange(m_bda_sync, RangeSet {});
+	RangeSet taken;
+	{
+		std::lock_guard lock(m_bda_sync_mutex);
+		taken = std::exchange(m_bda_sync, RangeSet {});
+	}
+	if (HotPages::CurrentMode() == HotPages::Mode::On) {
+		AddHotPages(taken);
+	}
+	return taken;
+}
+
+void MemoryTracker::AddHotPages(RangeSet& set) {
+	std::vector<RegionManager*> managers;
+	{
+		std::lock_guard lock(m_region_mutex);
+		for (const auto& manager: m_region_storage) {
+			if (manager->HotCountRelaxed() != 0) {
+				managers.push_back(manager.get());
+			}
+		}
+	}
+	for (auto* manager: managers) {
+		std::scoped_lock lock(manager->lock);
+		manager->ForEachHotPage([&](uint64_t address, uint64_t bytes) { set.Add(address, bytes); });
+	}
 }
 
 bool MemoryTracker::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
@@ -118,6 +141,7 @@ void MemoryTracker::MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size) {
 	Iterate<true>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 		std::scoped_lock lock(manager->lock);
 		manager->ChangeState<DirtySource::Cpu, true>(manager->GetCpuAddr() + offset, bytes);
+		manager->InvalidateHashes(manager->GetCpuAddr() + offset, bytes);
 	});
 	QueueBdaSync(vaddr, size);
 }
@@ -126,6 +150,7 @@ void MemoryTracker::MarkRegionAsGpuModified(uint64_t vaddr, uint64_t size) {
 	CheckNotInUploadCallback();
 	Iterate<true>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 		std::scoped_lock lock(manager->lock);
+		manager->ReleaseHot(manager->GetCpuAddr() + offset, bytes);
 		manager->ChangeState<DirtySource::Gpu, true>(manager->GetCpuAddr() + offset, bytes);
 	});
 }
@@ -159,6 +184,7 @@ void MemoryTracker::UntrackMemory(uint64_t vaddr, uint64_t size) {
 	}
 	Iterate<false>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 		manager->ChangeState<DirtySource::Cpu, true>(manager->GetCpuAddr() + offset, bytes);
+		manager->InvalidateHashes(manager->GetCpuAddr() + offset, bytes);
 	});
 	locks.clear();
 	QueueBdaSync(vaddr, size);

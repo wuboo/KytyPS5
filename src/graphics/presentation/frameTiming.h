@@ -339,6 +339,10 @@ enum class Counter : uint32_t {
 	// entered the interpreter / per-slot JIT / tree JIT (calls), PC samples taken in sh.walk / failed.
 	CpThreadCpuNs, CpThreadWallNs, CpWalkCpuNs, CpWalkWallNs,
 	WalkN, WalkReadN, WalkReadBytes, WalkPagesN, WalkInterpCallN, WalkJitSlotCallN, WalkJitTreeCallN, CpPcSampleN, CpPcFailN,
+	// S440 (KYTY_WF_HOT_UNPROTECT=1|shadow), tracker pages: hot now (gauge) / became hot / left the hot state; page hashes taken and their time; dirty hot
+	// pages whose hash was unchanged (no upload; shadow: would be skipped) / changed (uploaded); shadow: clean hot pages whose hash differs from their last
+	// upload (a write the tracker never saw, must be 0); pages that changed between the last hash and the return of the protection (uploaded after all).
+	WfHotPagesN, WfHotPromoteN, WfHotDemoteN, WfHotHashN, WfHotHashNs, WfHotSkipN, WfHotChangedN, WfHotNeN, WfHotRaceN,
 	Count,
 };
 
