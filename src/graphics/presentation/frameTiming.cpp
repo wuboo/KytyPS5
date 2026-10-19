@@ -469,6 +469,7 @@ constexpr const char* kCounterNames[] = {
     "prewarm_manifest_n",
     "prewarm_ne_n",
     "prewarm_build_ns",
+    "prewarm_ready_peak",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

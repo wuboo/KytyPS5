@@ -209,6 +209,32 @@ void TestEveryKeyBuiltOnce() {
 	Check(missing == 0, "no key is left unbuilt");
 }
 
+// The worker stops while max_ready results wait to be taken, and goes on when CP takes one.
+void TestReadyCap() {
+	Mailbox<int>     box(1, 30000ms, {}, 2);
+	std::atomic<int> ran {0};
+	for (int i = 0; i < 5; i++) {
+		box.Submit(K(500 + i), [&, i]() -> std::optional<int> {
+			ran++;
+			return i;
+		});
+	}
+	for (int i = 0; i < 100 && ran.load() < 2; i++) std::this_thread::sleep_for(10ms);
+	std::this_thread::sleep_for(150ms); // time for a worker that ignores the limit to run the rest
+	Check(ran.load() == 2, "only max_ready jobs run while nobody takes a result");
+	Check(box.Stats().ready == 2 && box.Stats().ready_peak == 2, "ready counters");
+	auto claimed = box.Claim(K(500));
+	Check(claimed.payload && *claimed.payload == 0, "CP takes the first result");
+	for (int i = 0; i < 100 && ran.load() < 3; i++) std::this_thread::sleep_for(10ms);
+	std::this_thread::sleep_for(100ms);
+	Check(ran.load() == 3, "taking a result lets the worker run one more job");
+	Check(box.Stats().ready == 2, "ready is back at the limit");
+	// the rest: CP claims the queued ones (cancelled), nothing is built twice
+	for (int i = 1; i < 5; i++) (void)box.Claim(K(500 + i));
+	box.Drain();
+	Check(ran.load() == 3 && box.Stats().ready_peak == 2, "the limit held for the whole run");
+}
+
 // ---- manifest ----------------------------------------------------------------------------------------------------------------------------
 
 ManifestEntry Entry(uint32_t seed) {
@@ -374,6 +400,7 @@ int main(int argc, char** argv) {
 		TestCancelsQueued();
 		TestWaitIsBounded();
 		TestFailedWork();
+		TestReadyCap();
 		TestEveryKeyBuiltOnce();
 		TestManifest();
 		TestManifestBuilder();
