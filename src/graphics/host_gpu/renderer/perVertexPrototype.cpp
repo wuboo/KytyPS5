@@ -12,6 +12,7 @@
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "kytyGitVersion.h"
+#include "graphics/shader/permutationRecord.h"
 #include "per_vertex_unpack_spv.h"
 
 #include <algorithm>
@@ -372,6 +373,25 @@ void RememberPerVertexPrototypeShader(const ShaderProgram&                    pr
 			FrameTiming::Add(FrameTiming::Counter::PvValidateSkippedN);
 		}
 	}
+}
+
+bool ExportPerVertexPrototypeVariant(uint64_t program_id, ProgramDisk::PvOriginalRecord* record) {
+	const auto it = originals.find(program_id);
+	if (it == originals.end()) return false;
+	record->stage         = static_cast<uint32_t>(it->second.stage);
+	record->per_vertex    = it->second.per_vertex;
+	record->capture_words = it->second.capture_words;
+	return true;
+}
+
+void ImportPerVertexPrototypeVariant(uint64_t program_id, const ProgramDisk::PvOriginalRecord& record, std::span<const uint32_t> spirv) {
+#ifdef KYTY_PROGDISK_MUTANT_PV_IMPORT_DROPS_CAPTURE
+	const std::vector<uint32_t> capture_words;
+#else
+	const auto& capture_words = record.capture_words;
+#endif
+	originals.emplace(program_id, Original {static_cast<ShaderType>(record.stage), record.per_vertex,
+	                                        std::vector<uint32_t>(spirv.begin(), spirv.end()), capture_words});
 }
 
 const PerVertexUnpackPipeline* GetPerVertexUnpackPipeline(GraphicContext&   graphics,

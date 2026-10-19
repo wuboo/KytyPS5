@@ -22,6 +22,9 @@ namespace Spirv {
 struct VertexCaptureInfo;
 } // namespace Spirv
 } // namespace ShaderRecompiler
+namespace ProgramDisk {
+struct PvOriginalRecord;
+} // namespace ProgramDisk
 bool PerVertexPrototypeEnabled();
 // S134: KYTY_PV_UNIQUE=1 (value "1" only) captures once per unique vertex; default OFF.
 // S432 KYTY_PV_LAYOUT_FAST=0|1|shadow (default 0).
@@ -73,6 +76,11 @@ void RememberPerVertexPrototypeShader(const ShaderProgram&                    pr
                                       uint32_t                                host_subgroup_size,
                                       uint32_t                                push_data_start_dword,
                                       bool                                    maintenance8_enabled);
+
+// S434 (KYTY_PROGRAM_DISK_CACHE): what RememberPerVertexPrototypeShader left for `program_id` as data (false: it left nothing), and the same
+// effect created for a program that came from a file: `spirv` are the words of the program itself.
+bool ExportPerVertexPrototypeVariant(uint64_t program_id, ProgramDisk::PvOriginalRecord* record);
+void ImportPerVertexPrototypeVariant(uint64_t program_id, const ProgramDisk::PvOriginalRecord& record, std::span<const uint32_t> spirv);
 
 // What the prototype path does with a draw whose pixel shader needs PerVertexKHR (the host cannot
 // run those natively, so the draw either goes through the prototype or is skipped, never exits).

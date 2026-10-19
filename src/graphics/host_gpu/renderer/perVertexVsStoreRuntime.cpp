@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/perVertexPrototype.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/shader/permutationRecord.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 
@@ -148,6 +149,29 @@ void RememberPerVertexVariants(const ShaderProgram& program, ShaderRecompiler::C
 	EXIT_IF(check && !PvVariantPushMatches(emitted_bindings, result.program.bindings));
 	EXIT_IF(result.program.bindings.descriptor_mask != emitted_bindings.descriptor_mask);
 	result.program.bindings = emitted_bindings;
+}
+
+ProgramDisk::PvRecord ExportPerVertexVariants(uint64_t program_id) {
+	ProgramDisk::PvRecord record;
+	ProgramDisk::PvOriginalRecord original;
+	if (ExportPerVertexPrototypeVariant(program_id, &original)) record.original = std::move(original);
+	if (const auto it = s_shaders.find(program_id); it != s_shaders.end()) {
+		const auto& shader = it->second;
+		record.store       = ProgramDisk::PvStoreRecord {static_cast<uint32_t>(shader.stage), shader.words, shader.mask, shader.corners, shader.hash,
+		                                                 shader.compact_spec_id};
+	}
+	return record;
+}
+
+void ImportPerVertexVariants(uint64_t program_id, const ProgramDisk::PvRecord& record, std::span<const uint32_t> spirv) {
+	if (record.original) ImportPerVertexPrototypeVariant(program_id, *record.original, spirv);
+#ifndef KYTY_PROGDISK_MUTANT_PV_IMPORT_DROPS_STORE
+	if (record.store) {
+		const auto& stored = *record.store;
+		s_shaders.emplace(program_id, StoreShader {static_cast<ShaderType>(stored.stage), stored.words, stored.mask, stored.corners, stored.hash,
+		                                           stored.compact_spec_id});
+	}
+#endif
 }
 
 vk::DescriptorSetLayout PvVsStoreSetLayout(GraphicContext& graphics) {

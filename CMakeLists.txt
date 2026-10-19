@@ -443,6 +443,17 @@ target_compile_definitions(shader_cfg_pv_vsstore_mutant_stride_dword_tests PRIVA
 # S390: NGG vertex count in s3 (KYTY_NGG_VCOUNT); the mutant forces the "active" count, TestNggVertexCount must catch it (WILL_FAIL).
 add_kyty_full_emulator_test(shader_cfg_ngg_mutant_active_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
 target_compile_definitions(shader_cfg_ngg_mutant_active_tests PRIVATE KYTY_NGG_MUTANT_ACTIVE=1)
+# S434 (S443): KYTY_PROGRAM_DISK_CACHE with the real recompiler (a compute shader through record and file) and the import / export of the per-vertex records.
+# The mutants rebuild the whole emulator with one define; they must fail (WILL_FAIL): PV_IMPORT_DROPS_STORE, PV_IMPORT_DROPS_CAPTURE.
+foreach(mutant IN ITEMS "" PV_IMPORT_DROPS_STORE PV_IMPORT_DROPS_CAPTURE)
+	if(mutant STREQUAL "")
+		add_kyty_full_emulator_test(program_disk_pv_tests "${KYTY_TESTS_DIR}/ProgramDiskPvTests.cpp")
+	else()
+		string(TOLOWER ${mutant} mutant_lower)
+		add_kyty_full_emulator_test(program_disk_pv_mutant_${mutant_lower}_tests "${KYTY_TESTS_DIR}/ProgramDiskPvTests.cpp")
+		target_compile_definitions(program_disk_pv_mutant_${mutant_lower}_tests PRIVATE KYTY_PROGDISK_MUTANT_${mutant}=1)
+	endif()
+endforeach()
 # S384: the capture / VS-store re-emissions take the regular program's push start (WILL_FAIL mutants: start 0 again; start/size check accepts anything).
 add_kyty_full_emulator_test(shader_cfg_pvpush_mutant_zero_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
 target_compile_definitions(shader_cfg_pvpush_mutant_zero_tests PRIVATE KYTY_PVPUSH_MUTANT_ZERO=1)
@@ -1398,6 +1409,12 @@ if(BUILD_TESTING)
 	# Apple vertex shaders derive the guest lane from gl_VertexIndex by default; tests that check lane selection need the builtin.
 	set_tests_properties(shader_cfg PROPERTIES ENVIRONMENT "KYTY_VS_LANE_FROM_INDEX=0")
 	# The mutant aborts (Check -> abort), which ctest counts as a crash even with WILL_FAIL: require its failure message instead.
+	add_test(NAME program_disk_pv COMMAND $<TARGET_FILE:program_disk_pv_tests>)
+	set_tests_properties(program_disk_pv PROPERTIES TIMEOUT 120)
+	foreach(mutant IN ITEMS pv_import_drops_store pv_import_drops_capture)
+		add_test(NAME program_disk_pv_mutant_${mutant} COMMAND $<TARGET_FILE:program_disk_pv_mutant_${mutant}_tests>)
+		set_tests_properties(program_disk_pv_mutant_${mutant} PROPERTIES TIMEOUT 120 WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME shader_cfg_pv_vsstore_mutant_first_third
 	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_pv_vsstore_mutant_first_third_tests> 2>&1 | grep -q 'first/third swapped'")
 	add_test(NAME shader_cfg_pv_vsstore_mutant_stride_dword
@@ -1743,6 +1760,9 @@ if(BUILD_TESTING)
 		shader_cfg_pv_vsstore_mutant_compact_slot_location_tests
 		shader_cfg_pv_vsstore_mutant_compact_no_branch_tests
 		shader_cfg_ngg_mutant_active_tests
+		program_disk_pv_tests
+		program_disk_pv_mutant_pv_import_drops_store_tests
+		program_disk_pv_mutant_pv_import_drops_capture_tests
 		scalar_provenance_tests
 		image_page_table_tests
 		memory_tracker_tests
@@ -2343,6 +2363,36 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 				set_tests_properties(${progdisk_test} PROPERTIES WILL_FAIL TRUE)
 			endif()
 			add_dependencies(kyty_tests ${progdisk_target})
+		endif()
+	endforeach()
+	# S434 (S443): the permutation record of KYTY_PROGRAM_DISK_CACHE (src/graphics/shader/permutationRecord.cpp). Mutants (WILL_FAIL): IGNORE_SPEC_COMPARE,
+	# IGNORE_PUSH_START, DROP_PV_RECORD, STALE_BINDINGS, DROP_INFO_VECTORS, SKIP_REQUEST_CHECK.
+	foreach(mutant IN ITEMS "" IGNORE_SPEC_COMPARE IGNORE_PUSH_START DROP_PV_RECORD STALE_BINDINGS DROP_INFO_VECTORS SKIP_REQUEST_CHECK)
+		if(mutant STREQUAL "")
+			set(permrec_target permutation_record_tests)
+			set(permrec_test permutation_record)
+		else()
+			string(TOLOWER ${mutant} mutant_lower)
+			set(permrec_target permutation_record_mutant_${mutant_lower}_tests)
+			set(permrec_test permutation_record_mutant_${mutant_lower})
+		endif()
+		add_executable(${permrec_target} EXCLUDE_FROM_ALL
+			"${KYTY_TESTS_DIR}/PermutationRecordTests.cpp"
+			"${KYTY_SOURCE_DIR}/graphics/shader/permutationRecord.cpp"
+			"${KYTY_SOURCE_DIR}/graphics/shader/programDiskCache.cpp"
+		)
+		target_link_libraries(${permrec_target} common fmt::fmt xxhash)
+		target_include_directories(${permrec_target} PRIVATE ${inc_headers})
+		if(NOT mutant STREQUAL "")
+			target_compile_definitions(${permrec_target} PRIVATE KYTY_PERMREC_MUTANT_${mutant}=1)
+		endif()
+		if(BUILD_TESTING)
+			add_test(NAME ${permrec_test} COMMAND $<TARGET_FILE:${permrec_target}>)
+			set_tests_properties(${permrec_test} PROPERTIES TIMEOUT 60)
+			if(NOT mutant STREQUAL "")
+				set_tests_properties(${permrec_test} PROPERTIES WILL_FAIL TRUE)
+			endif()
+			add_dependencies(kyty_tests ${permrec_target})
 		endif()
 	endforeach()
 	# S434 (S442): every known KYTY_* name is classified as codegen or not. Mutant (WILL_FAIL): UNCLASSIFIED (a known name in neither list).

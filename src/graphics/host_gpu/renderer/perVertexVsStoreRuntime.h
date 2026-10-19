@@ -11,9 +11,13 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace Libs::Graphics {
+namespace ProgramDisk {
+struct PvRecord;
+} // namespace ProgramDisk
 class CommandScheduler;
 struct GraphicContext;
 namespace ShaderRecompiler {
@@ -48,6 +52,11 @@ std::vector<uint32_t> EmitPvVsStoreVariant(ShaderRecompiler::IR::Program&       
 void RememberPerVertexVariants(const ShaderProgram& program, ShaderRecompiler::CompileResult& result,
                                const ShaderRecompiler::CompileOptions& options, uint32_t host_subgroup_size,
                                uint32_t push_data_start_dword);
+
+// S434 (KYTY_PROGRAM_DISK_CACHE): the per-vertex effects (prototype and VS-store) the compile of `program_id` left behind, as data; and the same
+// effects created for a program that came from a file (`spirv` are the words of the program itself).
+ProgramDisk::PvRecord ExportPerVertexVariants(uint64_t program_id);
+void                  ImportPerVertexVariants(uint64_t program_id, const ProgramDisk::PvRecord& record, std::span<const uint32_t> spirv);
 
 struct PvVsStorePrograms {
 	PvVsStoreInterfaceVerdict       verdict     = PvVsStoreInterfaceVerdict::NoPerVertex;

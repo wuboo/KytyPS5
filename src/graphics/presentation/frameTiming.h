@@ -319,6 +319,11 @@ enum class Counter : uint32_t {
 	ShaderPrepareNs, ShaderTranslateNs, ShaderResourcePlanNs, ShaderMaterializeFirstNs,
 	ShaderCompilePermNs, ShaderEmitSpirvNs, ShaderValidateNs, ShaderModuleNs, ShaderPvVariantsNs,
 	ShaderLeadB0, ShaderLeadB1, ShaderLeadB2, ShaderLeadB3, ShaderLeadB4, ShaderLeadB5, ShaderLeadB6, ShaderLeadB7,
+	// S434 (KYTY_PROGRAM_DISK_CACHE): permutations answered from a file (hit; with 1 the compile is skipped) / looked up and not found (miss) /
+	// files written (the writer thread), bytes of them, writes that failed / verify: stored file equal to the fresh compile, different (must be 0),
+	// files refused (damaged, other key, does not answer the request) / lookups skipped because the program has a call source / time of the lookups.
+	ProgDiskHitN, ProgDiskMissN, ProgDiskWriteN, ProgDiskBytes, ProgDiskWriteFailN, ProgDiskEqN, ProgDiskNeN, ProgDiskRejectN, ProgDiskSkipCallN,
+	ProgDiskLoadNs,
 	Count,
 };
 

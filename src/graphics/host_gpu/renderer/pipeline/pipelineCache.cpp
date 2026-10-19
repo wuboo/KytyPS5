@@ -34,6 +34,8 @@
 #include "graphics/shader/recompiler/srtReader.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "graphics/shader/shaderCost.h"
+#include "graphics/shader/permutationRecord.h"
+#include "kytyGitVersion.h"
 #include "kernel/memory.h"
 #include "loader/systemContent.h"
 
@@ -44,6 +46,10 @@
 #include <chrono>
 #include <cstdio>
 #include <cstring>
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#endif
+#include <filesystem>
 #include <fmt/format.h>
 #include <limits>
 #include <mutex>
@@ -795,7 +801,8 @@ struct PipelineCache::ProgramCache {
 	                               ShaderRecompiler::TranslateResult            translated,
 	                               ShaderRecompiler::IR::ResourceSpecialization specialization,
 	                               uint32_t push_data_start_dword,
-	                               std::span<const uint32_t> function_code) {
+	                               std::span<const uint32_t> function_code,
+	                               std::vector<uint32_t>* keep_spirv = nullptr) {
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::ShadersCompiled,
 		                                         Common::DebugCounters::Counter::ShaderCompileNs,
 		                                         Common::DebugCounters::Peak::ShaderCompileNs);
@@ -813,6 +820,7 @@ struct PipelineCache::ProgramCache {
 			     options.shader_hash);
 		}
 		DumpShaderSpirv(stage_name, options.shader_hash, result.spirv);
+		if (keep_spirv != nullptr) *keep_spirv = result.spirv; // S434: the words go into the file of KYTY_PROGRAM_DISK_CACHE
 
 		stage_timer.emplace(FrameTiming::Counter::ShaderModuleNs);
 		const auto module = CompileSPV(result.spirv, graphics.device);
@@ -836,6 +844,160 @@ struct PipelineCache::ProgramCache {
 		};
 	}
 
+	// S434 KYTY_PROGRAM_DISK_CACHE (programDiskCache.h, permutationRecord.h). Off: nothing below runs.
+	struct DiskCache {
+		bool                                      initialized = false;
+		ProgramDisk::Mode                         mode        = ProgramDisk::Mode::Off;
+		ProgramDisk::Key                          fingerprint;
+		std::filesystem::path                     dir;
+		std::unique_ptr<ProgramDisk::AsyncWriter> writer;
+		uint64_t                                  reported_written = 0;
+		uint64_t                                  reported_failed  = 0;
+		uint64_t                                  reported_bytes   = 0;
+		uint32_t                                  ne_lines         = 0;
+	} disk;
+
+	void InitDisk() {
+		if (disk.initialized) return;
+		disk.initialized = true;
+		const auto mode  = ProgramDisk::EnvMode();
+		if (mode == ProgramDisk::Mode::Off) return;
+#ifndef KYTY_RECOMPILER_SIGNATURE
+#define KYTY_RECOMPILER_SIGNATURE "unknown"
+#endif
+#if defined(__APPLE__)
+		const char* const* environment = *_NSGetEnviron();
+#else
+		const char* const* environment = nullptr;
+#endif
+		ProgramDisk::FingerprintInputs inputs;
+		inputs.recompiler_signature          = KYTY_RECOMPILER_SIGNATURE;
+		inputs.environment                   = environment;
+		const auto& properties               = graphics.physical_device_properties;
+		inputs.device.vendor_id              = properties.vendorID;
+		inputs.device.device_id              = properties.deviceID;
+		inputs.device.driver_version         = properties.driverVersion;
+		std::memcpy(inputs.device.cache_uuid, properties.pipelineCacheUUID, sizeof(inputs.device.cache_uuid));
+		inputs.device.subgroup_size          = graphics.subgroup_size;
+		inputs.device.maintenance8           = graphics.maintenance8_enabled;
+		inputs.device.mesh_shader            = graphics.mesh_shader_enabled;
+		inputs.config.shader_optimization_type = static_cast<int>(Config::GetShaderOptimizationType());
+		inputs.config.debug_dump             = Config::GraphicsDebugDumpEnabled();
+		inputs.config.shader_log             = Config::GetShaderLogDirection() != Config::LogDirection::Silent;
+		const auto fingerprint               = ProgramDisk::MakeFingerprint(inputs);
+		if (!fingerprint.enabled) {
+			LOGF("[progdisk] off: %s\n", fingerprint.reason.c_str());
+			return;
+		}
+		if (std::string_view(KYTY_RECOMPILER_SIGNATURE) == "unknown") {
+			LOGF("[progdisk] off: the build has no recompiler signature\n");
+			return;
+		}
+		auto title_id = PipelineCacheTitleId();
+		if (title_id.empty()) title_id = "default";
+		disk.fingerprint = fingerprint.key;
+		disk.dir         = std::filesystem::path("_ShaderCache") / title_id;
+		disk.writer      = std::make_unique<ProgramDisk::AsyncWriter>();
+		disk.mode        = mode;
+		const auto dir_text = Common::PathToString(disk.dir);
+		LOGF("[progdisk] mode=%s dir=%s %s\n", mode == ProgramDisk::Mode::Verify ? "verify" : "on", dir_text.c_str(), fingerprint.description.c_str());
+	}
+
+	// The writer runs on its own thread: its totals reach the per-flip columns as the difference since the last look.
+	void ReportDiskWriter() {
+		if (!disk.writer) return;
+		const auto written = disk.writer->Written();
+		const auto failed  = disk.writer->Failed() + disk.writer->Dropped();
+		const auto bytes   = disk.writer->Bytes();
+		if (written != disk.reported_written) FrameTiming::Add(FrameTiming::Counter::ProgDiskWriteN, written - disk.reported_written);
+		if (failed != disk.reported_failed) FrameTiming::Add(FrameTiming::Counter::ProgDiskWriteFailN, failed - disk.reported_failed);
+		if (bytes != disk.reported_bytes) FrameTiming::Add(FrameTiming::Counter::ProgDiskBytes, bytes - disk.reported_bytes);
+		disk.reported_written = written;
+		disk.reported_failed  = failed;
+		disk.reported_bytes   = bytes;
+	}
+
+	ProgramDisk::Request DiskRequest(const ShaderParams& params, const ShaderRecompiler::CompileOptions& options,
+	                                 const ShaderRecompiler::IR::ResourceSpecialization& specialization, uint32_t push_data_start_dword) const {
+		ProgramDisk::ProgramIdentity identity;
+		identity.stage           = static_cast<uint32_t>(lookup_key.stage);
+		identity.params_hash     = params.hash;
+		identity.user_data_count = params.user_data_count;
+		identity.code_size       = static_cast<uint32_t>(params.code.size());
+		identity.static_state    = lookup_key.static_state;
+		identity.user_data_base  = options.user_data_base;
+		identity.wave_size       = options.wave_size;
+		identity.code            = params.code;
+		identity.back_code       = params.back_code;
+		return ProgramDisk::MakeRequest(disk.dir, disk.fingerprint, identity, specialization, push_data_start_dword);
+	}
+
+	// mode 1: the permutation answered from its file, or nullptr (no file, refused). verify never adopts (it compiles and compares afterwards).
+	Permutation* DiskAdopt(SourceEntry& source, const ProgramDisk::Request& request, uint32_t push_data_start_dword) {
+		if (disk.mode != ProgramDisk::Mode::On) return nullptr;
+		ProgramDisk::PermutationRecord record;
+		ProgramDisk::Found             found;
+		{
+			FrameTiming::ScopedCounterNs load_timer(FrameTiming::Counter::ProgDiskLoadNs);
+			found = ProgramDisk::Find(request, source.specialization, push_data_start_dword, &record);
+		}
+		if (found != ProgramDisk::Found::Hit) {
+			if (found == ProgramDisk::Found::Rejected) FrameTiming::Add(FrameTiming::Counter::ProgDiskRejectN);
+			FrameTiming::Add(FrameTiming::Counter::ProgDiskMissN);
+			return nullptr;
+		}
+		vk::ShaderModule module;
+		{
+			FrameTiming::ScopedCounterNs module_timer(FrameTiming::Counter::ShaderModuleNs);
+			module = CompileSPV(record.spirv, graphics.device);
+		}
+		EXIT_IF(module == nullptr);
+		const ShaderProgram handle {.id = ++next_shader_id, .module = module};
+		ImportPerVertexVariants(handle.id, record.pv, record.spirv);
+		source.permutations.push_back({
+		    .function_code  = {},
+		    .specialization = source.specialization,
+		    .program        = std::move(record.info),
+		    .handle         = handle,
+		});
+		FrameTiming::Add(FrameTiming::Counter::ProgDiskHitN);
+		return &source.permutations.back();
+	}
+
+	// After a real compile: mode 1 writes the file (the writer thread), verify compares the stored file with the fresh result and writes it when absent.
+	void DiskAfterCompile(const ProgramDisk::Request& request, const Permutation& permutation, std::vector<uint32_t> spirv, uint32_t push_data_start_dword) {
+		ProgramDisk::PermutationRecord record;
+		record.specialization        = permutation.specialization;
+		record.push_data_start_dword = push_data_start_dword;
+		record.spirv                 = std::move(spirv);
+		record.info                  = permutation.program;
+		record.pv                    = ExportPerVertexVariants(permutation.handle.id);
+		bool write = true;
+		if (disk.mode == ProgramDisk::Mode::Verify) {
+			std::string difference;
+			switch (ProgramDisk::VerifyAgainst(request, record, &difference)) {
+				case ProgramDisk::Verdict::Equal:
+					FrameTiming::Add(FrameTiming::Counter::ProgDiskEqN);
+					write = false;
+					break;
+				case ProgramDisk::Verdict::NotEqual:
+					FrameTiming::Add(FrameTiming::Counter::ProgDiskNeN);
+					if (disk.ne_lines++ < 20) {
+						LOGF("[progdisk] verify ne #%u stage=%u shader=0x%016" PRIx64 " program=%s permutation=%s: %s\n", disk.ne_lines, static_cast<uint32_t>(lookup_key.stage),
+						     record.info.shader_hash, request.program.Hex().c_str(), request.permutation.Hex().c_str(), difference.c_str());
+					}
+					write = false; // the stored file stays for the diagnosis
+					break;
+				case ProgramDisk::Verdict::Rejected: FrameTiming::Add(FrameTiming::Counter::ProgDiskRejectN); break;
+				case ProgramDisk::Verdict::NoFile: break;
+			}
+		}
+		if (write && !disk.writer->Enqueue(request.path, ProgramDisk::MakeFileBytes(request, record))) {
+			FrameTiming::Add(FrameTiming::Counter::ProgDiskWriteFailN);
+		}
+		ReportDiskWriter();
+	}
+
 	template <typename InputInfo>
 	ShaderProgram Get(const ShaderParams& params, InputInfo& input_info,
 	                  uint32_t& push_data_cursor) {
@@ -849,6 +1011,7 @@ struct PipelineCache::ProgramCache {
 			stage = ShaderType::Compute;
 		}
 
+		InitDisk();
 		const auto user_data = std::span(params.user_data).first(params.user_data_count);
 		lookup_key.stage           = stage;
 		lookup_key.hash            = params.hash;
@@ -954,6 +1117,22 @@ struct PipelineCache::ProgramCache {
 			options.wave_size = input_info.wave_size;
 		}
 		DumpShaderOriginal(stage_name, options.shader_hash, params.code);
+		// S434: the permutation of a known program may be in a file; nothing is translated then.
+		std::optional<ProgramDisk::Request> disk_request;
+		if (disk.mode != ProgramDisk::Mode::Off && entry != programs.end()) {
+			if (entry->second.call_source) {
+				FrameTiming::Add(FrameTiming::Counter::ProgDiskSkipCallN);
+			} else {
+				disk_request = DiskRequest(params, options, entry->second.specialization, push_data_cursor);
+				if (auto* adopted = DiskAdopt(entry->second, *disk_request, push_data_cursor)) {
+					const auto miss = ShaderCost::ClassifyLookup(true, false, false); // still a lookup that found no cached permutation
+					FrameTiming::Add(FrameTiming::Counter::ShaderPermMissN, miss.perm_miss);
+					input_info.stage = {.program = &adopted->program, .resources = &entry->second.resources};
+					adopted->program.bindings.AdvancePushData(push_data_cursor);
+					return adopted->handle;
+				}
+			}
+		}
 		ShaderRecompiler::ShaderSource source;
 		if (entry == programs.end()) {
 			FrameTiming::ScopedCounterNs prepare_timer(FrameTiming::Counter::ShaderPrepareNs);
@@ -1004,6 +1183,18 @@ struct PipelineCache::ProgramCache {
 				    entry->second.specialization));
 			}
 			NoteSrtMemo(entry->second.resources, read_context, params.hash, stage);
+			if (disk.mode != ProgramDisk::Mode::Off) {
+				if (entry->second.call_source) {
+					FrameTiming::Add(FrameTiming::Counter::ProgDiskSkipCallN);
+				} else {
+					disk_request = DiskRequest(params, options, entry->second.specialization, push_data_cursor);
+					if (auto* adopted = DiskAdopt(entry->second, *disk_request, push_data_cursor)) {
+						input_info.stage = {.program = &adopted->program, .resources = &entry->second.resources};
+						adopted->program.bindings.AdvancePushData(push_data_cursor);
+						return adopted->handle; // the translated program is dropped: no emit, validate, module or per-vertex variants
+					}
+				}
+			}
 		} else if (source_changed) {
 			entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
 			entry->second.m_matmemo_mask_valid = false;
@@ -1013,10 +1204,13 @@ struct PipelineCache::ProgramCache {
 				return permutation->handle;
 			}
 		}
+		const uint32_t        push_start = push_data_cursor;
+		std::vector<uint32_t> disk_spirv;
 		entry->second.permutations.push_back(CompilePermutation(
 		    stage_name, options, std::move(translated), entry->second.specialization, push_data_cursor,
-		    entry->second.FunctionCode()));
+		    entry->second.FunctionCode(), disk_request ? &disk_spirv : nullptr));
 		const auto& permutation = entry->second.permutations.back();
+		if (disk_request) DiskAfterCompile(*disk_request, permutation, std::move(disk_spirv), push_start);
 		input_info.stage = {.program = &permutation.program, .resources = &entry->second.resources};
 		permutation.program.bindings.AdvancePushData(push_data_cursor);
 

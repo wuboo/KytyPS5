@@ -446,6 +446,16 @@ constexpr const char* kCounterNames[] = {
     "shader_lead_lt250ms",
     "shader_lead_lt1000ms",
     "shader_lead_ge1000ms",
+    "prog_disk_hit_n",
+    "prog_disk_miss_n",
+    "prog_disk_write_n",
+    "prog_disk_bytes",
+    "prog_disk_write_fail_n",
+    "prog_disk_eq_n",
+    "prog_disk_ne_n",
+    "prog_disk_reject_n",
+    "prog_disk_skip_call_n",
+    "prog_disk_load_ns",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
