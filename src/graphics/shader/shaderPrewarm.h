@@ -17,10 +17,11 @@
 //   Mapped hook       ShaderMapUserData -> OnMapped(); the codes that are seen before the hook is installed are kept and replayed.
 //
 // Mutants (tests/ShaderPrewarmTests.cpp, KYTY_PREWARM_MUTANT_*): DOUBLE_COMPILE, NO_WAIT_ON_BUILDING, FORGET_TAKEN, WAIT_UNBOUNDED,
-// MANIFEST_ACCEPTS_CORRUPT, SHADOW_IGNORES_DIFF.
+// MANIFEST_ACCEPTS_CORRUPT, SHADOW_IGNORES_DIFF, NO_READY_CAP.
 
 #include "graphics/shader/programDiskCache.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -59,13 +60,17 @@ struct MailboxStats {
 	uint64_t cancelled = 0; // CP claimed a Queued key: it builds itself
 	uint64_t timeout   = 0; // CP gave up waiting for a Building key (the key may be built twice)
 	uint64_t dedup     = 0; // Submit refused: the key is already known
+	uint32_t ready      = 0; // finished results nobody has taken yet (they hold the translation of a whole program)
+	uint32_t ready_peak = 0;
 };
 
 template <typename Payload>
 class Mailbox {
 public:
-	explicit Mailbox(unsigned workers = 1, std::chrono::milliseconds max_wait = std::chrono::milliseconds(30000), std::function<void()> worker_setup = {})
-	    : m_max_wait(max_wait), m_setup(std::move(worker_setup)) {
+	// max_ready: the workers stop taking jobs while that many finished results wait to be taken (memory); 0 = no limit.
+	explicit Mailbox(unsigned workers = 1, std::chrono::milliseconds max_wait = std::chrono::milliseconds(30000), std::function<void()> worker_setup = {},
+	                 uint32_t max_ready = 0)
+	    : m_max_wait(max_wait), m_setup(std::move(worker_setup)), m_max_ready(max_ready) {
 		for (unsigned i = 0; i < workers; i++) m_threads.emplace_back([this] { Run(); });
 	}
 	~Mailbox() {
@@ -173,6 +178,8 @@ public:
 		stats.cancelled = m_cancelled;
 		stats.timeout   = m_timeout;
 		stats.dedup     = m_dedup;
+		stats.ready      = m_ready;
+		stats.ready_peak = m_ready_peak;
 		return stats;
 	}
 	[[nodiscard]] std::vector<std::thread::id> WorkerIds() const {
@@ -190,6 +197,8 @@ private:
 	};
 
 	void MarkTaken(typename std::unordered_map<ProgramDisk::Key, Slot, KeyHash>::iterator found) {
+		m_ready--;
+		m_wake.notify_all(); // a worker held back by the limit may go on
 #ifdef KYTY_PREWARM_MUTANT_FORGET_TAKEN
 		m_slots.erase(found); // the key is unknown again: a later Submit builds it a second time
 #else
@@ -205,7 +214,11 @@ private:
 			Work             work;
 			{
 				std::unique_lock lock(m_mutex);
+#ifdef KYTY_PREWARM_MUTANT_NO_READY_CAP
 				m_wake.wait(lock, [&] { return m_stop || !m_queue.empty(); });
+#else
+				m_wake.wait(lock, [&] { return m_stop || (!m_queue.empty() && (m_max_ready == 0 || m_ready < m_max_ready)); });
+#endif
 				if (m_stop) return;
 				key = m_queue.front();
 				m_queue.pop_front();
@@ -231,6 +244,8 @@ private:
 				} else if (payload) {
 					slot.payload = std::move(payload);
 					slot.state   = State::Done;
+					m_ready++;
+					m_ready_peak = std::max(m_ready_peak, m_ready);
 				} else {
 					slot.state = State::Failed;
 				}
@@ -247,6 +262,8 @@ private:
 	std::vector<std::thread>                                  m_threads;
 	std::chrono::milliseconds                                 m_max_wait;
 	std::function<void()>                                     m_setup;
+	uint32_t                                                  m_max_ready = 0;
+	uint32_t                                                  m_ready = 0, m_ready_peak = 0;
 	bool                                                      m_stop = false;
 	uint32_t                                                  m_building = 0;
 	uint64_t                                                  m_queued = 0, m_finished = 0, m_failed = 0, m_hit = 0, m_waited = 0, m_wait_ns = 0;

@@ -454,6 +454,17 @@ foreach(mutant IN ITEMS "" PV_IMPORT_DROPS_STORE PV_IMPORT_DROPS_CAPTURE)
 		target_compile_definitions(program_disk_pv_mutant_${mutant_lower}_tests PRIVATE KYTY_PROGDISK_MUTANT_${mutant}=1)
 	endif()
 endforeach()
+# S435 (S446): the worker's translation (PrewarmBuild, from the manifest bytes) against the command processor's own, with the real recompiler. Mutant (WILL_FAIL):
+# BUILD_DROPS_INFO (the worker translates with a default input info).
+foreach(mutant IN ITEMS "" BUILD_DROPS_INFO)
+	if(mutant STREQUAL "")
+		add_kyty_full_emulator_test(shader_prewarm_build_tests "${KYTY_TESTS_DIR}/ShaderPrewarmBuildTests.cpp")
+	else()
+		string(TOLOWER ${mutant} mutant_lower)
+		add_kyty_full_emulator_test(shader_prewarm_build_mutant_${mutant_lower}_tests "${KYTY_TESTS_DIR}/ShaderPrewarmBuildTests.cpp")
+		target_compile_definitions(shader_prewarm_build_mutant_${mutant_lower}_tests PRIVATE KYTY_PREWARM_MUTANT_${mutant}=1)
+	endif()
+endforeach()
 # S384: the capture / VS-store re-emissions take the regular program's push start (WILL_FAIL mutants: start 0 again; start/size check accepts anything).
 add_kyty_full_emulator_test(shader_cfg_pvpush_mutant_zero_tests "${KYTY_TESTS_DIR}/shaderCfgTests.cpp")
 target_compile_definitions(shader_cfg_pvpush_mutant_zero_tests PRIVATE KYTY_PVPUSH_MUTANT_ZERO=1)
@@ -1411,6 +1422,10 @@ if(BUILD_TESTING)
 	# The mutant aborts (Check -> abort), which ctest counts as a crash even with WILL_FAIL: require its failure message instead.
 	add_test(NAME program_disk_pv COMMAND $<TARGET_FILE:program_disk_pv_tests>)
 	set_tests_properties(program_disk_pv PROPERTIES TIMEOUT 120)
+	add_test(NAME shader_prewarm_build COMMAND $<TARGET_FILE:shader_prewarm_build_tests>)
+	set_tests_properties(shader_prewarm_build PROPERTIES TIMEOUT 120)
+	add_test(NAME shader_prewarm_build_mutant_build_drops_info COMMAND $<TARGET_FILE:shader_prewarm_build_mutant_build_drops_info_tests>)
+	set_tests_properties(shader_prewarm_build_mutant_build_drops_info PROPERTIES TIMEOUT 120 WILL_FAIL TRUE)
 	foreach(mutant IN ITEMS pv_import_drops_store pv_import_drops_capture)
 		add_test(NAME program_disk_pv_mutant_${mutant} COMMAND $<TARGET_FILE:program_disk_pv_mutant_${mutant}_tests>)
 		set_tests_properties(program_disk_pv_mutant_${mutant} PROPERTIES TIMEOUT 120 WILL_FAIL TRUE)
@@ -1763,6 +1778,8 @@ if(BUILD_TESTING)
 		program_disk_pv_tests
 		program_disk_pv_mutant_pv_import_drops_store_tests
 		program_disk_pv_mutant_pv_import_drops_capture_tests
+		shader_prewarm_build_tests
+		shader_prewarm_build_mutant_build_drops_info_tests
 		scalar_provenance_tests
 		image_page_table_tests
 		memory_tracker_tests
@@ -2396,8 +2413,8 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 		endif()
 	endforeach()
 	# S435 (S446): KYTY_SHADER_PREWARM mailbox, manifest, shadow compare and mapped hook (src/graphics/shader/shaderPrewarm.cpp). Mutants (WILL_FAIL):
-	# DOUBLE_COMPILE, NO_WAIT_ON_BUILDING, FORGET_TAKEN, WAIT_UNBOUNDED, MANIFEST_ACCEPTS_CORRUPT, SHADOW_IGNORES_DIFF. The base also runs with the variable unset ("off").
-	foreach(mutant IN ITEMS "" DOUBLE_COMPILE NO_WAIT_ON_BUILDING FORGET_TAKEN WAIT_UNBOUNDED MANIFEST_ACCEPTS_CORRUPT SHADOW_IGNORES_DIFF)
+	# DOUBLE_COMPILE, NO_WAIT_ON_BUILDING, FORGET_TAKEN, WAIT_UNBOUNDED, MANIFEST_ACCEPTS_CORRUPT, SHADOW_IGNORES_DIFF, NO_READY_CAP. The base also runs with the variable unset ("off").
+	foreach(mutant IN ITEMS "" DOUBLE_COMPILE NO_WAIT_ON_BUILDING FORGET_TAKEN WAIT_UNBOUNDED MANIFEST_ACCEPTS_CORRUPT SHADOW_IGNORES_DIFF NO_READY_CAP)
 		if(mutant STREQUAL "")
 			set(prewarm_target shader_prewarm_tests)
 			set(prewarm_test shader_prewarm)

@@ -16,6 +16,8 @@
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "graphics/shader/shaderCost.h"
+#include "graphics/shader/shaderPrewarm.h"
+#include "graphics/shader/shaderPrewarm.h"
 #include "graphics/shader/shaderVertexMetadata.h"
 #include "kernel/memory.h"
 #include "libs/errno.h"
@@ -75,6 +77,8 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	                                                     previous != g_shader_map->end() ? previous->second.hash : 0, hash,
 	                                                     static_cast<uint64_t>(FrameTiming::SteadyNowNs()));
 	(*g_shader_map)[addr] = {data, hash};
+	// S435 (KYTY_SHADER_PREWARM): a copy of the code goes to the worker; the worker never reads guest memory.
+	ShaderPrewarm::OnMapped(hash, reinterpret_cast<const uint32_t*>(addr), data.code_size_bytes / sizeof(uint32_t));
 }
 
 static ShaderMapEntry ShaderGetMappedData(uint64_t addr, const char* label) {

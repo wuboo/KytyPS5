@@ -35,6 +35,8 @@
 #include "graphics/shader/shaderCompiler.h"
 #include "graphics/shader/shaderCost.h"
 #include "graphics/shader/permutationRecord.h"
+#include "graphics/shader/shaderPrewarm.h"
+#include "graphics/shader/shaderPrewarmBuild.h"
 #include "kytyGitVersion.h"
 #include "kernel/memory.h"
 #include "loader/systemContent.h"
@@ -50,6 +52,9 @@
 #include <crt_externs.h>
 #endif
 #include <filesystem>
+#include <fstream>
+#include <iterator>
+#include <pthread.h>
 #include <fmt/format.h>
 #include <limits>
 #include <mutex>
@@ -860,7 +865,8 @@ struct PipelineCache::ProgramCache {
 		if (disk.initialized) return;
 		disk.initialized = true;
 		const auto mode  = ProgramDisk::EnvMode();
-		if (mode == ProgramDisk::Mode::Off) return;
+		const auto prewarm_mode = ShaderPrewarm::EnvMode();
+		if (mode == ProgramDisk::Mode::Off && prewarm_mode == ShaderPrewarm::Mode::Off) return;
 #ifndef KYTY_RECOMPILER_SIGNATURE
 #define KYTY_RECOMPILER_SIGNATURE "unknown"
 #endif
@@ -896,10 +902,150 @@ struct PipelineCache::ProgramCache {
 		if (title_id.empty()) title_id = "default";
 		disk.fingerprint = fingerprint.key;
 		disk.dir         = std::filesystem::path("_ShaderCache") / title_id;
-		disk.writer      = std::make_unique<ProgramDisk::AsyncWriter>();
-		disk.mode        = mode;
 		const auto dir_text = Common::PathToString(disk.dir);
-		LOGF("[progdisk] mode=%s dir=%s %s\n", mode == ProgramDisk::Mode::Verify ? "verify" : "on", dir_text.c_str(), fingerprint.description.c_str());
+		if (mode != ProgramDisk::Mode::Off) {
+			disk.writer = std::make_unique<ProgramDisk::AsyncWriter>();
+			disk.mode   = mode;
+			LOGF("[progdisk] mode=%s dir=%s %s\n", mode == ProgramDisk::Mode::Verify ? "verify" : "on", dir_text.c_str(), fingerprint.description.c_str());
+		}
+		if (prewarm_mode != ShaderPrewarm::Mode::Off) InitPrewarm(prewarm_mode, dir_text);
+	}
+
+	// S435 (KYTY_SHADER_PREWARM=1|shadow, programs of the previous runs from prewarm_v1.lst are translated on a worker as soon as the game maps them).
+	static constexpr uint32_t kPrewarmMaxReady = 64; // finished translations waiting for CP (memory)
+	struct PrewarmState {
+		ShaderPrewarm::Mode                                                       mode = ShaderPrewarm::Mode::Off;
+		std::filesystem::path                                                     path;
+		std::unique_ptr<ShaderPrewarm::Mailbox<std::unique_ptr<PrewarmProgram>>>  box;
+		ShaderPrewarm::ManifestBuilder                                            builder;
+		std::unordered_multimap<uint64_t, ShaderPrewarm::ManifestEntry>           by_hash; // read-only after InitPrewarm (the hook reads it from the guest thread)
+		std::unique_ptr<ProgramDisk::AsyncWriter>                                 writer;
+		size_t                                                                    saved_entries = 0;
+		std::chrono::steady_clock::time_point                                     last_save {};
+		ShaderPrewarm::MailboxStats                                               reported;
+		uint32_t                                                                  ne_lines = 0;
+	} prewarm;
+
+	void InitPrewarm(ShaderPrewarm::Mode mode, const std::string& dir_text) {
+		prewarm.mode = mode;
+		prewarm.path = ShaderPrewarm::ManifestPath(disk.dir);
+		std::vector<ShaderPrewarm::ManifestEntry> entries;
+		bool                                      loaded = false;
+		if (std::ifstream file(prewarm.path, std::ios::binary); file) {
+			const std::vector<uint8_t> bytes((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
+			loaded = ShaderPrewarm::ParseManifest(bytes, disk.fingerprint, PrewarmLayout(), &entries);
+			if (!loaded) LOGF("[prewarm] manifest %s refused (damaged, other fingerprint or layout): starting a new one\n", Common::PathToString(prewarm.path).c_str());
+		}
+		prewarm.builder.Load(entries);
+		prewarm.saved_entries = prewarm.builder.Size();
+		for (const auto& entry: prewarm.builder.Entries()) prewarm.by_hash.emplace(entry.code_hash, entry);
+		FrameTiming::Add(FrameTiming::Counter::PrewarmManifestN, prewarm.builder.Size());
+		prewarm.writer = std::make_unique<ProgramDisk::AsyncWriter>();
+		prewarm.box    = std::make_unique<ShaderPrewarm::Mailbox<std::unique_ptr<PrewarmProgram>>>(
+            1, std::chrono::milliseconds(30000),
+            [] {
+#if defined(__APPLE__)
+                pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
+#endif
+            },
+            kPrewarmMaxReady);
+		auto*      box    = prewarm.box.get();
+		const bool shadow = mode == ShaderPrewarm::Mode::Shadow;
+		ShaderPrewarm::SetMappedHook([this, box, shadow](uint64_t hash, std::shared_ptr<const std::vector<uint32_t>> code) {
+			const auto range = prewarm.by_hash.equal_range(hash);
+			for (auto it = range.first; it != range.second; ++it) {
+				if (it->second.code_size_words != code->size()) continue;
+				box->Submit(ShaderPrewarm::EntryKey(it->second), [entry = it->second, code, shadow]() -> std::optional<std::unique_ptr<PrewarmProgram>> {
+					FrameTiming::ScopedCounterNs build_timer(FrameTiming::Counter::PrewarmBuildNs);
+					auto                         built = PrewarmBuild(entry, *code, shadow);
+					if (!built) return std::nullopt;
+					return built;
+				});
+			}
+		});
+		LOGF("[prewarm] mode=%s dir=%s manifest=%s entries=%zu\n", mode == ShaderPrewarm::Mode::Shadow ? "shadow" : "on", dir_text.c_str(),
+		     loaded ? "loaded" : "none", prewarm.builder.Size());
+	}
+
+	void ReportPrewarm() {
+		if (!prewarm.box) return;
+		const auto now = prewarm.box->Stats();
+		const auto& was = prewarm.reported;
+		using C = FrameTiming::Counter;
+		FrameTiming::Add(C::PrewarmQueuedN, now.queued - was.queued);
+		FrameTiming::Add(C::PrewarmDoneN, now.done - was.done);
+		FrameTiming::Add(C::PrewarmFailN, now.failed - was.failed);
+		FrameTiming::Add(C::PrewarmHitN, now.hit - was.hit);
+		FrameTiming::Add(C::PrewarmWaitN, now.waited - was.waited);
+		FrameTiming::Add(C::PrewarmWaitNs, now.wait_ns - was.wait_ns);
+		FrameTiming::Add(C::PrewarmCancelN, now.cancelled - was.cancelled);
+		FrameTiming::Add(C::PrewarmTimeoutN, now.timeout - was.timeout);
+		FrameTiming::Max(C::PrewarmReadyPeak, now.ready_peak);
+		prewarm.reported = now;
+	}
+
+	// The entry of the program that CP is about to build (Get, new ProgramKey), without the input info bytes.
+	template <typename InputInfo>
+	ShaderPrewarm::ManifestEntry PrewarmEntry(const ShaderParams& params, const ShaderRecompiler::CompileOptions& options, const InputInfo* info) const {
+		ShaderPrewarm::ManifestEntry entry;
+		entry.stage           = static_cast<uint32_t>(lookup_key.stage);
+		entry.code_hash       = params.hash;
+		entry.user_data_count = params.user_data_count;
+		entry.code_size_words = static_cast<uint32_t>(params.code.size());
+		entry.user_data_base  = options.user_data_base;
+		entry.wave_size       = options.wave_size;
+		entry.maintenance8    = options.maintenance8_enabled;
+		entry.static_state    = lookup_key.static_state;
+		if (info != nullptr) entry.input_info = PrewarmInfoBytes(*info);
+		return entry;
+	}
+
+	// The result of the worker for this program if there is one and it is the program CP builds; nullptr: CP builds on its own.
+	std::unique_ptr<PrewarmProgram> PrewarmClaim(const ShaderPrewarm::ManifestEntry& wanted) {
+		auto claimed = prewarm.box->Claim(ShaderPrewarm::EntryKey(wanted));
+		if (claimed.waited) { /* the wait is in the mailbox counters */ }
+		if (!claimed.payload || !*claimed.payload) return nullptr;
+		auto program = std::move(*claimed.payload);
+		const auto& got = program->entry;
+		if (got.stage != wanted.stage || got.code_hash != wanted.code_hash || got.user_data_count != wanted.user_data_count ||
+		    got.code_size_words != wanted.code_size_words || got.user_data_base != wanted.user_data_base || got.wave_size != wanted.wave_size ||
+		    got.maintenance8 != wanted.maintenance8 || got.static_state != wanted.static_state) {
+			FrameTiming::Add(FrameTiming::Counter::PrewarmMismatchN);
+			return nullptr;
+		}
+		return program;
+	}
+
+	// shadow: CP built its own program; the translation the worker made is emitted with the same specialization and must give the same SPIR-V and the
+	// same plan.
+	void PrewarmShadowCompare(PrewarmProgram& other, SourceEntry& own, const ShaderRecompiler::CompileOptions& options, uint32_t push_start,
+	                          const std::string& own_ir, const std::vector<uint32_t>& own_spirv, uint64_t shader_hash) {
+		std::string difference;
+		if (other.ir_text != own_ir) {
+			difference = "translated IR (ProgramToString)";
+		} else if (ShaderRecompiler::IR::PlanUsedUserDataMask(other.plan) != ShaderRecompiler::IR::PlanUsedUserDataMask(own.resource_plan)) {
+			difference = "resource plan: used user data mask";
+		} else {
+			const auto emitted = ShaderRecompiler::CompileProgram(std::move(other.translated), options, own.specialization, push_start);
+			difference         = ShaderPrewarm::CompareSpirv(own_spirv, emitted.spirv);
+		}
+		if (difference.empty()) return;
+		FrameTiming::Add(FrameTiming::Counter::PrewarmNeN);
+		if (prewarm.ne_lines++ < 20) {
+			LOGF("[prewarm] shadow ne #%u stage=%u shader=0x%016" PRIx64 ": %s\n", prewarm.ne_lines, static_cast<uint32_t>(lookup_key.stage), shader_hash, difference.c_str());
+		}
+	}
+
+	// Remember the program for the next run; the file is written on a thread of its own, at most every 2 s.
+	void PrewarmRecord(ShaderPrewarm::ManifestEntry entry, bool force) {
+		if (!prewarm.writer) return;
+		prewarm.builder.Add(std::move(entry));
+		const auto now = std::chrono::steady_clock::now();
+		if (prewarm.builder.Size() == prewarm.saved_entries) return;
+		if (!force && now - prewarm.last_save < std::chrono::seconds(2)) return;
+		prewarm.last_save     = now;
+		prewarm.saved_entries = prewarm.builder.Size();
+		prewarm.writer->Enqueue(prewarm.path, ShaderPrewarm::SerializeManifest(disk.fingerprint, PrewarmLayout(), prewarm.builder.Entries()));
 	}
 
 	// The writer runs on its own thread: its totals reach the per-flip columns as the difference since the last look.
@@ -1131,10 +1277,27 @@ struct PipelineCache::ProgramCache {
 				}
 			}
 		}
+		// S435: the translation of a program that is new to this run may be ready (a manifest of the previous run, a worker thread).
+		std::unique_ptr<PrewarmProgram>             prewarmed;
+		std::optional<ShaderPrewarm::ManifestEntry> prewarm_record;
+		if (prewarm.mode != ShaderPrewarm::Mode::Off && entry == programs.end()) {
+			if (!params.back_code.empty()) {
+				FrameTiming::Add(FrameTiming::Counter::PrewarmSkipN); // the front/back pair of a geometry shader: the hash is not the one of a mapping
+			} else {
+				prewarm_record = PrewarmEntry<InputInfo>(params, options, nullptr);
+				prewarmed      = PrewarmClaim(*prewarm_record);
+				ReportPrewarm();
+			}
+		}
+		const bool use_prewarm = prewarmed != nullptr && prewarm.mode == ShaderPrewarm::Mode::On;
 		ShaderRecompiler::ShaderSource source;
 		if (entry == programs.end()) {
-			FrameTiming::ScopedCounterNs prepare_timer(FrameTiming::Counter::ShaderPrepareNs);
-			source = ShaderRecompiler::PrepareShaderSource(params.code, options);
+			if (use_prewarm) {
+				source = std::move(*prewarmed->source); // non-call by construction; kept alive as long as this lookup uses the translation
+			} else {
+				FrameTiming::ScopedCounterNs prepare_timer(FrameTiming::Counter::ShaderPrepareNs);
+				source = ShaderRecompiler::PrepareShaderSource(params.code, options);
+			}
 		}
 		auto* current = entry == programs.end() ? &source : entry->second.call_source.get();
 		{
@@ -1146,7 +1309,9 @@ struct PipelineCache::ProgramCache {
 		}
 		ShaderRecompiler::TranslateResult translated;
 		std::optional<FrameTiming::ScopedCounterNs> translate_timer(std::in_place, FrameTiming::Counter::ShaderTranslateNs);
-		if (current != nullptr) {
+		if (use_prewarm) {
+			translated = std::move(prewarmed->translated);
+		} else if (current != nullptr) {
 			if (current->call) {
 				if (entry == programs.end()) ShaderRecompiler::RefreshShaderSource(*current, runtime);
 				translated = ShaderRecompiler::TranslateProgram(current->linked->decoded, options);
@@ -1158,11 +1323,13 @@ struct PipelineCache::ProgramCache {
 			translated = ShaderRecompiler::TranslateProgram(params.code, options);
 		}
 		translate_timer.reset();
+		std::string own_ir;
+		if (prewarmed != nullptr && !use_prewarm && entry == programs.end()) own_ir = ShaderRecompiler::IR::ProgramToString(translated.program); // shadow; the plan extraction empties it
 		if (entry == programs.end()) {
 			auto retained = source.call ? std::make_unique<ShaderRecompiler::ShaderSource>(std::move(source)) : nullptr;
 			std::optional<FrameTiming::ScopedCounterNs> plan_timer(std::in_place, FrameTiming::Counter::ShaderResourcePlanNs);
 			entry = programs.try_emplace(lookup_key,
-			    ShaderRecompiler::IR::ExtractResourcePlan(translated.program), std::move(retained)).first;
+			    use_prewarm ? std::move(prewarmed->plan) : ShaderRecompiler::IR::ExtractResourcePlan(translated.program), std::move(retained)).first;
 			plan_timer.reset();
 			if (entry->second.call_source) read_context.mode = runtime.fast_mode = ShaderRecompiler::IR::SrtFastMode::Off;
 			read_context.pass = {};
@@ -1173,6 +1340,14 @@ struct PipelineCache::ProgramCache {
 				    entry->second.specialization));
 			}
 			NoteSrtMemo(entry->second.resources, read_context, params.hash, stage);
+			if (prewarm_record) {
+				if (entry->second.call_source) {
+					FrameTiming::Add(FrameTiming::Counter::PrewarmSkipN); // its translation depends on guest memory
+				} else {
+					prewarm_record->input_info = PrewarmInfoBytes(input_info);
+					PrewarmRecord(std::move(*prewarm_record), false);
+				}
+			}
 			if (disk.mode != ProgramDisk::Mode::Off) {
 				if (entry->second.call_source) {
 					FrameTiming::Add(FrameTiming::Counter::ProgDiskSkipCallN);
@@ -1196,10 +1371,12 @@ struct PipelineCache::ProgramCache {
 		}
 		const uint32_t        push_start = push_data_cursor;
 		std::vector<uint32_t> disk_spirv;
+		const bool            prewarm_shadow = prewarmed != nullptr && !use_prewarm && !entry->second.call_source;
 		entry->second.permutations.push_back(CompilePermutation(
 		    stage_name, options, std::move(translated), entry->second.specialization, push_data_cursor,
-		    entry->second.FunctionCode(), disk_request ? &disk_spirv : nullptr));
+		    entry->second.FunctionCode(), (disk_request || prewarm_shadow) ? &disk_spirv : nullptr));
 		const auto& permutation = entry->second.permutations.back();
+		if (prewarm_shadow) PrewarmShadowCompare(*prewarmed, entry->second, options, push_start, own_ir, disk_spirv, params.hash);
 		if (disk_request) DiskAfterCompile(*disk_request, permutation, std::move(disk_spirv), push_start);
 		input_info.stage = {.program = &permutation.program, .resources = &entry->second.resources};
 		permutation.program.bindings.AdvancePushData(push_data_cursor);
@@ -1224,6 +1401,15 @@ struct PipelineCache::ProgramCache {
 		lookup_key.static_state.reserve(MaxStaticKeyWords);
 	}
 	~ProgramCache() {
+		if (prewarm.box) {
+			ShaderPrewarm::SetMappedHook({}); // the hook refers to this object
+			ReportPrewarm();
+			prewarm.box.reset();
+			if (prewarm.writer && prewarm.builder.Size() != prewarm.saved_entries) {
+				prewarm.writer->Enqueue(prewarm.path, ShaderPrewarm::SerializeManifest(disk.fingerprint, PrewarmLayout(), prewarm.builder.Entries()));
+			}
+			if (prewarm.writer) prewarm.writer->Flush();
+		}
 		for (const auto& [key, entry]: programs) {
 			(void)key;
 			for (const auto& permutation: entry.permutations) {
