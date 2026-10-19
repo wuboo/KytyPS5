@@ -1227,7 +1227,7 @@ struct PipelineCache::ProgramCache {
 		BuildStageStaticKey(input_info, lookup_key.static_state);
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 			// Only when on, so the keys of runs without KYTY_RT_MISS stay as they were.
-			if (ShaderRecompiler::RtMissEnabled()) lookup_key.static_state.push_back(0x52544d53u);
+			if (ShaderRecompiler::RtMissEnabled()) lookup_key.static_state.push_back(ShaderRecompiler::RtMissMode() == 2 ? 0x52544d32u : 0x52544d53u);
 		}
 		auto                                         entry = programs.find(lookup_key);
 		static_key_site.reset();

@@ -240,6 +240,17 @@ void DefineBvhIntersect(EmitterState& s) {
 	}
 	EmitLabel(s, s.builder.AllocateId());
 	const auto descriptor = args[0], node = args[1], extent = args[2];
+	if (RtMissEarlyReturn()) {
+		// KYTY_RT_MISS=2: the "no hit" answer before any work (S446, ablation of the cost of the traversal).
+		const auto miss_kind = Binary(s, spv::OpBitwiseAnd, u, Unary(s, spv::OpUConvert, u, node), ConstantU32(s, 7));
+		const auto miss_triangle = Binary(s, spv::OpULessThan, b, miss_kind, ConstantU32(s, 4));
+		std::array<uint32_t, 4> miss_words;
+		const std::array miss_tri {ConstantU32(s, 0x7f800000), ConstantU32(s, 0x3f800000), ConstantU32(s, ~0u), ConstantU32(s, 0)};
+		for (uint32_t i = 0; i < 4; ++i) miss_words[i] = Select(s, u, miss_triangle, miss_tri[i], ConstantU32(s, ~0u));
+		s.builder.AddFunction(spv::OpReturnValue, Vector(s, vec4, miss_words));
+		s.builder.AddFunction(spv::OpFunctionEnd);
+		return;
+	}
 	Vec3 origin, direction, inverse;
 	for (uint32_t i = 0; i < 3; ++i) {
 		origin[i] = Extract(s, f, args[3], i);
