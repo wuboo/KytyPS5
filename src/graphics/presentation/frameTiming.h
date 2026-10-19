@@ -308,7 +308,7 @@ enum class Counter : uint32_t {
 	PvLayoutFastN, PvLayoutNeN, PvValidateSkippedN, PvValidateNeN,
 	// S433 (S440): PipelineCache::Save - jobs, time of the jobs (wherever they ran), bytes written, failures, and the time the command processor
 	// thread itself spent in Save (all of it with KYTY_PIPELINE_SAVE_ASYNC=0, only the hand-over with 1).
-	PipelineSaveN, PipelineSaveNs, PipelineSaveBytes, PipelineSaveFailN, PipelineSaveCpNs,
+	PipelineSaveN, PipelineSaveNs, PipelineSaveBytes, PipelineSaveFailN, PipelineSaveCpNs, PipelineSaveSkippedN,
 	// S433 (S441): cost of the first use of a shader on the CP thread, per flip. Misses: program (new ProgramKey) / permutation (new specialization or
 	// push start) / of those, programs with a retained call source. Ns: GetGraphicsPrograms and GetComputeProgram as a whole (hits included),
 	// GetGraphicsPipeline as a whole (includes an inline Save), then the pieces of a miss: PrepareShaderSource, TranslateProgram, ExtractResourcePlan,

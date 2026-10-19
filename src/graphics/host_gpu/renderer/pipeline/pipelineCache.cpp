@@ -85,8 +85,6 @@ std::string PipelineCacheTitleId() {
 
 namespace {
 
-constexpr auto DriverCacheSaveInterval = std::chrono::minutes {5};
-
 uint8_t RemapSourceAlphaFactor(uint8_t factor) {
 	switch (static_cast<Prospero::BlendFactor>(factor)) {
 		case Prospero::BlendFactor::kSrcAlpha:
@@ -1436,8 +1434,7 @@ struct PipelineCache::ProgramCache {
 };
 
 PipelineCache::PipelineCache(GraphicContext& graphics)
-    : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics)),
-      m_next_driver_cache_save(std::chrono::steady_clock::now() + DriverCacheSaveInterval) {
+    : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics)) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	// S408: stale reads of the condition word are only allowed with a verification of the used bytes after GPU-done (plan-chainA 1b),
 	// which is not built. Not a silent 0.
@@ -1450,14 +1447,16 @@ PipelineCache::PipelineCache(GraphicContext& graphics)
 	    PipelineCacheSaver::ParseAsync(std::getenv("KYTY_PIPELINE_SAVE_ASYNC")),
 	    [this](uint64_t ns, uint64_t bytes, bool ok) {
 		    FrameTiming::Add(FrameTiming::Counter::PipelineSaveNs, ns);
-		    if (ok) {
+		    if (m_save_same_size.exchange(false)) { // S437: the job saw the same driver cache size as the last file and wrote nothing
+			    FrameTiming::Add(FrameTiming::Counter::PipelineSaveSkippedN);
+		    } else if (ok) {
 			    FrameTiming::Add(FrameTiming::Counter::PipelineSaveN);
 			    FrameTiming::Add(FrameTiming::Counter::PipelineSaveBytes, bytes);
 			    PipelineCacheLog("Vulkan pipeline cache: saved {:.2f} MB ({:.1f} ms)",
 			                     static_cast<double>(bytes) / 1'000'000.0, static_cast<double>(ns) / 1e6);
 		    } else {
 			    FrameTiming::Add(FrameTiming::Counter::PipelineSaveFailN);
-			    m_driver_cache_dirty = true;
+			    m_save_failed = true;
 		    }
 	    });
 	PipelineCacheLog("Vulkan pipeline cache: save {}", m_saver->Async() ? "async (worker thread)" : "inline (CP thread)");
@@ -1549,6 +1548,7 @@ void PipelineCache::InitializeDriverCache() {
 		return;
 	}
 	if (!initial_data.empty()) {
+		m_last_saved_size = initial_data.size();
 		PipelineCacheLog("Vulkan pipeline cache: loaded {:.2f} MB from {}",
 		                 static_cast<double>(initial_data.size()) / 1'000'000.0, path);
 	} else {
@@ -1556,28 +1556,35 @@ void PipelineCache::InitializeDriverCache() {
 	}
 }
 
-void PipelineCache::CheckpointDriverCache() {
+// S437: a pipeline was created. The cache is written only if the driver did not take the pipeline from its own cache (a hit adds nothing) and
+// after the burst of new pipelines ended (PipelineSaveGate: 2 s without a new one, at most 30 s after the first). A change that is still pending
+// when the game ends is written by the destructor.
+void PipelineCache::CheckpointDriverCache(PipelineCacheUse use) {
 	if (m_driver_cache == nullptr) {
 		return;
 	}
-	m_driver_cache_dirty = true;
-	if (std::chrono::steady_clock::now() >= m_next_driver_cache_save) {
+	const auto now = std::chrono::steady_clock::now();
+	if (m_save_failed.exchange(false)) {
+		m_save_gate.Failed(now);
+	}
+	if (m_save_gate.Due(now)) {
 		Save();
 	}
+	m_save_gate.NoteCreated(use, now);
+	FrameTiming::Add(FrameTiming::Counter::PipelineSaveSkippedN, m_save_gate.TakeSkippedDelta());
 }
 
 void PipelineCache::Save() {
-	if (m_driver_cache == nullptr || !m_driver_cache_dirty) {
+	if (m_driver_cache == nullptr || !m_save_gate.Dirty()) {
 		return;
 	}
-	m_next_driver_cache_save = std::chrono::steady_clock::now() + DriverCacheSaveInterval;
 	// S433: the dirty flag is cleared when the job is handed over, so a pipeline created while the job runs sets it again; a failed job sets it back.
-	m_driver_cache_dirty = false;
+	m_save_gate.Cleared();
 
 	const auto cp_begin  = std::chrono::steady_clock::now();
 	auto       signature = DriverCacheSignature(m_graphics.GetPhysicalDeviceProperties());
 	m_saver->Request(m_driver_cache_path,
-	                 [device = m_graphics.device, cache = m_driver_cache, signature = std::move(signature)](std::string& prefix, std::vector<uint8_t>& payload) {
+	                 [this, device = m_graphics.device, cache = m_driver_cache, signature = std::move(signature)](std::string& prefix, std::vector<uint8_t>& payload) {
 		                 size_t     size = 0;
 		                 vk::Result result;
 		                 for (uint32_t attempt = 0; attempt < 3; attempt++) {
@@ -1585,6 +1592,10 @@ void PipelineCache::Save() {
 			                 result = device.getPipelineCacheData(cache, &size, nullptr);
 			                 if (result != vk::Result::eSuccess || size == 0 || size > 256 * 1024 * 1024) {
 				                 break;
+			                 }
+			                 if (size == m_last_saved_size.load()) { // S437: nothing was added since the last file (the driver appends entries)
+				                 m_save_same_size = true;
+				                 return false;
 			                 }
 			                 payload.resize(size);
 			                 result = device.getPipelineCacheData(cache, &size, payload.data());
@@ -1598,6 +1609,7 @@ void PipelineCache::Save() {
 			                 return false;
 		                 }
 		                 payload.resize(size);
+		                 m_last_saved_size       = size;
 		                 prefix                  = signature;
 		                 const auto payload_hash = XXH3_64bits(payload.data(), payload.size());
 		                 prefix.append(reinterpret_cast<const char*>(&payload_hash), sizeof(payload_hash));
@@ -1983,13 +1995,14 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 
 	auto cached = std::make_unique<Pipeline>();
 	LogPipelineTrace("CreatePipelineInternal begin", vs_id, ps_id);
+	PipelineCacheUse cache_use = PipelineCacheUse::Unknown;
 	const auto compile_begin = std::chrono::steady_clock::now();
 	{
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
 		                                         Common::DebugCounters::Counter::PipelineCreateNs,
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
 		CreatePipelineInternal(m_graphics, *cached, rendering, key.vertex_input, vertex_info,
-		                       ps_input_info, programs, static_params, m_driver_cache);
+		                       ps_input_info, programs, static_params, m_driver_cache, &cache_use);
 	}
 	FrameTiming::Add(FrameTiming::Counter::PipelinesCreated);
 	FrameTiming::Add(FrameTiming::Counter::PipelineCompileNs,
@@ -2003,14 +2016,7 @@ PipelineCache::Pipeline& PipelineCache::GetGraphicsPipeline(
 
 	auto [iter, inserted] = m_graphics_pipelines.emplace(std::move(key), std::move(cached));
 	EXIT_IF(!inserted);
-	CheckpointDriverCache();
-
-	static auto last_save = std::chrono::steady_clock::now();
-	const auto  now       = std::chrono::steady_clock::now();
-	if (now - last_save >= std::chrono::milliseconds(500)) {
-		last_save = now;
-		Save();
-	}
+	CheckpointDriverCache(cache_use);
 
 	return *iter->second;
 }
@@ -2031,13 +2037,14 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 	}
 
 	auto cached = std::make_unique<Pipeline>();
+	PipelineCacheUse cache_use = PipelineCacheUse::Unknown;
 	const auto compile_begin = std::chrono::steady_clock::now();
 	{
 		Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::PipelinesCreated,
 		                                         Common::DebugCounters::Counter::PipelineCreateNs,
 		                                         Common::DebugCounters::Peak::PipelineCreateNs);
 		CreatePipelineInternal(m_graphics, *cached, input_info, compute_program.module,
-		                       m_driver_cache);
+		                       m_driver_cache, &cache_use);
 	}
 	FrameTiming::Add(FrameTiming::Counter::PipelinesCreated);
 	FrameTiming::Add(FrameTiming::Counter::PipelineCompileNs,
@@ -2050,14 +2057,7 @@ PipelineCache::Pipeline& PipelineCache::GetComputePipeline(const ShaderComputeIn
 
 	auto [iter, inserted] = m_compute_pipelines.emplace(compute_program.id, std::move(cached));
 	EXIT_IF(!inserted);
-	CheckpointDriverCache();
-
-	static auto last_save = std::chrono::steady_clock::now();
-	const auto  now       = std::chrono::steady_clock::now();
-	if (now - last_save >= std::chrono::milliseconds(500)) {
-		last_save = now;
-		Save();
-	}
+	CheckpointDriverCache(cache_use);
 
 	return *iter->second;
 }

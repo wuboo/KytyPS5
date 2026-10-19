@@ -251,7 +251,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
                             const ShaderPixelInputInfo*            ps_input_info,
                             const PipelineCache::GraphicsPrograms& programs,
                             const PipelineStaticParameters&        static_params,
-                            vk::PipelineCache                      driver_cache) {
+                            vk::PipelineCache                      driver_cache,
+                            PipelineCacheUse*                      cache_use) {
 	const auto& vs_input_info  = vertex_info.front();
 	const auto& vertex_program = programs.vertex[0];
 	const auto& pixel_program  = programs.pixel;
@@ -550,6 +551,15 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	rendering_info.pColorAttachmentFormats = rendering.color_formats.data();
 	rendering_info.depthAttachmentFormat   = rendering.depth_format;
 	rendering_info.stencilAttachmentFormat = rendering.stencil_format;
+	// S437: whole-pipeline feedback (core in Vulkan 1.3): did the driver take the pipeline from its cache?
+	vk::PipelineCreationFeedback                      feedback {};
+	std::array<vk::PipelineCreationFeedback, 8>       stage_feedback {};
+	vk::PipelineCreationFeedbackCreateInfo            feedback_info {};
+	feedback_info.pPipelineCreationFeedback           = &feedback;
+	feedback_info.pipelineStageCreationFeedbackCount  = shader_stage_count;
+	feedback_info.pPipelineStageCreationFeedbacks     = stage_feedback.data();
+	EXIT_IF(shader_stage_count > stage_feedback.size());
+	rendering_info.pNext                   = &feedback_info;
 	pipeline_info.pNext                    = &rendering_info;
 	pipeline_info.stageCount               = shader_stage_count;
 	pipeline_info.pStages                  = shader_stages;
@@ -593,6 +603,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	if (cache_use != nullptr) *cache_use = driver_cache != nullptr ? ClassifyFeedback(static_cast<uint32_t>(feedback.flags)) : PipelineCacheUse::Miss;
 
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr);
 
@@ -607,7 +618,8 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& pipeline,
                             const ShaderComputeInputInfo& input_info,
-                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache) {
+                            vk::ShaderModule compute_module, vk::PipelineCache driver_cache,
+                            PipelineCacheUse* cache_use) {
 	EXIT_IF(compute_module == nullptr);
 
 	vk::PipelineShaderStageCreateInfo                     comp_shader_stage_info {};
@@ -651,6 +663,14 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	info.stage             = comp_shader_stage_info;
 	info.layout            = pipeline.pipeline_layout;
 	info.basePipelineIndex = -1;
+	// S437: did the driver take the pipeline from its cache?
+	vk::PipelineCreationFeedback                 feedback {};
+	vk::PipelineCreationFeedback                 stage_feedback {};
+	vk::PipelineCreationFeedbackCreateInfo       feedback_info {};
+	feedback_info.pPipelineCreationFeedback          = &feedback;
+	feedback_info.pipelineStageCreationFeedbackCount = 1;
+	feedback_info.pPipelineStageCreationFeedbacks    = &stage_feedback;
+	info.pNext                                       = &feedback_info;
 
 	EXIT_IF(pipeline.pipeline != nullptr);
 
@@ -668,6 +688,7 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 	LOGF("PipelineTrace: vkCreateComputePipelines done result=%s pipeline=%p\n",
 	     vk::to_string(result).c_str(), static_cast<void*>(pipeline.pipeline));
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
+	if (cache_use != nullptr) *cache_use = driver_cache != nullptr ? ClassifyFeedback(static_cast<uint32_t>(feedback.flags)) : PipelineCacheUse::Miss;
 
 	EXIT_NOT_IMPLEMENTED(pipeline.pipeline == nullptr);
 }

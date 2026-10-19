@@ -423,6 +423,7 @@ constexpr const char* kCounterNames[] = {
     "pipeline_save_bytes",
     "pipeline_save_fail_n",
     "pipeline_save_cp_ns",
+    "pipeline_save_skipped_n",
     "shader_program_miss_n",
     "shader_perm_miss_n",
     "shader_call_program_n",
