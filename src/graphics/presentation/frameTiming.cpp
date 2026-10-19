@@ -4,6 +4,7 @@
 #include "graphics/presentation/cpSampler.h"
 #include "graphics/presentation/cpPcSampler.h"
 #include "graphics/host_gpu/hotPages.h"
+#include "graphics/host_gpu/renderer/cache/imagePageSummary.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/cpWaitDiag.h"
 #include "graphics/shader/nullDescDiag.h"
@@ -513,6 +514,18 @@ constexpr const char* kCounterNames[] = {
     "wf_hot_changed_n",
     "wf_hot_ne_n",
     "wf_hot_race_n",
+    "wf_flip_refault_n",
+    "wf_flip_promote_n",
+    "wf_flip_demote_n",
+    "wf_flip_keep_n",
+    "wf_flip_pages_n",
+    "wf_flip_cand_n",
+    "wf_flip_hash_n",
+    "wf_flip_ne_n",
+    "wf_flip_ne_unstable_n",
+    "wf_fast_n",
+    "wf_slow_n",
+    "wf_fast_ne_n",
     "prewarm_deferred_n",
     "prewarm_ready_bytes",
     "prewarm_ready_bytes_peak",
@@ -650,6 +663,20 @@ static void PublishHotPages() {
 	Set(Counter::WfHotChangedN, stats.changed.load(std::memory_order_relaxed));
 	Set(Counter::WfHotNeN, stats.ne.load(std::memory_order_relaxed));
 	Set(Counter::WfHotRaceN, stats.race.load(std::memory_order_relaxed));
+	const auto& flip = FlipUnprotect::GetStats();
+	Set(Counter::WfFlipRefaultN, flip.refault.load(std::memory_order_relaxed));
+	Set(Counter::WfFlipPromoteN, flip.promote.load(std::memory_order_relaxed));
+	Set(Counter::WfFlipDemoteN, flip.demote.load(std::memory_order_relaxed));
+	Set(Counter::WfFlipKeepN, flip.keep.load(std::memory_order_relaxed));
+	Set(Counter::WfFlipPagesN, static_cast<uint64_t>(std::max<int64_t>(0, flip.pages.load(std::memory_order_relaxed))));
+	Set(Counter::WfFlipCandN, flip.cand.load(std::memory_order_relaxed));
+	Set(Counter::WfFlipHashN, flip.hash.load(std::memory_order_relaxed));
+	Set(Counter::WfFlipNeN, flip.ne.load(std::memory_order_relaxed));
+	Set(Counter::WfFlipNeUnstableN, flip.ne_unstable.load(std::memory_order_relaxed));
+	const auto& fast = FastHandler::GetStats();
+	Set(Counter::WfFastN, fast.fast.load(std::memory_order_relaxed));
+	Set(Counter::WfSlowN, fast.slow.load(std::memory_order_relaxed));
+	Set(Counter::WfFastNeN, fast.ne.load(std::memory_order_relaxed));
 }
 
 // ---- S441: CP frame interval, guest lead, thread CPU ---------------------------------------------------------------------------------------------

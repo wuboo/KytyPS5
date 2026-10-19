@@ -96,4 +96,58 @@ inline Stats& GetStats() {
 
 } // namespace Libs::Graphics::HotPages
 
+// S443 (KYTY_WF_FLIP_UNPROTECT=0|1|shadow, default 0): a page that takes its SECOND write fault in one guest flip stays unprotected (CPU-dirty) until the
+// flip ends: the third and later faults of the flip are gone. Every upload copies a dirty page (no hash decides anything), so a kept page is correct by
+// construction; the first upload after the flip changed consumes the dirty bit and protects the page again (the copy of that upload is taken after the
+// protection, as for any page).
+//   shadow: protection and faults stay as they are; the pages that WOULD be kept ("candidates") are hashed right after the upload protected them, and a
+//           later upload check of the same flip rehashes every candidate that is still clean. A different hash means a write the tracker never saw;
+//           it is hashed once more at once: same value again = ne (a real unseen write; the observer logs the address), another value = ne_unstable
+//           (the page is being written by a host thread that does not fault; reported, not counted in ne).
+namespace Libs::Graphics::FlipUnprotect {
+
+using Mode = HotPages::Mode;
+
+inline Mode ParseMode(const char* text) { return HotPages::ParseMode(text); }
+
+inline std::atomic<int>& ModeOverride() {
+	static std::atomic<int> value {-1};
+	return value;
+}
+
+inline Mode CurrentMode() {
+	const int forced = ModeOverride().load(std::memory_order_relaxed);
+	if (forced >= 0) {
+		return static_cast<Mode>(forced);
+	}
+	static const Mode env = ParseMode(std::getenv("KYTY_WF_FLIP_UNPROTECT"));
+	return env;
+}
+
+// DIAG/log: a shadow mismatch (address of the page, whether the second hash agreed with the first).
+using NeObserverFn = void (*)(uint64_t page, bool stable);
+inline std::atomic<NeObserverFn>& NeObserver() {
+	static std::atomic<NeObserverFn> observer {nullptr};
+	return observer;
+}
+
+struct Stats {
+	std::atomic<uint64_t> refault {0};     // write faults on a page that already faulted in this flip (the second and later ones)
+	std::atomic<uint64_t> promote {0};     // pages kept unprotected until the end of their flip
+	std::atomic<uint64_t> demote {0};      // kept pages protected again at the first upload after their flip
+	std::atomic<uint64_t> keep {0};        // uploads of a kept page that left it unprotected
+	std::atomic<uint64_t> cand {0};        // shadow: pages that would have been kept
+	std::atomic<uint64_t> hash {0};        // shadow: page hashes taken
+	std::atomic<uint64_t> ne {0};          // shadow: candidate page whose bytes changed without a fault, twice the same value (must be 0)
+	std::atomic<uint64_t> ne_unstable {0}; // shadow: ... and the second hash differed from the first
+	std::atomic<int64_t>  pages {0};       // gauge: pages kept now
+};
+
+inline Stats& GetStats() {
+	static Stats stats;
+	return stats;
+}
+
+} // namespace Libs::Graphics::FlipUnprotect
+
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_HOTPAGES_H_

@@ -54,7 +54,8 @@ void Check(bool value, const char *text) {
   if (!value) {
     std::fprintf(stderr, "MemoryTrackerTests: failed: %s\n", text);
 #if defined(KYTY_MEMTRACKER_MUTANT_NO_BUMP_CPU) || defined(KYTY_MEMTRACKER_MUTANT_NO_BUMP_GPU) || \
-    defined(KYTY_MEMTRACKER_MUTANT_HOT_SKIPS_HASH) || defined(KYTY_MEMTRACKER_MUTANT_HOT_NEVER_REPROTECT)
+    defined(KYTY_MEMTRACKER_MUTANT_HOT_SKIPS_HASH) || defined(KYTY_MEMTRACKER_MUTANT_HOT_NEVER_REPROTECT) || \
+    defined(KYTY_MEMTRACKER_MUTANT_FLIP_NEVER_DEMOTE) || defined(KYTY_MEMTRACKER_MUTANT_FLIP_SKIPS_UPLOAD) || defined(KYTY_MEMTRACKER_MUTANT_FLIP_SHADOW_BLIND)
     std::_Exit(1); // a mutant must fail with an exit code (an abort is not inverted by WILL_FAIL)
 #else
     std::abort();
@@ -1494,6 +1495,118 @@ void TestHotPages() {
   Release(memory);
 }
 
+// S443 (KYTY_WF_FLIP_UNPROTECT): a page with a second write fault in one flip stays unprotected until the flip ends; every upload copies it; the first upload
+// after the flip protects it again. Mutants FLIP_NEVER_DEMOTE / FLIP_SKIPS_UPLOAD must fail the On part, FLIP_SHADOW_BLIND the shadow part.
+uint64_t g_noise = 0;
+
+bool HotHashNoisy(uint64_t page, uint64_t *hash) {
+  const bool ok = HotHash(page, hash);
+  *hash ^= g_noise;
+  if (g_noise != 0) {
+    g_noise++; // every call sees another value
+  }
+  return ok;
+}
+
+void TestFlipUnprotect() {
+  using Libs::Graphics::FlipUnprotect::GetStats;
+  using Libs::Graphics::HotPages::Mode;
+  Libs::Graphics::HotPages::EpochSource().store(&HotEpoch);
+  Libs::Graphics::HotPages::HasherSource().store(&HotHash);
+  Libs::Graphics::FlipUnprotect::ModeOverride().store(static_cast<int>(Mode::On));
+  auto &stats = GetStats();
+  const auto promote0 = stats.promote.load();
+  const auto demote0 = stats.demote.load();
+  const auto refault0 = stats.refault.load();
+
+  TrackerHarness harness;
+  auto &tracker = harness.tracker;
+  const auto page_size = harness.page_manager.GetPageSize();
+  auto *memory = Allocate(harness.page_manager, 4);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+  const auto page = address + page_size;
+  g_hot_epoch = 100;
+  Check(HotUpload(tracker, address, page_size * 4) == 1, "first upload did not report the new region");
+
+  // One fault in a flip: protected again by the upload, nothing kept.
+  HotFault(tracker, page, 1);
+  memory[page_size] = 1;
+  Check(HotUpload(tracker, page, 1) == 1 && !IsWritable(memory + page_size), "single fault page was not protected again");
+  Check(stats.promote.load() == promote0, "a single fault promoted the page");
+
+  // The second fault of the same flip: the page stays writable and is copied by every upload, with no further fault.
+  HotFault(tracker, page, 1);
+  memory[page_size] = 2;
+  Check(stats.refault.load() == refault0 + 1 && stats.promote.load() == promote0 + 1 && stats.pages.load() == 1,
+        "second fault of a flip did not promote the page");
+  Check(HotUpload(tracker, page, 1) == 1 && IsWritable(memory + page_size) && tracker.IsRegionCpuModified(page, 1),
+        "kept page was protected or not uploaded");
+  memory[page_size] = 3; // no fault: the page is writable
+  Check(HotUpload(tracker, page, 1) == 1 && IsWritable(memory + page_size), "write to a kept page was not uploaded");
+  Check(HotUpload(tracker, page, 1) == 1, "kept page was not uploaded when nothing changed (it is dirty: always copied)");
+  Check(!IsWritable(memory) && !IsWritable(memory + 2 * page_size), "neighbour pages lost their protection");
+  (void)tracker.TakeBdaSync();
+  Check(tracker.TakeBdaSync().Intersects(page, 1), "kept page missing from BDA sync");
+
+  // The flip ends: the next upload copies the page and protects it; a later fault starts a fresh count.
+  g_hot_epoch = 101;
+  memory[page_size] = 4;
+  Check(HotUpload(tracker, page, 1) == 1 && !IsWritable(memory + page_size) && !tracker.IsRegionCpuModified(page, 1) &&
+            stats.demote.load() == demote0 + 1 && stats.pages.load() == 0,
+        "kept page was not protected again after its flip");
+  HotFault(tracker, page, 1);
+  memory[page_size] = 5;
+  Check(stats.promote.load() == promote0 + 1, "the first fault of a new flip promoted the page");
+  Check(HotUpload(tracker, page, 1) == 1 && !IsWritable(memory + page_size), "first fault of the new flip was not uploaded");
+
+  // The GPU takes a kept page for writing: the kept state ends, ownership moves without a conflict.
+  g_hot_epoch = 102;
+  HotFault(tracker, page, 1);
+  (void)HotUpload(tracker, page, 1);
+  HotFault(tracker, page, 1);
+  Check(stats.pages.load() == 1, "page did not become kept again");
+  (void)HotUpload(tracker, page, 1, true);
+  Check(stats.pages.load() == 0 && tracker.IsRegionGpuModified(page, 1) && !IsWritable(memory + page_size) &&
+            !tracker.IsRegionCpuModified(page, 1),
+        "GPU write ownership of a kept page failed");
+  tracker.UnmarkRegionAsGpuModified(page, 1);
+
+  // Shadow: protection and uploads as ever; candidates are hashed after the protection; an unseen write is counted once, twice the same hash = ne.
+  Libs::Graphics::FlipUnprotect::ModeOverride().store(static_cast<int>(Mode::Shadow));
+  Libs::Graphics::HotPages::HasherSource().store(&HotHashNoisy);
+  tracker.UntrackMemory(address, page_size * 4);
+  (void)HotUpload(tracker, address, page_size * 4);
+  const auto cand0 = stats.cand.load();
+  const auto ne0 = stats.ne.load();
+  const auto unstable0 = stats.ne_unstable.load();
+  g_hot_epoch = 200;
+  HotFault(tracker, page, 1);
+  Check(HotUpload(tracker, page, 1) == 1 && !IsWritable(memory + page_size), "shadow changed the first upload");
+  HotFault(tracker, page, 1);
+  Check(stats.cand.load() == cand0 + 1 && IsWritable(memory + page_size), "shadow did not find a candidate");
+  Check(HotUpload(tracker, page, 1) == 1 && !IsWritable(memory + page_size), "shadow kept the page unprotected");
+  const auto hash0 = stats.hash.load();
+  Check(HotUpload(tracker, page, 1) == 0 && stats.hash.load() > hash0 && stats.ne.load() == ne0, "shadow counted a clean candidate or never hashed it");
+  DWORD old = 0;
+  Check(VirtualProtect(memory + page_size, page_size, PAGE_READWRITE, &old) != 0, "VirtualProtect failed");
+  memory[page_size + 9] ^= 0xff; // a write the tracker never saw
+  (void)HotUpload(tracker, page, 1);
+  Check(stats.ne.load() == ne0 + 1 && stats.ne_unstable.load() == unstable0, "shadow missed an unseen write");
+  g_noise = 1; // the hash keeps changing: not a stable page
+  (void)HotUpload(tracker, page, 1);
+  Check(stats.ne_unstable.load() == unstable0 + 1 && stats.ne.load() == ne0 + 1, "an unstable page was counted as ne");
+  g_noise = 0;
+  g_hot_epoch = 201; // the candidate of the earlier flip is forgotten: no more hashing of it
+  const auto hash1 = stats.hash.load();
+  (void)HotUpload(tracker, page, 1);
+  Check(stats.hash.load() == hash1, "a candidate outlived its flip");
+
+  Libs::Graphics::FlipUnprotect::ModeOverride().store(-1);
+  Libs::Graphics::HotPages::HasherSource().store(&HotHash);
+  tracker.UntrackMemory(address, page_size * 4);
+  Release(memory);
+}
+
 int main(int argc, char **argv) {
   if (argc == 3 && std::strcmp(argv[1], "--death") == 0) {
     RunDeathCase(argv[2]);
@@ -1523,6 +1636,7 @@ int main(int argc, char **argv) {
   TestGpuUnmarkUsesRegionMask();
   TestFullRegionGpuUnmarkBatching();
   TestHotPages();
+  TestFlipUnprotect();
   TestFatalPaths();
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
   TestFaultOnProtectedStack();

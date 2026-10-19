@@ -350,6 +350,10 @@ enum class Counter : uint32_t {
 	// pages whose hash was unchanged (no upload; shadow: would be skipped) / changed (uploaded); shadow: clean hot pages whose hash differs from their last
 	// upload (a write the tracker never saw, must be 0); pages that changed between the last hash and the return of the protection (uploaded after all).
 	WfHotPagesN, WfHotPromoteN, WfHotDemoteN, WfHotHashN, WfHotHashNs, WfHotSkipN, WfHotChangedN, WfHotNeN, WfHotRaceN,
+	// S443 (KYTY_WF_FLIP_UNPROTECT=1|shadow): second and later write faults of a page within one flip / pages kept unprotected for their flip / kept pages protected
+	// again / uploads that left a kept page unprotected / kept now (gauge) / shadow: candidates, page hashes, unseen writes (stable = must be 0, unstable).
+	// (KYTY_WF_FAST_HANDLER=1|shadow): write faults that skipped the texture-cache lock / that took it / shadow: image found after the filter said none (must be 0).
+	WfFlipRefaultN, WfFlipPromoteN, WfFlipDemoteN, WfFlipKeepN, WfFlipPagesN, WfFlipCandN, WfFlipHashN, WfFlipNeN, WfFlipNeUnstableN, WfFastN, WfSlowN, WfFastNeN,
 	// S441 (KYTY_SHADER_PREWARM_MAX_MB): times the prewarm worker stopped at the byte limit instead of evicting (jobs wait in the queue) / estimated bytes of
 	// the finished results waiting for CP (gauge) / their peak.
 	PrewarmDeferredN, PrewarmReadyBytes, PrewarmReadyBytesPeak,

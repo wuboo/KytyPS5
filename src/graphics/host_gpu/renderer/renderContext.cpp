@@ -20,6 +20,8 @@
 #include <mutex>
 #include <unordered_set>
 
+#include <pthread.h>
+
 namespace Libs::Graphics {
 
 RenderContext::RenderContext(GraphicContext& graphics)
@@ -68,6 +70,28 @@ VideoOut::VideoOutDriver& RenderContext::GetVideoOut() const {
 	return *m_video_out;
 }
 
+namespace {
+// S443 (KYTY_DIAG_WRITE_FAULT): id and name of the faulting thread, read once per thread.
+uint64_t WfThreadId() {
+#if defined(__APPLE__)
+	static thread_local const uint64_t tid = static_cast<uint64_t>(pthread_mach_thread_np(pthread_self()));
+#else
+	static thread_local const uint64_t tid = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(pthread_self()));
+#endif
+	return tid;
+}
+
+const char* WfThreadName() {
+	static thread_local char name[64] = {};
+	static thread_local bool done     = false;
+	if (!done) {
+		(void)pthread_getname_np(pthread_self(), name, sizeof(name));
+		done = true;
+	}
+	return name;
+}
+} // namespace
+
 bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) noexcept {
 	// The host reports the faulting byte, not the instruction's access width. Both caches
 	// resolve its page; guessing a width can cross the end of a valid guest mapping.
@@ -96,6 +120,10 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 				if (wf_first.exchange(false, std::memory_order_relaxed) || finished.flip % WriteFault::kTopEveryFlips == 0) {
 					for (const auto& entry: WriteFault::Pages().Top(WriteFault::kTopPages)) {
 						LOGF("%s\n", WriteFault::FormatLine(entry, finished.flip).c_str());
+					}
+					LOGF("%s\n", WriteFault::FormatRuns(finished).c_str());
+					for (const auto& entry: WriteFault::Threads().Snapshot()) {
+						LOGF("%s\n", WriteFault::FormatThread(entry, finished.flip).c_str());
 					}
 				}
 			}
@@ -133,7 +161,9 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		m_texture_cache.InvalidateMemory(fault_vaddr, invalidate_size);
 		if (wf_diag) {
 			FrameTiming::Add(FrameTiming::Counter::WfN);
-			FrameTiming::Add(FrameTiming::Counter::WfHandlerNs, FrameTiming::ElapsedNs(wf_begin, FrameTiming::SteadyNowNs()));
+			const auto wf_ns = FrameTiming::ElapsedNs(wf_begin, FrameTiming::SteadyNowNs());
+			FrameTiming::Add(FrameTiming::Counter::WfHandlerNs, wf_ns);
+			WriteFault::Threads().NoteWrite(WfThreadId(), WfThreadName(), wf_ns);
 		}
 	} else {
 		FrameTiming::Add(on_gpu_thread ? FrameTiming::Counter::ReadbackReadFaultGpu
@@ -169,7 +199,12 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 			gf_eager_before        = FrameTiming::Get(FrameTiming::Counter::ReadbackEagerHits);
 			gf_begin               = FrameTiming::SteadyNowNs();
 		}
+		const bool wf_threads = !on_gpu_thread && access == PageFaultAccess::Read && WriteFault::Enabled();
+		const auto wf_read_begin = wf_threads ? FrameTiming::SteadyNowNs() : int64_t {0};
 		const bool downloaded = m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		if (wf_threads) {
+			WriteFault::Threads().NoteRead(WfThreadId(), WfThreadName(), FrameTiming::ElapsedNs(wf_read_begin, FrameTiming::SteadyNowNs()));
+		}
 		if (gf) {
 			const auto wait_ns = FrameTiming::ElapsedNs(gf_begin, FrameTiming::SteadyNowNs());
 			gf_event.wait_us   = wait_ns / 1000;
