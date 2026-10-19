@@ -272,7 +272,8 @@ private:
 	// The description of a texture binding, kept for inputs seen before.
 	[[nodiscard]] const TextureDescription&
 	FindTextureDescription(const ShaderRecompiler::IR::ImageResource&   resource,
-	                       const ShaderRecompiler::IR::DescriptorValue& value);
+	                       const ShaderRecompiler::IR::DescriptorValue& value,
+	                       TexMemo::Entry<ImageId>**                    memo = nullptr);
 
 	void ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& target,
 	                              uint32_t render_target_slice_offset, uint32_t render_target_slot,
@@ -428,6 +429,8 @@ private:
 		ShaderRecompiler::IR::ImageResource   inputs;
 		ShaderRecompiler::IR::DescriptorValue value;
 		TextureDescription                    description;
+		// S438 (KYTY_TEX_RESOLVE_MEMO): the image this description resolved to; valid until a registration touches its pages.
+		TexMemo::Entry<ImageId>               memo;
 	};
 	// Descriptions by input hash; an entry is used only when its inputs compare equal.
 	std::unordered_map<uint64_t, TextureDescriptionEntry> m_texture_descriptions;

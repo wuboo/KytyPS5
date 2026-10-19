@@ -302,6 +302,10 @@ enum class Counter : uint32_t {
 	// S430 (KYTY_SPEC_READ_FAST=1|shadow): strict reads served from a remembered quiet page / that had to ask (and maybe drain); shadow: hits whose range
 	// is GPU-dirty or in flight now (stale, must be 0) / reads whose ok or bytes differ from the full read (mismatch, must be 0).
 	SpecFastHitN, SpecFastMissN, SpecFastStaleN, SpecFastMismatchN,
+	// S438 (KYTY_TEX_RESOLVE_MEMO=1|shadow), per ResolveTexture of a non-null texture: remembered image used (shadow: could be used) / nothing remembered /
+	// remembered but a registration or rebind made it stale / the full resolve gave a result that cannot be remembered / shadow only: memo and full resolve
+	// differ (must be 0).
+	TexMemoHitN, TexMemoMissN, TexMemoInvalidateN, TexMemoUncacheableN, TexMemoNeN,
 	SrtWalkTreeN, SrtWalkTreeFailN, SrtWalkCaptureN, SrtWalkSlotJitN, SrtWalkInterpN, SrtInterpSlotsN, SpecReadN, SpecReadXpageN,
 	// S432 (KYTY_PV_LAYOUT_FAST=1|shadow): vertex layouts taken from the SPIR-V words / Validate calls skipped on the capture and VS-store variants;
 	// shadow: layouts that differ from the disassembly route (must be 0) / variants Validate rejected (must be 0).

@@ -777,13 +777,15 @@ static uint64_t TextureDescriptionKey(const ShaderRecompiler::IR::ImageResource&
 
 const TextureDescription&
 RenderExecutor::FindTextureDescription(const ShaderRecompiler::IR::ImageResource&   resource,
-                                       const ShaderRecompiler::IR::DescriptorValue& value) {
+                                       const ShaderRecompiler::IR::DescriptorValue& value,
+                                       TexMemo::Entry<ImageId>**                    memo) {
 	constexpr size_t MaxTextureDescriptions = 16384;
 	const auto       inputs                 = TextureDescriptionInputs(resource);
 	const auto       key                    = TextureDescriptionKey(inputs, value);
 	if (const auto found = m_texture_descriptions.find(key);
 	    found != m_texture_descriptions.end() && found->second.value == value &&
 	    found->second.inputs == inputs) {
+		if (memo != nullptr) *memo = &found->second.memo;
 		return found->second.description;
 	}
 	if (m_texture_descriptions.size() >= MaxTextureDescriptions) {
@@ -793,6 +795,8 @@ RenderExecutor::FindTextureDescription(const ShaderRecompiler::IR::ImageResource
 	entry.inputs = inputs;
 	entry.value  = value;
 	entry.description = DescribeTexture(inputs, value, m_context.GetGraphics());
+	entry.memo        = {}; // S438: a new description (or a key collision) never inherits a remembered image
+	if (memo != nullptr) *memo = &entry.memo;
 	return entry.description;
 }
 
@@ -817,12 +821,27 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 			}
 		}
 	}
-	// A copy: the cache lookups below must not depend on the memo's storage.
-	auto  described     = [&] {
-		KYTY_CP_SITE(BindResolveDescCopy); // S430
-		return FindTextureDescription(resource, value);
+	// S438: KYTY_TEX_RESOLVE_MEMO=0 keeps the copy (the cache lookups below must not depend on the memo's storage); 1 and shadow read the
+	// description in place and copy only the ImageDesc that FindImage may change and the binding keeps.
+	static const bool                   memo_logged = [] {
+		LOGF("[tex-resolve-memo] mode=%s\n", TexMemo::ModeName(TexMemo::EnvMode()));
+		return true;
 	}();
-	auto& desc          = described.desc;
+	(void)memo_logged;
+	const auto                          memo_mode = TexMemo::EnvMode();
+	TexMemo::Entry<ImageId>*            memo      = nullptr;
+	std::optional<TextureDescription>   legacy_copy;
+	std::optional<TextureCache::ImageDesc> own_desc;
+	const TextureDescription&           described = [&]() -> const TextureDescription& {
+		KYTY_CP_SITE(BindResolveDescCopy); // S430
+		const auto& found = FindTextureDescription(resource, value, &memo);
+		if (memo_mode == TexMemo::Mode::Off) {
+			return legacy_copy.emplace(found);
+		}
+		own_desc.emplace(found.desc);
+		return found;
+	}();
+	auto&       desc                = legacy_copy ? legacy_copy->desc : *own_desc;
 	const bool  storage             = resource.written;
 	if (described.null) {
 		if (m_context.GetGraphics().null_descriptor_enabled) {
@@ -865,7 +884,40 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	const auto  max_mip             = resource.r128 ? last_level : descriptor.MaxMip();
 	auto        id                  = [&] {
 		KYTY_CP_SITE(BindResolveFindImage); // S430
-		return texture_cache.FindImage(desc, described.shader_conversion);
+		if (memo_mode == TexMemo::Mode::Off) {
+			return texture_cache.FindImage(desc, described.shader_conversion);
+		}
+		const auto pristine_view = desc.view_info;
+		// The remembered image: used in `1` (the registration check, the touch and MaterializeColorClear as in FindImage), only asked in `shadow`.
+		const auto metadata_base_layer = desc.view_info.base_layer;
+		const auto verdict             = texture_cache.ReuseImage(*memo, desc, metadata_base_layer, memo_mode == TexMemo::Mode::On);
+		FrameTiming::Add(verdict == TexMemo::Verdict::Hit        ? FrameTiming::Counter::TexMemoHitN
+		                 : verdict == TexMemo::Verdict::Stale    ? FrameTiming::Counter::TexMemoInvalidateN
+		                                                         : FrameTiming::Counter::TexMemoMissN);
+		if (verdict == TexMemo::Verdict::Hit && memo_mode == TexMemo::Mode::On) {
+			return memo->id;
+		}
+		TextureCache::FindImageInfo info;
+		const auto                  full = texture_cache.FindImage(desc, described.shader_conversion, &info);
+		if (verdict == TexMemo::Verdict::Hit) {
+			const bool same = TexMemo::ShadowAgrees(*memo, full, !info.view_adjusted && desc.view_info == pristine_view);
+			if (!same) {
+				FrameTiming::Add(FrameTiming::Counter::TexMemoNeN);
+				static std::atomic<uint32_t> logged {0};
+				if (logged.fetch_add(1) < 20) {
+					LOGF("[tex-memo-ne] addr=0x%llx memo=%u full=%u view_adjusted=%d exact=%d\n",
+					     static_cast<unsigned long long>(desc.info.data.address), memo->id.index, full.index, info.view_adjusted ? 1 : 0,
+					     info.exact ? 1 : 0);
+				}
+			}
+		}
+		if (TexMemo::CanStore(info) && full) {
+			*memo = {full, info.generation, true};
+		} else {
+			*memo = {};
+			FrameTiming::Add(FrameTiming::Counter::TexMemoUncacheableN);
+		}
+		return full;
 	}();
 	auto*       image               = &texture_cache.GetImage(id);
 	const bool  stencil_association = static_cast<bool>(image->depth_id);

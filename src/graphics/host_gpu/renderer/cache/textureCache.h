@@ -11,6 +11,7 @@
 #include "graphics/host_gpu/renderer/image/blitHelper.h"
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
+#include "graphics/host_gpu/renderer/pipeline/texResolveMemo.h"
 
 #include <bitset>
 #include <map>
@@ -67,7 +68,15 @@ public:
 	~TextureCache();
 	KYTY_CLASS_NO_COPY(TextureCache);
 
-	[[nodiscard]] ImageId       FindImage(ImageDesc& desc, bool exact_format = false);
+	// S438: what FindImage learned about its result, for KYTY_TEX_RESOLVE_MEMO (generation = registration generation at the end of the lookup).
+	struct FindImageInfo : TexMemo::Found {
+		uint64_t generation = 0;
+	};
+	[[nodiscard]] ImageId       FindImage(ImageDesc& desc, bool exact_format = false,
+	                                      FindImageInfo* info = nullptr);
+	// S438: the `known` branch of FindImage for a remembered result. Hit: the image is touched (commit) and MaterializeColorClear ran.
+	[[nodiscard]] TexMemo::Verdict ReuseImage(const TexMemo::Entry<ImageId>& entry, const ImageDesc& desc,
+	                                          uint32_t metadata_base_layer, bool commit);
 	void                        UpdateImage(ImageId id);
 	[[nodiscard]] ImageId       FindImageFromRange(uint64_t address, uint64_t size,
 	                                               bool ensure_valid = true);
