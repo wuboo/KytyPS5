@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
 #include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
+#include "graphics/presentation/cpPcSampler.h"
 
 #include "common/abi.h"
 #include "graphics/shader/nullDescDiag.h"
@@ -545,6 +546,7 @@ void CompileSrtReads(ResourcePlan& program) {
 	}
 	code.readyRE();
 	EXIT_IF(Xbyak::GetError() != 0);
+	if (CpSampler::Pc::Enabled()) CpSampler::Pc::RegisterJit(code.getCode(), code.getSize(), CpSampler::Pc::JitKind::Slots, program.shader_hash); // S439 DIAG
 	program.srt_read_addresses.resize(routines.size());
 }
 
@@ -670,6 +672,7 @@ void CompileTreeWalker(ResourcePlan& program) {
 	code.ret();
 	code.readyRE();
 	EXIT_IF(Xbyak::GetError() != 0);
+	if (CpSampler::Pc::Enabled()) CpSampler::Pc::RegisterJit(code.getCode(), code.getSize(), CpSampler::Pc::JitKind::Tree, program.shader_hash); // S439 DIAG
 }
 
 } // namespace
@@ -1366,6 +1369,7 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 		m_context.values.resize(m_program.evaluation_value_count);
 		using Walker = bool KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*,
 		    ResourcePlan::EvaluationContext::Entry*, uint64_t, size_t);
+		if (CpSampler::Pc::WalkActive().load(std::memory_order_relaxed)) CpSampler::Pc::Tally().jit_tree_calls++; // S439 DIAG
 		if (m_program.srt_code->getCode<Walker>()(m_runtime.user_data.data(), flat.data(),
 		                                          m_context.values.data(), m_context.generation,
 		                                          m_runtime.user_data.size())) {
@@ -1377,6 +1381,7 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 		SrtWalkPaths::Note(SrtWalkPaths::Path::Capture);
 	}
 	SrtWalkPaths::Note(SrtWalkPaths::Path::InterpWalk);
+	const bool pc_diag = CpSampler::Pc::WalkActive().load(std::memory_order_relaxed); // S439 DIAG
 	// Compiled slots read mapped memory directly, as the ordinary reader of a capture does.
 	auto*      captured = SrtReadCapture::DirectRanges(m_runtime);
 	const bool compiled = m_program.srt_read_code && m_active_mask.IsEmpty() &&
@@ -1394,6 +1399,10 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 			                                       m_program.srt_read_entries[slot])(
 			    m_runtime.user_data.data(), flat.data(), m_context.values.data(),
 			    m_context.generation, m_runtime.user_data.size(), &cursor);
+			if (pc_diag) { // S439 DIAG: the JIT slot reads are the 32-bit loads listed in the address cursor
+				CpSampler::Pc::Tally().jit_slot_calls++;
+				CpSampler::Pc::NoteReads(addresses, static_cast<size_t>(cursor - addresses), sizeof(uint32_t));
+			}
 			if (captured != nullptr) {
 				for (const auto* address = addresses; address != cursor; ++address) {
 					captured->emplace_back(*address, sizeof(uint32_t));
@@ -1406,6 +1415,7 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 			}
 		}
 		SrtWalkPaths::Note(SrtWalkPaths::Path::InterpSlots);
+		if (pc_diag) CpSampler::Pc::Tally().interp_calls++; // S439 DIAG
 		const auto& read = m_program.srt_reads[slot];
 		const auto* inst = read.value.ResolveInstruction();
 		const bool clean = inst != nullptr && inst->Flags<SrtReadFlags>().clean != 0u;

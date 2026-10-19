@@ -953,6 +953,16 @@ add_executable(cp_sampler_mutant_no_restore_tests EXCLUDE_FROM_ALL "${KYTY_TESTS
 target_include_directories(cp_sampler_mutant_no_restore_tests PRIVATE ${inc_headers})
 target_compile_definitions(cp_sampler_mutant_no_restore_tests PRIVATE KYTY_CPSAMPLER_MUTANT_NO_RESTORE=1)
 
+# S439 DIAG: PC sampling of the CP thread, JIT registry, CPU-vs-wall, walk tally. Mutants: no JIT registration, no read counting.
+add_executable(cp_pc_sampler_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPcSamplerTests.cpp")
+target_include_directories(cp_pc_sampler_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS NO_REGISTER NO_READS)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(cp_pc_sampler_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPcSamplerTests.cpp")
+	target_include_directories(cp_pc_sampler_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_pc_sampler_mutant_${mutant_lower}_tests PRIVATE KYTY_CPPC_MUTANT_${mutant}=1)
+endforeach()
+
 # S406: GPU busy-time estimate from timeline completions. Mutant: no max with the previous completion.
 add_executable(gpu_done_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GpuDoneTests.cpp")
 target_include_directories(gpu_done_tests PRIVATE ${inc_headers})
@@ -1628,6 +1638,11 @@ if(BUILD_TESTING)
 	add_test(NAME cp_sampler COMMAND $<TARGET_FILE:cp_sampler_tests>)
 	add_test(NAME cp_sampler_mutant_no_restore COMMAND $<TARGET_FILE:cp_sampler_mutant_no_restore_tests>)
 	set_tests_properties(cp_sampler_mutant_no_restore PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME cp_pc_sampler COMMAND $<TARGET_FILE:cp_pc_sampler_tests>)
+	foreach(mutant IN ITEMS no_register no_reads)
+		add_test(NAME cp_pc_sampler_mutant_${mutant} COMMAND $<TARGET_FILE:cp_pc_sampler_mutant_${mutant}_tests>)
+		set_tests_properties(cp_pc_sampler_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME gpu_done COMMAND $<TARGET_FILE:gpu_done_tests>)
 	add_test(NAME gpu_done_mutant_no_max COMMAND $<TARGET_FILE:gpu_done_mutant_no_max_tests>)
 	set_tests_properties(gpu_done_mutant_no_max PROPERTIES WILL_FAIL TRUE)
@@ -1965,6 +1980,9 @@ if(BUILD_TESTING)
 		cp_phases_tests
 		cp_sampler_tests
 		cp_sampler_mutant_no_restore_tests
+		cp_pc_sampler_tests
+		cp_pc_sampler_mutant_no_register_tests
+		cp_pc_sampler_mutant_no_reads_tests
 		gpu_done_tests
 		gpu_done_mutant_no_max_tests
 		gpu_done_mutant_starve_no_firstrec_tests

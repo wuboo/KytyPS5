@@ -334,6 +334,11 @@ enum class Counter : uint32_t {
 	// worker time in the builds / most finished results waiting to be taken at once (the worker stops at 64: each holds a whole program).
 	PrewarmQueuedN, PrewarmDoneN, PrewarmFailN, PrewarmHitN, PrewarmWaitN, PrewarmWaitNs, PrewarmCancelN, PrewarmTimeoutN, PrewarmMismatchN,
 	PrewarmSkipN, PrewarmManifestN, PrewarmNeN, PrewarmBuildNs, PrewarmReadyPeak, PrewarmEvictN,
+	// S439 DIAG (KYTY_DIAG_CP_SAMPLE + KYTY_DIAG_CP_PC): CPU time vs wall time of the CP thread per flip (all ticks / ticks in the sh.walk site), and the
+	// guest reads of the walks: walks, JIT slot reads counted from the address list (reads, bytes, distinct 4 KiB pages per walk), walks that
+	// entered the interpreter / per-slot JIT / tree JIT (calls), PC samples taken in sh.walk / failed.
+	CpThreadCpuNs, CpThreadWallNs, CpWalkCpuNs, CpWalkWallNs,
+	WalkN, WalkReadN, WalkReadBytes, WalkPagesN, WalkInterpCallN, WalkJitSlotCallN, WalkJitTreeCallN, CpPcSampleN, CpPcFailN,
 	Count,
 };
 
