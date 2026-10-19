@@ -86,6 +86,35 @@ void TestTopAndFormat() {
 	Check(MakeOwner(true, true) == Owner::Both && MakeOwner(false, false) == Owner::None, "owner mapping");
 }
 
+// S443: runs of consecutive faulting pages, pages with a repeated fault, per-thread write / read split.
+void TestRunsAndRefaults() {
+	Aggregator aggregator;
+	Finished   finished;
+	// flip 3: pages 0..2 (run of 3), page 10 (run of 1), pages 20..21 (run of 2), pages 30..37 (run of 8), pages 50..66 (run of 17); page 10 twice, page 21 three times
+	for (uint64_t page: {0, 1, 2, 10, 10, 20, 21, 21, 21, 30, 31, 32, 33, 34, 35, 36, 37, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66}) {
+		(void)aggregator.Note(0x50000000 + page * 0x1000, 3, Owner::Buffer, 0, &finished);
+	}
+	Check(aggregator.Note(0x50000000, 4, Owner::Buffer, 0, &finished), "roll");
+	Check(finished.distinct == 31, "distinct pages of the flip");
+	Check(finished.runs[0] == 1 && finished.runs[1] == 1 && finished.runs[2] == 1 && finished.runs[3] == 1 && finished.runs[4] == 0 && finished.runs[5] == 1,
+	      "runs by length");
+	Check(finished.refault_pages == 2 && finished.refaults == 3, "pages with a repeated fault and the faults beyond the first");
+	const auto line = FormatRuns(finished);
+	Check(line.find("[wf-runs] flip=3 pages=31 runs_1=1 runs_2=1 runs_3_4=1 runs_5_8=1 runs_9_16=0 runs_17_up=1 refault_pages=2 refaults=3") == 0, "runs line");
+}
+
+void TestThreads() {
+	ThreadStats stats;
+	stats.NoteWrite(7, "guest-a", 1000);
+	stats.NoteWrite(7, "guest-a", 2000);
+	stats.NoteRead(7, "guest-a", 500000);
+	stats.NoteWrite(9, "guest-b", 100);
+	const auto all = stats.Snapshot();
+	Check(all.size() == 2 && all[0].tid == 7 && all[1].tid == 9, "busiest thread first");
+	Check(all[0].wf_n == 2 && all[0].wf_ns == 3000 && all[0].rf_n == 1 && all[0].rf_ns == 500000 && all[0].name == "guest-a", "write and read split");
+	Check(FormatThread(all[1], 5).find("[wf-thread] flip=5 tid=9 name=guest-b wf_n=1 wf_ms=0.00 rf_n=0 rf_ms=0.00") == 0, "thread line");
+}
+
 } // namespace
 
 int main() {
@@ -93,6 +122,8 @@ int main() {
 	TestRepeatedFaultsInOneFlipCountOnce();
 	TestUploadSameFlip();
 	TestTopAndFormat();
+	TestRunsAndRefaults();
+	TestThreads();
 	std::puts("WfDiagTests: all cases passed");
 	return 0;
 }

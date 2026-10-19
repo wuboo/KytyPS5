@@ -109,6 +109,7 @@ public:
 		Iterate<true>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 			manager->lock.lock();
 			manager->ShadowCheckClean(manager->GetCpuAddr() + offset, bytes);
+			manager->ShadowCheckFlip(manager->GetCpuAddr() + offset, bytes);
 			manager->ConsumeCpuDirty(manager->GetCpuAddr() + offset, bytes, !is_written, observed_range);
 			if (!is_written) {
 				manager->lock.unlock();

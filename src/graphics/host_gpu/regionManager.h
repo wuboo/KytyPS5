@@ -179,18 +179,27 @@ public:
 	}
 
 	// S440 (KYTY_WF_HOT_UNPROTECT): everything below runs with `lock` held.
-	[[nodiscard]] bool HasHot() const { return m_hot_state != nullptr && m_hot_state->count != 0; }
+	[[nodiscard]] bool HasHot() const { return m_hot_state != nullptr && (m_hot_state->count != 0 || m_hot_state->cand_n != 0); }
 	[[nodiscard]] uint32_t HotCountRelaxed() const { return m_hot_count.load(std::memory_order_relaxed); }
 	[[nodiscard]] bool IsHot(size_t page) const { return m_hot_state != nullptr && m_hot_state->hot.Get(page); }
 
 	// A write fault released [vaddr, vaddr + size): count one more flip for each page (hot after kHotStreak flips in a row).
 	void NoteWriteFault(uint64_t vaddr, uint64_t size) {
-		if (HotPages::CurrentMode() == HotPages::Mode::Off) {
+		const auto flip_mode = FlipUnprotect::CurrentMode();
+		if (HotPages::CurrentMode() == HotPages::Mode::Off && flip_mode == HotPages::Mode::Off) {
 			return;
 		}
 		const auto [start, end] = GetPageRange(vaddr, size);
 		auto&      hs           = EnsureHot();
 		const auto epoch        = HotPages::Epoch();
+		if (flip_mode != HotPages::Mode::Off) {
+			for (size_t page = start; page < end; ++page) {
+				NoteFlipFault(hs, page, epoch, flip_mode);
+			}
+		}
+		if (HotPages::CurrentMode() == HotPages::Mode::Off) {
+			return;
+		}
 		for (size_t page = start; page < end; ++page) {
 			if (hs.streak[page] != 0 && hs.last_fault[page] == epoch) {
 				continue;
@@ -226,6 +235,7 @@ public:
 		auto&      hs           = *m_hot_state;
 		bool       any          = false;
 		for (size_t page = start; page < end; ++page) {
+			DropCandidate(hs, page);
 			if (hs.hot.Get(page)) {
 				DropHot(hs, page);
 				m_cpu_dirty.Unset(page);
@@ -256,6 +266,47 @@ public:
 		}
 	}
 
+	// S443 shadow (KYTY_WF_FLIP_UNPROTECT=shadow): a candidate page that is clean (protected) must hash like it did right after its protection; a candidate of an
+	// earlier flip leaves the set.
+	void ShadowCheckFlip(uint64_t vaddr, uint64_t size) {
+		if (m_hot_state == nullptr || m_hot_state->cand_n == 0 || FlipUnprotect::CurrentMode() != HotPages::Mode::Shadow) {
+			return;
+		}
+		const auto [start, end] = GetPageRange(vaddr, size);
+		auto&      hs           = *m_hot_state;
+		const auto epoch        = HotPages::Epoch();
+		for (size_t page = start; page < end; ++page) {
+			if (!hs.cand.Get(page)) {
+				continue;
+			}
+			if (hs.sticky_epoch[page] != epoch) {
+				DropCandidate(hs, page);
+				continue;
+			}
+			if (m_cpu_dirty.Get(page) || m_gpu_dirty.Get(page) || !hs.cand_hash_valid.Get(page)) {
+				continue;
+			}
+#if defined(KYTY_MEMTRACKER_MUTANT_FLIP_SHADOW_BLIND)
+			continue;
+#endif
+			uint64_t first = 0;
+			if (!HashPage(page, &first)) {
+				continue;
+			}
+			FlipUnprotect::GetStats().hash.fetch_add(1, std::memory_order_relaxed);
+			if (first == hs.fhash[page]) {
+				continue;
+			}
+			uint64_t second = 0;
+			const bool stable = HashPage(page, &second) && second == first;
+			(stable ? FlipUnprotect::GetStats().ne : FlipUnprotect::GetStats().ne_unstable).fetch_add(1, std::memory_order_relaxed);
+			if (const auto observer = FlipUnprotect::NeObserver().load(std::memory_order_relaxed)) {
+				observer(m_cpu_addr + page * TRACKER_PAGE_SIZE, stable);
+			}
+			hs.fhash[page] = second;
+		}
+	}
+
 	// ForEachModifiedRange<Cpu, true> that knows hot pages. keep_hot: the caller will not hand the pages to the GPU for writing.
 	template <typename Func>
 	void ConsumeCpuDirty(uint64_t vaddr, uint64_t size, bool keep_hot, Func&& func) {
@@ -277,8 +328,27 @@ public:
 		const auto epoch = HotPages::Epoch();
 		const auto t0    = std::chrono::steady_clock::now();
 		uint64_t   hashed = 0;
+		const bool flip_on = FlipUnprotect::CurrentMode() == HotPages::Mode::On;
 		for (size_t page = start; page < end; ++page) {
 			if (!mask.Get(page) || !hs.hot.Get(page)) {
+				continue;
+			}
+			if (hs.sticky.Get(page)) {
+				// S443: kept until the end of its flip; the page is reported (copied) by every upload, whether or not it stays unprotected.
+#if defined(KYTY_MEMTRACKER_MUTANT_FLIP_NEVER_DEMOTE)
+				const bool same_flip = true;
+#else
+				const bool same_flip = hs.sticky_epoch[page] == epoch;
+#endif
+				if (keep_hot && same_flip && flip_on) {
+					clear.Unset(page);
+					FlipUnprotect::GetStats().keep.fetch_add(1, std::memory_order_relaxed);
+				} else {
+					DropHot(hs, page);
+				}
+#if defined(KYTY_MEMTRACKER_MUTANT_FLIP_SKIPS_UPLOAD)
+				report.Unset(page);
+#endif
 				continue;
 			}
 #if defined(KYTY_MEMTRACKER_MUTANT_HOT_SKIPS_HASH)
@@ -345,6 +415,26 @@ public:
 				report.Set(page);
 			}
 		}
+		if (hs.cand_n != 0 && FlipUnprotect::CurrentMode() == HotPages::Mode::Shadow) {
+			// S443 shadow: hash the candidates once the protection is in force (a hash taken earlier would miss a write between it and the protection).
+			for (size_t page = start; page < end; ++page) {
+				if (!mask.Get(page) || !hs.cand.Get(page) || m_cpu_dirty.Get(page)) {
+					continue;
+				}
+				if (hs.sticky_epoch[page] != epoch) {
+					DropCandidate(hs, page);
+					continue;
+				}
+				uint64_t hash = 0;
+				if (HashPage(page, &hash)) {
+					hs.fhash[page] = hash;
+					hs.cand_hash_valid.Set(page);
+					FlipUnprotect::GetStats().hash.fetch_add(1, std::memory_order_relaxed);
+				} else {
+					hs.cand_hash_valid.Unset(page);
+				}
+			}
+		}
 		for (const auto [first, last]: report) {
 			func(m_cpu_addr + first * TRACKER_PAGE_SIZE, (last - first) * TRACKER_PAGE_SIZE);
 		}
@@ -373,6 +463,15 @@ private:
 		std::array<uint32_t, TRACKER_REGION_PAGES> last_change {};
 		std::array<uint64_t, TRACKER_REGION_PAGES> hash {};
 		uint32_t                                   count = 0;
+		// S443 (KYTY_WF_FLIP_UNPROTECT): `sticky` marks the hot pages kept for their flip (On); `cand` the pages that would be (shadow).
+		RegionBits                                 sticky;
+		RegionBits                                 fault_seen; // fault_epoch[page] is valid
+		RegionBits                                 cand;
+		RegionBits                                 cand_hash_valid;
+		std::array<uint32_t, TRACKER_REGION_PAGES> fault_epoch {}; // flip of the last write fault
+		std::array<uint32_t, TRACKER_REGION_PAGES> sticky_epoch {}; // flip in which the page became sticky / candidate
+		std::array<uint64_t, TRACKER_REGION_PAGES> fhash {};
+		uint32_t                                   cand_n = 0;
 	};
 
 	HotState& EnsureHot() {
@@ -380,6 +479,10 @@ private:
 			m_hot_state = std::make_unique<HotState>();
 			m_hot_state->hot.Clear();
 			m_hot_state->hash_valid.Clear();
+			m_hot_state->sticky.Clear();
+			m_hot_state->fault_seen.Clear();
+			m_hot_state->cand.Clear();
+			m_hot_state->cand_hash_valid.Clear();
 		}
 		return *m_hot_state;
 	}
@@ -389,7 +492,53 @@ private:
 		m_hot_count.store(count, std::memory_order_relaxed);
 	}
 
+	// The second write fault of `page` in guest flip `epoch` (S443): keep the page unprotected until the flip ends (On) / remember it as a candidate (shadow).
+	void NoteFlipFault(HotState& hs, size_t page, uint32_t epoch, HotPages::Mode mode) {
+		if (!hs.fault_seen.Get(page) || hs.fault_epoch[page] != epoch) {
+			hs.fault_seen.Set(page);
+			hs.fault_epoch[page] = epoch;
+			return;
+		}
+		FlipUnprotect::GetStats().refault.fetch_add(1, std::memory_order_relaxed);
+		if (mode == HotPages::Mode::On) {
+			if (hs.hot.Get(page)) {
+				return; // already hot (S440) or kept
+			}
+			hs.hot.Set(page);
+			hs.sticky.Set(page);
+			hs.sticky_epoch[page] = epoch;
+			hs.hash_valid.Unset(page);
+			SetHotCount(hs, hs.count + 1);
+			FlipUnprotect::GetStats().promote.fetch_add(1, std::memory_order_relaxed);
+			FlipUnprotect::GetStats().pages.fetch_add(1, std::memory_order_relaxed);
+		} else if (!hs.cand.Get(page)) {
+			hs.cand.Set(page);
+			hs.cand_hash_valid.Unset(page);
+			hs.sticky_epoch[page] = epoch;
+			hs.cand_n++;
+			FlipUnprotect::GetStats().cand.fetch_add(1, std::memory_order_relaxed);
+		}
+	}
+
+	void DropCandidate(HotState& hs, size_t page) {
+		if (hs.cand.Get(page)) {
+			hs.cand.Unset(page);
+			hs.cand_hash_valid.Unset(page);
+			hs.cand_n--;
+		}
+	}
+
 	void DropHot(HotState& hs, size_t page) {
+		if (hs.sticky.Get(page)) {
+			hs.sticky.Unset(page);
+			hs.hot.Unset(page);
+			hs.hash_valid.Unset(page);
+			hs.streak[page] = 0;
+			SetHotCount(hs, hs.count - 1);
+			FlipUnprotect::GetStats().demote.fetch_add(1, std::memory_order_relaxed);
+			FlipUnprotect::GetStats().pages.fetch_sub(1, std::memory_order_relaxed);
+			return;
+		}
 		hs.hot.Unset(page);
 		hs.hash_valid.Unset(page); // later uploads of the page are not hashed: the stored hash describes an older buffer
 		hs.streak[page] = 0;

@@ -241,6 +241,7 @@ void TextureCache::RegisterImage(ImageId id) {
 	ForEachPage(image.info.data.address, image.info.data.size, [this, id](uint64_t page) {
 		m_image_page_table[page].push_back(id);
 	});
+	m_image_summary.Add(image.info.data.address, image.info.data.size);
 	TouchRegistrations(image.info.data.address, image.info.data.size);
 	image.registered = true;
 	image.lru_id     = m_lru_cache.Insert(id, m_gc_tick);
@@ -263,6 +264,7 @@ void TextureCache::UnregisterImage(ImageId id) {
 			EXIT("TextureCache: image missing from page owner index\n");
 		}
 	});
+	m_image_summary.Remove(image.info.data.address, image.info.data.size);
 	m_lru_cache.Free(image.lru_id);
 	const auto accounted = image.AccountedSize();
 	if (accounted > m_total_used_memory) {
@@ -1847,6 +1849,26 @@ void TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format for
 void TextureCache::InvalidateMemory(uint64_t address, uint64_t size) {
 	if (!GuestRange {address, size}.Valid()) {
 		EXIT("TextureCache: invalid memory-invalidation range\n");
+	}
+	// S443 (KYTY_WF_FAST_HANDLER): no image covers the page, so the lock and the page owner index have nothing to find.
+	const auto fast_mode = FastHandler::CurrentMode();
+	if (fast_mode != FastHandler::Mode::Off && !m_image_summary.MayCover(address, size)) {
+		auto& stats = FastHandler::GetStats();
+		if (fast_mode == FastHandler::Mode::On) {
+			Common::MemEvents::Record(Common::MemEvents::Kind::CpuWrite, address, size);
+			stats.fast.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+		std::scoped_lock lock {m_lock}; // shadow: the slow path runs as ever; an image found after the filter said "none" is a mismatch
+		if (!FindImagesInRegion(address, size, true).empty()) {
+			stats.ne.fetch_add(1, std::memory_order_relaxed);
+		}
+		stats.fast.fetch_add(1, std::memory_order_relaxed);
+		InvalidateCpuAliases(address, size);
+		return;
+	}
+	if (fast_mode != FastHandler::Mode::Off) {
+		FastHandler::GetStats().slow.fetch_add(1, std::memory_order_relaxed);
 	}
 	std::scoped_lock lock {m_lock};
 	InvalidateCpuAliases(address, size);

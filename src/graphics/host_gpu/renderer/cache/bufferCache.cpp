@@ -360,6 +360,15 @@ uint64_t GuestFlipsForTracker() {
 	return FrameTiming::GuestFlips();
 }
 
+// S443 (KYTY_WF_FLIP_UNPROTECT=shadow): a candidate page changed without a fault.
+void LogFlipShadowNe(uint64_t page, bool stable) {
+	static std::atomic<uint32_t> logged {0};
+	if (logged.fetch_add(1, std::memory_order_relaxed) < 40) {
+		LOGF("[wf-flip-ne] page=0x%016llx %s flip=%llu\n", static_cast<unsigned long long>(page), stable ? "stable" : "unstable",
+		     static_cast<unsigned long long>(FrameTiming::GuestFlips()));
+	}
+}
+
 void NoteUploadForWriteFaultDiag(uint64_t address, uint64_t size) {
 	WriteFault::Pages().NoteUpload(address, size, FrameTiming::GuestFlips());
 }
@@ -379,6 +388,7 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       m_texture_cache(texture_cache) {
 	HotPages::EpochSource().store(&GuestFlipsForTracker, std::memory_order_relaxed);
 	HotPages::HasherSource().store(&HashGuestPage, std::memory_order_relaxed);
+	FlipUnprotect::NeObserver().store(&LogFlipShadowNe, std::memory_order_relaxed);
 	if (WriteFault::Enabled()) {
 		HotPages::UploadObserver().store(&NoteUploadForWriteFaultDiag, std::memory_order_relaxed);
 	}

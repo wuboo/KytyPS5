@@ -80,7 +80,7 @@ RangeSet MemoryTracker::TakeBdaSync() {
 		std::lock_guard lock(m_bda_sync_mutex);
 		taken = std::exchange(m_bda_sync, RangeSet {});
 	}
-	if (HotPages::CurrentMode() == HotPages::Mode::On) {
+	if (HotPages::CurrentMode() == HotPages::Mode::On || FlipUnprotect::CurrentMode() == HotPages::Mode::On) {
 		AddHotPages(taken);
 	}
 	return taken;

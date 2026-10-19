@@ -779,7 +779,7 @@ add_executable(memory_tracker_tests EXCLUDE_FROM_ALL
 target_link_libraries(memory_tracker_tests fmt::fmt common)
 target_include_directories(memory_tracker_tests PRIVATE ${inc_headers})
 # S406: the page-stamp mutants (a CPU / GPU modification takes no stamp) must fail TestPageGeneration. S440: HOT_SKIPS_HASH (a changed hot page is not noticed) / HOT_NEVER_REPROTECT must fail TestHotPages.
-foreach(mutant IN ITEMS NO_BUMP_CPU NO_BUMP_GPU HOT_SKIPS_HASH HOT_NEVER_REPROTECT)
+foreach(mutant IN ITEMS NO_BUMP_CPU NO_BUMP_GPU HOT_SKIPS_HASH HOT_NEVER_REPROTECT FLIP_NEVER_DEMOTE FLIP_SKIPS_UPLOAD FLIP_SHADOW_BLIND)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(memory_tracker_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/MemoryTrackerTests.cpp"
@@ -1382,11 +1382,26 @@ target_include_directories(wf_diag_tests PRIVATE ${inc_headers})
 add_executable(wf_diag_mutant_no_shift_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/WfDiagTests.cpp")
 target_include_directories(wf_diag_mutant_no_shift_tests PRIVATE ${inc_headers})
 target_compile_definitions(wf_diag_mutant_no_shift_tests PRIVATE KYTY_WFDIAG_MUTANT_NO_SHIFT=1)
+foreach(mutant IN ITEMS RUNS_SPLIT THREAD_MIXED)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(wf_diag_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/WfDiagTests.cpp")
+	target_include_directories(wf_diag_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(wf_diag_mutant_${mutant_lower}_tests PRIVATE KYTY_WFDIAG_MUTANT_${mutant}=1)
+endforeach()
 add_executable(gf_diag_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GfDiagTests.cpp")
 target_include_directories(gf_diag_tests PRIVATE ${inc_headers})
 add_executable(gf_diag_mutant_no_after_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GfDiagTests.cpp")
 target_include_directories(gf_diag_mutant_no_after_tests PRIVATE ${inc_headers})
 target_compile_definitions(gf_diag_mutant_no_after_tests PRIVATE KYTY_GFDIAG_MUTANT_NO_AFTER=1)
+# S443 (KYTY_WF_FAST_HANDLER): the lock-free "no image on this page" filter. Mutants: NEVER_COVERS (an image page is reported empty), NO_ADD (registration adds nothing).
+add_executable(image_page_summary_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ImagePageSummaryTests.cpp")
+target_include_directories(image_page_summary_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS NEVER_COVERS NO_ADD)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(image_page_summary_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ImagePageSummaryTests.cpp")
+	target_include_directories(image_page_summary_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(image_page_summary_mutant_${mutant_lower}_tests PRIVATE KYTY_IMAGEPAGESUMMARY_MUTANT_${mutant}=1)
+endforeach()
 # S413: KYTY_DIAG_CP_WAIT cause tag. Mutant CPWAIT_NO_CAUSE: the scope does not set the cause.
 add_executable(cp_wait_diag_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpWaitDiagTests.cpp")
 target_include_directories(cp_wait_diag_tests PRIVATE ${inc_headers})
@@ -1562,6 +1577,10 @@ if(BUILD_TESTING)
 	add_test(NAME wf_diag COMMAND $<TARGET_FILE:wf_diag_tests>)
 	add_test(NAME wf_diag_mutant_no_shift COMMAND $<TARGET_FILE:wf_diag_mutant_no_shift_tests>)
 	set_tests_properties(wf_diag_mutant_no_shift PROPERTIES WILL_FAIL TRUE)
+	foreach(mutant IN ITEMS runs_split thread_mixed)
+		add_test(NAME wf_diag_mutant_${mutant} COMMAND $<TARGET_FILE:wf_diag_mutant_${mutant}_tests>)
+		set_tests_properties(wf_diag_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME gf_diag COMMAND $<TARGET_FILE:gf_diag_tests>)
 	add_test(NAME gf_diag_mutant_no_after COMMAND $<TARGET_FILE:gf_diag_mutant_no_after_tests>)
 	set_tests_properties(gf_diag_mutant_no_after PROPERTIES WILL_FAIL TRUE)
@@ -1589,8 +1608,13 @@ if(BUILD_TESTING)
 		set_tests_properties(gpu_keepwarm_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
+	add_test(NAME image_page_summary COMMAND $<TARGET_FILE:image_page_summary_tests>)
+	foreach(mutant IN ITEMS never_covers no_add)
+		add_test(NAME image_page_summary_mutant_${mutant} COMMAND $<TARGET_FILE:image_page_summary_mutant_${mutant}_tests>)
+		set_tests_properties(image_page_summary_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
-	foreach(mutant IN ITEMS no_bump_cpu no_bump_gpu hot_skips_hash hot_never_reprotect)
+	foreach(mutant IN ITEMS no_bump_cpu no_bump_gpu hot_skips_hash hot_never_reprotect flip_never_demote flip_skips_upload flip_shadow_blind)
 		add_test(NAME memory_tracker_mutant_${mutant} COMMAND $<TARGET_FILE:memory_tracker_mutant_${mutant}_tests>)
 		set_tests_properties(memory_tracker_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
@@ -1866,8 +1890,16 @@ if(BUILD_TESTING)
 		memory_tracker_mutant_no_bump_gpu_tests
 		memory_tracker_mutant_hot_skips_hash_tests
 		memory_tracker_mutant_hot_never_reprotect_tests
+		memory_tracker_mutant_flip_never_demote_tests
+		memory_tracker_mutant_flip_skips_upload_tests
+		memory_tracker_mutant_flip_shadow_blind_tests
+		image_page_summary_tests
+		image_page_summary_mutant_never_covers_tests
+		image_page_summary_mutant_no_add_tests
 		wf_diag_tests
 		wf_diag_mutant_no_shift_tests
+		wf_diag_mutant_runs_split_tests
+		wf_diag_mutant_thread_mixed_tests
 		pv_indirect_tests
 		pv_indirect_mutant_clamp_off_tests
 		pv_indirect_mutant_ignore_fields_tests
