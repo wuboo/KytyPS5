@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/presentation/cpPhases.h"
 #include "graphics/presentation/cpSampler.h"
+#include "graphics/presentation/cpPcSampler.h"
 #include "graphics/presentation/frameTiming.h"
 
 #include <cstdlib>
@@ -39,6 +40,9 @@ inline void BindCpThread() {
 	if (Enabled()) State().bound = true;
 	if (CpSampler::Enabled()) {
 		State().sampler = true;
+#if defined(__APPLE__)
+		if (CpSampler::Pc::Enabled()) CpSampler::Pc::RegisterCurrentThread(); // S439 DIAG: the sampler thread suspends this thread to read its PC
+#endif
 		CpSampler::StartProduction();
 	} else if (RfOp::Enabled() || CpWait::Enabled()) {
 		// S413: the breadcrumbs (site, opcode) without the 10 kHz sampler thread; the same single relaxed store per site as with the sampler.

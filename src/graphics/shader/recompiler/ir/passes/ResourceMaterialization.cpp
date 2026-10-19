@@ -6,6 +6,7 @@
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
 #include <optional>
 #include "graphics/presentation/cpSampler.h"
+#include "graphics/presentation/cpPcSampler.h"
 #include "graphics/shader/nullDescDiag.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/shaderBindings.h"
@@ -1667,6 +1668,7 @@ bool MaterializeResourcesWalk(const ResourcePlan& program, const SrtRuntime& run
 	{
 		KYTY_CP_SITE(ShWalk);
 		walked = walker.RefreshFlatBuffer(snapshot.flattened_srt);
+		if (CpSampler::Pc::WalkActive().load(std::memory_order_relaxed)) CpSampler::Pc::EndWalk(); // S439 DIAG
 	}
 	if (!walked) {
 		return SpecializationFail(fmt::format("SRT refresh complete={} reads={} user_data={}",

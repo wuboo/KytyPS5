@@ -2,6 +2,7 @@
 #include "kernel/eventQueue.h"
 #include "graphics/presentation/cpPhases.h"
 #include "graphics/presentation/cpSampler.h"
+#include "graphics/presentation/cpPcSampler.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/cpWaitDiag.h"
 #include "graphics/shader/nullDescDiag.h"
@@ -478,6 +479,19 @@ constexpr const char* kCounterNames[] = {
     "prewarm_build_ns",
     "prewarm_ready_peak",
     "prewarm_evict_n",
+    "cp_thread_cpu_ns",
+    "cp_thread_wall_ns",
+    "cp_walk_cpu_ns",
+    "cp_walk_wall_ns",
+    "walk_n",
+    "walk_read_n",
+    "walk_read_bytes",
+    "walk_pages_n",
+    "walk_interp_call_n",
+    "walk_jit_slot_call_n",
+    "walk_jit_tree_call_n",
+    "cp_pc_sample_n",
+    "cp_pc_fail_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
@@ -701,16 +715,55 @@ void DumpHistogram(const Histogram& hist, uint64_t from, uint64_t to) {
 	}
 }
 
+// S439 DIAG: PCs of the CP thread in sh.walk, dumped with the segment of the site histogram.
+Pc::PcHistogram& PcHist() {
+	static Pc::PcHistogram hist;
+	return hist;
+}
+
+void DumpPc(uint64_t from, uint64_t to) {
+	auto& hist = PcHist();
+	if (hist.Total() + hist.Fail() == 0) return;
+	LOGF("[cp-pc] flips=%llu-%llu samples=%llu fail=%llu distinct=%llu jit_registered=%u jit_dropped=%u\n", static_cast<unsigned long long>(from),
+	     static_cast<unsigned long long>(to), static_cast<unsigned long long>(hist.Total()), static_cast<unsigned long long>(hist.Fail()),
+	     static_cast<unsigned long long>(hist.Distinct()), Pc::JitCount().load(), Pc::JitDropped().load());
+	for (const auto& [pc, n]: hist.Top(40)) {
+		LOGF("[cp-pc] pc=0x%llx n=%llu sym=%s\n", static_cast<unsigned long long>(pc), static_cast<unsigned long long>(n), Pc::Symbolize(pc).c_str());
+	}
+	for (const auto& [sym, n]: hist.TopSymbols(25)) {
+		LOGF("[cp-pc-sym] n=%llu sym=%s\n", static_cast<unsigned long long>(n), sym.c_str());
+	}
+	hist.Clear();
+}
+
+// S439 DIAG: CPU time vs wall time of the CP thread, added per tick (100 us) to the per-flip counters; ticks that fall in sh.walk also to the walk pair.
+void TickCpuWall() {
+#if defined(__APPLE__)
+	static Pc::CpuWall tracker;
+	uint64_t           cpu = 0;
+	if (!Pc::ThreadCpuNs(Pc::CpThreadPort().load(std::memory_order_relaxed), cpu)) return;
+	const auto [dcpu, dwall] = tracker.Tick(cpu, static_cast<uint64_t>(FrameTiming::SteadyNowNs()));
+	FrameTiming::Add(FrameTiming::Counter::CpThreadCpuNs, dcpu);
+	FrameTiming::Add(FrameTiming::Counter::CpThreadWallNs, dwall);
+	if (CpSite().load(std::memory_order_relaxed) == SiteId(Site::ShWalk)) {
+		FrameTiming::Add(FrameTiming::Counter::CpWalkCpuNs, dcpu);
+		FrameTiming::Add(FrameTiming::Counter::CpWalkWallNs, dwall);
+	}
+#endif
+}
+
 // Sampler-thread state (only that thread touches it).
 bool OnSample(Histogram& hist) {
 	const auto window = Window();
 	static uint64_t     base_total = 0, base_wait = 0, seg_from = 0;
 	static bool         in_segment = false;
+	if (Pc::Enabled()) TickCpuWall();
 
 	const uint64_t flips  = FrameTiming::GuestFlips();
 	const bool     inside = flips >= window.from && flips <= window.to;
 	if (in_segment && (!inside || flips / 100 != seg_from / 100)) {
 		DumpHistogram(hist, seg_from, flips);
+		DumpPc(seg_from, flips);
 		base_total += hist.Total();
 		base_wait += hist.Wait();
 		hist.Clear();
@@ -723,6 +776,18 @@ bool OnSample(Histogram& hist) {
 	}
 	FrameTiming::Set(FrameTiming::Counter::CpSampleN, base_total + hist.Total());
 	FrameTiming::Set(FrameTiming::Counter::CpSampleWaitN, base_wait + hist.Wait());
+#if defined(__APPLE__)
+	if (Pc::Enabled() && CpSite().load(std::memory_order_relaxed) == SiteId(Site::ShWalk)) {
+		uint64_t pc = 0;
+		if (Pc::ReadPc(Pc::CpThreadPort().load(std::memory_order_relaxed), pc)) {
+			PcHist().Add(pc);
+			FrameTiming::Add(FrameTiming::Counter::CpPcSampleN);
+		} else {
+			PcHist().AddFail();
+			FrameTiming::Add(FrameTiming::Counter::CpPcFailN);
+		}
+	}
+#endif
 	return true;
 }
 

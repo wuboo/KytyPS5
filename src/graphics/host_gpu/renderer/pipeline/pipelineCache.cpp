@@ -381,6 +381,7 @@ bool SpecDiagOn() {
 		LOGF("[spec-read-fast] mode=%s\n", fast == Libs::LibKernel::Memory::SpecFastMode::On ? "1"
 		                                    : fast == Libs::LibKernel::Memory::SpecFastMode::Shadow ? "shadow" : "0");
 		if (diag) ShaderRecompiler::IR::SrtWalkPaths::Active().store(true, std::memory_order_relaxed);
+		if (CpSampler::Pc::Enabled()) CpSampler::Pc::WalkActive().store(true, std::memory_order_relaxed); // S439 DIAG
 		return diag;
 	}();
 	return on;
@@ -398,6 +399,16 @@ void DrainSrtWalkPaths() {
 	FrameTiming::Add(C::SrtWalkSlotJitN, at(Path::SlotJit));
 	FrameTiming::Add(C::SrtWalkInterpN, at(Path::InterpWalk));
 	FrameTiming::Add(C::SrtInterpSlotsN, at(Path::InterpSlots));
+	if (CpSampler::Pc::WalkActive().load(std::memory_order_relaxed)) { // S439 DIAG
+		const auto walk = CpSampler::Pc::Drain();
+		FrameTiming::Add(C::WalkN, walk.walks);
+		FrameTiming::Add(C::WalkReadN, walk.reads);
+		FrameTiming::Add(C::WalkReadBytes, walk.bytes);
+		FrameTiming::Add(C::WalkPagesN, walk.pages);
+		FrameTiming::Add(C::WalkInterpCallN, walk.interp_calls);
+		FrameTiming::Add(C::WalkJitSlotCallN, walk.jit_slot_calls);
+		FrameTiming::Add(C::WalkJitTreeCallN, walk.jit_tree_calls);
+	}
 }
 
 // S430 (KYTY_SPEC_READ_FAST): tallies of the CP thread, added to FrameTiming once per Get() (NoteSrtMemo).
