@@ -370,6 +370,8 @@ enum class Counter : uint32_t {
 	// S445 (KYTY_SRT_SLOT_BATCH=1|shadow): batch entries / slots they filled / compiled slots left to the per-slot entry (a run of one) / runs that stopped at a failing
 	// slot / shadow: results that differ from the per-slot path (must be 0).
 	SrtBatchRunsN, SrtBatchSlotsN, SrtBatchSingleN, SrtBatchFailN, SrtBatchMismatchN,
+	// S446 (KYTY_GPU_LABELS=1|2): labels put on encoders and the CPU time the label calls took (the last columns of frames.csv).
+	GpuLabelN, GpuLabelNs,
 	Count,
 };
 

@@ -31,6 +31,7 @@
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/ir/passes/specCond.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
+#include "graphics/host_gpu/gpuLabels.h"
 #include "graphics/shader/recompiler/rtMiss.h"
 #include "graphics/shader/nullDescDiag.h"
 #include "graphics/shader/recompiler/srtReader.h"
@@ -421,6 +422,14 @@ void DrainSrtSlotBatch() {
 	FrameTiming::Add(C::SrtBatchMismatchN, cells[static_cast<size_t>(Cell::Mismatch)]);
 }
 
+// S446: KYTY_GPU_LABELS counters (the label calls themselves are in gpuLabels.h, which has no FrameTiming).
+void DrainGpuLabels() {
+	if (GpuLabel::Mode() == 0) return;
+	auto& stats = GpuLabel::Stats();
+	FrameTiming::Add(FrameTiming::Counter::GpuLabelN, stats.labels.exchange(0, std::memory_order_relaxed));
+	FrameTiming::Add(FrameTiming::Counter::GpuLabelNs, stats.ns.exchange(0, std::memory_order_relaxed));
+}
+
 void DrainSrtWalkPaths() {
 	if (!SpecDiagOn()) return;
 	using Path = ShaderRecompiler::IR::SrtWalkPaths::Path;
@@ -560,6 +569,7 @@ void NoteSrtMemo(const ShaderRecompiler::IR::ResourceSnapshot& snapshot, const S
 	DrainSrtWalkPaths();
 	DrainSrtJitCover();
 	DrainSrtSlotBatch();
+	DrainGpuLabels();
 	if (Libs::LibKernel::Memory::SpecFastEnvMode() != Libs::LibKernel::Memory::SpecFastMode::Off) FlushSpecFastCounts(); // S437: nothing to flush when off
 	if (context.mode == ShaderRecompiler::IR::SrtFastMode::Off) {
 		return;

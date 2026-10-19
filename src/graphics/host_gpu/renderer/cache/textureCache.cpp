@@ -4,6 +4,7 @@
 #include "common/memEvents.h"
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "graphics/host_gpu/gpuLabelsVk.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/logging/log.h"
@@ -547,7 +548,8 @@ ImageId TextureCache::GetForcedImage(uint32_t rgba) {
 	command.EndRendering();
 	image.Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {},
 	              command.Handle());
-	command.Handle().clearColorImage(image.backing.image, vk::ImageLayout::eTransferDstOptimal, &clear, 1, &range);
+	GpuLabel::With(command.Handle(), GpuLabel::Class::Clear,
+	               [&] { command.Handle().clearColorImage(image.backing.image, vk::ImageLayout::eTransferDstOptimal, &clear, 1, &range); }, "G.clr.forced");
 	m_forced_images.emplace(rgba, id);
 	return id;
 }

@@ -2,6 +2,7 @@
 #include "common/common.h"
 #include "common/profiler.h"
 #include "common/threads.h"
+#include "graphics/host_gpu/gpuLabelsVk.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
@@ -128,7 +129,12 @@ void CommandBuffer::BeginRendering(const RenderState& wanted) const {
 	rendering.pColorAttachments    = colors.data();
 	rendering.pDepthAttachment     = depth_stencil.has_depth ? &depth : nullptr;
 	rendering.pStencilAttachment   = depth_stencil.has_stencil ? &stencil : nullptr;
-	Handle().beginRendering(rendering);
+	{
+		static std::atomic<uint32_t> pass_id {0};
+		GpuLabel::With(
+		    Handle(), GpuLabel::Class::GuestRp, [&] { Handle().beginRendering(rendering); }, "G.rp.%ux%u.%u.%u", state.width, state.height,
+		    state.num_color_attachments, pass_id.fetch_add(1, std::memory_order_relaxed));
+	}
 	m_render_state = state;
 	m_rendering    = true;
 }

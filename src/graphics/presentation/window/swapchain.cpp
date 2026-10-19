@@ -1,4 +1,5 @@
 #include "common/assert.h"
+#include "graphics/host_gpu/gpuLabelsVk.h"
 #include "common/common.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
@@ -820,9 +821,13 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 		region.dstOffsets[1].x               = static_cast<int>(m_extent.width);
 		region.dstOffsets[1].y               = static_cast<int>(m_extent.height);
 		region.dstOffsets[1].z               = 1;
-		vk_command.blitImage(source->image.image, vk::ImageLayout::eTransferSrcOptimal,
-		                     m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal, 1,
-		                     &region, vk::Filter::eLinear);
+		GpuLabel::With(
+		    vk_command, GpuLabel::Class::Present,
+		    [&] {
+			    vk_command.blitImage(source->image.image, vk::ImageLayout::eTransferSrcOptimal, m_images[m_image_index],
+			                         vk::ImageLayout::eTransferDstOptimal, 1, &region, vk::Filter::eLinear);
+		    },
+		    "I.present.%ux%u", m_extent.width, m_extent.height);
 	} else {
 		const vk::ClearColorValue black {};
 		vk_command.clearColorImage(m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal,

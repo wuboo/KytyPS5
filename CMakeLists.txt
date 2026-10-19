@@ -1243,6 +1243,21 @@ add_executable(rt_miss_switch_mutant_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/R
 target_include_directories(rt_miss_switch_mutant_tests PRIVATE ${inc_headers})
 target_compile_definitions(rt_miss_switch_mutant_tests PRIVATE KYTY_RTMISS_MUTANT_IGNORED=1)
 
+# Mutant (must be caught, WILL_FAIL): KYTY_RT_MISS=2 answers only after the work, like mode 1.
+add_executable(rt_miss_switch_mutant_after_loop_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RtMissSwitchTests.cpp")
+target_include_directories(rt_miss_switch_mutant_after_loop_tests PRIVATE ${inc_headers})
+target_compile_definitions(rt_miss_switch_mutant_after_loop_tests PRIVATE KYTY_RTMISS2_MUTANT_AFTER_LOOP=1)
+
+# S446: KYTY_GPU_LABELS on a recording backend. Mutants (each must be caught, WILL_FAIL): the tiler class is silent; the label comes after its command.
+add_executable(gpu_label_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GpuLabelTests.cpp" "${KYTY_SOURCE_DIR}/graphics/host_gpu/gpuLabels.cpp")
+target_include_directories(gpu_label_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS SKIP_TILER AFTER_CMD)
+	string(TOLOWER "${mutant}" mutant_lower)
+	add_executable(gpu_label_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GpuLabelTests.cpp" "${KYTY_SOURCE_DIR}/graphics/host_gpu/gpuLabels.cpp")
+	target_include_directories(gpu_label_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(gpu_label_mutant_${mutant_lower}_tests PRIVATE KYTY_GPULABEL_MUTANT_${mutant}=1)
+endforeach()
+
 # Mutant (must be caught, WILL_FAIL): the diagnostic switches are missing from the known list.
 add_executable(env_audit_mutant_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/EnvAuditTests.cpp")
 target_include_directories(env_audit_mutant_tests PRIVATE ${inc_headers})
@@ -1804,6 +1819,13 @@ if(BUILD_TESTING)
 	add_test(NAME rt_miss_switch COMMAND $<TARGET_FILE:rt_miss_switch_tests>)
 	add_test(NAME rt_miss_switch_mutant COMMAND $<TARGET_FILE:rt_miss_switch_mutant_tests>)
 	set_tests_properties(rt_miss_switch_mutant PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME rt_miss_switch_mutant_after_loop COMMAND $<TARGET_FILE:rt_miss_switch_mutant_after_loop_tests>)
+	set_tests_properties(rt_miss_switch_mutant_after_loop PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME gpu_label COMMAND $<TARGET_FILE:gpu_label_tests>)
+	foreach(mutant IN ITEMS skip_tiler after_cmd)
+		add_test(NAME gpu_label_mutant_${mutant} COMMAND $<TARGET_FILE:gpu_label_mutant_${mutant}_tests>)
+		set_tests_properties(gpu_label_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	foreach(mutant_test control_file_mutant_lax_numbers control_file_mutant_no_until
 			control_file_mutant_force_any_slot control_file_mutant_diag_any_slot
 			control_file_mutant_filter_ignored control_file_mutant_diag_all_ignored control_file_mutant_dump_any_slot control_file_mutant_watch_any_slot
@@ -1854,6 +1876,8 @@ if(BUILD_TESTING)
 	add_test(NAME shader_recompiler_compute COMMAND $<TARGET_FILE:shader_recompiler_compute_tests>)
 	add_test(NAME shader_recompiler_bvh_spirv_unchanged
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --bvh-spirv-hash-only)
+	add_test(NAME shader_recompiler_bvh_rtmiss2
+		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --bvh-rtmiss2-only)
 	add_test(NAME shader_recompiler_alignbyte
 		COMMAND $<TARGET_FILE:shader_recompiler_compute_tests> --alignbyte-only)
 	add_test(NAME graphics_pipeline_rasterization
@@ -2174,6 +2198,10 @@ if(BUILD_TESTING)
 		rt_dump_mutant_ignore_ps_tests
 		rt_miss_switch_tests
 		rt_miss_switch_mutant_tests
+		rt_miss_switch_mutant_after_loop_tests
+		gpu_label_tests
+		gpu_label_mutant_skip_tiler_tests
+		gpu_label_mutant_after_cmd_tests
 		resource_tracking_tests
 		event_queue_lifetime_tests
 		event_queue_coalesce_tests

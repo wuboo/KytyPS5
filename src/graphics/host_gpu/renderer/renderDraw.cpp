@@ -2,6 +2,7 @@
 #include "graphics/host_gpu/renderer/syncCensus.h"
 
 #include "common/assert.h"
+#include "graphics/host_gpu/gpuLabelsVk.h"
 #include "common/common.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"

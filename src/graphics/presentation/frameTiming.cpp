@@ -549,6 +549,8 @@ constexpr const char* kCounterNames[] = {
     "srt_batch_single_n",
     "srt_batch_fail_n",
     "srt_batch_mismatch_n",
+    "gpu_label_n",
+    "gpu_label_ns",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

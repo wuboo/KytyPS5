@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
+#include "graphics/host_gpu/gpuLabels.h"
 #include "graphics/host_gpu/renderer/cpWaitDiag.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
@@ -238,6 +239,7 @@ void CommandScheduler::Flush() {
 	}
 	SubmitInfo submit;
 	Flush(submit);
+	GpuLabel::NoteCause(GpuLabel::Cause::Submit);
 }
 
 void CommandScheduler::RequestFlush() {

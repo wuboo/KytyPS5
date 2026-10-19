@@ -498,7 +498,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		                       1, &unpack_set, 0, nullptr);
 		cmd.pushConstants(unpack_pipeline->pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
 		                  sizeof(unpack_push), &unpack_push);
-		cmd.dispatch((count + 63) / 64, 1, 1);
+		GpuLabel::With(cmd, GpuLabel::Class::VsStore, [&] { cmd.dispatch((count + 63) / 64, 1, 1); }, "I.vs.unpack.%u", static_cast<uint32_t>(count));
 		FrameTiming::NoteDispatch(FrameTiming::DispatchClass::ProtoUnpack);
 	} else {
 		// S134 1a: corner -> record map. `unpack_set` (index buffer, vertices, map, map) is the
@@ -527,7 +527,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		                       1, &unpack_set, 0, nullptr);
 		cmd.pushConstants(unpack_pipeline->pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
 		                  sizeof(map_push), &map_push);
-		cmd.dispatch((count + 63) / 64, 1, 1);
+		GpuLabel::With(cmd, GpuLabel::Class::VsStore, [&] { cmd.dispatch((count + 63) / 64, 1, 1); }, "I.vs.map.%u", static_cast<uint32_t>(count));
 		FrameTiming::NoteDispatch(FrameTiming::DispatchClass::ProtoUnpack);
 
 		// S134 1b: unpack of the unique records only: non-indexed from the first unique vertex,
@@ -564,7 +564,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 		                       1, &unique_set, 0, nullptr);
 		cmd.pushConstants(unpack_pipeline->pipeline_layout, vk::ShaderStageFlagBits::eCompute, 0,
 		                  sizeof(unique_push), &unique_push);
-		cmd.dispatch((static_cast<uint32_t>(unique_plan.records) + 63) / 64, 1, 1);
+		GpuLabel::With(cmd, GpuLabel::Class::VsStore, [&] { cmd.dispatch((static_cast<uint32_t>(unique_plan.records) + 63) / 64, 1, 1); }, "I.vs.uniq.%u", static_cast<uint32_t>(unique_plan.records));
 		FrameTiming::NoteDispatch(FrameTiming::DispatchClass::ProtoUnpack);
 	}
 
@@ -586,8 +586,7 @@ void RenderExecutor::ExecutePerVertexPrototype(uint64_t submit_id, CommandBuffer
 	                       nullptr);
 	cmd.bindPipeline(vk::PipelineBindPoint::eCompute, programs->capture_pipeline.pipeline);
 	const uint32_t capture_invocations = static_cast<uint32_t>(capture_count);
-	cmd.dispatch(programs->native_capture ? (capture_invocations + 63u) / 64u : capture_invocations,
-	             1, 1);
+	GpuLabel::With(cmd, GpuLabel::Class::VsStore, [&] { cmd.dispatch(programs->native_capture ? (capture_invocations + 63u) / 64u : capture_invocations, 1, 1); }, "I.vs.capture.%u", capture_invocations);
 	FrameTiming::NoteDispatch(FrameTiming::ProtoCaptureClass(programs->native_capture));
 	if (capture_has_writes) ShaderWriteBarrier(cmd, vk::PipelineStageFlagBits::eComputeShader);
 
