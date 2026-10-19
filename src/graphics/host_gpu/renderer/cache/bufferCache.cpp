@@ -13,6 +13,7 @@
 #include "graphics/host_gpu/renderer/cpWaitDiag.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/wfDiag.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
@@ -359,6 +360,9 @@ uint64_t GuestFlipsForTracker() {
 	return FrameTiming::GuestFlips();
 }
 
+void NoteUploadForWriteFaultDiag(uint64_t address, uint64_t size) {
+	WriteFault::Pages().NoteUpload(address, size, FrameTiming::GuestFlips());
+}
 } // namespace
 
 BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
@@ -375,6 +379,9 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       m_texture_cache(texture_cache) {
 	HotPages::EpochSource().store(&GuestFlipsForTracker, std::memory_order_relaxed);
 	HotPages::HasherSource().store(&HashGuestPage, std::memory_order_relaxed);
+	if (WriteFault::Enabled()) {
+		HotPages::UploadObserver().store(&NoteUploadForWriteFaultDiag, std::memory_order_relaxed);
+	}
 	m_scheduler.SetPreSubmitHook([this] { FlushEagerReadbacks(); });
 	std::memset(m_gds_buffer.Mapped().data(), 0, static_cast<size_t>(m_gds_buffer.Size()));
 	m_gds_buffer.Flush(0, m_gds_buffer.Size());
