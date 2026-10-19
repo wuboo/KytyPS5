@@ -209,7 +209,7 @@ void TestEveryKeyBuiltOnce() {
 	Check(missing == 0, "no key is left unbuilt");
 }
 
-// The worker stops while max_ready results wait to be taken, and goes on when CP takes one.
+// With max_ready results waiting a newer one evicts the oldest: the worker never stops, CP builds an evicted program itself.
 void TestReadyCap() {
 	Mailbox<int>     box(1, 30000ms, {}, 2);
 	std::atomic<int> ran {0};
@@ -219,20 +219,47 @@ void TestReadyCap() {
 			return i;
 		});
 	}
-	for (int i = 0; i < 100 && ran.load() < 2; i++) std::this_thread::sleep_for(10ms);
-	std::this_thread::sleep_for(150ms); // time for a worker that ignores the limit to run the rest
-	Check(ran.load() == 2, "only max_ready jobs run while nobody takes a result");
-	Check(box.Stats().ready == 2 && box.Stats().ready_peak == 2, "ready counters");
-	auto claimed = box.Claim(K(500));
-	Check(claimed.payload && *claimed.payload == 0, "CP takes the first result");
-	for (int i = 0; i < 100 && ran.load() < 3; i++) std::this_thread::sleep_for(10ms);
-	std::this_thread::sleep_for(100ms);
-	Check(ran.load() == 3, "taking a result lets the worker run one more job");
-	Check(box.Stats().ready == 2, "ready is back at the limit");
-	// the rest: CP claims the queued ones (cancelled), nothing is built twice
-	for (int i = 1; i < 5; i++) (void)box.Claim(K(500 + i));
 	box.Drain();
-	Check(ran.load() == 3 && box.Stats().ready_peak == 2, "the limit held for the whole run");
+	Check(ran.load() == 5, "the worker does not stop at the limit");
+	const auto stats = box.Stats();
+	Check(stats.ready == 2 && stats.ready_peak <= 3, "ready never stays above max_ready");
+	Check(stats.evicted == 3, "three oldest results were evicted");
+	for (int i = 0; i < 3; i++) Check(!box.Claim(K(500 + i)).payload, "an evicted key gives nothing: CP builds it");
+	auto four = box.Claim(K(503));
+	auto five = box.Claim(K(504));
+	Check(four.payload && *four.payload == 3 && five.payload && *five.payload == 4, "the two newest results are kept");
+	Check(!box.Submit(K(500), []() -> std::optional<int> { return 1; }), "an evicted key is not built a second time");
+	Check(box.Stats().ready == 0, "ready is back at 0");
+	// a result CP took does not count as evictable later
+	Mailbox<int> box2(1, 30000ms, {}, 2);
+	for (int i = 0; i < 2; i++) box2.Submit(K(600 + i), [i]() -> std::optional<int> { return i; });
+	box2.Drain();
+	Check(box2.Claim(K(600)).payload.has_value(), "first taken");
+	box2.Submit(K(602), []() -> std::optional<int> { return 2; });
+	box2.Drain();
+	Check(box2.Stats().evicted == 0 && box2.Claim(K(601)).payload && box2.Claim(K(602)).payload, "a taken result frees its slot: nothing evicted");
+}
+
+// CP never waits for a building key longer than 250 ms by default.
+void TestDefaultWaitIsShort() {
+	Check(kDefaultMaxWait <= 250ms, "the default wait for a Building key is at most 250 ms");
+	if (kDefaultMaxWait > 250ms) return;
+	Mailbox<int>       box(1);
+	std::promise<void> started, release;
+	auto               release_future = release.get_future().share();
+	box.Submit(K(40), [&]() -> std::optional<int> {
+		started.set_value();
+		release_future.wait();
+		return 1;
+	});
+	started.get_future().wait();
+	const auto begin   = std::chrono::steady_clock::now();
+	auto       claimed = box.Claim(K(40));
+	const auto took    = std::chrono::steady_clock::now() - begin;
+	Check(!claimed.payload && took < 2000ms, "CP stopped waiting on its own");
+	Check(box.Stats().timeout == 1, "timeout counter");
+	release.set_value();
+	box.Drain();
 }
 
 // ---- manifest ----------------------------------------------------------------------------------------------------------------------------
@@ -401,6 +428,7 @@ int main(int argc, char** argv) {
 		TestWaitIsBounded();
 		TestFailedWork();
 		TestReadyCap();
+		TestDefaultWaitIsShort();
 		TestEveryKeyBuiltOnce();
 		TestManifest();
 		TestManifestBuilder();

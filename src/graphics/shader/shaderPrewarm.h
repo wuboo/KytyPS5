@@ -17,7 +17,7 @@
 //   Mapped hook       ShaderMapUserData -> OnMapped(); the codes that are seen before the hook is installed are kept and replayed.
 //
 // Mutants (tests/ShaderPrewarmTests.cpp, KYTY_PREWARM_MUTANT_*): DOUBLE_COMPILE, NO_WAIT_ON_BUILDING, FORGET_TAKEN, WAIT_UNBOUNDED,
-// MANIFEST_ACCEPTS_CORRUPT, SHADOW_IGNORES_DIFF, NO_READY_CAP.
+// MANIFEST_ACCEPTS_CORRUPT, SHADOW_IGNORES_DIFF, NO_READY_CAP (no eviction), LONG_WAIT (the 250 ms default becomes 30 s).
 
 #include "graphics/shader/programDiskCache.h"
 
@@ -60,15 +60,24 @@ struct MailboxStats {
 	uint64_t cancelled = 0; // CP claimed a Queued key: it builds itself
 	uint64_t timeout   = 0; // CP gave up waiting for a Building key (the key may be built twice)
 	uint64_t dedup     = 0; // Submit refused: the key is already known
+	uint64_t evicted   = 0; // finished results dropped (oldest first) because max_ready were waiting; CP builds those itself
 	uint32_t ready      = 0; // finished results nobody has taken yet (they hold the translation of a whole program)
 	uint32_t ready_peak = 0;
 };
 
+// CP waits that long for a key the worker is building, then builds it itself (S437: 30 s was no limit for a frame).
+#ifdef KYTY_PREWARM_MUTANT_LONG_WAIT
+inline constexpr std::chrono::milliseconds kDefaultMaxWait(30000);
+#else
+inline constexpr std::chrono::milliseconds kDefaultMaxWait(250);
+#endif
+
 template <typename Payload>
 class Mailbox {
 public:
-	// max_ready: the workers stop taking jobs while that many finished results wait to be taken (memory); 0 = no limit.
-	explicit Mailbox(unsigned workers = 1, std::chrono::milliseconds max_wait = std::chrono::milliseconds(30000), std::function<void()> worker_setup = {},
+	// max_ready: at most that many finished results wait to be taken (memory); a newer result evicts the oldest one (the worker never stops, CP
+	// builds an evicted program itself); 0 = no limit. max_wait: how long CP waits for a Building key (a late result is dropped).
+	explicit Mailbox(unsigned workers = 1, std::chrono::milliseconds max_wait = kDefaultMaxWait, std::function<void()> worker_setup = {},
 	                 uint32_t max_ready = 0)
 	    : m_max_wait(max_wait), m_setup(std::move(worker_setup)), m_max_ready(max_ready) {
 		for (unsigned i = 0; i < workers; i++) m_threads.emplace_back([this] { Run(); });
@@ -153,6 +162,7 @@ public:
 				m_hit++;
 				return result;
 			case State::Failed:
+			case State::Evicted:
 			case State::Taken:
 			case State::Cancelled:
 			case State::Abandoned: return result;
@@ -178,6 +188,7 @@ public:
 		stats.cancelled = m_cancelled;
 		stats.timeout   = m_timeout;
 		stats.dedup     = m_dedup;
+		stats.evicted   = m_evicted;
 		stats.ready      = m_ready;
 		stats.ready_peak = m_ready_peak;
 		return stats;
@@ -189,7 +200,7 @@ public:
 	}
 
 private:
-	enum class State : uint8_t { Queued, Building, Done, Failed, Taken, Cancelled, Abandoned };
+	enum class State : uint8_t { Queued, Building, Done, Failed, Taken, Cancelled, Abandoned, Evicted };
 	struct Slot {
 		State                  state = State::Queued;
 		Work                   work;
@@ -198,13 +209,36 @@ private:
 
 	void MarkTaken(typename std::unordered_map<ProgramDisk::Key, Slot, KeyHash>::iterator found) {
 		m_ready--;
-		m_wake.notify_all(); // a worker held back by the limit may go on
 #ifdef KYTY_PREWARM_MUTANT_FORGET_TAKEN
 		m_slots.erase(found); // the key is unknown again: a later Submit builds it a second time
 #else
 		found->second.payload.reset();
 		found->second.state = State::Taken;
 #endif
+	}
+
+	// Called with the mutex held after a result became Done: keeps at most m_max_ready results waiting, dropping the oldest finished one.
+	void EvictOldest() {
+#ifndef KYTY_PREWARM_MUTANT_NO_READY_CAP
+		while (m_max_ready != 0 && m_ready > m_max_ready && !m_finished_order.empty()) {
+			const auto old = m_finished_order.front();
+			m_finished_order.pop_front();
+			const auto found = m_slots.find(old);
+			if (found == m_slots.end() || found->second.state != State::Done) continue; // taken by CP meanwhile
+			found->second.payload.reset();
+			found->second.state = State::Evicted;
+			m_ready--;
+			m_evicted++;
+		}
+#endif
+		if (m_finished_order.size() > 4u * (m_max_ready + 1u) && m_max_ready != 0) { // keys taken by CP: forget them
+			std::deque<ProgramDisk::Key> keep;
+			for (const auto& k: m_finished_order) {
+				const auto found = m_slots.find(k);
+				if (found != m_slots.end() && found->second.state == State::Done) keep.push_back(k);
+			}
+			m_finished_order.swap(keep);
+		}
 	}
 
 	void Run() {
@@ -214,11 +248,7 @@ private:
 			Work             work;
 			{
 				std::unique_lock lock(m_mutex);
-#ifdef KYTY_PREWARM_MUTANT_NO_READY_CAP
 				m_wake.wait(lock, [&] { return m_stop || !m_queue.empty(); });
-#else
-				m_wake.wait(lock, [&] { return m_stop || (!m_queue.empty() && (m_max_ready == 0 || m_ready < m_max_ready)); });
-#endif
 				if (m_stop) return;
 				key = m_queue.front();
 				m_queue.pop_front();
@@ -246,6 +276,8 @@ private:
 					slot.state   = State::Done;
 					m_ready++;
 					m_ready_peak = std::max(m_ready_peak, m_ready);
+					m_finished_order.push_back(key);
+					EvictOldest();
 				} else {
 					slot.state = State::Failed;
 				}
@@ -259,6 +291,7 @@ private:
 	std::condition_variable                                   m_done;
 	std::unordered_map<ProgramDisk::Key, Slot, KeyHash>       m_slots;
 	std::deque<ProgramDisk::Key>                              m_queue;
+	std::deque<ProgramDisk::Key>                              m_finished_order; // oldest first
 	std::vector<std::thread>                                  m_threads;
 	std::chrono::milliseconds                                 m_max_wait;
 	std::function<void()>                                     m_setup;
@@ -267,7 +300,7 @@ private:
 	bool                                                      m_stop = false;
 	uint32_t                                                  m_building = 0;
 	uint64_t                                                  m_queued = 0, m_finished = 0, m_failed = 0, m_hit = 0, m_waited = 0, m_wait_ns = 0;
-	uint64_t                                                  m_cancelled = 0, m_timeout = 0, m_dedup = 0;
+	uint64_t                                                  m_cancelled = 0, m_timeout = 0, m_dedup = 0, m_evicted = 0;
 };
 
 // ---- manifest ----------------------------------------------------------------------------------------------------------------------------

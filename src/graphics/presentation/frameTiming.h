@@ -329,7 +329,7 @@ enum class Counter : uint32_t {
 	// differ) / programs not pre-warmable (call source, back code) / manifest entries / shadow: SPIR-V of the pre-warmed translation differs (must be 0) /
 	// worker time in the builds / most finished results waiting to be taken at once (the worker stops at 64: each holds a whole program).
 	PrewarmQueuedN, PrewarmDoneN, PrewarmFailN, PrewarmHitN, PrewarmWaitN, PrewarmWaitNs, PrewarmCancelN, PrewarmTimeoutN, PrewarmMismatchN,
-	PrewarmSkipN, PrewarmManifestN, PrewarmNeN, PrewarmBuildNs, PrewarmReadyPeak,
+	PrewarmSkipN, PrewarmManifestN, PrewarmNeN, PrewarmBuildNs, PrewarmReadyPeak, PrewarmEvictN,
 	Count,
 };
 
