@@ -49377,6 +49377,19 @@ int main(int argc, char **argv) {
       Require(test.name, "RT_MISS SPIR-V", fnv(CompileCase(test, 32).spirv) != golden.at(test.name),
               "KYTY_RT_MISS=1 left the SPIR-V unchanged");
     }
+    return 0;
+  }
+  if (argc == 2 && std::strcmp(argv[1], "--bvh-rtmiss2-only") == 0) {
+    // CPU only (S446). Separate from --bvh-spirv-hash-only so that mode's golden hashes do not hide this check.
+    Require("BvhRtMiss2", "environment", std::getenv("KYTY_RT_MISS") == nullptr, "run this mode without KYTY_RT_MISS");
+    std::vector<TestCase> hash_cases;
+    hash_cases.push_back(BvhIntersections(true, true, 1));
+    hash_cases.push_back(BvhIntersections(true, true, 0, true));
+    for (bool barycentrics : {false, true}) {
+      for (bool sorted : {false, true}) {
+        hash_cases.push_back(BvhIntersections(barycentrics, sorted));
+      }
+    }
     // S446: KYTY_RT_MISS=2 answers before the traversal work. In the bvh_intersect function there is no memory
     // load and no pointer conversion (mode 0 has both), and the code differs from mode 1 and from mode 0.
     const auto bvh_function_counts = [](const std::vector<u32> &words) {
@@ -49397,7 +49410,6 @@ int main(int argc, char **argv) {
       return std::make_pair(name_id != 0, counts);
     };
     for (auto test : hash_cases) {
-      if (std::strncmp(test.name, "Bvh", 3) != 0) continue;
       const auto plain = CompileCase(test, 32).spirv;
       const auto [plain_found, plain_counts] = bvh_function_counts(plain);
       Require(test.name, "RT_MISS=2 plain function", plain_found && plain_counts[0] > 0 && plain_counts[1] > 0,
@@ -49413,6 +49425,7 @@ int main(int argc, char **argv) {
       Require(test.name, "RT_MISS=1 keeps the loads", bvh_function_counts(one).second[0] > 0,
               "KYTY_RT_MISS=1 lost its loads (it answers at the end)");
     }
+    std::printf("bvh-rtmiss2 cases=%zu\n", hash_cases.size());
     return 0;
   }
   if (argc == 2 && std::strcmp(argv[1], "--scalar-sext-only") == 0) {

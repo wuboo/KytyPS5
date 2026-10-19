@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "graphics/host_gpu/gpuLabelsVk.h"
 #include "common/debugCounters.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -87,7 +88,9 @@ void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* 
 		dependency.pBufferMemoryBarriers    = &before;
 		command.pipelineBarrier2(dependency);
 		const vk::BufferCopy copy {offset, destination_offset, chunk};
-		command.copyBuffer(m_staging_buffer.Handle(), buffer.Handle(), 1, &copy);
+		GpuLabel::With(command, GpuLabel::Class::Upload, [&] { command.copyBuffer(m_staging_buffer.Handle(), buffer.Handle(), 1, &copy); }, "I.up.%ukb",
+		               static_cast<uint32_t>(chunk >> 10u));
+		GpuLabel::NoteCause(GpuLabel::Cause::Upload);
 		auto after          = before;
 		after.srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
 		after.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
@@ -311,8 +314,9 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                       vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1, &before, 0,
 	                       nullptr);
-	native.copyBuffer(buffer.Handle(), download.Handle(),
-	                  static_cast<uint32_t>(copies.size()), copies.data());
+	GpuLabel::With(native, GpuLabel::Class::Readback,
+	               [&] { native.copyBuffer(buffer.Handle(), download.Handle(), static_cast<uint32_t>(copies.size()), copies.data()); }, "I.rb.%ukb",
+	               static_cast<uint32_t>(buffer.Size() >> 10u));
 
 	auto after          = before;
 	after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
@@ -1071,8 +1075,10 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		native.pipelineBarrier(
 		    vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer,
 		    vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &before, 0, nullptr);
-		native.copyBuffer(source, buffer.Handle(), static_cast<uint32_t>(copies.size()),
-		                  copies.data());
+		GpuLabel::With(native, GpuLabel::Class::Upload,
+		               [&] { native.copyBuffer(source, buffer.Handle(), static_cast<uint32_t>(copies.size()), copies.data()); }, "I.up.n%u",
+		               static_cast<uint32_t>(copies.size()));
+		GpuLabel::NoteCause(GpuLabel::Cause::Upload);
 		auto after          = before;
 		after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
 		after.dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;

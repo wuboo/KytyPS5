@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
 
 #include "common/assert.h"
+#include "graphics/host_gpu/gpuLabelsVk.h"
 #include "common/logging/log.h"
 #include "gpu_tiler_shaders/fault_buffer_process_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -124,7 +125,8 @@ void FaultManager::ProcessFaultBuffer() {
 	                             m_fault_process_pipeline_layout, 0, writes);
 	const auto num_threads    = BufferCache::CACHING_NUMPAGES / 32;
 	const auto num_workgroups = (num_threads + 63) / 64;
-	command.dispatch(static_cast<uint32_t>(num_workgroups), 1, 1);
+	GpuLabel::With(command, GpuLabel::Class::Fault, [&] { command.dispatch(static_cast<uint32_t>(num_workgroups), 1, 1); }, "I.fault.%u",
+	               static_cast<uint32_t>(num_workgroups));
 	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Fault);
 	dependency.pBufferMemoryBarriers = &post_barrier;
 	command.pipelineBarrier2(dependency);

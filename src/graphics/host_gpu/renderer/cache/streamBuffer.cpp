@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/assert.h"
+#include "graphics/host_gpu/gpuLabelsVk.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
@@ -182,7 +183,9 @@ void Buffer::CopyFrom(CommandBuffer& command, const Buffer& source, uint64_t sou
 	native.pipelineBarrier(before_stage, vk::PipelineStageFlagBits::eTransfer,
 	                       vk::DependencyFlagBits::eByRegion, 0, nullptr, 2, before, 0, nullptr);
 	const vk::BufferCopy copy {source_offset, destination_offset, size};
-	native.copyBuffer(source.Handle(), Handle(), 1, &copy);
+	GpuLabel::With(native, GpuLabel::Class::Upload, [&] { native.copyBuffer(source.Handle(), Handle(), 1, &copy); }, "I.up.sb.%ukb",
+	               static_cast<uint32_t>(size >> 10u));
+	GpuLabel::NoteCause(GpuLabel::Cause::Upload);
 	const vk::BufferMemoryBarrier after[] = {
 	    source.Barrier(source_offset, size, vk::AccessFlagBits::eTransferRead, source_after),
 	    Barrier(destination_offset, size, vk::AccessFlagBits::eTransferWrite, destination_after),
@@ -208,7 +211,7 @@ void Buffer::Fill(uint64_t offset, uint64_t size, uint32_t value) {
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                       vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
 	                       0, nullptr, 1, &before, 0, nullptr);
-	native.fillBuffer(Handle(), offset, size, value);
+	GpuLabel::With(native, GpuLabel::Class::Fill, [&] { native.fillBuffer(Handle(), offset, size, value); }, "G.fill.%ukb", static_cast<uint32_t>(size >> 10u));
 	const auto after = Barrier(offset, size, vk::AccessFlagBits::eTransferWrite,
 	                           vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite);
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,

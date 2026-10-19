@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/image/image.h"
 
 #include "common/assert.h"
+#include "graphics/host_gpu/gpuLabelsVk.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
@@ -335,8 +336,13 @@ void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffe
 	dependency.pImageMemoryBarriers     = image_barriers.data();
 	auto command                        = m_scheduler.Current().Handle();
 	command.pipelineBarrier2(dependency);
-	command.copyBufferToImage(buffer, backing.image, vk::ImageLayout::eTransferDstOptimal,
-	                          static_cast<uint32_t>(copies.size()), copies.data());
+	GpuLabel::With(
+	    command, GpuLabel::Class::Tex,
+	    [&] {
+		    command.copyBufferToImage(buffer, backing.image, vk::ImageLayout::eTransferDstOptimal, static_cast<uint32_t>(copies.size()),
+		                              copies.data());
+	    },
+	    "I.tex.up.n%u", static_cast<uint32_t>(copies.size()));
 	buffer_barrier.srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
 	buffer_barrier.srcAccessMask = vk::AccessFlagBits2::eTransferRead;
 	buffer_barrier.dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
@@ -460,9 +466,13 @@ void Image::CopyImage(Image& source) {
 	source.Transit(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead, {},
 	               command);
 	Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {}, command);
-	command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal, backing.image,
-	                  vk::ImageLayout::eTransferDstOptimal, static_cast<uint32_t>(copies.size()),
-	                  copies.data());
+	GpuLabel::With(
+	    command, GpuLabel::Class::Tex,
+	    [&] {
+		    command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal, backing.image,
+		                      vk::ImageLayout::eTransferDstOptimal, static_cast<uint32_t>(copies.size()), copies.data());
+	    },
+	    "I.tex.copy.n%u", static_cast<uint32_t>(copies.size()));
 	Transit(vk::ImageLayout::eGeneral,
 	        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {}, command);
 }

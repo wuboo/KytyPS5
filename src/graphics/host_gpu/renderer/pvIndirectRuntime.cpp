@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/pvIndirectRuntime.h"
 
 #include "common/assert.h"
+#include "graphics/host_gpu/gpuLabelsVk.h"
 #include "gpu_tiler_shaders/pv_indirect_prepare_spv.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
@@ -166,7 +167,7 @@ void PvIndirectRuntime::Push(vk::CommandBuffer command, const Prepared& prepared
 }
 
 void PvIndirectRuntime::Dispatch(vk::CommandBuffer command) {
-	command.dispatch(1, 1, 1);
+	GpuLabel::With(command, GpuLabel::Class::PvIndirect, [&] { command.dispatch(1, 1, 1); }, "I.pvind");
 	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Other);
 }
 

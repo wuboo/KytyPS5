@@ -12,6 +12,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/gpuLabelsVk.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -481,12 +482,16 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	}
 
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
+	GpuLabel::With(
+	    vk_buffer, GpuLabel::Class::GuestCs, [&] { vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z); },
+	    "G.cs.%08x.a%d.%ux%ux%u", static_cast<uint32_t>(program.shader_hash), async_compute ? 1 : 0, thread_group_x,
+	    thread_group_y, thread_group_z);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Guest);
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	GpuLabel::NoteCause(GpuLabel::Cause::Cs);
 	ResetBindings();
 }
 
@@ -569,10 +574,13 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	                          vk::PipelineStageFlagBits::eDrawIndirect, {},
 	                          1, &barrier, 0, nullptr, 0, nullptr);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
+	GpuLabel::With(
+	    vk_buffer, GpuLabel::Class::GuestCs, [&] { vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset); },
+	    "G.cs.%08x.a%d.ind", static_cast<uint32_t>(program.shader_hash), async_compute ? 1 : 0);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Guest);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	GpuLabel::NoteCause(GpuLabel::Cause::Cs);
 	ResetBindings();
 }
 
