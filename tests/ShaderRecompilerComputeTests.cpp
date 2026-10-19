@@ -1423,7 +1423,7 @@ struct TestCase {
   u32 image_descriptor_swizzle = DstSel(4, 5, 6, 7);
   bool compile_only = false;
   // KYTY_RT_MISS=1 while this case is compiled: every BvhIntersect answers "no hit".
-  bool rt_miss = false;
+  int rt_miss = 0;
   size_t storage_buffer_range_bytes = 0;
   std::vector<u32> storage_buffer_offsets;
   std::vector<std::pair<u32, u32>> storage_buffer_ranges;
@@ -1726,12 +1726,12 @@ void CheckSpirvEmission(const TestCase &test, const std::vector<u32> &spirv) {
 
 // Sets KYTY_RT_MISS for the lifetime of the object when asked to and restores the old value.
 struct RtMissScope {
-  explicit RtMissScope(bool on) : on_(on) {
+  explicit RtMissScope(int mode) : on_(mode != 0) {
     if (!on_) return;
     const char *old = std::getenv("KYTY_RT_MISS");
     had_ = old != nullptr;
     if (had_) old_ = old;
-    setenv("KYTY_RT_MISS", "1", 1);
+    setenv("KYTY_RT_MISS", mode == 2 ? "2" : "1", 1);
   }
   ~RtMissScope() {
     if (!on_) return;
@@ -49373,9 +49373,45 @@ int main(int argc, char **argv) {
     // different SPIR-V for every case that contains BvhIntersect.
     for (auto test : hash_cases) {
       if (std::strncmp(test.name, "Bvh", 3) != 0) continue;
-      test.rt_miss = true;
+      test.rt_miss = 1;
       Require(test.name, "RT_MISS SPIR-V", fnv(CompileCase(test, 32).spirv) != golden.at(test.name),
               "KYTY_RT_MISS=1 left the SPIR-V unchanged");
+    }
+    // S446: KYTY_RT_MISS=2 answers before the traversal work. In the bvh_intersect function there is no memory
+    // load and no pointer conversion (mode 0 has both), and the code differs from mode 1 and from mode 0.
+    const auto bvh_function_counts = [](const std::vector<u32> &words) {
+      u32 name_id = 0;
+      std::array<u32, 2> counts{0, 0}; // OpLoad, OpConvertUToPtr inside the function
+      bool inside = false;
+      for (size_t at = 5; at < words.size();) {
+        const u32 op = words[at] & 0xffffu, len = words[at] >> 16u;
+        if (len == 0) break;
+        if (op == 5 && len >= 3 && std::strncmp(reinterpret_cast<const char *>(&words[at + 2]), "bvh_intersect", 14) == 0)
+          name_id = words[at + 1];
+        if (op == 54 && len >= 3 && name_id != 0 && words[at + 2] == name_id) inside = true;
+        else if (op == 56) inside = false;
+        else if (inside && op == 61) ++counts[0];
+        else if (inside && op == 128) ++counts[1];
+        at += len;
+      }
+      return std::make_pair(name_id != 0, counts);
+    };
+    for (auto test : hash_cases) {
+      if (std::strncmp(test.name, "Bvh", 3) != 0) continue;
+      const auto plain = CompileCase(test, 32).spirv;
+      const auto [plain_found, plain_counts] = bvh_function_counts(plain);
+      Require(test.name, "RT_MISS=2 plain function", plain_found && plain_counts[0] > 0 && plain_counts[1] > 0,
+              "mode 0 bvh_intersect has no loads (the counter is blind)");
+      test.rt_miss = 1;
+      const auto one = CompileCase(test, 32).spirv;
+      test.rt_miss = 2;
+      const auto two = CompileCase(test, 32).spirv;
+      const auto [two_found, two_counts] = bvh_function_counts(two);
+      Require(test.name, "RT_MISS=2 early", two_found && two_counts[0] == 0 && two_counts[1] == 0,
+              "KYTY_RT_MISS=2 still loads from the structure in bvh_intersect");
+      Require(test.name, "RT_MISS=2 differs", two != plain && two != one, "KYTY_RT_MISS=2 SPIR-V equals mode 0 or 1");
+      Require(test.name, "RT_MISS=1 keeps the loads", bvh_function_counts(one).second[0] > 0,
+              "KYTY_RT_MISS=1 lost its loads (it answers at the end)");
     }
     return 0;
   }
