@@ -99,10 +99,17 @@ public:
 		static_assert(std::is_nothrow_invocable_v<UploadFunc&>);
 		CheckNotInUploadCallback();
 		const auto* previous_upload_owner = std::exchange(s_upload_owner, this);
+		const auto  observer              = HotPages::UploadObserver().load(std::memory_order_relaxed);
+		const auto  observed_range        = [&](uint64_t address, uint64_t bytes) noexcept {
+            if (observer != nullptr) {
+                observer(address, bytes);
+            }
+            range_func(address, bytes);
+        };
 		Iterate<true>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 			manager->lock.lock();
 			manager->ShadowCheckClean(manager->GetCpuAddr() + offset, bytes);
-			manager->ConsumeCpuDirty(manager->GetCpuAddr() + offset, bytes, !is_written, range_func);
+			manager->ConsumeCpuDirty(manager->GetCpuAddr() + offset, bytes, !is_written, observed_range);
 			if (!is_written) {
 				manager->lock.unlock();
 			}

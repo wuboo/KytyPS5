@@ -70,6 +70,13 @@ inline std::atomic<HashFn>& HasherSource() {
 	return source;
 }
 
+// DIAG (KYTY_DIAG_WRITE_FAULT): called for every range ForEachUploadRange hands to the upload.
+using UploadObserverFn = void (*)(uint64_t address, uint64_t size);
+inline std::atomic<UploadObserverFn>& UploadObserver() {
+	static std::atomic<UploadObserverFn> observer {nullptr};
+	return observer;
+}
+
 struct Stats {
 	std::atomic<uint64_t> promote {0};   // pages that became hot
 	std::atomic<uint64_t> demote {0};    // hot pages that left the hot state

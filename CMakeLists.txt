@@ -1336,6 +1336,12 @@ add_executable(rfop_diag_mutant_walk_no_grow_tests EXCLUDE_FROM_ALL "${KYTY_TEST
 target_include_directories(rfop_diag_mutant_walk_no_grow_tests PRIVATE ${inc_headers})
 target_compile_definitions(rfop_diag_mutant_walk_no_grow_tests PRIVATE KYTY_RFOP_MUTANT_WALK_NO_GROW=1)
 # S421: KYTY_DIAG_GUEST_FAULT ([gf] line, backing-read ring). Mutant GF_NO_AFTER: after_backing is always 0.
+# S440 (KYTY_DIAG_WRITE_FAULT): the aggregator of write faults per page. Mutant: the per-page history never moves on (pages in >= 54 of 60 flips are missed).
+add_executable(wf_diag_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/WfDiagTests.cpp")
+target_include_directories(wf_diag_tests PRIVATE ${inc_headers})
+add_executable(wf_diag_mutant_no_shift_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/WfDiagTests.cpp")
+target_include_directories(wf_diag_mutant_no_shift_tests PRIVATE ${inc_headers})
+target_compile_definitions(wf_diag_mutant_no_shift_tests PRIVATE KYTY_WFDIAG_MUTANT_NO_SHIFT=1)
 add_executable(gf_diag_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GfDiagTests.cpp")
 target_include_directories(gf_diag_tests PRIVATE ${inc_headers})
 add_executable(gf_diag_mutant_no_after_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GfDiagTests.cpp")
@@ -1513,6 +1519,9 @@ if(BUILD_TESTING)
 	set_tests_properties(rfop_diag_mutant_no_opcode PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME rfop_diag_mutant_no_site COMMAND $<TARGET_FILE:rfop_diag_mutant_no_site_tests>)
 	set_tests_properties(rfop_diag_mutant_no_site PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME wf_diag COMMAND $<TARGET_FILE:wf_diag_tests>)
+	add_test(NAME wf_diag_mutant_no_shift COMMAND $<TARGET_FILE:wf_diag_mutant_no_shift_tests>)
+	set_tests_properties(wf_diag_mutant_no_shift PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME gf_diag COMMAND $<TARGET_FILE:gf_diag_tests>)
 	add_test(NAME gf_diag_mutant_no_after COMMAND $<TARGET_FILE:gf_diag_mutant_no_after_tests>)
 	set_tests_properties(gf_diag_mutant_no_after PROPERTIES WILL_FAIL TRUE)
@@ -1802,6 +1811,8 @@ if(BUILD_TESTING)
 		memory_tracker_mutant_no_bump_gpu_tests
 		memory_tracker_mutant_hot_skips_hash_tests
 		memory_tracker_mutant_hot_never_reprotect_tests
+		wf_diag_tests
+		wf_diag_mutant_no_shift_tests
 		pv_indirect_tests
 		pv_indirect_mutant_clamp_off_tests
 		pv_indirect_mutant_ignore_fields_tests

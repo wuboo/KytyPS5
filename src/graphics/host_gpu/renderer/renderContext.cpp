@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/wfDiag.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/gfDiag.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
@@ -78,6 +79,27 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 	if (access == PageFaultAccess::Write) {
 		FrameTiming::Add(on_gpu_thread ? FrameTiming::Counter::WriteFaultsGpu
 		                               : FrameTiming::Counter::WriteFaults);
+		// S440 (KYTY_DIAG_WRITE_FAULT): owner of the page before the invalidation untracks it, then the handler's time.
+		const bool wf_diag  = WriteFault::Enabled();
+		const auto wf_begin = wf_diag ? FrameTiming::SteadyNowNs() : int64_t {0};
+		if (wf_diag) {
+			const auto page      = fault_vaddr & ~(m_page_manager.GetPageSize() - 1);
+			uint64_t   image_size = 0;
+			const bool image     = m_texture_cache.DiagRegionOwner(page, &image_size);
+			const bool buffer    = !m_buffer_cache.IsRegionCpuModified(page, m_page_manager.GetPageSize());
+			const auto flip      = FrameTiming::GuestFlips();
+			WriteFault::Finished finished;
+			if (WriteFault::Pages().Note(page, flip, WriteFault::MakeOwner(buffer, image), image_size, &finished)) {
+				FrameTiming::Set(FrameTiming::Counter::WfPagesDistinct, finished.distinct);
+				FrameTiming::Set(FrameTiming::Counter::WfPagesEveryFlip, finished.every);
+				static std::atomic<bool> wf_first {true};
+				if (wf_first.exchange(false, std::memory_order_relaxed) || finished.flip % WriteFault::kTopEveryFlips == 0) {
+					for (const auto& entry: WriteFault::Pages().Top(WriteFault::kTopPages)) {
+						LOGF("%s\n", WriteFault::FormatLine(entry, finished.flip).c_str());
+					}
+				}
+			}
+		}
 		uint64_t invalidate_size = fault_size;
 #if defined(__APPLE__)
 		// Rosetta aborts the process ("unexpectedly need to EmulateForward on a synchronous
@@ -109,6 +131,10 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 #endif
 		m_buffer_cache.InvalidateMemory(fault_vaddr, invalidate_size);
 		m_texture_cache.InvalidateMemory(fault_vaddr, invalidate_size);
+		if (wf_diag) {
+			FrameTiming::Add(FrameTiming::Counter::WfN);
+			FrameTiming::Add(FrameTiming::Counter::WfHandlerNs, FrameTiming::ElapsedNs(wf_begin, FrameTiming::SteadyNowNs()));
+		}
 	} else {
 		FrameTiming::Add(on_gpu_thread ? FrameTiming::Counter::ReadbackReadFaultGpu
 		                               : FrameTiming::Counter::ReadbackReadFault);

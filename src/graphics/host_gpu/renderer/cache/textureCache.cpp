@@ -2102,6 +2102,17 @@ bool TextureCache::TouchMeta(uint64_t address, uint32_t slice, bool is_clear) {
 	return true;
 }
 
+bool TextureCache::DiagRegionOwner(uint64_t address, uint64_t* image_size) {
+	std::scoped_lock lock {m_lock};
+	for (const auto id: FindImagesInRegion(address, 1, false)) {
+		if (const auto* image = m_slot_images.try_get(id); image != nullptr) {
+			*image_size = image->info.data.size;
+			return true;
+		}
+	}
+	return false;
+}
+
 bool TextureCache::IsRegionRegistered(uint64_t address, uint64_t size) {
 	std::scoped_lock lock {m_lock};
 	return !FindImagesInRegion(address, size, false).empty();
