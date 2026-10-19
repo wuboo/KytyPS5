@@ -10,7 +10,7 @@
 //  - the guest address space changes its mappings (m_map_seq, a seqlock: odd while a change is under way).
 // Everything runs on the command processor thread (the only thread that adds dirty / in-flight ranges and the only caller of the reader).
 // Pure part; tests/SpecPageCacheTests.cpp pins it. Mutants: KYTY_SPECFAST_MUTANT_{FAST_IGNORES_DIRTY, FAST_NO_INVALIDATE_ON_WRITE,
-// NO_INFLIGHT_INVALIDATE, NO_MAP_SEQ, CACHE_BYTES, CROSS_PAGE}.
+// NO_INFLIGHT_INVALIDATE, NO_MAP_SEQ, CACHE_BYTES, CROSS_PAGE}; S437: BUSY_NOT_GATED (tests/SpecPageCacheOffTests.cpp).
 
 #include "kernel/srtReadPass.h"
 
@@ -94,7 +94,13 @@ public:
 #endif
 
 	// Called by GpuDirtyRanges::Add and InflightRanges::Add (the only transitions quiet -> busy).
-	static void OnRangeBecameBusy(uint64_t address, uint64_t size) { Global().InvalidateRange(address, size); }
+	// S437: with KYTY_SPEC_READ_FAST off (the default) nothing reads the cache, so the hot path of every Add() pays one load and no invalidation.
+	static void OnRangeBecameBusy(uint64_t address, uint64_t size) {
+#ifndef KYTY_SPECFAST_MUTANT_BUSY_NOT_GATED
+		if (SpecFastEnvMode() == SpecFastMode::Off) return;
+#endif
+		Global().InvalidateRange(address, size);
+	}
 
 private:
 	struct Slot {

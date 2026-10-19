@@ -513,7 +513,7 @@ void NoteSrtMemo(const ShaderRecompiler::IR::ResourceSnapshot& snapshot, const S
                  ShaderType stage) {
 	using ShaderRecompiler::IR::SrtMemoOutcome;
 	DrainSrtWalkPaths();
-	FlushSpecFastCounts();
+	if (Libs::LibKernel::Memory::SpecFastEnvMode() != Libs::LibKernel::Memory::SpecFastMode::Off) FlushSpecFastCounts(); // S437: nothing to flush when off
 	if (context.mode == ShaderRecompiler::IR::SrtFastMode::Off) {
 		return;
 	}
