@@ -119,8 +119,9 @@ static std::string FriendlyName(const std::string& name) {
 }
 
 bool DerivePerVertexVertexLayoutFromSpirv(std::span<const uint32_t> words, PerVertexLayout& layout,
-                                          std::map<uint32_t, std::string>& vs_param_vars) {
+                                          std::map<uint32_t, std::string>& vs_param_vars, bool* ambiguous) {
 	vs_param_vars.clear();
+	if (ambiguous != nullptr) *ambiguous = false;
 	if (words.size() < 5 || words[0] != spv::MagicNumber) return false;
 	std::map<uint32_t, std::string> names;
 	std::vector<uint32_t>           output_ids;
@@ -149,7 +150,13 @@ bool DerivePerVertexVertexLayoutFromSpirv(std::span<const uint32_t> words, PerVe
 	for (const uint32_t id: output_ids) {
 		const auto name = names.find(id);
 		const auto var  = name != names.end() ? FriendlyName(name->second) : "%" + std::to_string(id);
-		vs_outputs.insert(var);
+		if (!vs_outputs.insert(var).second) {
+#ifndef KYTY_PVLAYOUT_MUTANT_NO_AMBIGUITY_CHECK
+			if (ambiguous != nullptr) *ambiguous = true;
+			vs_param_vars.clear();
+			return false;
+#endif
+		}
 		if (const auto location = locations.find(id); location != locations.end()) var_locations.emplace(var, location->second);
 	}
 	if (vs_outputs.empty()) return false;
@@ -169,6 +176,31 @@ bool DerivePerVertexVertexLayoutFromSpirv(std::span<const uint32_t> words, PerVe
 	layout.record_stride_vec4 = layout.num_params + 1;
 #endif
 	return ok;
+}
+
+bool DerivePerVertexVertexLayoutFast(std::span<const uint32_t> words, const std::function<bool(std::string*)>& disassemble, PerVertexLayout& layout,
+                                     std::map<uint32_t, std::string>& vs_param_vars, bool* fell_back) {
+	bool ambiguous = false;
+	if (fell_back != nullptr) *fell_back = false;
+	const bool derived = DerivePerVertexVertexLayoutFromSpirv(words, layout, vs_param_vars, &ambiguous);
+	if (!ambiguous) return derived;
+	if (fell_back != nullptr) *fell_back = true;
+	std::string source;
+	if (!disassemble(&source)) return false;
+	return DerivePerVertexVertexLayout(source, layout, vs_param_vars);
+}
+
+bool ParsePvSkipValidate(const char* text) {
+	return text != nullptr && std::strcmp(text, "1") == 0;
+}
+
+bool PvShouldValidate(PvLayoutFastMode mode, const char* skip_validate_env) {
+#ifdef KYTY_PVLAYOUT_MUTANT_FAST_SKIPS_VALIDATE
+	if (mode == PvLayoutFastMode::On) return false; // the S432 coupling
+#else
+	(void)mode;
+#endif
+	return !ParsePvSkipValidate(skip_validate_env);
 }
 
 PvLayoutFastMode ParsePvLayoutFastMode(const char* text) {

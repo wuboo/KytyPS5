@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <span>
 #include <string>
@@ -79,6 +80,8 @@ struct PerVertexLayout {
 	std::map<uint32_t, uint32_t>               location_to_slot;
 };
 
+enum class PvLayoutFastMode : uint8_t { Off, On, Shadow };
+
 bool DerivePerVertexLayout(const std::string& vs_source, const std::string& ps_source,
                            PerVertexLayout& layout, std::map<uint32_t, std::string>& vs_param_vars);
 bool DerivePerVertexVertexLayout(const std::string& vs_source, PerVertexLayout& layout,
@@ -86,10 +89,21 @@ bool DerivePerVertexVertexLayout(const std::string& vs_source, PerVertexLayout& 
 // S432 (KYTY_PV_LAYOUT_FAST): the same layout from the SPIR-V words of the vertex shader, without the text of the disassembly. Output variables are
 // the OpVariable ... Output without an initializer, their location the first OpDecorate Location, their name the OpName (what the friendly-names
 // disassembler prints), so the result equals DerivePerVertexVertexLayout(Disassemble(words)).
+// S437: false with *ambiguous = true when two Output variables carry the same friendly name (the disassembler makes them distinct with a suffix,
+// FriendlyName does not, so the std::set would merge them into one parameter and the record stride would be wrong): the caller must use the
+// disassembly route for that shader.
 bool DerivePerVertexVertexLayoutFromSpirv(std::span<const uint32_t> words, PerVertexLayout& layout,
-                                          std::map<uint32_t, std::string>& vs_param_vars);
+                                          std::map<uint32_t, std::string>& vs_param_vars, bool* ambiguous = nullptr);
+// S437 (KYTY_PV_LAYOUT_FAST=1): the layout from the words, or from the disassembly when the words are ambiguous (*fell_back = true).
+// `disassemble` fills the friendly-names text of the same module; returns false on failure (then nothing is derived).
+bool DerivePerVertexVertexLayoutFast(std::span<const uint32_t> words, const std::function<bool(std::string*)>& disassemble, PerVertexLayout& layout,
+                                     std::map<uint32_t, std::string>& vs_param_vars, bool* fell_back);
+// S437 KYTY_PV_SKIP_VALIDATE=0|1 (default 0, bench only): "1" skips spvtools Validate of our own per-vertex variants. null/""/"0"/anything else -> false.
+// Independent of KYTY_PV_LAYOUT_FAST (before S437 LAYOUT_FAST=1 skipped Validate too).
+bool ParsePvSkipValidate(const char* text);
+// Whether Validate runs for a variant: !skip_env, whatever the layout mode.
+bool PvShouldValidate(PvLayoutFastMode mode, const char* skip_validate_env);
 
-enum class PvLayoutFastMode : uint8_t { Off, On, Shadow };
 // null/""/"0" -> Off, "1" -> On, "shadow" -> Shadow, anything else -> Off.
 PvLayoutFastMode ParsePvLayoutFastMode(const char* text);
 // `unique` (S134): the replay reads captured[map[vertex index].x] instead of captured[vertex index];

@@ -418,6 +418,7 @@ constexpr const char* kCounterNames[] = {
     "pv_layout_ne_n",
     "pv_validate_skipped_n",
     "pv_validate_ne_n",
+    "pv_layout_fallback_n",
     "pipeline_save_n",
     "pipeline_save_ns",
     "pipeline_save_bytes",

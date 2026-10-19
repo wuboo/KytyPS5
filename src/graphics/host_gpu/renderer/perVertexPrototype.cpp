@@ -332,21 +332,30 @@ void RememberPerVertexPrototypeShader(const ShaderProgram&                    pr
 		std::map<uint32_t, std::string> params;
 		bool                            derived = false;
 		const auto                      layout_mode = PerVertexLayoutFastMode();
+		const auto disassemble = [&](std::string* text) { return tools.Disassemble(words, text, SPV_BINARY_TO_TEXT_OPTION_FRIENDLY_NAMES); };
 		if (layout_mode != PvLayoutFastMode::On) {
 			std::string vs_source;
-			EXIT_IF(!tools.Disassemble(words, &vs_source, SPV_BINARY_TO_TEXT_OPTION_FRIENDLY_NAMES));
+			EXIT_IF(!disassemble(&vs_source));
 			derived = DerivePerVertexVertexLayout(vs_source, layout, params);
 		}
-		if (layout_mode != PvLayoutFastMode::Off) {
-			// S432: straight from the words. Shadow keeps the disassembly result and counts the differences.
+		if (layout_mode == PvLayoutFastMode::On) {
+			// S432: straight from the words. S437: a module with two Output variables of the same name goes the disassembly route.
+			bool fell_back = false;
+			derived        = DerivePerVertexVertexLayoutFast(words, disassemble, layout, params, &fell_back);
+			FrameTiming::Add(FrameTiming::Counter::PvLayoutFastN);
+			if (fell_back) {
+				FrameTiming::Add(FrameTiming::Counter::PvLayoutFallbackN);
+				LOGF("[pv-layout] ambiguous Output names in shader 0x%016llx: disassembly route\n", static_cast<unsigned long long>(program.id));
+			}
+		} else if (layout_mode == PvLayoutFastMode::Shadow) {
+			// Shadow keeps the disassembly result and counts the differences.
 			PerVertexLayout                 fast_layout;
 			std::map<uint32_t, std::string> fast_params;
-			const bool fast_derived = DerivePerVertexVertexLayoutFromSpirv(words, fast_layout, fast_params);
+			bool                            ambiguous    = false;
+			const bool                      fast_derived = DerivePerVertexVertexLayoutFromSpirv(words, fast_layout, fast_params, &ambiguous);
 			FrameTiming::Add(FrameTiming::Counter::PvLayoutFastN);
-			if (layout_mode == PvLayoutFastMode::On) {
-				derived = fast_derived;
-				layout  = std::move(fast_layout);
-				params  = std::move(fast_params);
+			if (ambiguous) {
+				FrameTiming::Add(FrameTiming::Counter::PvLayoutFallbackN); // the real mode would take the disassembly route: same result as the reference
 			} else if (fast_derived != derived ||
 			           (derived && (fast_layout.record_stride_vec4 != layout.record_stride_vec4 || fast_layout.clip_slot != layout.clip_slot ||
 			                        fast_layout.num_params != layout.num_params || fast_layout.has_clip != layout.has_clip ||
@@ -365,9 +374,9 @@ void RememberPerVertexPrototypeShader(const ShaderProgram&                    pr
 		NotePvPushVariant("capture", options.shader_hash, result.program.bindings);
 		// Validation of our own emitter output is ~30% of a vertex permutation's cost; bench-only
 		// switch KYTY_PV_SKIP_VALIDATE=1 skips it (the first draw would still be validated by Vulkan).
-		// S432: KYTY_PV_LAYOUT_FAST=1 skips it too; shadow validates and so keeps the reference.
-		static const bool skip_validate = std::getenv("KYTY_PV_SKIP_VALIDATE") != nullptr;
-		if (!skip_validate && layout_mode != PvLayoutFastMode::On) {
+		// S437: independent of KYTY_PV_LAYOUT_FAST (S432 had LAYOUT_FAST=1 skip it too).
+		static const bool should_validate = PvShouldValidate(layout_mode, std::getenv("KYTY_PV_SKIP_VALIDATE"));
+		if (should_validate) {
 			EXIT_IF(!tools.Validate(it->second.capture_words));
 		} else {
 			FrameTiming::Add(FrameTiming::Counter::PvValidateSkippedN);
