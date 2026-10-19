@@ -8,6 +8,7 @@
 #include "common/virtualMemory.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/hotPages.h"
+#include "graphics/host_gpu/memory/umaReadFence.h"
 #include "graphics/host_gpu/protectRing.h"
 #include "graphics/host_gpu/renderer/gfDiag.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -951,7 +952,8 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 // S447: with UMA active a GPU store leaves no dirty/in-flight trace in the buffer cache, so the page-quiet shortcuts of the
 // SRT pass and the spec page cache would read before the writer ticks retired; those reads take the full TryReadBufferBacking.
 static bool UmaDefeatsReadShortcuts() {
-	return g_gpu_resources != nullptr && GetGpuResources().GetUnifiedMemory().Active();
+	return g_gpu_resources != nullptr &&
+	       !Graphics::UmaReadFence::ReadShortcutsAllowed(GetGpuResources().GetUnifiedMemory().Active());
 }
 
 bool TryReadBufferBackingPass(uint64_t vaddr, void* data, uint64_t size, SrtReadPass* pass) {

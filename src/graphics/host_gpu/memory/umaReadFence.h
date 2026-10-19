@@ -23,6 +23,17 @@ namespace Libs::Graphics::UmaReadFence {
 #endif
 }
 
+// S447: the page-quiet shortcuts of the CP/SRT reads (SRT pass, spec page cache) look only at the buffer cache's dirty and in-flight
+// state. With UMA active a GPU store leaves no trace there, so the shortcuts must not be used (the read goes through the writer fence).
+[[nodiscard]] constexpr bool ReadShortcutsAllowed(bool uma_active) {
+#ifdef KYTY_UMA_MUTANT_SHORTCUT_IGNORES_UMA
+	(void)uma_active;
+	return true;
+#else
+	return !uma_active;
+#endif
+}
+
 // Data shadow-compare (KYTY_UMA=shadow): every `every`-th read (1-based call number) is repeated after a full drain.
 [[nodiscard]] constexpr bool ShouldCheck(uint64_t call_number, uint64_t every, uint64_t size, uint64_t max_size) {
 #ifdef KYTY_UMA_MUTANT_CHECK_ALWAYS_BIG

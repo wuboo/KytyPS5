@@ -6,7 +6,8 @@
 #include <cstring>
 
 // Built normally and once per mutant (KYTY_UMA_MUTANT_IGNORE_PENDING_WRITER, KYTY_UMA_MUTANT_CHECK_ALWAYS_BIG,
-// KYTY_UMA_MUTANT_DIFF_IGNORES_TAIL, KYTY_UMA_MUTANT_SHADOW_LINE_OMITS_NE). Every mutant build must FAIL (ctest WILL_FAIL).
+// KYTY_UMA_MUTANT_DIFF_IGNORES_TAIL, KYTY_UMA_MUTANT_SHADOW_LINE_OMITS_NE,
+// KYTY_UMA_MUTANT_SHORTCUT_IGNORES_UMA). Every mutant build must FAIL (ctest WILL_FAIL).
 
 namespace {
 
@@ -47,6 +48,11 @@ void TestDiffers() {
 	Check(Fence::Differs(a, b, 8, &first) && first == 2, "the first differing offset is reported");
 }
 
+void TestReadShortcuts() {
+	Check(Fence::ReadShortcutsAllowed(false), "UMA off: the page-quiet shortcuts stay (path as before)");
+	Check(!Fence::ReadShortcutsAllowed(true), "UMA on: no shortcut, the read goes through the writer fence");
+}
+
 void TestShadowCounters() {
 	char out[128];
 	Fence::FormatShadowCounters(out, sizeof(out), true, 10, 9, 1);
@@ -62,6 +68,7 @@ void TestShadowCounters() {
 
 int main() {
 	TestShadowCounters();
+	TestReadShortcuts();
 	TestGpuDirty();
 	TestShouldCheck();
 	TestDiffers();

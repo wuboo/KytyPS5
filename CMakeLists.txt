@@ -836,7 +836,7 @@ add_executable(uma_read_fence_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(uma_read_fence_tests PRIVATE ${inc_headers})
 # Mutants: a pending writer is ignored, the data shadow checks every read, the diff skips the last byte.
-set(UMA_READ_FENCE_MUTANTS IGNORE_PENDING_WRITER CHECK_ALWAYS_BIG DIFF_IGNORES_TAIL SHADOW_LINE_OMITS_NE)
+set(UMA_READ_FENCE_MUTANTS IGNORE_PENDING_WRITER CHECK_ALWAYS_BIG DIFF_IGNORES_TAIL SHADOW_LINE_OMITS_NE SHORTCUT_IGNORES_UMA)
 foreach(mutant IN LISTS UMA_READ_FENCE_MUTANTS)
 	add_executable(uma_read_fence_mutant_${mutant}_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/UmaReadFenceTests.cpp"
@@ -2164,6 +2164,7 @@ if(BUILD_TESTING)
 		uma_read_fence_mutant_CHECK_ALWAYS_BIG_tests
 		uma_read_fence_mutant_DIFF_IGNORES_TAIL_tests
 		uma_read_fence_mutant_SHADOW_LINE_OMITS_NE_tests
+		uma_read_fence_mutant_SHORTCUT_IGNORES_UMA_tests
 		uma3_policy_mutant_TEXEL_WINDOW_tests
 		uma3_policy_mutant_WINDOW_NO_ADJUST_tests
 		uma3_policy_mutant_SKIP_LEGACY_tests
