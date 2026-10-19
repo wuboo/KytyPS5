@@ -305,7 +305,7 @@ enum class Counter : uint32_t {
 	SrtWalkTreeN, SrtWalkTreeFailN, SrtWalkCaptureN, SrtWalkSlotJitN, SrtWalkInterpN, SrtInterpSlotsN, SpecReadN, SpecReadXpageN,
 	// S432 (KYTY_PV_LAYOUT_FAST=1|shadow): vertex layouts taken from the SPIR-V words / Validate calls skipped on the capture and VS-store variants;
 	// shadow: layouts that differ from the disassembly route (must be 0) / variants Validate rejected (must be 0).
-	PvLayoutFastN, PvLayoutNeN, PvValidateSkippedN, PvValidateNeN,
+	PvLayoutFastN, PvLayoutNeN, PvValidateSkippedN, PvValidateNeN, PvLayoutFallbackN,
 	// S433 (S440): PipelineCache::Save - jobs, time of the jobs (wherever they ran), bytes written, failures, and the time the command processor
 	// thread itself spent in Save (all of it with KYTY_PIPELINE_SAVE_ASYNC=0, only the hand-over with 1).
 	PipelineSaveN, PipelineSaveNs, PipelineSaveBytes, PipelineSaveFailN, PipelineSaveCpNs, PipelineSaveSkippedN,

@@ -115,11 +115,12 @@ void RememberPvVsStoreShader(const ShaderProgram& program, ShaderRecompiler::Com
 		LOGF("PvVsStore: %s 0x%016llx SPIR-V word %zu: %s\n", vertex ? "VS" : "PS",
 		     static_cast<unsigned long long>(program.id), position.index, message);
 	});
-	// S432 KYTY_PV_LAYOUT_FAST=1: the variant is our own emitter output; Validate (the larger part of the cost of a permutation) is left to the
-	// driver at the first draw. shadow: validates as before and counts a rejection (must be 0).
-	const auto layout_mode = PerVertexLayoutFastMode();
-	const bool validated   = layout_mode == PvLayoutFastMode::On || tools.Validate(words);
-	if (layout_mode == PvLayoutFastMode::On) {
+	// S437 KYTY_PV_SKIP_VALIDATE=1 (bench only, default 0): the variant is our own emitter output; Validate (the larger part of the cost of a
+	// permutation) is left to the driver at the first draw. Independent of KYTY_PV_LAYOUT_FAST (S432 coupled them). shadow counts a rejection (must be 0).
+	const auto layout_mode     = PerVertexLayoutFastMode();
+	static const bool should_validate = PvShouldValidate(layout_mode, std::getenv("KYTY_PV_SKIP_VALIDATE"));
+	const bool validated       = !should_validate || tools.Validate(words);
+	if (!should_validate) {
 		FrameTiming::Add(FrameTiming::Counter::PvValidateSkippedN);
 	} else if (layout_mode == PvLayoutFastMode::Shadow && !validated) {
 		FrameTiming::Add(FrameTiming::Counter::PvValidateNeN);

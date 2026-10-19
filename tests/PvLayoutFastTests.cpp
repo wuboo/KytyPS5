@@ -1,7 +1,7 @@
 // S432: KYTY_PV_LAYOUT_FAST. The vertex layout of the per-vertex prototype read straight from the SPIR-V words must equal the one derived from the
 // friendly-names disassembly (the reference), for every shape of output interface the emitter produces and for the corner cases of the scan.
 // Also prints the cost of both routes on a vertex shader of ~5000 instructions. Mutants: KYTY_PVLAYOUT_MUTANT_{DROP_ATTR, CLIP_IGNORED,
-// KEEP_BUILTIN_VARS, NO_OUTPUT_FILTER}.
+// KEEP_BUILTIN_VARS, NO_OUTPUT_FILTER, NO_AMBIGUITY_CHECK, FAST_SKIPS_VALIDATE}.
 
 #include "graphics/host_gpu/renderer/perVertexTransform.h"
 
@@ -177,6 +177,66 @@ void TestMalformedInput() {
 	      "mode parsing");
 }
 
+// S437: two Output variables with the same OpName. The disassembler names them param0 and param0_0 (two parameters); the names of the words route
+// collapse into one, which gives a record stride that is one vec4 short. That route must refuse and the fast entry point must take the disassembly.
+Variant Duplicated() {
+	return {"two outputs named param0",
+	        "OpName %in_pos \"in_pos\"\nOpName %outPerVertex \"outPerVertex\"\nOpName %param0 \"param0\"\nOpName %other \"param0\"\n"
+	        "OpDecorate %param0 Location 0\nOpDecorate %other Location 1\n",
+	        kBaseVars + "%other = OpVariable %ptr_out_v4 Output\n", "%in_pos %outPerVertex %param0 %other", false};
+}
+
+void TestDuplicateOutputNames() {
+	const auto words = Assemble(VertexShader(Duplicated()));
+	const auto slow  = ViaDisassembly(words);
+	Check(slow.ok && slow.layout.num_params == 2, "reference: the disassembly route sees two parameters");
+	PerVertexLayout                 layout;
+	std::map<uint32_t, std::string> params;
+	bool                            ambiguous = false;
+	Check(!DerivePerVertexVertexLayoutFromSpirv(words, layout, params, &ambiguous), "the words route refuses a duplicated Output name");
+	Check(ambiguous, "and says why (ambiguous)");
+	// a unique shape is not ambiguous
+	ambiguous         = true;
+	const auto unique = Assemble(VertexShader(Variants()[0]));
+	Check(DerivePerVertexVertexLayoutFromSpirv(unique, layout, params, &ambiguous) && !ambiguous, "unique names: derived, not ambiguous");
+
+	// the fast entry point: falls back to the disassembly for the ambiguous module and gets the reference layout
+	spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+	int                  disassembled = 0;
+	const auto           disassemble  = [&](std::string* text) {
+        disassembled++;
+        return tools.Disassemble(words, text, SPV_BINARY_TO_TEXT_OPTION_FRIENDLY_NAMES);
+	};
+	PerVertexLayout                 fast_layout;
+	std::map<uint32_t, std::string> fast_params;
+	bool                            fell_back = false;
+	const bool                      ok        = DerivePerVertexVertexLayoutFast(words, disassemble, fast_layout, fast_params, &fell_back);
+	Check(ok && fell_back && disassembled == 1, "ambiguous: the fast entry point used the disassembly once");
+	Check(ok && SameLayout(slow.layout, fast_layout) && fast_params == slow.params, "ambiguous: the layout equals the reference (two parameters, full stride)");
+	// the unambiguous shape does not disassemble at all
+	disassembled = 0;
+	bool unique_fell_back = true;
+	PerVertexLayout unique_layout;
+	std::map<uint32_t, std::string> unique_params;
+	const auto unique_disassemble = [&](std::string*) {
+		disassembled++;
+		return false;
+	};
+	Check(DerivePerVertexVertexLayoutFast(unique, unique_disassemble, unique_layout, unique_params, &unique_fell_back) && !unique_fell_back && disassembled == 0,
+	      "unambiguous: no disassembly");
+}
+
+// S437: KYTY_PV_SKIP_VALIDATE is its own switch; KYTY_PV_LAYOUT_FAST no longer skips Validate.
+void TestSkipValidateIsIndependent() {
+	Check(!ParsePvSkipValidate(nullptr) && !ParsePvSkipValidate("") && !ParsePvSkipValidate("0") && ParsePvSkipValidate("1") && !ParsePvSkipValidate("yes"),
+	      "KYTY_PV_SKIP_VALIDATE parsing: only \"1\" skips");
+	for (const auto mode: {PvLayoutFastMode::Off, PvLayoutFastMode::On, PvLayoutFastMode::Shadow}) {
+		Check(PvShouldValidate(mode, nullptr), "default: Validate runs in every layout mode");
+		Check(PvShouldValidate(mode, "0"), "SKIP_VALIDATE=0: Validate runs in every layout mode");
+		Check(!PvShouldValidate(mode, "1"), "SKIP_VALIDATE=1 skips Validate in every layout mode");
+	}
+}
+
 double MicrosPerCall(int iterations, const auto& call) {
 	const auto begin = std::chrono::steady_clock::now();
 	for (int i = 0; i < iterations; i++) call();
@@ -200,6 +260,8 @@ void TestCostOnLargeShader() {
 int main() {
 	TestEquivalence();
 	TestMalformedInput();
+	TestDuplicateOutputNames();
+	TestSkipValidateIsIndependent();
 	TestCostOnLargeShader();
 	if (g_failures != 0) {
 		std::fprintf(stderr, "%d failures\n", g_failures);

@@ -485,8 +485,8 @@ target_include_directories(per_vertex_transform_tests PRIVATE ${inc_headers})
 target_link_libraries(per_vertex_transform_tests common fmt::fmt xxhash)
 
 # S432: KYTY_PV_LAYOUT_FAST, the vertex layout from the SPIR-V words against the friendly-names disassembly. Mutants (WILL_FAIL): DROP_ATTR, CLIP_IGNORED,
-# KEEP_BUILTIN_VARS, NO_OUTPUT_FILTER.
-foreach(mutant IN ITEMS "" DROP_ATTR CLIP_IGNORED KEEP_BUILTIN_VARS NO_OUTPUT_FILTER)
+# KEEP_BUILTIN_VARS, NO_OUTPUT_FILTER, NO_AMBIGUITY_CHECK, FAST_SKIPS_VALIDATE (S437).
+foreach(mutant IN ITEMS "" DROP_ATTR CLIP_IGNORED KEEP_BUILTIN_VARS NO_OUTPUT_FILTER NO_AMBIGUITY_CHECK FAST_SKIPS_VALIDATE)
 	if(mutant STREQUAL "")
 		set(pv_layout_target pv_layout_fast_tests)
 		set(pv_layout_test pv_layout_fast)
@@ -1451,7 +1451,7 @@ if(BUILD_TESTING)
 	add_test(NAME shader_cfg_ngg_mutant_active
 	         COMMAND sh -c "$<TARGET_FILE:shader_cfg_ngg_mutant_active_tests> 2>&1 | grep -q 'synthetic lanes must default to the full wave'")
 	add_test(NAME per_vertex_transform COMMAND $<TARGET_FILE:per_vertex_transform_tests>)
-	foreach(mutant IN ITEMS "" DROP_ATTR CLIP_IGNORED KEEP_BUILTIN_VARS NO_OUTPUT_FILTER)
+	foreach(mutant IN ITEMS "" DROP_ATTR CLIP_IGNORED KEEP_BUILTIN_VARS NO_OUTPUT_FILTER NO_AMBIGUITY_CHECK FAST_SKIPS_VALIDATE)
 		if(mutant STREQUAL "")
 			set(pv_layout_target pv_layout_fast_tests)
 			set(pv_layout_test pv_layout_fast)
@@ -2017,7 +2017,7 @@ if(BUILD_TESTING)
 	foreach(mutant IN LISTS KYTY_KW_MUTANTS)
 		add_dependencies(kyty_tests gpu_keepwarm_mutant_${mutant}_tests)
 	endforeach()
-	add_dependencies(kyty_tests pv_layout_fast_tests pv_layout_fast_mutant_drop_attr_tests pv_layout_fast_mutant_clip_ignored_tests pv_layout_fast_mutant_keep_builtin_vars_tests pv_layout_fast_mutant_no_output_filter_tests)
+	add_dependencies(kyty_tests pv_layout_fast_tests pv_layout_fast_mutant_drop_attr_tests pv_layout_fast_mutant_clip_ignored_tests pv_layout_fast_mutant_keep_builtin_vars_tests pv_layout_fast_mutant_no_output_filter_tests pv_layout_fast_mutant_no_ambiguity_check_tests pv_layout_fast_mutant_fast_skips_validate_tests)
 	add_dependencies(kyty_tests indirect_gpu_tests indirect_gpu_mutant_IGNORE_PV_tests indirect_gpu_mutant_DEFAULT_OFF_tests sync_census_tests dcc_known_tests eager_pages_tests eager_pages_mutant_one_page_tests)
 	add_dependencies(kyty_tests rfop_diag_tests rfop_diag_mutant_no_opcode_tests rfop_diag_mutant_no_site_tests
 	                 rfop_diag_mutant_walk_no_grow_tests cp_wait_diag_tests cp_wait_diag_mutant_no_cause_tests)
