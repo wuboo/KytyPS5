@@ -53,6 +53,7 @@ uint64_t ReadReferenceClock() {
 
 uint64_t PrepareVideoOutFlip(CommandBuffer& buffer, int handle, int index, int flip_mode,
                              int64_t flip_arg) {
+	FrameTiming::NoteCpFlipPrepared(); // S441: CP interval between flips, guest-lead minimum of the flip
 	for (;;) {
 		uint64_t   request_id = 0;
 		auto&      video_out  = buffer.GetContext().GetVideoOut();

@@ -1,5 +1,6 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
+#include "graphics/shader/recompiler/ir/passes/srtTreeReject.h"
 #include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
 #include "graphics/presentation/cpPcSampler.h"
 
@@ -16,6 +17,8 @@
 #include <cmath>
 #include <cstring>
 #include <map>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -428,6 +431,27 @@ bool IsCompiledRead(const ResourcePlan& program, const Inst& inst, uint32_t dept
 	return true;
 }
 
+// S441 DIAG: why IsCompiledRead refuses a slot (same conditions, same order).
+std::string DiagSlotReject(const ResourcePlan& program, const Inst* inst, uint32_t depth = 0) {
+	if (inst == nullptr) return "not_an_instruction";
+	if (depth > 16) return "too_deep";
+	if (inst->GetOpcode() != ValueOpcode::LoadAddressU32 || inst->NumArgs() < 2) return "opcode:" + std::string(ValueOpcodeName(inst->GetOpcode()));
+	if (!IsRawRead(program, *inst)) return "not_raw_read";
+	if (inst->Flags<SrtReadFlags>().clean != 0u) return "clean_read";
+	const auto  offset = inst->Arg(1).Resolve();
+	const auto* handle = inst->Arg(0).Resolve().TryInstruction();
+	if (!offset.IsImmediate() || offset.GetType() != Type::U32) return "offset_not_imm";
+	if (handle == nullptr || handle->GetOpcode() != ValueOpcode::GetAddressResource || handle->NumArgs() != 2) return "handle_shape";
+	for (size_t word = 0; word < 2; ++word) {
+		const auto* source = handle->Arg(word).Resolve().TryInstruction();
+		if (source == nullptr) return "immediate_pointer_word";
+		if (IsUserDataWord(program, *source)) continue;
+		if (IsCompiledRead(program, *source, depth + 1)) continue;
+		return "pointer_word:" + DiagSlotReject(program, source, depth + 1);
+	}
+	return "compilable";
+}
+
 // Compiles the SRT slots of plans the whole-plan walker rejects (block conditions, captured
 // reads): one entry per slot, one memoized routine per read. Other slots stay interpreted.
 void CompileSrtReads(ResourcePlan& program) {
@@ -436,6 +460,8 @@ void CompileSrtReads(ResourcePlan& program) {
 		return;
 	std::vector<const Inst*> slots(program.srt_reads.size(), nullptr);
 	bool                     any = false;
+	const bool               diag = SrtTreeReject::Active().load(std::memory_order_relaxed);
+	if (diag) program.srt_slot_reject.assign(slots.size(), std::string());
 	for (uint32_t slot = 0; slot < slots.size(); ++slot) {
 		const auto& read = program.srt_reads[slot];
 		const auto* inst = read.value.Resolve().TryInstruction();
@@ -443,6 +469,8 @@ void CompileSrtReads(ResourcePlan& program) {
 		    IsCompiledRead(program, *inst)) {
 			slots[slot] = inst;
 			any         = true;
+		} else if (diag) {
+			program.srt_slot_reject[slot] = read.flat_offset >= program.srt_reads.size() ? "flat_oob" : DiagSlotReject(program, inst);
 		}
 	}
 	if (!any) return;
@@ -549,9 +577,22 @@ void CompileSrtReads(ResourcePlan& program) {
 }
 
 void CompileTreeWalker(ResourcePlan& program) {
-	if (!program.resource_tracking_complete || !program.srt_plan_complete ||
-	    program.capture_specialization_reads || !program.control_flow.empty() ||
-	    program.srt_reads.empty()) return;
+	using Reason = SrtTreeReject::Reason;
+	// S441 DIAG: the first reason the whole-tree JIT is refused (a byte store; the detail string only for the census).
+	const auto reject = [&](Reason reason, std::string_view detail = "") {
+#ifndef KYTY_TREEREJECT_MUTANT_NO_RECORD
+		program.tree_reject = static_cast<uint8_t>(reason);
+		if (SrtTreeReject::Active().load(std::memory_order_relaxed)) program.tree_reject_detail = std::string(detail);
+#else
+		(void)reason;
+		(void)detail;
+#endif
+	};
+	if (!program.resource_tracking_complete) return reject(Reason::NotTracked);
+	if (!program.srt_plan_complete) return reject(Reason::PlanIncomplete);
+	if (program.capture_specialization_reads) return reject(Reason::CaptureSpecReads);
+	if (!program.control_flow.empty()) return reject(Reason::ControlFlow);
+	if (program.srt_reads.empty()) return reject(Reason::NoReads);
 
 	using Reads = std::map<int32_t, const SrtRead*>;
 	std::map<uint32_t, Reads> roots;
@@ -559,27 +600,28 @@ void CompileTreeWalker(ResourcePlan& program) {
 	std::unordered_map<const Inst*, int32_t> offsets;
 	for (const auto& read: program.srt_reads) {
 		const auto* inst = read.value.Resolve().TryInstruction();
-		if (inst == nullptr || inst->GetOpcode() != ValueOpcode::LoadAddressU32 ||
-		    inst->NumArgs() < 2 || !IsRawRead(program, *inst) ||
-		    read.flat_offset >= program.srt_reads.size()) return;
+		if (inst == nullptr || inst->GetOpcode() != ValueOpcode::LoadAddressU32 || inst->NumArgs() < 2)
+			return reject(Reason::SlotOpcode, inst == nullptr ? "not_an_instruction" : ValueOpcodeName(inst->GetOpcode()));
+		if (!IsRawRead(program, *inst)) return reject(Reason::SlotNotRaw);
+		if (read.flat_offset >= program.srt_reads.size()) return reject(Reason::SlotFlatOob);
 		const auto offset = inst->Arg(1).Resolve();
-		if (!offset.IsImmediate() || offset.GetType() != Type::U32) return;
+		if (!offset.IsImmediate() || offset.GetType() != Type::U32) return reject(Reason::OffsetNotImm);
 		const auto& memory = program.memory_info[inst->Flags<SrtReadFlags>().index];
 		const auto relative =
 		    (static_cast<int64_t>(static_cast<int32_t>(memory.offset)) & ~int64_t {3}) +
 		    static_cast<int64_t>(offset.U32() & ~3u);
 		if (relative < INT32_MIN || relative > INT32_MAX ||
-		    !offsets.emplace(inst, static_cast<int32_t>(relative)).second) return;
+		    !offsets.emplace(inst, static_cast<int32_t>(relative)).second) return reject(Reason::OffsetRange);
 	}
 	uint32_t user_data_count = 0;
 	for (const auto& read: program.srt_reads) {
 		const auto* inst = read.value.ResolveInstruction();
 		const auto* handle = inst->Arg(0).Resolve().TryInstruction();
 		if (handle == nullptr || handle->GetOpcode() != ValueOpcode::GetAddressResource ||
-		    handle->NumArgs() != 2) return;
+		    handle->NumArgs() != 2) return reject(Reason::HandleShape, handle == nullptr ? "not_an_instruction" : ValueOpcodeName(handle->GetOpcode()));
 		const auto* low = handle->Arg(0).Resolve().TryInstruction();
 		const auto* high = handle->Arg(1).Resolve().TryInstruction();
-		if (low == nullptr || high == nullptr) return;
+		if (low == nullptr || high == nullptr) return reject(Reason::HandleWords, "immediate_pointer_word");
 		Reads* uses = nullptr;
 		if (low->GetOpcode() == ValueOpcode::GetUserData &&
 		    high->GetOpcode() == ValueOpcode::GetUserData && low->NumArgs() == 1 &&
@@ -587,7 +629,7 @@ void CompileTreeWalker(ResourcePlan& program) {
 		    high->Arg(0).GetType() == Type::ScalarReg) {
 			const auto reg = RegIndex(low->Arg(0).ScalarRegister());
 			if (reg < program.user_data_base ||
-			    RegIndex(high->Arg(0).ScalarRegister()) != reg + 1u) return;
+			    RegIndex(high->Arg(0).ScalarRegister()) != reg + 1u) return reject(Reason::UserDataRegs);
 			const auto base = reg - program.user_data_base;
 			user_data_count = std::max(user_data_count, base + 2u);
 			uses = &roots[base];
@@ -596,10 +638,11 @@ void CompileTreeWalker(ResourcePlan& program) {
 			const auto hi = offsets.find(high);
 			if (lo == offsets.end() || hi == offsets.end() ||
 			    static_cast<int64_t>(lo->second) + 4 != hi->second ||
-			    !EquivalentValue(program, low->Arg(0), high->Arg(0))) return;
+			    !EquivalentValue(program, low->Arg(0), high->Arg(0)))
+				return reject(Reason::PointerOffsets, ValueOpcodeName(low->GetOpcode()));
 			uses = &pointer_uses[low];
 		}
-		if (!uses->emplace(offsets.at(inst), &read).second) return;
+		if (!uses->emplace(offsets.at(inst), &read).second) return reject(Reason::DuplicateOffset);
 	}
 	std::unordered_set<const Inst*> visited;
 	const auto reachable = [&](auto&& self, const Reads& reads) -> bool {
@@ -612,9 +655,9 @@ void CompileTreeWalker(ResourcePlan& program) {
 		return true;
 	};
 	for (const auto& [reg, reads]: roots) {
-		if (!reachable(reachable, reads)) return;
+		if (!reachable(reachable, reads)) return reject(Reason::PointerCycle);
 	}
-	if (visited.size() != pointer_uses.size()) return;
+	if (visited.size() != pointer_uses.size()) return reject(Reason::PointerUnreached);
 
 	program.srt_code = std::make_unique<Xbyak::CodeGenerator>(4096, Xbyak::AutoGrow);
 	auto& code = *program.srt_code;
@@ -1353,7 +1396,13 @@ bool SrtWalker::EvaluateDescriptor(uint32_t source, DescriptorValue& result) {
 	return true;
 }
 
+// S441 DIAG: a walk that did not get the tree JIT, with its reason.
+static void NoteTreeRejectFor(uint64_t plan, SrtTreeReject::Reason reason, const std::string& detail) {
+	if (SrtTreeReject::Active().load(std::memory_order_relaxed)) SrtTreeReject::Global().Note(plan, reason, detail);
+}
+
 bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
+	const auto NoteTreeReject = [&](SrtTreeReject::Reason reason, const std::string& detail) { NoteTreeRejectFor(m_program.shader_hash, reason, detail); };
 	if (!m_program.srt_plan_complete) return false;
 	// nojit keeps the interpreted memcpy walk so a bad compiled walker can be separated from the read itself.
 	if (m_program.srt_code && m_runtime.read_memory == nullptr && SrtReader::UseCompiledWalker()) {
@@ -1370,8 +1419,14 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 			return true;
 		}
 		SrtWalkPaths::Note(SrtWalkPaths::Path::TreeFail);
+		NoteTreeReject(SrtTreeReject::Reason::TreeReturnedFalse, "");
 	} else if (m_program.srt_code && m_runtime.read_memory != nullptr) {
 		SrtWalkPaths::Note(SrtWalkPaths::Path::Capture);
+		NoteTreeReject(SrtTreeReject::Reason::CaptureRuntime, "");
+	} else if (m_program.srt_code) {
+		NoteTreeReject(SrtTreeReject::Reason::NojitEnv, "");
+	} else {
+		NoteTreeReject(static_cast<SrtTreeReject::Reason>(m_program.tree_reject), m_program.tree_reject_detail);
 	}
 	SrtWalkPaths::Note(SrtWalkPaths::Path::InterpWalk);
 	const bool pc_diag = CpSampler::Pc::WalkActive().load(std::memory_order_relaxed); // S439 DIAG
@@ -1408,6 +1463,16 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 			}
 		}
 		SrtWalkPaths::Note(SrtWalkPaths::Path::InterpSlots);
+		if (SrtTreeReject::Active().load(std::memory_order_relaxed)) { // S441 DIAG
+			const char* why = "no_slot_code";
+			if (m_program.srt_read_code) {
+				if (slot < m_program.srt_read_entries.size() && m_program.srt_read_entries[slot] == UINT32_MAX)
+					why = slot < m_program.srt_slot_reject.size() ? m_program.srt_slot_reject[slot].c_str() : "not_compiled";
+				else
+					why = compiled ? "jit_read_failed" : "slot_jit_off_at_runtime";
+			}
+			SrtTreeReject::Global().Note(m_program.shader_hash, SrtTreeReject::Reason::SlotInterp, why);
+		}
 		if (pc_diag) CpSampler::Pc::Tally().interp_calls++; // S439 DIAG
 		const auto& read = m_program.srt_reads[slot];
 		const auto* inst = read.value.ResolveInstruction();

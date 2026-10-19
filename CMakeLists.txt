@@ -608,6 +608,10 @@ add_executable(srt_reader_mutant_note_after_filter_tests EXCLUDE_FROM_ALL ${SRT_
 target_link_libraries(srt_reader_mutant_note_after_filter_tests fmt::fmt xbyak::xbyak common)
 target_include_directories(srt_reader_mutant_note_after_filter_tests PRIVATE ${inc_headers})
 target_compile_definitions(srt_reader_mutant_note_after_filter_tests PRIVATE KYTY_NULLDESC_MUTANT_NOTE_AFTER_FILTER=1)
+add_executable(srt_reader_mutant_no_record_tests EXCLUDE_FROM_ALL ${SRT_READER_TEST_SOURCES})
+target_link_libraries(srt_reader_mutant_no_record_tests fmt::fmt xbyak::xbyak common)
+target_include_directories(srt_reader_mutant_no_record_tests PRIVATE ${inc_headers})
+target_compile_definitions(srt_reader_mutant_no_record_tests PRIVATE KYTY_TREEREJECT_MUTANT_NO_RECORD=1)
 
 add_executable(guest_driver_memory_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GuestDriverMemoryTests.cpp"
@@ -962,6 +966,23 @@ foreach(mutant IN ITEMS NO_REGISTER NO_READS)
 	target_include_directories(cp_pc_sampler_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(cp_pc_sampler_mutant_${mutant_lower}_tests PRIVATE KYTY_CPPC_MUTANT_${mutant}=1)
 endforeach()
+
+# S441: cp_frame_ns / guest_lead_ns / thread CPU bookkeeping (cpFrameStats.h). Mutants: PERCENTILE_LOW, MIN_IS_MAX, FIRST_MARK_COUNTS, THREAD_ABSOLUTE.
+add_executable(cp_frame_stats_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpFrameStatsTests.cpp")
+target_include_directories(cp_frame_stats_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS PERCENTILE_LOW MIN_IS_MAX FIRST_MARK_COUNTS THREAD_ABSOLUTE)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(cp_frame_stats_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpFrameStatsTests.cpp")
+	target_include_directories(cp_frame_stats_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_frame_stats_mutant_${mutant_lower}_tests PRIVATE KYTY_CPFRAME_MUTANT_${mutant}=1)
+endforeach()
+
+# S441 DIAG: census of walks without the tree JIT (srtTreeReject.h). Mutant: ALL_ONE_ROW.
+add_executable(srt_tree_reject_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SrtTreeRejectTests.cpp")
+target_include_directories(srt_tree_reject_tests PRIVATE ${inc_headers})
+add_executable(srt_tree_reject_mutant_all_one_row_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SrtTreeRejectTests.cpp")
+target_include_directories(srt_tree_reject_mutant_all_one_row_tests PRIVATE ${inc_headers})
+target_compile_definitions(srt_tree_reject_mutant_all_one_row_tests PRIVATE KYTY_TREEREJECT_MUTANT_ALL_ONE_ROW=1)
 
 # S406: GPU busy-time estimate from timeline completions. Mutant: no max with the previous completion.
 add_executable(gpu_done_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GpuDoneTests.cpp")
@@ -1652,6 +1673,16 @@ if(BUILD_TESTING)
 		add_test(NAME cp_pc_sampler_mutant_${mutant} COMMAND $<TARGET_FILE:cp_pc_sampler_mutant_${mutant}_tests>)
 		set_tests_properties(cp_pc_sampler_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
+	add_test(NAME cp_frame_stats COMMAND $<TARGET_FILE:cp_frame_stats_tests>)
+	foreach(mutant IN ITEMS percentile_low min_is_max first_mark_counts thread_absolute)
+		add_test(NAME cp_frame_stats_mutant_${mutant} COMMAND $<TARGET_FILE:cp_frame_stats_mutant_${mutant}_tests>)
+		set_tests_properties(cp_frame_stats_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME srt_tree_reject COMMAND $<TARGET_FILE:srt_tree_reject_tests>)
+	add_test(NAME srt_tree_reject_mutant_all_one_row COMMAND $<TARGET_FILE:srt_tree_reject_mutant_all_one_row_tests>)
+	set_tests_properties(srt_tree_reject_mutant_all_one_row PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME srt_reader_mutant_no_record COMMAND $<TARGET_FILE:srt_reader_mutant_no_record_tests>)
+	set_tests_properties(srt_reader_mutant_no_record PROPERTIES ENVIRONMENT "KYTY_DIAG_NULLDESC=1" WILL_FAIL TRUE)
 	add_test(NAME gpu_done COMMAND $<TARGET_FILE:gpu_done_tests>)
 	add_test(NAME gpu_done_mutant_no_max COMMAND $<TARGET_FILE:gpu_done_mutant_no_max_tests>)
 	set_tests_properties(gpu_done_mutant_no_max PROPERTIES WILL_FAIL TRUE)
@@ -1868,6 +1899,9 @@ if(BUILD_TESTING)
 		srt_reader_mutant_fault_unmapped_tests
 		srt_reader_mutant_ignore_nojit_tests
 		srt_reader_mutant_note_after_filter_tests
+		srt_reader_mutant_no_record_tests
+		srt_tree_reject_tests
+		srt_tree_reject_mutant_all_one_row_tests
 		guest_driver_memory_tests
 		pad_script_parser_tests
 		shader_vertex_metadata_tests
@@ -1996,6 +2030,11 @@ if(BUILD_TESTING)
 		cp_pc_sampler_tests
 		cp_pc_sampler_mutant_no_register_tests
 		cp_pc_sampler_mutant_no_reads_tests
+		cp_frame_stats_tests
+		cp_frame_stats_mutant_percentile_low_tests
+		cp_frame_stats_mutant_min_is_max_tests
+		cp_frame_stats_mutant_first_mark_counts_tests
+		cp_frame_stats_mutant_thread_absolute_tests
 		gpu_done_tests
 		gpu_done_mutant_no_max_tests
 		gpu_done_mutant_starve_no_firstrec_tests

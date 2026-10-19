@@ -1,6 +1,7 @@
 #include "graphics/shader/nullDescDiag.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+#include "graphics/shader/recompiler/ir/passes/srtTreeReject.h"
 #include "graphics/shader/recompiler/srtReader.h"
 #include "graphics/shader/shader.h"
 
@@ -224,6 +225,15 @@ void TestFilteredDimensionKeepsAddress() {
 	Check(snapshot.images[0].dwords[0] == 0u, "dimension filter did not zero the rejected T#");
 }
 
+// S441 DIAG: a plan whose SRT address is an immediate (no pointer instruction) is refused by the tree JIT with a recorded reason.
+void TestTreeRejectReason() {
+	uint32_t host = 0;
+	const auto plan = ExtractResourcePlan(SrtProgram(reinterpret_cast<uint64_t>(&host)));
+	Check(plan.srt_code == nullptr, "an immediate SRT address compiled a tree walker");
+	Check(plan.tree_reject == static_cast<uint8_t>(Libs::Graphics::ShaderRecompiler::IR::SrtTreeReject::Reason::HandleWords),
+	      "the tree JIT refusal was not recorded as handle_words");
+}
+
 void TestCompiledWalkerSwitch() {
 	uint32_t host = 0xABCu;
 	auto plan = ExtractResourcePlan(SrtProgram(reinterpret_cast<uint64_t>(&host)));
@@ -253,6 +263,7 @@ int main() {
 	if (Current() == Mode::Main || Current() == Mode::NoJit) {
 		TestCompiledWalkerSwitch();
 	}
+	TestTreeRejectReason();
 	TestDriverWindowAndDirty();
 	TestFilteredDimensionKeepsAddress();
 	std::printf("SrtReaderTests: ok mode=%s\n", Libs::Graphics::SrtReader::ModeName());

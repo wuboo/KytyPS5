@@ -18,6 +18,10 @@ void OnFramePresented();
 
 // Called once per guest flip that reached the screen (as opposed to a re-presented frame).
 void OnGuestFlip();
+// S441: the CP prepares a flip (Sync::PrepareVideoOutFlip, CP thread): closes the per-flip guest-lead minimum and the CP interval; every 100 intervals logs
+// `[cp-frame] ... p50 p90 p99 max`. NoteGuestLead: the CP picked up a submission that the guest enqueued `ns` earlier (CP thread).
+void NoteCpFlipPrepared();
+void NoteGuestLead(uint64_t ns);
 
 // Adds time the GPU command thread spent processing a submission or command.
 void AddGpuBusy(uint64_t ns);
@@ -349,6 +353,10 @@ enum class Counter : uint32_t {
 	// S441 (KYTY_SHADER_PREWARM_MAX_MB): times the prewarm worker stopped at the byte limit instead of evicting (jobs wait in the queue) / estimated bytes of
 	// the finished results waiting for CP (gauge) / their peak.
 	PrewarmDeferredN, PrewarmReadyBytes, PrewarmReadyBytesPeak,
+	// S441 (verify-442 step 0), cumulative: CP intervals between consecutive PrepareVideoOutFlip (count, sum, longest) / flips with a guest lead and the sum of
+	// the per-flip minimum of (CP picks up a submission - the guest enqueued it), the guest's slack / ReadbackWaitNs split by the waiting thread (CP, the rest) /
+	// CPU time of the CP thread and of all other threads of the process, per guest flip, and the number of snapshots.
+	CpFrameN, CpFrameNs, CpFrameMaxNs, GuestLeadN, GuestLeadMinNs, ReadbackWaitCpNs, ReadbackWaitOtherNs, ThreadCpuCpNs, ThreadCpuOtherNs, ThreadCpuN,
 	Count,
 };
 

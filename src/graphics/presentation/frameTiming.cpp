@@ -13,7 +13,13 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/signalCensus.h"
+#include "graphics/presentation/cpFrameStats.h"
+#include "graphics/shader/recompiler/ir/passes/srtTreeReject.h"
 
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <pthread.h>
+#endif
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -24,6 +30,7 @@
 #include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace Libs::Graphics::FrameTiming {
@@ -509,6 +516,16 @@ constexpr const char* kCounterNames[] = {
     "prewarm_deferred_n",
     "prewarm_ready_bytes",
     "prewarm_ready_bytes_peak",
+    "cp_frame_n",
+    "cp_frame_ns",
+    "cp_frame_max_ns",
+    "guest_lead_n",
+    "guest_lead_min_ns",
+    "readback_wait_cp_ns",
+    "readback_wait_other_ns",
+    "thread_cpu_cp_ns",
+    "thread_cpu_other_ns",
+    "thread_cpu_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
@@ -631,8 +648,161 @@ static void PublishHotPages() {
 	Set(Counter::WfHotRaceN, stats.race.load(std::memory_order_relaxed));
 }
 
+// ---- S441: CP frame interval, guest lead, thread CPU ---------------------------------------------------------------------------------------------
+
+namespace {
+
+// Only the CP thread touches this.
+struct CpFrameState {
+	CpFrameStats::FrameClock clock;
+	CpFrameStats::Samples    intervals;
+	CpFrameStats::Samples    leads; // per-flip minimum, one per flip that had a submission
+	CpFrameStats::PerFlipMin lead_min;
+	uint64_t                 first_flip = 0;
+} g_cp_frame;
+
+constexpr size_t kCpFrameSegment = 100;
+
+void ReportCpFrame(uint64_t from, uint64_t to) {
+	auto& st = g_cp_frame;
+	LOGF("[cp-frame] flips=%llu-%llu n=%zu mean_us=%llu p50_us=%llu p90_us=%llu p99_us=%llu max_us=%llu | lead_n=%zu lead_min_p50_us=%llu lead_min_p90_us=%llu "
+	     "lead_min_p1_us=%llu\n",
+	     static_cast<unsigned long long>(from), static_cast<unsigned long long>(to), st.intervals.Size(),
+	     static_cast<unsigned long long>(st.intervals.Size() ? st.intervals.Sum() / st.intervals.Size() / 1000 : 0),
+	     static_cast<unsigned long long>(st.intervals.Percentile(50) / 1000), static_cast<unsigned long long>(st.intervals.Percentile(90) / 1000),
+	     static_cast<unsigned long long>(st.intervals.Percentile(99) / 1000), static_cast<unsigned long long>(st.intervals.Max() / 1000), st.leads.Size(),
+	     static_cast<unsigned long long>(st.leads.Percentile(50) / 1000), static_cast<unsigned long long>(st.leads.Percentile(90) / 1000),
+	     static_cast<unsigned long long>(st.leads.Percentile(1) / 1000));
+}
+
+} // namespace
+
+void NoteGuestLead(uint64_t ns) {
+	g_cp_frame.lead_min.Note(ns);
+}
+
+void NoteCpFlipPrepared() {
+	auto& st = g_cp_frame;
+	if (const auto lead = st.lead_min.TakeFlip()) {
+		Add(Counter::GuestLeadN);
+		Add(Counter::GuestLeadMinNs, *lead);
+		st.leads.Add(*lead);
+	}
+	const auto interval = st.clock.Mark(static_cast<uint64_t>(SteadyNowNs()));
+	if (!interval) return;
+	Add(Counter::CpFrameN);
+	Add(Counter::CpFrameNs, *interval);
+	Max(Counter::CpFrameMaxNs, *interval);
+	st.intervals.Add(*interval);
+	if (st.intervals.Size() >= kCpFrameSegment) {
+		const uint64_t flips = GuestFlips();
+		ReportCpFrame(st.first_flip, flips);
+		st.first_flip = flips;
+		st.intervals.Clear();
+		st.leads.Clear();
+	}
+}
+
+namespace {
+
+#if defined(__APPLE__)
+// CPU time of every thread of the process, with the thread name (pthread name: Thread_Gpu for the CP thread).
+std::vector<CpFrameStats::ThreadSample> SnapshotThreads() {
+	std::vector<CpFrameStats::ThreadSample> out;
+	thread_act_array_t                      threads = nullptr;
+	mach_msg_type_number_t                  count   = 0;
+	if (task_threads(mach_task_self(), &threads, &count) != KERN_SUCCESS) return out;
+	for (mach_msg_type_number_t i = 0; i < count; i++) {
+		CpFrameStats::ThreadSample sample;
+		thread_identifier_info_data_t ident {};
+		mach_msg_type_number_t        ident_count = THREAD_IDENTIFIER_INFO_COUNT;
+		thread_basic_info_data_t      basic {};
+		mach_msg_type_number_t        basic_count = THREAD_BASIC_INFO_COUNT;
+		if (thread_info(threads[i], THREAD_IDENTIFIER_INFO, reinterpret_cast<thread_info_t>(&ident), &ident_count) == KERN_SUCCESS &&
+		    thread_info(threads[i], THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&basic), &basic_count) == KERN_SUCCESS) {
+			const auto us = [](const time_value_t& t) { return static_cast<uint64_t>(t.seconds) * 1000000ull + static_cast<uint64_t>(t.microseconds); };
+			sample.id     = ident.thread_id;
+			sample.cpu_ns = (us(basic.user_time) + us(basic.system_time)) * 1000ull;
+			char name[64] = {};
+			if (const pthread_t pt = pthread_from_mach_thread_np(threads[i]); pt != nullptr) pthread_getname_np(pt, name, sizeof(name));
+			sample.name = name[0] != 0 ? name : "unnamed";
+			out.push_back(std::move(sample));
+		}
+		mach_port_deallocate(mach_task_self(), threads[i]);
+	}
+	vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads), count * sizeof(thread_act_t));
+	return out;
+}
+#endif
+
+// KYTY_THREAD_CPU=0 switches the snapshots off (default on: one task_threads + 2 thread_info per thread per guest flip).
+void SampleThreadCpu(uint64_t flip) {
+#if defined(__APPLE__)
+	static const bool on = [] {
+		const char* v = std::getenv("KYTY_THREAD_CPU");
+		return v == nullptr || v[0] != '0';
+	}();
+	if (!on) return;
+	static std::mutex                                           mutex;
+	static CpFrameStats::ThreadCpu                              tracker;
+	static std::unordered_map<std::string, uint64_t>            window;
+	static uint64_t                                             window_from = 0, window_n = 0;
+	std::unique_lock                                            lock(mutex, std::try_to_lock);
+	if (!lock.owns_lock()) return;
+	const auto snapshot = SnapshotThreads();
+	if (snapshot.empty()) return;
+	const auto delta = tracker.Update(snapshot, "Thread_Gpu");
+	Add(Counter::ThreadCpuCpNs, delta.cp);
+	Add(Counter::ThreadCpuOtherNs, delta.other);
+	Add(Counter::ThreadCpuN);
+	for (const auto& [name, ns]: delta.by_name) window[name] += ns;
+	window_n++;
+	if (window_n >= 100) {
+		std::vector<std::pair<std::string, uint64_t>> top(window.begin(), window.end());
+		std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second != b.second ? a.second > b.second : a.first < b.first; });
+		std::string line;
+		for (size_t i = 0; i < top.size() && i < 8; i++) {
+			char item[96];
+			std::snprintf(item, sizeof(item), " %s=%.2f", top[i].first.c_str(), static_cast<double>(top[i].second) / 1e6 / static_cast<double>(window_n));
+			line += item;
+		}
+		LOGF("[thread-cpu] flips=%llu-%llu ms_per_flip:%s\n", static_cast<unsigned long long>(window_from), static_cast<unsigned long long>(flip), line.c_str());
+		window.clear();
+		window_n    = 0;
+		window_from = flip;
+	}
+#else
+	(void)flip;
+#endif
+}
+
+} // namespace
+
+namespace {
+
+// S441 DIAG (KYTY_DIAG_JIT_TREE_REJECT=1): the census of walks without the tree JIT, per 100 flips: totals per reason and the top rows.
+void DumpTreeReject(uint64_t from, uint64_t to) {
+	namespace TR = ShaderRecompiler::IR::SrtTreeReject;
+	if (!TR::Active().load(std::memory_order_relaxed)) return;
+	const auto   rows  = TR::Global().Take();
+	const double flips = static_cast<double>(std::max<uint64_t>(1, to - from));
+	for (const auto& [reason, n]: TR::Census::ByReason(rows)) {
+		LOGF("[jit-tree-reject-sum] flips=%llu-%llu reason=%s per_flip=%.2f\n", static_cast<unsigned long long>(from), static_cast<unsigned long long>(to),
+		     TR::Name(reason), static_cast<double>(n) / flips);
+	}
+	for (size_t i = 0; i < rows.size() && i < 10; i++) {
+		LOGF("[jit-tree-reject] flips=%llu-%llu plan=%016llx reason=%s detail=%s per_flip=%.2f\n", static_cast<unsigned long long>(from),
+		     static_cast<unsigned long long>(to), static_cast<unsigned long long>(rows[i].plan), TR::Name(rows[i].reason),
+		     rows[i].detail.empty() ? "-" : rows[i].detail.c_str(), static_cast<double>(rows[i].n) / flips);
+	}
+}
+
+} // namespace
+
 void OnGuestFlip() {
 	const auto flip = g_guest_flips.fetch_add(1, std::memory_order_relaxed) + 1;
+	SampleThreadCpu(flip);
+	if (flip % 100 == 0) DumpTreeReject(flip - 100, flip);
 	Common::MemEvents::SetCompletedFlips(flip);
 	// S276: KYTY_DIAG_SIGCENSUS=1 dumps the RIP histogram every 600 guest flips (and at exit, see ProgramExitHandler).
 	if (flip % 600 == 0 && Common::SignalCensus::HistogramEnabled()) {
