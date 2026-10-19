@@ -357,6 +357,10 @@ enum class Counter : uint32_t {
 	// the per-flip minimum of (CP picks up a submission - the guest enqueued it), the guest's slack / ReadbackWaitNs split by the waiting thread (CP, the rest) /
 	// CPU time of the CP thread and of all other threads of the process, per guest flip, and the number of snapshots.
 	CpFrameN, CpFrameNs, CpFrameMaxNs, GuestLeadN, GuestLeadMinNs, ReadbackWaitCpNs, ReadbackWaitOtherNs, ThreadCpuCpNs, ThreadCpuOtherNs, ThreadCpuN,
+	// S442 (KYTY_SRT_JIT_COVER=1|shadow): walks of plans with no reads answered from the plan / slots served by the per-slot JIT that read a constant buffer
+	// (shadow: compared with the interpreter) / slots the per-slot JIT served in plans that capture specialization reads; shadow: flat buffers that differ
+	// from the walk (must be 0).
+	SrtCoverNoreadsN, SrtCoverCbN, SrtCoverCaptureN, SrtJitCoverNeN,
 	Count,
 };
 

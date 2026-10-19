@@ -119,6 +119,7 @@ public:
 	bool RefreshFlatBuffer(std::vector<uint32_t>& flat);
 
 private:
+	bool RefreshFlatBufferWalk(std::vector<uint32_t>& flat);
 	SrtWalker(SrtWalker& parent, Value active_mask, bool clean = false,
 	          SrtWalker* clean_evaluator = nullptr);
 	ResourcePlan::EvaluationContext& AcquireContext();
