@@ -755,8 +755,8 @@ add_executable(memory_tracker_tests EXCLUDE_FROM_ALL
 )
 target_link_libraries(memory_tracker_tests fmt::fmt common)
 target_include_directories(memory_tracker_tests PRIVATE ${inc_headers})
-# S406: the page-stamp mutants (a CPU / GPU modification takes no stamp) must fail TestPageGeneration.
-foreach(mutant IN ITEMS NO_BUMP_CPU NO_BUMP_GPU)
+# S406: the page-stamp mutants (a CPU / GPU modification takes no stamp) must fail TestPageGeneration. S440: HOT_SKIPS_HASH (a changed hot page is not noticed) / HOT_NEVER_REPROTECT must fail TestHotPages.
+foreach(mutant IN ITEMS NO_BUMP_CPU NO_BUMP_GPU HOT_SKIPS_HASH HOT_NEVER_REPROTECT)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(memory_tracker_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/MemoryTrackerTests.cpp"
@@ -1541,7 +1541,7 @@ if(BUILD_TESTING)
 	endforeach()
 	add_test(NAME image_page_table COMMAND $<TARGET_FILE:image_page_table_tests>)
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
-	foreach(mutant IN ITEMS no_bump_cpu no_bump_gpu)
+	foreach(mutant IN ITEMS no_bump_cpu no_bump_gpu hot_skips_hash hot_never_reprotect)
 		add_test(NAME memory_tracker_mutant_${mutant} COMMAND $<TARGET_FILE:memory_tracker_mutant_${mutant}_tests>)
 		set_tests_properties(memory_tracker_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
@@ -1800,6 +1800,8 @@ if(BUILD_TESTING)
 		memory_tracker_tests
 		memory_tracker_mutant_no_bump_cpu_tests
 		memory_tracker_mutant_no_bump_gpu_tests
+		memory_tracker_mutant_hot_skips_hash_tests
+		memory_tracker_mutant_hot_never_reprotect_tests
 		pv_indirect_tests
 		pv_indirect_mutant_clamp_off_tests
 		pv_indirect_mutant_ignore_fields_tests

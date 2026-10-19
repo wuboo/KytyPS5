@@ -7,6 +7,7 @@
 #include "common/profiler.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/hotPages.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/cpWaitDiag.h"
@@ -25,6 +26,7 @@
 #include <cstring>
 #include <memory>
 #include <unordered_set>
+#include <xxhash.h>
 #include <utility>
 #include <vector>
 
@@ -342,6 +344,23 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	return true;
 }
 
+namespace {
+// S440 (KYTY_WF_HOT_UNPROTECT): the tracker hashes a page the way the upload would read it.
+bool HashGuestPage(uint64_t page, uint64_t* hash) {
+	alignas(64) uint8_t data[TRACKER_PAGE_SIZE];
+	if (!LibKernel::Memory::CopySparseMemory(page, data, sizeof(data))) {
+		return false;
+	}
+	*hash = XXH3_64bits(data, sizeof(data));
+	return true;
+}
+
+uint64_t GuestFlipsForTracker() {
+	return FrameTiming::GuestFlips();
+}
+
+} // namespace
+
 BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
                          PageManager& page_manager, TextureCache& texture_cache)
     : m_graphics(graphics), m_scheduler(scheduler), m_fault_manager(graphics, scheduler, *this),
@@ -354,6 +373,8 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
       m_download_buffer(graphics, scheduler, MemoryUsage::Download, 64 * MiB),
       m_device_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 128 * MiB),
       m_texture_cache(texture_cache) {
+	HotPages::EpochSource().store(&GuestFlipsForTracker, std::memory_order_relaxed);
+	HotPages::HasherSource().store(&HashGuestPage, std::memory_order_relaxed);
 	m_scheduler.SetPreSubmitHook([this] { FlushEagerReadbacks(); });
 	std::memset(m_gds_buffer.Mapped().data(), 0, static_cast<size_t>(m_gds_buffer.Size()));
 	m_gds_buffer.Flush(0, m_gds_buffer.Size());

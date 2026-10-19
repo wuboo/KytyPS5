@@ -3,6 +3,7 @@
 #include "graphics/presentation/cpPhases.h"
 #include "graphics/presentation/cpSampler.h"
 #include "graphics/presentation/cpPcSampler.h"
+#include "graphics/host_gpu/hotPages.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/cpWaitDiag.h"
 #include "graphics/shader/nullDescDiag.h"
@@ -492,6 +493,15 @@ constexpr const char* kCounterNames[] = {
     "walk_jit_tree_call_n",
     "cp_pc_sample_n",
     "cp_pc_fail_n",
+    "wf_hot_pages_n",
+    "wf_hot_promote_n",
+    "wf_hot_demote_n",
+    "wf_hot_hash_n",
+    "wf_hot_hash_ns",
+    "wf_hot_skip_n",
+    "wf_hot_changed_n",
+    "wf_hot_ne_n",
+    "wf_hot_race_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
@@ -600,6 +610,20 @@ void PollControlFile(uint64_t flip) {
 
 } // namespace
 
+// S440: the tracker's HotPages statistics (header-only, the tracker cannot reach FrameTiming) as counters.
+static void PublishHotPages() {
+	const auto& stats = HotPages::GetStats();
+	Set(Counter::WfHotPagesN, static_cast<uint64_t>(std::max<int64_t>(0, stats.hot_pages.load(std::memory_order_relaxed))));
+	Set(Counter::WfHotPromoteN, stats.promote.load(std::memory_order_relaxed));
+	Set(Counter::WfHotDemoteN, stats.demote.load(std::memory_order_relaxed));
+	Set(Counter::WfHotHashN, stats.hash.load(std::memory_order_relaxed));
+	Set(Counter::WfHotHashNs, stats.hash_ns.load(std::memory_order_relaxed));
+	Set(Counter::WfHotSkipN, stats.skip.load(std::memory_order_relaxed));
+	Set(Counter::WfHotChangedN, stats.changed.load(std::memory_order_relaxed));
+	Set(Counter::WfHotNeN, stats.ne.load(std::memory_order_relaxed));
+	Set(Counter::WfHotRaceN, stats.race.load(std::memory_order_relaxed));
+}
+
 void OnGuestFlip() {
 	const auto flip = g_guest_flips.fetch_add(1, std::memory_order_relaxed) + 1;
 	Common::MemEvents::SetCompletedFlips(flip);
@@ -609,6 +633,7 @@ void OnGuestFlip() {
 		std::snprintf(why, sizeof(why), "flip %llu", static_cast<unsigned long long>(flip));
 		Common::SignalCensus::DumpHistogram(why, [](const char* line) { LOGF("%s", line); });
 	}
+	PublishHotPages();
 	PollControlFile(flip);
 }
 
