@@ -1402,6 +1402,15 @@ foreach(mutant IN ITEMS NEVER_COVERS NO_ADD)
 	target_include_directories(image_page_summary_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(image_page_summary_mutant_${mutant_lower}_tests PRIVATE KYTY_IMAGEPAGESUMMARY_MUTANT_${mutant}=1)
 endforeach()
+# S445 (R1, KYTY_TEX_SAMPLED_NOTE): the sampled-T# list only while watch_tex is listed. Mutants: GATE_INVERTED (watch notes when nothing is listed), NO_DEDUP.
+add_executable(sampled_note_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SampledNoteTests.cpp")
+target_include_directories(sampled_note_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS GATE_INVERTED NO_DEDUP)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(sampled_note_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SampledNoteTests.cpp")
+	target_include_directories(sampled_note_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(sampled_note_mutant_${mutant_lower}_tests PRIVATE KYTY_SAMPLEDNOTE_MUTANT_${mutant}=1)
+endforeach()
 # S413: KYTY_DIAG_CP_WAIT cause tag. Mutant CPWAIT_NO_CAUSE: the scope does not set the cause.
 add_executable(cp_wait_diag_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpWaitDiagTests.cpp")
 target_include_directories(cp_wait_diag_tests PRIVATE ${inc_headers})
@@ -1580,6 +1589,11 @@ if(BUILD_TESTING)
 	foreach(mutant IN ITEMS runs_split thread_mixed)
 		add_test(NAME wf_diag_mutant_${mutant} COMMAND $<TARGET_FILE:wf_diag_mutant_${mutant}_tests>)
 		set_tests_properties(wf_diag_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME sampled_note COMMAND $<TARGET_FILE:sampled_note_tests>)
+	foreach(mutant IN ITEMS gate_inverted no_dedup)
+		add_test(NAME sampled_note_mutant_${mutant} COMMAND $<TARGET_FILE:sampled_note_mutant_${mutant}_tests>)
+		set_tests_properties(sampled_note_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
 	add_test(NAME gf_diag COMMAND $<TARGET_FILE:gf_diag_tests>)
 	add_test(NAME gf_diag_mutant_no_after COMMAND $<TARGET_FILE:gf_diag_mutant_no_after_tests>)
@@ -1899,6 +1913,9 @@ if(BUILD_TESTING)
 		image_page_summary_tests
 		image_page_summary_mutant_never_covers_tests
 		image_page_summary_mutant_no_add_tests
+		sampled_note_tests
+		sampled_note_mutant_gate_inverted_tests
+		sampled_note_mutant_no_dedup_tests
 		wf_diag_tests
 		wf_diag_mutant_no_shift_tests
 		wf_diag_mutant_runs_split_tests

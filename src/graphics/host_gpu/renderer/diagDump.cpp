@@ -5,6 +5,7 @@
 #include "common/memEvents.h"
 #include "kernel/memory.h"
 #include "graphics/host_gpu/renderer/diagTex.h"
+#include "graphics/host_gpu/renderer/sampledNote.h"
 #include "graphics/host_gpu/renderer/rtDump.h"
 #include "graphics/presentation/frameTiming.h"
 
@@ -36,15 +37,11 @@ uint64_t                                     g_tex_seq = 0;
 
 // S125 watch_tex
 TexOnceState g_watch_tex_once;
-struct SampledTex {
-	uint64_t ps, addr;
-	uint32_t slot, fmt, width, height;
-};
 struct WatchRange {
 	uint64_t flip, ps, addr, size;
 	uint32_t slot;
 };
-std::vector<SampledTex> g_sampled_this_flip; // deduplicated by (ps, slot, addr), capped
+SampledNote::List       g_sampled_this_flip; // deduplicated by (ps, slot, addr), capped
 std::vector<WatchRange> g_watch_ranges;      // armed by WatchTexTrigger, reported (and dropped) at the end of their flip
 
 } // namespace
@@ -72,12 +69,12 @@ bool WantsWatchTex(uint64_t ps_hash, uint32_t slot, const Common::ControlFile::T
 
 void NoteSampledTex(uint64_t ps_hash, uint32_t slot, uint64_t addr, uint32_t fmt, uint32_t width, uint32_t height) {
 	if (ps_hash == 0 || !Common::MemEvents::Enabled()) return;
+	// S445 (KYTY_TEX_SAMPLED_NOTE=watch, default): the list is read only for ranges armed by a watch_tex trigger, so without watch_tex (and diag_tex) in the
+	// control file leave before the mutex.
+	const auto& snapshot = Common::ControlFile::Current();
+	if (!SampledNote::ShouldNote(SampledNote::CurrentMode(), !snapshot.watch_tex.empty() || !snapshot.diag_tex.empty())) return;
 	std::lock_guard lock(g_mutex);
-	if (g_sampled_this_flip.size() >= 8192) return;
-	for (const auto& t: g_sampled_this_flip) {
-		if (t.ps == ps_hash && t.slot == slot && t.addr == addr) return;
-	}
-	g_sampled_this_flip.push_back({ps_hash, addr, slot, fmt, width, height});
+	g_sampled_this_flip.Note({ps_hash, addr, slot, fmt, width, height});
 }
 
 void WatchTexTrigger(const TexInfo& info, uint64_t range_size) {
@@ -260,17 +257,17 @@ void FlipReport(uint64_t flip) {
 	std::lock_guard lock(g_mutex);
 	for (const auto& watch: g_watch_ranges) {
 		size_t n = 0;
-		for (const auto& t: g_sampled_this_flip) {
+		for (const auto& t: g_sampled_this_flip.Entries()) {
 			if (t.addr < watch.addr || t.addr >= watch.addr + watch.size) continue;
 			LOGF("[watch-tex] flip=%" PRIu64 " T# inside the watched range: ps=%016" PRIx64 " slot=%u addr=0x%" PRIx64 " (+0x%" PRIx64 ") fmt=%u %ux%u%s\n", flip, t.ps,
 			     t.slot, t.addr, t.addr - watch.addr, t.fmt, t.width, t.height, t.addr == watch.addr && t.ps == watch.ps && t.slot == watch.slot ? " (the watched T#)" : "");
 			n++;
 		}
 		LOGF("[watch-tex] flip=%" PRIu64 " %zu T# sampled in this flip start inside [0x%" PRIx64 ", 0x%" PRIx64 ") (of %zu distinct T# sampled)\n", flip, n, watch.addr,
-		     watch.addr + watch.size, g_sampled_this_flip.size());
+		     watch.addr + watch.size, g_sampled_this_flip.Entries().size());
 	}
 	g_watch_ranges.clear();
-	g_sampled_this_flip.clear();
+	g_sampled_this_flip.Clear();
 	const char* diag_dir = std::getenv("KYTY_DIAG_DIR");
 	for (const auto& line: TexHistLines(g_tex_hist, flip)) LOGF("%s\n", line.c_str());
 	g_tex_hist.entries.clear();
