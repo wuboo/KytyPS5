@@ -131,7 +131,15 @@ inline std::atomic<NeObserverFn>& NeObserver() {
 	return observer;
 }
 
+// S444 DIAG: a write fault on a page that is sticky (kept unprotected) now: page address, flip of the fault, flip in which the page became sticky.
+using StickyRefaultFn = void (*)(uint64_t page, uint32_t flip, uint32_t sticky_flip);
+inline std::atomic<StickyRefaultFn>& StickyRefaultObserver() {
+	static std::atomic<StickyRefaultFn> observer {nullptr};
+	return observer;
+}
+
 struct Stats {
+	std::atomic<uint64_t> sticky_refault {0}; // write faults on a page that is sticky at that moment (S444; should be 0 when the protection is kept off)
 	std::atomic<uint64_t> refault {0};     // write faults on a page that already faulted in this flip (the second and later ones)
 	std::atomic<uint64_t> promote {0};     // pages kept unprotected until the end of their flip
 	std::atomic<uint64_t> demote {0};      // kept pages protected again at the first upload after their flip
