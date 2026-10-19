@@ -9,7 +9,6 @@
 #include "graphics/shader/nullDescDiag.h"
 #include "graphics/shader/recompiler/srtReader.h"
 #include "common/assert.h"
-#include "common/logging/log.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <xbyak/xbyak.h>
@@ -17,6 +16,7 @@
 #include <algorithm>
 #include <bit>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <map>
 #include <string>
@@ -1517,9 +1517,12 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 	SrtJitCover::Note(SrtJitCover::Cell::NoReads);
 	if (!walked || flat != planned || !m_program.active_sources.empty()) {
 		SrtJitCover::Note(SrtJitCover::Cell::Ne);
-		if (SrtJitCover::ShouldLogNe())
-			LOGF("[srt-cover-ne] noreads plan=0x%016llx walked=%d flat=%zu planned=%zu\n", static_cast<unsigned long long>(m_program.shader_hash),
-			     walked ? 1 : 0, flat.size(), planned.size());
+		if (SrtJitCover::ShouldLogNe()) {
+			char line[160];
+			std::snprintf(line, sizeof(line), "[srt-cover-ne] noreads plan=0x%016llx walked=%d flat=%zu planned=%zu\n",
+			              static_cast<unsigned long long>(m_program.shader_hash), walked ? 1 : 0, flat.size(), planned.size());
+			SrtJitCover::LogSink()(line);
+		}
 	}
 	return walked;
 }
@@ -1631,9 +1634,12 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 			SrtJitCover::Note(SrtJitCover::Cell::ConstBuffer);
 			if (cover_word != flat[read.flat_offset]) {
 				SrtJitCover::Note(SrtJitCover::Cell::Ne);
-				if (SrtJitCover::ShouldLogNe())
-					LOGF("[srt-cover-ne] cb plan=0x%016llx slot=%u jit=0x%08x walk=0x%08x\n", static_cast<unsigned long long>(m_program.shader_hash), slot,
-					     cover_word, flat[read.flat_offset]);
+				if (SrtJitCover::ShouldLogNe()) {
+					char line[160];
+					std::snprintf(line, sizeof(line), "[srt-cover-ne] cb plan=0x%016llx slot=%u jit=0x%08x walk=0x%08x\n",
+					              static_cast<unsigned long long>(m_program.shader_hash), slot, cover_word, flat[read.flat_offset]);
+					SrtJitCover::LogSink()(line);
+				}
 			}
 		}
 		return evaluated;

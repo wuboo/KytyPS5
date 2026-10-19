@@ -198,11 +198,18 @@ void TestConstBuffer() {
 	}
 }
 
+void TestNeLineCap() {
+	uint32_t logged = 0;
+	for (uint32_t i = 0; i < 50u; ++i) logged += Cover::ShouldLogNe() ? 1u : 0u;
+	Check(logged == Cover::kMaxNeLines && Cover::kMaxNeLines <= 20u, "[srt-cover-ne] lines are not capped at 20");
+}
+
 } // namespace
 
 int main() {
 	TestNoReads();
 	TestConstBuffer();
+	TestNeLineCap();
 	Cover::Override().store(-1);
 	std::printf("SrtJitCoverTests: ok\n");
 	return 0;
