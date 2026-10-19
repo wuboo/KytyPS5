@@ -17,7 +17,8 @@
 //   Mapped hook       ShaderMapUserData -> OnMapped(); the codes that are seen before the hook is installed are kept and replayed.
 //
 // Mutants (tests/ShaderPrewarmTests.cpp, KYTY_PREWARM_MUTANT_*): DOUBLE_COMPILE, NO_WAIT_ON_BUILDING, FORGET_TAKEN, WAIT_UNBOUNDED,
-// MANIFEST_ACCEPTS_CORRUPT, SHADOW_IGNORES_DIFF, NO_READY_CAP (no eviction), LONG_WAIT (the 250 ms default becomes 30 s).
+// MANIFEST_ACCEPTS_CORRUPT, SHADOW_IGNORES_DIFF, NO_READY_CAP (no eviction), LONG_WAIT (the 250 ms default becomes 30 s),
+// EVICTS_UNTAKEN (S441: at the byte limit the oldest result nobody has taken is dropped instead of the worker waiting).
 
 #include "graphics/shader/programDiskCache.h"
 
@@ -63,6 +64,9 @@ struct MailboxStats {
 	uint64_t evicted   = 0; // finished results dropped (oldest first) because max_ready were waiting; CP builds those itself
 	uint32_t ready      = 0; // finished results nobody has taken yet (they hold the translation of a whole program)
 	uint32_t ready_peak = 0;
+	uint64_t ready_bytes      = 0; // estimated size of those results (S441)
+	uint64_t ready_bytes_peak = 0;
+	uint64_t deferred         = 0; // times the worker stopped before a queued job because max_bytes were waiting: nothing is evicted, it goes on when CP takes one (S441)
 };
 
 // CP waits that long for a key the worker is building, then builds it itself (S437: 30 s was no limit for a frame).
@@ -77,9 +81,11 @@ class Mailbox {
 public:
 	// max_ready: at most that many finished results wait to be taken (memory); a newer result evicts the oldest one (the worker never stops, CP
 	// builds an evicted program itself); 0 = no limit. max_wait: how long CP waits for a Building key (a late result is dropped).
+	// S441: max_bytes (with sizer, the estimated size of a result): when that much waits the worker does NOT start the next queued job and nothing is
+	// dropped; it goes on as soon as CP takes a result (a result CP is about to need is never the one that is thrown away). 0 = no limit.
 	explicit Mailbox(unsigned workers = 1, std::chrono::milliseconds max_wait = kDefaultMaxWait, std::function<void()> worker_setup = {},
-	                 uint32_t max_ready = 0)
-	    : m_max_wait(max_wait), m_setup(std::move(worker_setup)), m_max_ready(max_ready) {
+	                 uint32_t max_ready = 0, uint64_t max_bytes = 0, std::function<uint64_t(const Payload&)> sizer = {})
+	    : m_max_wait(max_wait), m_setup(std::move(worker_setup)), m_max_ready(max_ready), m_max_bytes(sizer ? max_bytes : 0), m_sizer(std::move(sizer)) {
 		for (unsigned i = 0; i < workers; i++) m_threads.emplace_back([this] { Run(); });
 	}
 	~Mailbox() {
@@ -191,6 +197,9 @@ public:
 		stats.evicted   = m_evicted;
 		stats.ready      = m_ready;
 		stats.ready_peak = m_ready_peak;
+		stats.ready_bytes      = m_ready_bytes;
+		stats.ready_bytes_peak = m_ready_bytes_peak;
+		stats.deferred         = m_deferred;
 		return stats;
 	}
 	[[nodiscard]] std::vector<std::thread::id> WorkerIds() const {
@@ -205,10 +214,13 @@ private:
 		State                  state = State::Queued;
 		Work                   work;
 		std::optional<Payload> payload;
+		uint64_t               bytes = 0; // estimated size while the result waits (Done)
 	};
 
 	void MarkTaken(typename std::unordered_map<ProgramDisk::Key, Slot, KeyHash>::iterator found) {
 		m_ready--;
+		ReleaseBytes(found->second);
+		m_wake.notify_one(); // a worker held back by max_bytes may go on
 #ifdef KYTY_PREWARM_MUTANT_FORGET_TAKEN
 		m_slots.erase(found); // the key is unknown again: a later Submit builds it a second time
 #else
@@ -217,10 +229,30 @@ private:
 #endif
 	}
 
+	void ReleaseBytes(Slot& slot) {
+		m_ready_bytes -= std::min(m_ready_bytes, slot.bytes);
+		slot.bytes = 0;
+	}
+	[[nodiscard]] static constexpr bool EvictsOnBytes() {
+#ifdef KYTY_PREWARM_MUTANT_EVICTS_UNTAKEN
+		return true;
+#else
+		return false;
+#endif
+	}
+	[[nodiscard]] bool AtByteLimit() const {
+#ifdef KYTY_PREWARM_MUTANT_EVICTS_UNTAKEN
+		return false; // the mutant never holds the worker back: the byte limit evicts the oldest result instead (EvictOldest)
+#else
+		return m_max_bytes != 0 && m_ready_bytes >= m_max_bytes && m_ready != 0;
+#endif
+	}
+
 	// Called with the mutex held after a result became Done: keeps at most m_max_ready results waiting, dropping the oldest finished one.
 	void EvictOldest() {
 #ifndef KYTY_PREWARM_MUTANT_NO_READY_CAP
-		while (m_max_ready != 0 && m_ready > m_max_ready && !m_finished_order.empty()) {
+		while (((m_max_ready != 0 && m_ready > m_max_ready) || (EvictsOnBytes() && m_ready_bytes > m_max_bytes && m_ready > 1)) &&
+		       !m_finished_order.empty()) {
 			const auto old = m_finished_order.front();
 			m_finished_order.pop_front();
 			const auto found = m_slots.find(old);
@@ -228,6 +260,7 @@ private:
 			found->second.payload.reset();
 			found->second.state = State::Evicted;
 			m_ready--;
+			ReleaseBytes(found->second);
 			m_evicted++;
 		}
 #endif
@@ -248,7 +281,8 @@ private:
 			Work             work;
 			{
 				std::unique_lock lock(m_mutex);
-				m_wake.wait(lock, [&] { return m_stop || !m_queue.empty(); });
+				if (!m_stop && !m_queue.empty() && AtByteLimit()) m_deferred++; // one count per stop: the worker waits until CP takes a result
+				m_wake.wait(lock, [&] { return m_stop || (!m_queue.empty() && !AtByteLimit()); });
 				if (m_stop) return;
 				key = m_queue.front();
 				m_queue.pop_front();
@@ -272,9 +306,12 @@ private:
 				if (slot.state == State::Abandoned) {
 					// CP gave up and builds on its own: the result is dropped.
 				} else if (payload) {
+					slot.bytes   = m_sizer ? m_sizer(*payload) : 0;
 					slot.payload = std::move(payload);
 					slot.state   = State::Done;
 					m_ready++;
+					m_ready_bytes += slot.bytes;
+					m_ready_bytes_peak = std::max(m_ready_bytes_peak, m_ready_bytes);
 					m_ready_peak = std::max(m_ready_peak, m_ready);
 					m_finished_order.push_back(key);
 					EvictOldest();
@@ -296,6 +333,9 @@ private:
 	std::chrono::milliseconds                                 m_max_wait;
 	std::function<void()>                                     m_setup;
 	uint32_t                                                  m_max_ready = 0;
+	uint64_t                                                  m_max_bytes = 0;
+	std::function<uint64_t(const Payload&)>                   m_sizer;
+	uint64_t                                                  m_ready_bytes = 0, m_ready_bytes_peak = 0, m_deferred = 0;
 	uint32_t                                                  m_ready = 0, m_ready_peak = 0;
 	bool                                                      m_stop = false;
 	uint32_t                                                  m_building = 0;
