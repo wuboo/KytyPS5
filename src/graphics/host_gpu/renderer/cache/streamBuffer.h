@@ -39,6 +39,10 @@ class Buffer {
 public:
 	Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsage usage,
 	       uint64_t cpu_address, vk::BufferUsageFlags flags, uint64_t size);
+	// Non-owning wrapper of a buffer somebody else created and keeps alive (the imported UMA
+	// arena): the destructor does not destroy it, and it has no mapping of its own.
+	Buffer(GraphicContext& graphics, CommandScheduler& scheduler, vk::Buffer external,
+	       vk::DeviceAddress device_address, uint64_t size);
 	~Buffer();
 	KYTY_CLASS_NO_COPY(Buffer);
 

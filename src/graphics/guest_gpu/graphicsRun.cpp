@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/gpuKeepWarm.h"
 #include "graphics/host_gpu/gpuLabels.h"
 #include "graphics/host_gpu/renderer/indirectGpu.h"
+#include "graphics/host_gpu/renderer/deferredLabel.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -339,6 +340,58 @@ bool TestWaitRegMemValue(uint64_t value, uint64_t ref, uint64_t mask, uint32_t f
 	return false;
 }
 
+static bool EopDiagEarlyEnabled() {
+	static const bool enabled = std::getenv("KYTY_DIAG_EOP_EARLY") != nullptr;
+	return enabled;
+}
+
+static void EopWriteGuestBacking(uint64_t address, const void* data, uint64_t size) {
+	if (!LibKernel::Memory::TryWriteBacking(address, data, size)) {
+		std::memcpy(reinterpret_cast<void*>(address), data, size);
+	}
+}
+
+static void EopNoWrite(uint64_t, const void*, uint64_t) {}
+
+static Sync::PendingLabels& EopPendingLabels() {
+	static Sync::PendingLabels labels;
+	return labels;
+}
+
+// Label store of EVENT_WRITE_EOP / RELEASE_MEM / flip-with-label. KYTY_OPT_ON=eop_on_completion
+// defers it until the current submit's tick has finished (see renderer/deferredLabel.h); otherwise
+// it is written now, while parsing. KYTY_DIAG_EOP_EARLY=1 tracks the labels still waiting for their
+// tick so reads of them (WAIT_REG_MEM) can be counted.
+static void EopStoreLabel(CommandScheduler& scheduler, void* dst, uint64_t value, uint32_t size) {
+	// UMA stage 3 forces it: without protected pages nothing else keeps the guest from seeing a
+	// label before the GPU work it announces has finished.
+	static const bool on_completion =
+	    FrameTiming::OptForcedOn("eop_on_completion") || LibKernel::Memory::UmaStage3();
+	const bool        diag_early    = EopDiagEarlyEnabled();
+	const auto        address       = reinterpret_cast<uint64_t>(dst);
+	if (on_completion) {
+		// Stage 3: the label counts as a write that completes with this submit's tick, so a
+		// WAIT_REG_MEM on it waits for the tick rather than spinning on the old value.
+		if (LibKernel::Memory::UmaStage3()) {
+			scheduler.Context().GetUnifiedMemory().RecordWriterAt(address, size,
+			                                                       scheduler.CurrentTick());
+		}
+		Sync::DeferGuestLabelWrite(scheduler, EopWriteGuestBacking,
+		                           diag_early ? &EopPendingLabels() : nullptr, address, value, size);
+		return;
+	}
+	std::memcpy(dst, &value, size);
+	if (diag_early) {
+		Sync::DeferGuestLabelWrite(scheduler, EopNoWrite, &EopPendingLabels(), address, value, size);
+	}
+}
+
+void CommandProcessor::WaitGuestWriters(const volatile void* address, uint64_t size) {
+	if (LibKernel::Memory::UmaStage3() && address != nullptr) {
+		m_renderer.GetUnifiedMemory().WaitWritersForCp(reinterpret_cast<uint64_t>(address), size);
+	}
+}
+
 template <typename T>
 void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, uint32_t poll,
                                   uint32_t wait_op) {
@@ -348,8 +401,24 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 	}
 
 	(void)poll;
+	if (EopDiagEarlyEnabled() &&
+	    EopPendingLabels().NoteRead(reinterpret_cast<uint64_t>(addr)) &&
+	    TestWaitRegMemValue(*addr, ref, mask, func)) {
+		static std::atomic<uint32_t> early_log {0};
+		const auto                   n = early_log.fetch_add(1, std::memory_order_relaxed) + 1u;
+		if ((n & (n - 1u)) == 0u) {
+			LOGF("EOP_EARLY: WAIT_REG_MEM saw label 0x%016" PRIx64 " before its tick (count=%" PRIu32
+			     ")\n",
+			     reinterpret_cast<uint64_t>(addr), n);
+		}
+	}
 	if (!TestWaitRegMemValue(*addr, ref, mask, func)) {
-		SuspendPm4();
+		// UMA stage 3: a label or counter that a recorded submit has yet to write is waited for
+		// by tick (the write happens when that tick retires) instead of polled stale.
+		WaitGuestWriters(addr, sizeof(T));
+		if (!TestWaitRegMemValue(*addr, ref, mask, func)) {
+			SuspendPm4();
+		}
 	}
 }
 
@@ -920,6 +989,11 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
                                       const volatile void* address, uint32_t count_in_dwords) {
 	(void)count_in_dwords;
 	uint64_t value = 0;
+	if (op == 0x01) {
+		WaitGuestWriters(address, 16u * 2u * sizeof(uint64_t));
+	} else if (op == 0x03) {
+		WaitGuestWriters(address, sizeof(uint64_t));
+	}
 
 	switch (op) {
 		case 0x00:
@@ -1117,6 +1191,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	uint32_t draw_count = max_count_or_count;
 	if (count_addr != nullptr) {
 		const auto count_begin = diag && probe.count_dirty ? FrameTiming::SteadyNowNs() : 0;
+		WaitGuestWriters(count_addr, sizeof(uint32_t));
 		draw_count = *count_addr;
 		if (count_begin != 0) {
 			probe.wait_ns += static_cast<uint64_t>(FrameTiming::SteadyNowNs() - count_begin);
@@ -1225,6 +1300,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	for (uint32_t i = 0; i < draw_count; i++) {
 		const auto args_addr = m_draw_indirect_args_base_addr + data_offset +
 		                       static_cast<uint64_t>(i) * stride_in_bytes;
+		WaitGuestWriters(reinterpret_cast<const void*>(args_addr), args_size);
 		if (diag && NoteIndirectArgsChanged(args_addr, args_size)) {
 			probe.args_changed++;
 		}
@@ -1348,6 +1424,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 	EXIT_NOT_IMPLEMENTED(args_addr == 0 || (args_addr & 3u) != 0);
 	if ((mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0) {
 		const auto* args = reinterpret_cast<const vk::DispatchIndirectCommand*>(args_addr);
+		WaitGuestWriters(args, sizeof(*args));
 		DispatchDirect(args->x, args->y, args->z, mode);
 		return;
 	}
@@ -1424,7 +1501,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 		auto  data = static_cast<uint32_t>(value);
 		EXIT_IF(dst == nullptr);
 		(void)command.Handle();
-		std::memcpy(dst, &data, sizeof(data));
+		EopStoreLabel(GetScheduler(), dst, data, sizeof(data));
 
 		if (with_interrupt) {
 			TriggerEopEventAtEndOfPipe(interrupt_context_id);
@@ -1467,7 +1544,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 					auto* dst = static_cast<uint64_t*>(dst_gpu_addr);
 					EXIT_IF(dst == nullptr);
 					(void)command.Handle();
-					std::memcpy(dst, &value, sizeof(value));
+					EopStoreLabel(GetScheduler(), dst, value, sizeof(value));
 
 					if (with_interrupt) {
 						TriggerEopEventAtEndOfPipe(interrupt_context_id);
@@ -1710,7 +1787,7 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 	}
 
 	EXIT_IF(dst_gpu_addr == nullptr);
-	std::memcpy(dst_gpu_addr, &value, sizeof(value));
+	EopStoreLabel(GetScheduler(), dst_gpu_addr, value, sizeof(value));
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
 	(void)command.Handle();
@@ -1737,7 +1814,7 @@ void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache
 		EXIT("unknown event type\n");
 	}
 	EXIT_IF(dst_gpu_addr == nullptr);
-	std::memcpy(dst_gpu_addr, &value, sizeof(value));
+	EopStoreLabel(GetScheduler(), dst_gpu_addr, value, sizeof(value));
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
 	                                         m_flip.flip_arg);
 	(void)command.Handle();

@@ -802,6 +802,82 @@ void TestFlexibleMemoryCapacityIsBootFixed() {
 	std::printf("[host]    %-48s ok\n", test);
 }
 
+void TestBackingMapListenerSeesMapAndUnmap() {
+	namespace Memory = Libs::LibKernel::Memory;
+	const char* test = "BackingMapListenerSeesMapAndUnmap";
+	struct Event {
+		uint64_t vaddr;
+		uint64_t size;
+		uint64_t backing_offset;
+		bool     mapped;
+	};
+	struct Recorder final: Memory::IGuestMappingListener {
+		std::vector<Event> events;
+		void OnMapped(uint64_t vaddr, uint64_t size, Memory::GuestArenaId arena,
+		              uint64_t offset) override {
+			(void)arena;
+			events.push_back({vaddr, size, offset, true});
+		}
+		void OnUnmapped(uint64_t vaddr, uint64_t size) override {
+			events.push_back({vaddr, size, 0, false});
+		}
+	} recorder;
+	auto& events = recorder.events;
+	const auto arena = Memory::GetGuestArena(Memory::GUEST_ARENA_DIRECT);
+	if (Memory::UmaEnabled()) {
+		// KYTY_UMA=1: the GPU imports the arena, which needs host-page alignment even under
+		// Rosetta (4 KB mmap alignment).
+		Check(test, arena.base % 16384 == 0, "UMA arena alias is not 16 KB aligned");
+		std::printf("[host]    UMA arena base=0x%" PRIx64 "\n", arena.base);
+	}
+	Memory::SetGuestMappingListener(&recorder);
+	// The listener starts consistent: existing mappings are replayed as "mapped" events.
+	for (const auto& event: events) {
+		Check(test, event.mapped && event.size != 0, "replay must only report live mappings");
+	}
+	events.clear();
+
+	const auto size    = 4 * SceKernelPageSize;
+	const auto address = MapNamedFlexible(test, size, SceKernelProtCpuRw, "uma_listener");
+	const auto covers  = [&](bool mapped) {
+		for (const auto& event: events) {
+			if (event.mapped == mapped && event.vaddr <= address &&
+			    address + size <= event.vaddr + event.size) {
+				return true;
+			}
+		}
+		return false;
+	};
+	Check(test, covers(true), "no mapped event covers the new flexible mapping");
+	for (const auto& event: events) {
+		if (event.mapped) {
+			Check(test, event.backing_offset + event.size <= arena.size,
+			      "mapped event points outside the arena");
+		}
+	}
+
+	// Translate agrees with the events: the range lies in the arena, and the offsets add up.
+	std::vector<Memory::GuestArenaSpan> spans;
+	Check(test, Memory::TranslateGuestRange(address, size, &spans), "Translate of a mapped range");
+	uint64_t covered = 0;
+	for (const auto& span: spans) {
+		Check(test, span.arena == Memory::GUEST_ARENA_DIRECT && span.offset + span.size <= arena.size,
+		      "span outside the arena");
+		Check(test, span.vaddr == address + covered, "spans are not contiguous in guest addresses");
+		covered += span.size;
+	}
+	Check(test, covered == size, "spans do not cover the range");
+	events.clear();
+	CheckOk(test, Memory::KernelMunmap(address, size), "KernelMunmap");
+	Check(test, covers(false), "no unmapped event covers the released mapping");
+	spans.clear();
+	Check(test, !Memory::TranslateGuestRange(address, size, &spans),
+	      "Translate must fail for an unmapped range");
+
+	Memory::SetGuestMappingListener(nullptr);
+	std::printf("[host]    %-48s ok\n", test);
+}
+
 void TestFlexibleMemoryUsesSharedBacking() {
 	const char* test     = "FlexibleMemoryUsesSharedBacking";
 	const auto  baseline = AvailableFlexibleMemory(test);
@@ -4933,6 +5009,7 @@ int main(int argc, char** argv) {
 	RunTest(TestReleasedReserveCanBeReused);
 	RunTest(TestMunmapAcrossAdjacentFlexibleMappings);
 	RunTest(TestDirectMapQueryOffsetAndPartialMunmap);
+	RunTest(TestBackingMapListenerSeesMapAndUnmap);
 	RunTest(TestDirectPartialProtectUnmapPreservesNeighbors);
 	RunTest(TestFixedArenaChurnKeepsRangesExact);
 #if defined(__linux__)

@@ -1432,6 +1432,7 @@ KYTY_CP_OP_PARSER(CpOpCondExec) {
 	EXIT_NOT_IMPLEMENTED(addr == 0);
 	EXIT_NOT_IMPLEMENTED(payload_dw + exec_count >= dw);
 
+	cp.WaitGuestWriters(reinterpret_cast<const volatile uint32_t*>(addr), sizeof(uint32_t));
 	if (*reinterpret_cast<const volatile uint32_t*>(addr) == 0) {
 		return payload_dw + exec_count;
 	}
@@ -1466,15 +1467,18 @@ KYTY_CP_OP_PARSER(CpOpBranch) {
 	EXIT_NOT_IMPLEMENTED(function > 6);
 	EXIT_NOT_IMPLEMENTED(then_buffer == nullptr || then_num_dw == 0);
 
+	cp.WaitGuestWriters(compare_addr, sizeof(uint64_t));
 	const bool take_then = TestWaitRegMemValue(*compare_addr, reference, mask, function);
 	LOGF("\t branch: take=%u then=0x%016" PRIx64 "/%" PRIu32 " else=0x%016" PRIx64 "/%" PRIu32 "\n",
 	     take_then ? 1u : 0u, reinterpret_cast<uint64_t>(then_buffer), then_num_dw,
 	     reinterpret_cast<uint64_t>(else_buffer), else_num_dw);
 
 	if (take_then) {
+		cp.WaitGuestWriters(then_buffer, static_cast<uint64_t>(then_num_dw) * sizeof(uint32_t));
 		cp.ProcessIndirectBuffer({then_buffer, then_num_dw}, true);
 	} else if (mode == 2 && else_num_dw != 0) {
 		EXIT_NOT_IMPLEMENTED(else_buffer == nullptr);
+		cp.WaitGuestWriters(else_buffer, static_cast<uint64_t>(else_num_dw) * sizeof(uint32_t));
 		cp.ProcessIndirectBuffer({else_buffer, else_num_dw}, true);
 	}
 
@@ -1936,6 +1940,8 @@ KYTY_CP_OP_PARSER(CpOpIndirectBuffer) {
 		     indirect_num_dw, buffer[2]);
 	}
 
+	// UMA stage 3: a command buffer that a GPU job wrote must be complete before it is parsed.
+	cp.WaitGuestWriters(indirect_buffer, static_cast<uint64_t>(indirect_num_dw) * sizeof(uint32_t));
 	GraphicsDbgDumpDcb("ci", indirect_num_dw, indirect_buffer);
 
 	cp.ProcessIndirectBuffer({indirect_buffer, indirect_num_dw}, (control & (1u << 20u)) != 0);

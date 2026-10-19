@@ -1,3 +1,4 @@
+#include "graphics/host_gpu/memory/uma3Policy.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 
 #include "common/alignment.h"
@@ -136,17 +137,28 @@ NativeStorageBuffer(RenderContext& context, const PreparedBindings::BufferSource
 	if (size > graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange) {
 		EXIT("storage buffer range is unsupported\n");
 	}
-	auto [buffer, offset] = context.GetBufferCache().ObtainBuffer(
-	    address, size, resource.written,
-	    resource.formatted || (resource.read && Config::SyncRawImageBuffersEnabled()), id);
-	const auto aligned_offset = Common::AlignDown(offset, alignment);
-	const auto adjustment     = offset - aligned_offset;
-	const auto max_range      = graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange;
-	if (adjustment >= 256 || size > max_range - adjustment) {
+	const bool written       = resource.written;
+	const bool formatted     = resource.formatted || (resource.read && Config::SyncRawImageBuffersEnabled());
+	auto&       cache = context.GetBufferCache();
+	vk::Buffer  handle {};
+	uint64_t    offset = 0;
+	// UMA: a range the guest backing holds in full is bound as a window of the imported arena, so
+	// descriptor and BDA accesses see the same bytes (no second copy).
+	// Stage 3: ObtainBuffer itself hands out the arena window.
+	if (!cache.UmaActive() || cache.UmaStage3() ||
+	    !cache.TryObtainUmaView(address, size, written, formatted, &handle, &offset)) {
+		auto [buffer, buffer_pos] = cache.ObtainBuffer(address, size, written, formatted, id);
+		handle = buffer->Handle();
+		offset = buffer_pos;
+	}
+	// The window starts at an aligned offset; the shader receives the remainder (buffer_offset).
+	const auto max_range = graphics.GetPhysicalDeviceProperties().limits.maxStorageBufferRange;
+	const auto window    = Uma3::SplitWindow(offset, alignment, size, max_range);
+	if (!window.ok) {
 		EXIT("storage buffer offset adjustment is unsupported\n");
 	}
-	buffer_offset = static_cast<uint32_t>(adjustment);
-	const vk::DescriptorBufferInfo result {buffer->Handle(), aligned_offset, size + adjustment};
+	buffer_offset = static_cast<uint32_t>(window.adjustment);
+	const vk::DescriptorBufferInfo result {handle, window.aligned, size + window.adjustment};
 	if (resource.written) {
 		context.GetTextureCache().InvalidateMemoryFromGPU(address, size);
 	}
@@ -1154,7 +1166,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 			if (size >= (uint64_t {1} << 30u) || descriptor.NumRecords() == UINT32_MAX) {
 				size = Libs::LibKernel::Memory::ClampRangeSize(address, size);
 			}
-			source = {address, size, cache.FindBuffer(address, size)};
+			source = {address, size, cache.FindBindingBuffer(address, size)};
 		}
 	}
 }
@@ -1252,15 +1264,17 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
                                              std::span<RenderColorInfo>         colors) {
 	bool uses_dma = false;
+	bool writes   = false;
 	{
 		KYTY_CP_SITE(BindFindBuffers);
 		FindBuffers(stages);
 	}
 	for (auto* stage: stages) {
 		uses_dma |= stage->runtime->program->info.uses_dma;
+		writes |= stage->runtime->program->has_address_writes;
 	}
 	if (uses_dma) {
-		m_context.PrepareBda();
+		m_context.PrepareBda(writes);
 	}
 	for (auto* stage: stages) {
 		RebindImages(*stage);

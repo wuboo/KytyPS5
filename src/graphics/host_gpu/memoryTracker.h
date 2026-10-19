@@ -43,6 +43,11 @@ public:
 	[[nodiscard]] RangeSet TakeBdaSync();
 	// S440: pages the tracker no longer protects (HotPages) raise no fault; this adds them to `set`.
 	void AddHotPages(RangeSet& set);
+	// Regions created so far (each is 16 MB of page state); 0 means no page was ever tracked.
+	[[nodiscard]] size_t RegionCount() {
+		std::lock_guard lock(m_region_mutex);
+		return m_region_storage.size();
+	}
 	// Removes protection from a range and flushes GPU-owned data when required.
 	template <typename Flush>
 	void InvalidateRegion(uint64_t vaddr, uint64_t size, Flush&& on_flush) noexcept {

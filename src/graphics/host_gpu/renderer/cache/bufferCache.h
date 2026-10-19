@@ -10,6 +10,8 @@
 #include "graphics/host_gpu/renderer/cache/dccFillPublish.h"
 #include "graphics/host_gpu/renderer/cache/inflightRanges.h"
 #include "graphics/host_gpu/renderer/cache/eagerPages.h"
+#include "graphics/host_gpu/memory/uma3Policy.h"
+#include "graphics/host_gpu/memory/unifiedMemory.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
 #include "graphics/host_gpu/renderer/cache/gpuDirtyRanges.h"
 #include "graphics/host_gpu/renderer/cache/gpuWriteLedger.h"
@@ -18,7 +20,11 @@
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
 
+#include <array>
+#include <atomic>
 #include <map>
+#include <memory>
+#include <optional>
 #include <mutex>
 #include <span>
 #include <unordered_map>
@@ -55,7 +61,7 @@ public:
 	}
 
 	BufferCache(GraphicContext& graphics, CommandScheduler& scheduler, PageManager& page_manager,
-	            TextureCache& texture_cache);
+	            TextureCache& texture_cache, UnifiedMemory& unified);
 	~BufferCache();
 	KYTY_CLASS_NO_COPY(BufferCache);
 
@@ -64,6 +70,9 @@ public:
 	bool                   ReadMemory(uint64_t vaddr, uint64_t size, bool is_write = false);
 	[[nodiscard]] Buffer&  GetBuffer(BufferId id) { return m_slot_buffers[id]; }
 	[[nodiscard]] BufferId FindBuffer(uint64_t vaddr, uint64_t size);
+	// FindBuffer for a binding that ObtainBuffer will serve: in stage 3 a range the arena backs
+	// needs no buffer object at all (NULL_BUFFER_ID), so none is created, registered or tracked.
+	[[nodiscard]] BufferId FindBindingBuffer(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBuffer(uint64_t vaddr, uint64_t size,
 	                                                        bool     is_written,
 	                                                        bool     is_texel_buffer = false,
@@ -110,6 +119,24 @@ public:
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
 	// S406 (KYTY_PV_RANGE_GEN): see MemoryTracker::QueryPageGeneration; `clean` also needs no GPU-dirty byte range.
 	[[nodiscard]] MemoryTracker::PageGeneration QueryPageGeneration(uint64_t vaddr, uint64_t size);
+	// UMA (KYTY_UMA=1): the guest direct-memory backing is imported in chunks, on first use, and the BDA
+	// page table points shader accesses straight at it.
+	[[nodiscard]] bool UmaActive() const noexcept { return m_unified.Active(); }
+	// GPU thread, before recording a submit whose shaders use BDA: applies queued mapping changes
+	// to the page table and records the tick that must retire before the CPU reads guest memory.
+	void PrepareUma(bool writes_through_pointers = true);
+	// Stage 3 (KYTY_UMA=3): every buffer is a window of the imported arena. True when the buffer
+	// cache keeps no copies, no download state and no page watchers for arena-backed memory.
+	[[nodiscard]] bool UmaStage3() const noexcept { return m_unified.Stage3(); }
+	// Descriptor view of the imported backing for a range the guest backing holds in full (UMA).
+	// The returned offset is the byte offset in the arena buffer; the caller aligns it down to the
+	// storage-buffer alignment and passes the remainder to the shader (same as ObtainBuffer).
+	// Returns false (and counts a fallback) when the range must keep the shadow-copy path.
+	[[nodiscard]] bool TryObtainUmaView(uint64_t vaddr, uint64_t size, bool is_written,
+	                                    bool is_texel_buffer, vk::Buffer* buffer, uint64_t* offset);
+	// Fault path: caches a faulting range; with UMA, pages the guest has not mapped at all get
+	// the sentinel page instead (and count in uma_unmapped_bda).
+	void               FindBufferForFault(uint64_t start, uint64_t size);
 	void               ProcessFaultBuffer();
 	void               SynchronizeBda(const RangeSet& mapped);
 	void               QueueBdaSync(uint64_t vaddr, uint64_t size) {
@@ -139,6 +166,22 @@ private:
 	using PageTable = MultiLevelPageTable<BufferId, CACHING_PAGEBITS, 44, 20>;
 	static_assert(CACHING_PAGESIZE == (uint64_t {1} << PageTable::kPageBits));
 	void WriteDataBuffer(Buffer& buffer, uint64_t address, const void* source, uint64_t size);
+	// Page-table entry for one cache page: the imported backing when the page is directly usable,
+	// else the covering shadow buffer, else 0 (fault path).
+	[[nodiscard]] vk::DeviceAddress PageTableEntry(uint64_t page_vaddr);
+	void                            PublishUmaPages(uint64_t first, uint64_t last);
+
+	// --- stage 3 ---
+	// Window of the arena for the range, or nullopt when the copy path must serve it (counted by
+	// reason). Applies queued mapping changes first.
+	[[nodiscard]] std::optional<std::pair<Buffer*, uint64_t>>
+	     TryObtainArenaWindow(uint64_t vaddr, uint64_t size, bool is_written, bool is_texel_buffer);
+	// First stage-3 use: buffer watchers that exist from before are dropped (counted).
+	void EnterUmaStage3();
+	// True when a copy-path buffer was ever registered over the range. Only those pages can carry
+	// buffer tracker state; thread safe (write faults arrive on guest threads).
+	[[nodiscard]] bool UmaTrackerCanSkip(uint64_t vaddr, uint64_t size);
+
 	void TouchBuffer(const Buffer& buffer);
 	[[nodiscard]] OverlapResult ResolveOverlaps(uint64_t vaddr, uint64_t size);
 	void JoinOverlap(BufferId new_id, BufferId overlap_id, bool accumulate_stream_score);
@@ -191,6 +234,7 @@ private:
 
 	GraphicContext&                                   m_graphics;
 	CommandScheduler&                                 m_scheduler;
+	UnifiedMemory&                                    m_unified;
 	FaultManager                                      m_fault_manager;
 	Buffer                                            m_gds_buffer;
 	Buffer                                            m_bda_pagetable_buffer;
@@ -234,6 +278,9 @@ private:
 	uint64_t                  m_sync_seq_next = 0;
 	std::unordered_map<uint64_t, uint64_t> m_spec_last_seq; // S402: per spec-read range, the write sequence seen by the previous read
 	SyncCensus::RepeatTracker m_sync_repeat;
+	bool                                   m_stage3_entered = false; // GPU thread
+	std::mutex                             m_uma_legacy_mutex;
+	Uma3::LegacyRanges                     m_uma_legacy_ranges; // m_uma_legacy_mutex
 };
 
 } // namespace Libs::Graphics

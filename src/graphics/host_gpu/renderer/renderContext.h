@@ -45,6 +45,7 @@ public:
 	DescriptorHeap&     GetDescriptorHeap() { return m_descriptor_heap; }
 	SamplerCache&       GetSamplerCache() { return m_sampler_cache; }
 	BufferCache&        GetBufferCache() { return m_buffer_cache; }
+	UnifiedMemory&      GetUnifiedMemory() { return m_unified_memory; }
 	TextureCache&       GetTextureCache() { return m_texture_cache; }
 	RenderExecutor&     GetRenderExecutor() { return m_render_executor; }
 
@@ -53,7 +54,9 @@ public:
 	[[nodiscard]] bool IsMapped(uint64_t vaddr, uint64_t size) const noexcept;
 	void               MapMemory(uint64_t vaddr, uint64_t size);
 	void               UnmapMemory(uint64_t vaddr, uint64_t size);
-	void               PrepareBda();
+	// writes_through_pointers: a shader of the submit stores through guest pointers (UMA stage 3
+	// treats only those submits as writers of unknown ranges).
+	void               PrepareBda(bool writes_through_pointers = true);
 	void               RunGarbageCollector();
 
 	void AddInterruptEq(LibKernel::EventQueue::KernelEqueue eq, int event_id);
@@ -74,6 +77,7 @@ private:
 	PipelineCache             m_pipeline_cache;
 	SamplerCache              m_sampler_cache;
 	PageManager               m_page_manager;
+	UnifiedMemory             m_unified_memory; // before the caches: outlives them
 	BufferCache               m_buffer_cache;
 	TextureCache              m_texture_cache;
 	mutable std::shared_mutex m_mapped_ranges_mutex;

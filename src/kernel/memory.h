@@ -10,6 +10,11 @@
 #include <string>
 #include <vector>
 
+#include "kernel/guestMemoryArena.h"
+
+#include <functional>
+#include <vector>
+
 namespace Libs::Graphics {
 class RenderContext;
 enum class PageFaultAccess;
@@ -154,6 +159,22 @@ bool                   QueryShaderGpuDirty(uint64_t vaddr, uint64_t size);
 // 1: a range that is neither GPU-dirty nor in flight is copied from the backing (no fault, no drain); anything else is read as in 0.
 // shadow: both reads, compared; `dst` holds the guest read. Counters cp_read_backing_*; `site` selects the per-site columns.
 void                   CpGuestRead(Graphics::CpReadBacking::Site site, uint64_t vaddr, void* dst, uint64_t size);
+// UMA (KYTY_UMA=1, macOS): the GPU imports the guest arenas and accesses them in place.
+[[nodiscard]] bool           UmaEnabled();
+// KYTY_UMA=<n>: 0 off, 1 BDA/storage windows (stages 1-2), 3 all buffers through the arena.
+[[nodiscard]] uint32_t       UmaStage();
+// KYTY_UMA=shadow: UMA plus the data shadow-compare of CPU reads.
+[[nodiscard]] bool           UmaShadow();
+[[nodiscard]] inline bool    UmaStage3() { return UmaStage() >= 3; }
+// Host placement of an arena (base == 0 when it does not exist).
+[[nodiscard]] GuestArenaInfo GetGuestArena(GuestArenaId id);
+// Splits a guest range into arena spans; false when part of it is not backed by an arena.
+bool TranslateGuestRange(uint64_t vaddr, uint64_t size, std::vector<GuestArenaSpan>* spans);
+// See IGuestMappingListener: the listener is called under the address-space lock and must only
+// queue the event. Existing mappings are replayed before this returns. nullptr detaches.
+void SetGuestMappingListener(IGuestMappingListener* listener);
+// True when any byte of the range is mapped in the guest address space.
+[[nodiscard]] bool IsGuestRangeMapped(uint64_t vaddr, uint64_t size);
 bool                   TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size);
 bool                   CopySparseMemory(uint64_t vaddr, void* data, uint64_t size);
 [[nodiscard]] uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size);

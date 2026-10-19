@@ -105,9 +105,16 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 	}
 }
 
+Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, vk::Buffer external,
+               vk::DeviceAddress device_address, uint64_t size)
+    : m_graphics(&graphics), m_scheduler(&scheduler), m_usage(MemoryUsage::DeviceLocal),
+      m_device_address(device_address), m_buffer(external), m_size(size) {
+	EXIT_IF(external == nullptr || size == 0);
+}
+
 Buffer::~Buffer() {
 	g_descriptor_resource_generation.fetch_add(1, std::memory_order_relaxed);
-	if (m_buffer != nullptr) {
+	if (m_buffer != nullptr && m_allocation != nullptr) {
 		vmaDestroyBuffer(m_graphics->allocator, m_buffer, m_allocation);
 	}
 }

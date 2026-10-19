@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/memory/umaReadFence.h"
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -105,7 +106,40 @@ void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* 
 }
 
 void BufferCache::Register(BufferId id) {
+	if (m_unified.Stage3()) {
+		const auto& buffer = m_slot_buffers[id];
+		std::lock_guard lock(m_uma_legacy_mutex);
+		m_uma_legacy_ranges.Add(buffer.CpuAddress(), buffer.Size());
+	}
 	ChangeRegister<true>(id);
+}
+
+bool BufferCache::UmaTrackerCanSkip(uint64_t vaddr, uint64_t size) {
+	std::lock_guard lock(m_uma_legacy_mutex);
+	return Uma3::TrackerCanSkip(m_uma_legacy_ranges, vaddr, size);
+}
+
+void BufferCache::EnterUmaStage3() {
+	if (m_stage3_entered || !m_unified.Stage3()) {
+		return;
+	}
+	m_stage3_entered = true;
+	// A buffer that already exists keeps working as a copy; its tracker pages are the only
+	// buffer watchers allowed, and anything else was created before the switch. Pages that no
+	// copy-path buffer covers must not stay watched for buffers.
+	uint64_t dropped = 0;
+	for (const auto& [vaddr, id]: m_buffers) {
+		(void)vaddr;
+		const auto& buffer = m_slot_buffers[id];
+		if (m_unified.Covers(buffer.CpuAddress(), buffer.Size()) &&
+		    !m_memory_tracker.IsRegionGpuModified(buffer.CpuAddress(), buffer.Size())) {
+			m_memory_tracker.UntrackMemory(buffer.CpuAddress(), buffer.Size());
+			++dropped;
+		}
+	}
+	m_unified.CountWatchersDropped(dropped);
+	LOGF("UMA3: dropped %" PRIu64 " buffer watcher ranges at the switch (uma_watchers_dropped)\n",
+	     dropped);
 }
 
 void BufferCache::Unregister(BufferId id) {
@@ -136,7 +170,13 @@ void BufferCache::ChangeRegister(BufferId id) {
 		std::vector<vk::DeviceAddress> addresses;
 		addresses.reserve(size_pages);
 		for (uint64_t i = 0; i < size_pages; ++i) {
-			addresses.push_back(buffer.BufferDeviceAddress() + (i << CACHING_PAGEBITS));
+			auto entry = buffer.BufferDeviceAddress() + (i << CACHING_PAGEBITS);
+			const auto page_vaddr =
+			    (buffer.CpuAddress() & ~(CACHING_PAGESIZE - 1)) + (i << CACHING_PAGEBITS);
+			if (const auto uma_entry = m_unified.PageEntry(page_vaddr); uma_entry != 0) {
+				entry = uma_entry;
+			}
+			addresses.push_back(entry);
 		}
 		WriteDataBuffer(m_bda_pagetable_buffer, table_offset,
 		                addresses.data(), addresses.size() * sizeof(vk::DeviceAddress));
@@ -148,8 +188,26 @@ void BufferCache::ChangeRegister(BufferId id) {
 		EXIT_IF(buffer.Size() > m_total_used_memory);
 		m_total_used_memory -= buffer.Size();
 		m_lru_cache.Free(buffer.lru_id);
-		m_bda_pagetable_buffer.Fill(table_offset,
-		                            size_pages * sizeof(vk::DeviceAddress), 0);
+		bool uma_pages = false;
+		if (m_unified.Active()) {
+			std::vector<vk::DeviceAddress> addresses(size_pages, 0);
+			for (uint64_t i = 0; i < size_pages; ++i) {
+				const auto page_vaddr =
+				    (buffer.CpuAddress() & ~(CACHING_PAGESIZE - 1)) + (i << CACHING_PAGEBITS);
+				if (const auto uma_entry = m_unified.PageEntry(page_vaddr); uma_entry != 0) {
+					addresses[i] = uma_entry;
+					uma_pages    = true;
+				}
+			}
+			if (uma_pages) {
+				// The imported backing keeps serving these pages after the shadow is gone.
+				WriteDataBuffer(m_bda_pagetable_buffer, table_offset, addresses.data(),
+				                addresses.size() * sizeof(vk::DeviceAddress));
+			}
+		}
+		if (!uma_pages) {
+			m_bda_pagetable_buffer.Fill(table_offset, size_pages * sizeof(vk::DeviceAddress), 0);
+		}
 		buffer.is_deleted = true;
 	}
 }
@@ -261,6 +319,11 @@ bool BufferCache::HasPendingDownload(uint64_t vaddr, uint64_t size) {
 
 template <bool async>
 bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
+	if (m_unified.Stage3() && UmaTrackerCanSkip(vaddr, size)) {
+		// Only copy-path buffers can hold GPU data that needs downloading; an arena window
+		// never does. Reaching this is a bug (counted, logged).
+		m_unified.CountLegacy(UnifiedMemory::Legacy::Other, vaddr, size);
+	}
 	CpPhases::Scope phase(CpPhases::Phase::ReadbackCpu);
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size     = 0;
@@ -379,8 +442,9 @@ void NoteUploadForWriteFaultDiag(uint64_t address, uint64_t size) {
 } // namespace
 
 BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
-                         PageManager& page_manager, TextureCache& texture_cache)
-    : m_graphics(graphics), m_scheduler(scheduler), m_fault_manager(graphics, scheduler, *this),
+                         PageManager& page_manager, TextureCache& texture_cache,
+                         UnifiedMemory& unified)
+    : m_graphics(graphics), m_scheduler(scheduler), m_unified(unified), m_fault_manager(graphics, scheduler, *this),
       m_gds_buffer(graphics, scheduler, MemoryUsage::Stream, 0, AllFlags, GdsBufferSize),
       m_bda_pagetable_buffer(graphics, scheduler, MemoryUsage::DeviceLocal, 0, AllFlags,
                              BDA_PAGETABLE_SIZE),
@@ -405,6 +469,7 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 	    m_slot_buffers.insert(m_graphics, m_scheduler, MemoryUsage::DeviceLocal, 0, AllFlags, 16);
 	EXIT_IF(null_id != NULL_BUFFER_ID);
 	SetVulkanObjectNameF(m_graphics.device, GetBuffer(null_id).Handle(), "Kyty.NullBuffer");
+	static_assert(UnifiedMemory::PageBits == CACHING_PAGEBITS);
 	if (!m_graphics.CanReportMemoryUsage()) {
 		return;
 	}
@@ -420,6 +485,11 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 }
 
 BufferCache::~BufferCache() {
+	if (m_unified.Stage3()) {
+		// With no copy-path buffer, the buffer tracker must never have created a region.
+		LOGF("UMA3: buffer tracker regions=%zu copy-path ranges=%zu (uma_tracker_regions)\n",
+		     m_memory_tracker.RegionCount(), m_uma_legacy_ranges.Count());
+	}
 	if (!m_gpu_modified_ranges.Empty()) {
 		EXIT("BufferCache: destroyed with pending GPU-modified ranges\n");
 	}
@@ -436,6 +506,12 @@ BufferCache::~BufferCache() {
 void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	if (!GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: invalid memory-invalidation range\n");
+	}
+	if (m_unified.Stage3() && UmaTrackerCanSkip(vaddr, size)) {
+		// No copy-path buffer was ever registered here: the pages carry no buffer tracker state
+		// and a write needs no readback (the bytes live in the arena).
+		m_unified.CountReadbackSkipped();
+		return;
 	}
 	// With KYTY_DCC_KNOWN the fill must still be known when the readback decides, so the CPU write forgets it afterwards.
 	const bool known = DccFillPublish::EnvMode() != DccFillPublish::Mode::Off;
@@ -465,6 +541,15 @@ FrameTiming::Counter SpecPurposeCounter(ShaderRecompiler::IR::SpecShadow::Purpos
 } // namespace
 
 bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
+	if (m_unified.Stage3() && UmaTrackerCanSkip(vaddr, size)) {
+		// The caller wants the CPU backing to be current: in UMA that is the writers' ticks, not
+		// a copy. Nothing is downloaded (false), so a read fault restores access itself.
+		m_unified.CountReadbackSkipped();
+		if (!is_write) {
+			m_unified.WaitWriters(vaddr, size);
+		}
+		return false;
+	}
 	if (!GuestGpu::IsGpuThread() && CommandScheduler::InDeferredOperation()) {
 		EXIT("unsupported buffer readback from an asynchronous GPU completion, "
 		     "addr=0x%016" PRIx64 " size=0x%016" PRIx64 "\n",
@@ -956,6 +1041,18 @@ BufferId BufferCache::FindBuffer(uint64_t vaddr, uint64_t size) {
 	return CreateBuffer(vaddr, size);
 }
 
+BufferId BufferCache::FindBindingBuffer(uint64_t vaddr, uint64_t size) {
+	if (m_unified.Stage3() && vaddr != 0 && GuestRange {vaddr, size}.Valid()) {
+		EnterUmaStage3();
+		m_unified.SyncMappings(
+		    [this](uint64_t first, uint64_t last) { PublishUmaPages(first, last); });
+		if (m_unified.Covers(vaddr, size)) {
+			return NULL_BUFFER_ID;
+		}
+	}
+	return FindBuffer(vaddr, size);
+}
+
 BufferCache::OverlapResult BufferCache::ResolveOverlaps(uint64_t vaddr, uint64_t size) {
 	static constexpr int      StreamLeapThreshold = 16;
 	static constexpr uint64_t StreamLeapSize      = CACHING_PAGESIZE * 128;
@@ -1120,6 +1217,15 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		EXIT("BufferCache: buffer request requires a recording command buffer\n");
 	}
 
+	if (m_unified.Stage3()) {
+		if (const auto window = TryObtainArenaWindow(vaddr, size, is_written, is_texel_buffer)) {
+			return *window;
+		}
+		// The copy path serves this range (counted by reason): bytes the GPU wrote in place must
+		// reach the backing before the copy is made from it.
+		m_unified.WaitWriters(vaddr, size);
+	}
+
 	if (!is_written && size <= CACHING_PAGESIZE &&
 	    !m_memory_tracker.IsRegionGpuModified(vaddr, size) &&
 	    m_memory_tracker.IsRegionCpuModified(vaddr, size)) {
@@ -1164,6 +1270,32 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	return {&buffer, buffer.Offset(vaddr)};
 }
 
+std::optional<std::pair<Buffer*, uint64_t>>
+BufferCache::TryObtainArenaWindow(uint64_t vaddr, uint64_t size, bool is_written,
+                                  bool is_texel_buffer) {
+	EnterUmaStage3();
+	// Mappings made since the last Prepare must be visible to the window lookup.
+	m_unified.SyncMappings([this](uint64_t first, uint64_t last) { PublishUmaPages(first, last); });
+	// A read of memory that holds a GPU-written image goes through the image-to-buffer copy.
+	switch (Uma3::RouteBuffer(m_unified.Covers(vaddr, size), is_texel_buffer, is_written, [&] {
+		return static_cast<bool>(m_texture_cache.FindImageFromRange(vaddr, size));
+	})) {
+		case Uma3::Route::LegacyUncovered:
+			m_unified.CountLegacy(UnifiedMemory::Legacy::Uncovered, vaddr, size);
+			return std::nullopt;
+		case Uma3::Route::LegacyImageSync:
+			m_unified.CountLegacy(UnifiedMemory::Legacy::ImageSync, vaddr, size);
+			return std::nullopt;
+		case Uma3::Route::Window: break;
+	}
+	UnifiedMemory::Window window;
+	if (!m_unified.View(vaddr, size, is_written, &window)) {
+		m_unified.CountLegacy(UnifiedMemory::Legacy::Other, vaddr, size);
+		return std::nullopt;
+	}
+	return std::pair<Buffer*, uint64_t> {window.wrapper, window.offset};
+}
+
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferForImage(uint64_t vaddr, uint64_t size) {
 	if (!GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: invalid image source\n");
@@ -1181,6 +1313,8 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferForImage(uint64_t vaddr, u
 		return ObtainBuffer(vaddr, size, false, false);
 	}
 
+	// The staging copy is made from the backing: GPU writers of the range must be done first.
+	m_unified.WaitWriters(vaddr, size);
 	return UploadMemory(m_graphics, m_scheduler, m_staging_buffer, size, 16,
 	    vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eStorageBuffer,
 	    [&](uint8_t* mapped, uint64_t) {
@@ -1205,6 +1339,16 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 		EXIT("BufferCache: invalid fill memory address\n");
 	}
 	(void)m_texture_cache.ClearMeta(vaddr);
+	if (m_unified.Stage3()) {
+		// The fill belongs to the command stream: it runs after the work recorded before it and
+		// before the work recorded after it (a CPU fill now would reorder against both).
+		m_texture_cache.InvalidateMemoryFromGPU(vaddr, size);
+		if (const auto window = TryObtainArenaWindow(vaddr, size, true, false)) {
+			window->first->Fill(window->second, size, value);
+			return;
+		}
+		m_unified.WaitWriters(vaddr, size);
+	}
 	if (!force_gpu && !IsRegionGpuModified(vaddr, size)) {
 		// Access the guest mapping so write faults invalidate cached buffers and images.
 		auto* destination = reinterpret_cast<uint32_t*>(vaddr);
@@ -1234,6 +1378,33 @@ void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t si
 		     " size=0x%016" PRIx64 " src_gds=%d dst_gds=%d\n",
 		     src_vaddr, dst_vaddr, size, static_cast<int>(src_gds), static_cast<int>(dst_gds));
 	}
+	if (m_unified.Stage3() && src_memory && dst_memory) {
+		// Both sides are windows of the arena: the copy runs in the command stream (ordered
+		// against the GPU work around it). Overlapping ranges cannot be one vkCmdCopyBuffer.
+		m_texture_cache.InvalidateMemoryFromGPU(dst_vaddr, size);
+		auto&      command = m_scheduler.Current();
+		const bool overlap = src_vaddr < dst_vaddr + size && dst_vaddr < src_vaddr + size;
+		if (overlap) {
+			// memmove semantics: wait for the writers, then move the bytes in place.
+			m_unified.WaitWriters(src_vaddr, size);
+			m_unified.WaitWriters(dst_vaddr, size);
+			std::memmove(reinterpret_cast<void*>(dst_vaddr), reinterpret_cast<const void*>(src_vaddr),
+			             size);
+			return;
+		}
+		{
+			const auto src_window = TryObtainArenaWindow(src_vaddr, size, false, true);
+			const auto dst_window = src_window ? TryObtainArenaWindow(dst_vaddr, size, true, true)
+			                                   : std::nullopt;
+			if (src_window && dst_window) {
+				dst_window->first->CopyFrom(command, *src_window->first, src_window->second,
+				                            dst_window->second, size);
+				return;
+			}
+		}
+		m_unified.WaitWriters(src_vaddr, size);
+		m_unified.WaitWriters(dst_vaddr, size);
+	}
 	if (src_memory && dst_memory && !IsRegionGpuModified(dst_vaddr, size) &&
 	    !IsRegionGpuModified(src_vaddr, size) &&
 	    !m_texture_cache.FindImageFromRange(src_vaddr, size)) {
@@ -1256,8 +1427,8 @@ void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t si
 	if (dst_memory) {
 		m_texture_cache.InvalidateMemoryFromGPU(dst_vaddr, size);
 	}
-	const auto src_id      = src_memory ? FindBuffer(src_vaddr, size) : BufferId {};
-	const auto dst_id      = dst_memory ? FindBuffer(dst_vaddr, size) : BufferId {};
+	const auto src_id      = src_memory ? FindBindingBuffer(src_vaddr, size) : BufferId {};
+	const auto dst_id      = dst_memory ? FindBindingBuffer(dst_vaddr, size) : BufferId {};
 	auto [src, src_offset] = src_memory ? ObtainBuffer(src_vaddr, size, false, true, src_id)
 	                                    : std::pair {&m_gds_buffer, src_vaddr};
 	auto [dst, dst_offset] = dst_memory ? ObtainBuffer(dst_vaddr, size, true, true, dst_id)
@@ -1280,17 +1451,23 @@ bool BufferCache::IsRegionRegistered(uint64_t vaddr, uint64_t size) {
 }
 
 bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
-	return m_memory_tracker.IsRegionGpuModified(vaddr, size);
+	// Stage 3: GPU-written bytes live in the arena, so "the CPU backing may be older" means a
+	// writer has not retired. Copy-path buffers (texel/image) keep the tracker.
+	return (m_unified.Stage3() && m_unified.HasPendingWriters(vaddr, size)) ||
+	       m_memory_tracker.IsRegionGpuModified(vaddr, size);
 }
 
 MemoryTracker::PageGeneration BufferCache::QueryPageGeneration(uint64_t vaddr, uint64_t size) {
 	auto result = m_memory_tracker.QueryPageGeneration(vaddr, size);
-	if (result.clean && m_gpu_modified_ranges.Intersects(vaddr, size)) result.clean = false;
+	if (result.clean && HasGpuDirtyBytes(vaddr, size)) result.clean = false;
 	return result;
 }
 
 bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
-	return m_gpu_modified_ranges.Intersects(vaddr, size);
+	// Stage 3: the GPU writes the arena in place, "dirty" is a writer that has not retired.
+	return UmaReadFence::GpuDirty(m_unified.Stage3(),
+	                              m_unified.Stage3() && m_unified.HasPendingWriters(vaddr, size),
+	                              m_gpu_modified_ranges.Intersects(vaddr, size));
 }
 
 bool BufferCache::TryQueryGuestFault(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight) const {
@@ -1330,6 +1507,8 @@ void BufferCache::RunGarbageCollector() {
 	const auto tick = m_gc_tick++;
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();
+		// The imported guest backing counts as device memory but is not evictable cache.
+		m_total_used_memory -= std::min(m_total_used_memory, m_unified.ImportedBytes());
 	}
 	if (m_total_used_memory < m_trigger_gc_memory) {
 		return;
@@ -1412,6 +1591,111 @@ void BufferCache::SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size) {
 			(void)SynchronizeBuffer(buffer, start, finish - start, false, false);
 		}
 	}
+}
+
+vk::DeviceAddress BufferCache::PageTableEntry(uint64_t page_vaddr) {
+	if (const auto uma_entry = m_unified.PageEntry(page_vaddr); uma_entry != 0) {
+		return uma_entry;
+	}
+	const auto id = m_page_table[page_vaddr >> CACHING_PAGEBITS];
+	if (IsBufferInvalid(id) || id == NULL_BUFFER_ID) {
+		// Nothing is mapped there: shaders that reach the page read and write the sentinel page
+		// (Apple GPUs have no guest faults). A partly mapped page stays 0 and takes the fault path.
+		return m_unified.UnmappedEntry(page_vaddr);
+	}
+	const auto& buffer = m_slot_buffers[id];
+	return buffer.BufferDeviceAddress() +
+	       (page_vaddr > buffer.CpuAddress() ? page_vaddr - buffer.CpuAddress() : 0);
+}
+
+void BufferCache::PublishUmaPages(uint64_t first, uint64_t last) {
+	if (!(GuestRange {first, last - first}.Valid())) {
+		return;
+	}
+	std::vector<vk::DeviceAddress> addresses;
+	addresses.reserve((last - first) >> CACHING_PAGEBITS);
+	uint64_t sentinel_pages = 0;
+	for (auto page = first; page < last; page += CACHING_PAGESIZE) {
+		auto entry = PageTableEntry(page);
+		if (entry != 0 && entry != m_unified.SentinelAddress()) {
+			// A chunk imported later must not hide a shadow buffer that holds GPU writes the
+			// backing has not seen yet: that page keeps pointing at the shadow.
+			const auto id = m_page_table[page >> CACHING_PAGEBITS];
+			if (!IsBufferInvalid(id) && id != NULL_BUFFER_ID &&
+			    (m_memory_tracker.IsRegionGpuModified(page, CACHING_PAGESIZE) ||
+			     m_gpu_modified_ranges.Intersects(page, CACHING_PAGESIZE))) {
+				const auto& buffer = m_slot_buffers[id];
+				entry = buffer.BufferDeviceAddress() +
+				        (page > buffer.CpuAddress() ? page - buffer.CpuAddress() : 0);
+			}
+		}
+		sentinel_pages += (entry != 0 && entry == m_unified.SentinelAddress()) ? 1 : 0;
+		addresses.push_back(entry);
+	}
+	WriteDataBuffer(m_bda_pagetable_buffer, PageIndex(first) * sizeof(vk::DeviceAddress),
+	                addresses.data(), addresses.size() * sizeof(vk::DeviceAddress));
+	m_unified.CountPublished(addresses.size(), sentinel_pages);
+}
+
+void BufferCache::FindBufferForFault(uint64_t start, uint64_t size) {
+	if (!m_unified.Active()) {
+		(void)FindBuffer(start, size);
+		return;
+	}
+	const auto end   = start + size;
+	auto       begin = start;
+	// Walk the pages of the fault range: unmapped ones get the sentinel, the rest keep the
+	// shadow-buffer path.
+	while (begin < end) {
+		const auto page_end = (begin & ~(CACHING_PAGESIZE - 1)) + CACHING_PAGESIZE;
+		const auto chunk    = std::min(end, page_end) - begin;
+		const auto page     = begin & ~(CACHING_PAGESIZE - 1);
+		if (!LibKernel::Memory::IsGuestRangeMapped(page, CACHING_PAGESIZE)) {
+			const auto n = m_unified.CountUnmappedBda();
+			if ((n & (n - 1)) == 0) {
+				LOGF("UMA: BDA access to unmapped page 0x%016" PRIx64 " (uma_unmapped_bda=%" PRIu64
+				     ")\n",
+				     page, n);
+			}
+			PublishUmaPages(page, page + CACHING_PAGESIZE);
+		} else if (m_unified.ImportForPage(page, [this](uint64_t first, uint64_t last) {
+			           PublishUmaPages(first, last);
+		           })) {
+			// Lazy chunk import: the page (and the rest of its chunk) now points into the arena.
+		} else {
+			(void)FindBuffer(begin, chunk);
+		}
+		begin += chunk;
+	}
+}
+
+void BufferCache::PrepareUma(bool writes_through_pointers) {
+	EnterUmaStage3();
+	m_unified.Prepare([this](uint64_t first, uint64_t last) { PublishUmaPages(first, last); },
+	                  writes_through_pointers);
+}
+
+bool BufferCache::TryObtainUmaView(uint64_t vaddr, uint64_t size, bool is_written,
+                                   bool is_texel_buffer, vk::Buffer* buffer, uint64_t* offset) {
+	if (!m_unified.Active()) {
+		return false;
+	}
+	UnifiedMemory::Window window;
+	// Texel buffers may need a format conversion and a different alignment: they stay copies.
+	// A range with GPU writes still held only in a shadow buffer must go through the shadow.
+	if (is_texel_buffer || m_memory_tracker.IsRegionGpuModified(vaddr, size) ||
+	    m_gpu_modified_ranges.Intersects(vaddr, size) || HasPendingDownload(vaddr, size) ||
+	    !m_unified.View(vaddr, size, is_written, &window)) {
+		m_unified.CountViewFallback();
+		return false;
+	}
+	if (is_written && IsRegionRegistered(vaddr, size)) {
+		// Shadow copies of these bytes are now stale: refresh them from the backing before use.
+		m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
+	}
+	*buffer = window.buffer;
+	*offset = window.offset;
+	return true;
 }
 
 } // namespace Libs::Graphics

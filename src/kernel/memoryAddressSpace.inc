@@ -11,6 +11,48 @@ static constexpr uint64_t HOST_USER_MIN            = 0x1000000000ull;
 #endif
 static constexpr uint64_t HOST_USER_MAX = 0xfbffffffffull;
 
+// KYTY_UMA=0|1|shadow (macOS only): every buffer is a window of the guest arena the GPU reads and
+// writes in place (no copies, the buffer tracker only watches image pages; "stage 3" of the
+// design). shadow = the same plus the data shadow-compare of CPU reads (uma_dshadow_ne).
+// "3" is accepted as an alias of "1" (the old stage number); stages 1/2 are no longer selectable.
+static bool UmaShadowRequested() {
+#if defined(__APPLE__)
+	static const bool shadow = [] {
+		const char* value = std::getenv("KYTY_UMA");
+		return value != nullptr && std::strcmp(value, "shadow") == 0;
+	}();
+	return shadow;
+#else
+	return false;
+#endif
+}
+
+static uint32_t UmaStageRequested() {
+#if defined(__APPLE__)
+	static const uint32_t stage = [] {
+		const char* value = std::getenv("KYTY_UMA");
+		if (value == nullptr) {
+			return 0u;
+		}
+		if (std::strcmp(value, "shadow") == 0 || std::strcmp(value, "1") == 0 ||
+		    std::strcmp(value, "3") == 0) {
+			return 3u;
+		}
+		return 0u;
+	}();
+	return stage;
+#else
+	return 0;
+#endif
+}
+
+static bool UmaRequested() {
+	return UmaStageRequested() != 0;
+}
+
+// A host pointer imported by the GPU must be aligned to the host page size; 16 KB covers arm64.
+static constexpr uint64_t UMA_BACKING_ALIGNMENT = 16384;
+
 static bool GuestFreeRangeContains(uint64_t base, uint64_t range_size, uint64_t candidate,
                                    uint64_t size) {
 	if (UINT64_MAX - base < range_size || candidate < base) {
@@ -114,7 +156,32 @@ public:
 			m_fd = -1;
 			return;
 		}
-		auto* backing = mmap(nullptr, m_size, PROT_READ | PROT_WRITE, MAP_SHARED, m_fd, 0);
+		void* backing = MAP_FAILED;
+		if (UmaRequested()) {
+			// Rosetta only guarantees 4 KB mmap alignment: reserve, then place the view on a 16 KB
+			// boundary and return the slack.
+			void* reserve = mmap(nullptr, m_size + UMA_BACKING_ALIGNMENT, PROT_NONE,
+			                     MAP_ANON | MAP_PRIVATE, -1, 0);
+			if (reserve != MAP_FAILED) {
+				const auto start = reinterpret_cast<uint64_t>(reserve);
+				const auto base  = (start + UMA_BACKING_ALIGNMENT - 1) & ~(UMA_BACKING_ALIGNMENT - 1);
+				backing = mmap(reinterpret_cast<void*>(base), m_size, PROT_READ | PROT_WRITE,
+				               MAP_SHARED | MAP_FIXED, m_fd, 0);
+				if (backing != MAP_FAILED) {
+					if (base > start) {
+						munmap(reserve, base - start);
+					}
+					const auto tail = start + m_size + UMA_BACKING_ALIGNMENT - (base + m_size);
+					if (tail > 0) {
+						munmap(reinterpret_cast<void*>(base + m_size), tail);
+					}
+				} else {
+					munmap(reserve, m_size + UMA_BACKING_ALIGNMENT);
+				}
+			}
+		} else {
+			backing = mmap(nullptr, m_size, PROT_READ | PROT_WRITE, MAP_SHARED, m_fd, 0);
+		}
 		if (backing == MAP_FAILED) {
 			LOGF_COLOR(Log::Color::Red, "\t direct-memory backing: writable alias failed: %d\n",
 			           errno);
@@ -184,6 +251,31 @@ public:
 	}
 
 	[[nodiscard]] uint64_t GetBackingSize() const { return m_size; }
+
+	// Arena id of this store: the direct-memory arena (a flexible arena gets its own instance).
+	[[nodiscard]] GuestArenaId GetArenaId() const { return GUEST_ARENA_DIRECT; }
+
+	// The listener runs under the store lock for every guest range that becomes (un)mapped on the
+	// arena. Existing mappings are replayed so the listener starts consistent. nullptr detaches.
+	void SetMappingListener(IGuestMappingListener* listener) {
+		std::lock_guard lock(m_mutex);
+		m_listener = listener;
+		if (m_listener != nullptr) {
+			for (const auto& [_, entry]: m_maps) {
+				m_listener->OnMapped(entry.vaddr, entry.size, GetArenaId(), entry.backing_offset);
+			}
+		}
+	}
+
+	// Splits [vaddr, vaddr + size) into the arena spans that back it. Returns false (spans hold
+	// the pieces found so far) when any byte of the range has no arena mapping.
+	bool Translate(uint64_t vaddr, uint64_t size, std::vector<GuestArenaSpan>* spans) {
+		if (size == 0 || UINT64_MAX - vaddr < size) {
+			return false;
+		}
+		std::lock_guard lock(m_mutex);
+		return TranslateUnlocked(vaddr, size, spans);
+	}
 
 	bool ZeroRange(uint64_t backing_offset, uint64_t size) {
 		if (!IsAvailable() || !RangeOk(backing_offset, size)) {
@@ -352,6 +444,9 @@ public:
 		}
 		RemoveMappingsUnlocked(vaddr, size);
 		EXIT_IF(!m_maps.emplace(vaddr, MapEntry {vaddr, size, backing_offset, mode}).second);
+		if (m_listener != nullptr) {
+			m_listener->OnMapped(vaddr, size, GetArenaId(), backing_offset);
+		}
 		SetFailure(failure_reason, FailureReason::None);
 		return true;
 #endif
@@ -517,6 +612,9 @@ public:
 		std::lock_guard lock(m_mutex);
 		MapMutation     mutation(m_map_seq);
 		RemoveMappingsUnlocked(vaddr, size);
+		if (m_listener != nullptr) {
+			m_listener->OnUnmapped(vaddr, size);
+		}
 
 		if (placeholder_preserved != nullptr) {
 			*placeholder_preserved = true;
@@ -565,6 +663,32 @@ private:
 		uint64_t            backing_offset = 0;
 		VirtualMemory::Mode mode           = VirtualMemory::Mode::NoAccess;
 	};
+
+	bool TranslateUnlocked(uint64_t vaddr, uint64_t size, std::vector<GuestArenaSpan>* spans) {
+		const auto end    = vaddr + size;
+		auto       cursor = vaddr;
+		auto       it     = m_maps.upper_bound(vaddr);
+		if (it != m_maps.begin()) {
+			--it;
+		}
+		for (; it != m_maps.end() && it->first < end && cursor < end; ++it) {
+			const auto& entry     = it->second;
+			const auto  map_end   = entry.vaddr + entry.size;
+			if (map_end <= cursor) {
+				continue;
+			}
+			if (entry.vaddr > cursor) {
+				return false; // hole
+			}
+			const auto piece = std::min(end, map_end) - cursor;
+			if (spans != nullptr) {
+				spans->push_back({cursor, piece, GetArenaId(),
+				                  entry.backing_offset + (cursor - entry.vaddr)});
+			}
+			cursor += piece;
+		}
+		return cursor == end;
+	}
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	void RemoveMappingsUnlocked(uint64_t vaddr, uint64_t size) {
@@ -728,6 +852,7 @@ private:
 	std::shared_mutex            m_mutex;
 	std::map<uint64_t, MapEntry> m_maps;
 	std::atomic<uint64_t>        m_map_seq {0};
+	IGuestMappingListener*       m_listener = nullptr;
 };
 
 class GuestAddressSpace {
@@ -788,6 +913,15 @@ public:
 	[[nodiscard]] uint64_t GetGranularity() const { return m_granularity; }
 	[[nodiscard]] uint64_t GetBackingBase() const { return m_backing->GetBackingBase(); }
 	[[nodiscard]] uint64_t GetBackingSize() const { return m_backing->GetBackingSize(); }
+	void SetMappingListener(IGuestMappingListener* listener) {
+		m_backing->SetMappingListener(listener);
+	}
+	[[nodiscard]] GuestArenaInfo GetArenaInfo() const {
+		return {m_backing->GetArenaId(), m_backing->GetBackingBase(), m_backing->GetBackingSize()};
+	}
+	bool Translate(uint64_t vaddr, uint64_t size, std::vector<GuestArenaSpan>* spans) {
+		return m_backing->Translate(vaddr, size, spans);
+	}
 
 	bool ZeroBacking(uint64_t backing_offset, uint64_t size) {
 		return m_backing->ZeroRange(backing_offset, size);
@@ -865,6 +999,20 @@ public:
 	}
 
 	bool BackingContains(uint64_t vaddr, uint64_t size) { return m_backing->Contains(vaddr, size); }
+
+	// True when any byte of the range is mapped (backing, private or committed).
+	bool IntersectsMapped(uint64_t vaddr, uint64_t size) {
+		if (size == 0 || UINT64_MAX - vaddr < size) {
+			return false;
+		}
+		std::lock_guard lock(m_mutex);
+		auto            it = FindMappedContainingUnlocked(vaddr);
+		if (it != m_mapped.end()) {
+			return true;
+		}
+		it = m_mapped.lower_bound(vaddr);
+		return it != m_mapped.end() && it->second.vaddr < vaddr + size;
+	}
 
 	bool Protect(uint64_t vaddr, uint64_t size, VirtualMemory::Mode mode) {
 		if (size == 0 || UINT64_MAX - vaddr < size) {

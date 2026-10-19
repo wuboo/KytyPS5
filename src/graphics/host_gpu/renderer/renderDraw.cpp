@@ -2006,9 +2006,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (mesh_active && draw.IsIndexed()) {
 		// Register the original guest indices for shader reads; PrepareGraphicsBindings
 		// synchronizes registered BDA ranges before any draw commands are committed.
-		(void)m_context.GetBufferCache().FindBuffer(index_source.address,
-		                                            static_cast<uint64_t>(draw.index_count) *
-		                                                index_source.guest_element_size);
+		(void)m_context.GetBufferCache().FindBindingBuffer(
+		    index_source.address,
+		    static_cast<uint64_t>(draw.index_count) * index_source.guest_element_size);
 	}
 	LogDrawPhase(draw.Name(), "PrepareBindings");
 	std::optional<CpPhases::Scope> bind_phase;

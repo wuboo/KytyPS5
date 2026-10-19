@@ -141,6 +141,10 @@ public:
 	             uint8_t wait_for_previous, uint8_t write_confirm, uint8_t block_engine);
 	void SetPredication(uint32_t condition, uint32_t op, uint32_t wait_op,
 	                    const volatile void* address, uint32_t count_in_dwords);
+	// UMA stage 3: GPU shaders write guest memory in place, so the bytes the CP is about to read
+	// (command buffers, WAIT_REG_MEM / COND_EXEC / predication operands, indirect arguments) are
+	// current only once the recorded writers have retired. No-op otherwise.
+	void WaitGuestWriters(const volatile void* address, uint64_t size);
 	[[nodiscard]] bool ShouldSkipPredicatedPackets() const { return m_predicate_skip; }
 
 	Pm4ProcessResult Process(Pm4Execution& execution, std::span<const uint32_t> commands);

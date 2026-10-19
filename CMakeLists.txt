@@ -212,6 +212,8 @@ file(GLOB kyty_emulator_src CONFIGURE_DEPENDS
 	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/command_processor/*.h"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/*.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/*.h"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/memory/*.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/memory/*.h"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/*.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/*.h"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/cache/*.cpp"
@@ -778,6 +780,107 @@ add_executable(gpu_gap_mutant_arm_first_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(gpu_gap_mutant_arm_first_tests PRIVATE ${inc_headers})
 target_compile_definitions(gpu_gap_mutant_arm_first_tests PRIVATE KYTY_GAP_MUTANT_ARM_FIRST=1)
+add_executable(uma_backing_map_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/UmaBackingMapTests.cpp"
+)
+target_include_directories(uma_backing_map_tests PRIVATE ${inc_headers})
+add_executable(uma_sync_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/UmaSyncTests.cpp"
+)
+target_include_directories(uma_sync_tests PRIVATE ${inc_headers})
+# Mutant: unmap published before the tick retires. Must be caught (WILL_FAIL).
+add_executable(uma_sync_mutant_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/UmaSyncTests.cpp"
+)
+target_include_directories(uma_sync_mutant_tests PRIVATE ${inc_headers})
+target_compile_definitions(uma_sync_mutant_tests PRIVATE KYTY_UMA_MUTANT_IMMEDIATE_UNMAP=1)
+add_executable(gpu_page_table_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/GpuPageTableTests.cpp"
+)
+target_include_directories(gpu_page_table_tests PRIVATE ${inc_headers})
+# Mutant: a 16 KB entry is returned for a page whose 4 KB pieces are not consecutive on the device
+# (the "split" page). Must be caught (WILL_FAIL).
+add_executable(gpu_page_table_mutant_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/GpuPageTableTests.cpp"
+)
+target_include_directories(gpu_page_table_mutant_tests PRIVATE ${inc_headers})
+target_compile_definitions(gpu_page_table_mutant_tests PRIVATE KYTY_UMA_MUTANT_SPLIT_AS_WHOLE=1)
+add_executable(write_fence_table_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/WriteFenceTableTests.cpp"
+)
+target_include_directories(write_fence_table_tests PRIVATE ${inc_headers})
+# Mutant: the timeline is ignored when the tick is looked up. Must be caught (WILL_FAIL).
+add_executable(write_fence_table_mutant_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/WriteFenceTableTests.cpp"
+)
+target_include_directories(write_fence_table_mutant_tests PRIVATE ${inc_headers})
+target_compile_definitions(write_fence_table_mutant_tests PRIVATE KYTY_UMA_MUTANT_FENCE_TIMELINE=1)
+add_executable(uma3_policy_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/Uma3PolicyTests.cpp"
+)
+target_include_directories(uma3_policy_tests PRIVATE ${inc_headers})
+# Mutants: the arena window is used for image memory, the descriptor offset is not aligned, the
+# buffer tracker skips copy-path ranges, every submit keeps the unknown-range writer tick alive.
+# Each must be caught (WILL_FAIL).
+set(UMA3_MUTANTS TEXEL_WINDOW WINDOW_NO_ADJUST SKIP_LEGACY GLOBAL_IGNORES_WRITES)
+foreach(mutant IN LISTS UMA3_MUTANTS)
+	add_executable(uma3_policy_mutant_${mutant}_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/Uma3PolicyTests.cpp"
+	)
+	target_include_directories(uma3_policy_mutant_${mutant}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(uma3_policy_mutant_${mutant}_tests PRIVATE
+		KYTY_UMA_MUTANT_${mutant}=1)
+endforeach()
+add_executable(uma_read_fence_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/UmaReadFenceTests.cpp"
+)
+target_include_directories(uma_read_fence_tests PRIVATE ${inc_headers})
+# Mutants: a pending writer is ignored, the data shadow checks every read, the diff skips the last byte.
+set(UMA_READ_FENCE_MUTANTS IGNORE_PENDING_WRITER CHECK_ALWAYS_BIG DIFF_IGNORES_TAIL)
+foreach(mutant IN LISTS UMA_READ_FENCE_MUTANTS)
+	add_executable(uma_read_fence_mutant_${mutant}_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/UmaReadFenceTests.cpp"
+	)
+	target_include_directories(uma_read_fence_mutant_${mutant}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(uma_read_fence_mutant_${mutant}_tests PRIVATE KYTY_UMA_MUTANT_${mutant}=1)
+endforeach()
+add_executable(uma_chunks_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/UmaChunksTests.cpp"
+)
+target_include_directories(uma_chunks_tests PRIVATE ${inc_headers})
+# Mutants: a window over a chunk boundary is served, the driver's 4 KB alignment is trusted, a
+# failed chunk import is retried on every request, neighbouring chunks do not overlap. Each must
+# be caught (WILL_FAIL).
+set(UMA_CHUNKS_MUTANTS STRADDLE_OK TRUST_REPORTED_ALIGNMENT RETRY_FAILED NO_OVERLAP)
+foreach(mutant IN LISTS UMA_CHUNKS_MUTANTS)
+	add_executable(uma_chunks_mutant_${mutant}_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/UmaChunksTests.cpp"
+	)
+	target_include_directories(uma_chunks_mutant_${mutant}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(uma_chunks_mutant_${mutant}_tests PRIVATE
+		KYTY_UMA_MUTANT_${mutant}=1)
+endforeach()
+add_executable(cp_wait_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/CpWaitTests.cpp"
+)
+target_include_directories(cp_wait_tests PRIVATE ${inc_headers})
+# Mutant: the processor waits without submitting the open buffer (hang caught by the test's own
+# watchdog). Must be caught (WILL_FAIL).
+add_executable(cp_wait_mutant_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/CpWaitTests.cpp"
+)
+target_include_directories(cp_wait_mutant_tests PRIVATE ${inc_headers})
+target_compile_definitions(cp_wait_mutant_tests PRIVATE KYTY_CPWAIT_MUTANT_NO_SUBMIT=1)
+add_executable(uma_barrier_diag_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/UmaBarrierDiagTests.cpp"
+)
+target_include_directories(uma_barrier_diag_tests PRIVATE ${inc_headers})
+add_executable(uma_barrier_diag_mutant_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/UmaBarrierDiagTests.cpp"
+)
+target_include_directories(uma_barrier_diag_mutant_tests PRIVATE ${inc_headers})
+target_compile_definitions(uma_barrier_diag_mutant_tests PRIVATE
+	KYTY_UMA_MUTANT_BARRIER_EPOCH_IGNORED=1)
 add_executable(pad_script_parser_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PadScriptParserTests.cpp"
 )
@@ -1721,6 +1824,40 @@ if(BUILD_TESTING)
 	set_tests_properties(eager_submit_mutant_eager3_no_limit eager_submit_mutant_lowwater_any_backlog PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME gpu_gap_mutant_clock_max COMMAND $<TARGET_FILE:gpu_gap_mutant_clock_max_tests>)
 	set_tests_properties(eager_submit_mutant_pass_open eager_submit_mutant_busy eager_submit_mutant_no_age eager_submit_mutant_no_closing gpu_gap_mutant_arm_first eager_submit_mutant_mid_any_cb eager_submit_mutant_mid_no_limit eager_submit_mutant_clear_reopen gpu_gap_mutant_clock_max PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME uma_backing_map COMMAND $<TARGET_FILE:uma_backing_map_tests>)
+	add_test(NAME uma_sync COMMAND $<TARGET_FILE:uma_sync_tests>)
+	add_test(NAME uma_sync_mutant COMMAND $<TARGET_FILE:uma_sync_mutant_tests>)
+	set_tests_properties(uma_sync_mutant PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME gpu_page_table COMMAND $<TARGET_FILE:gpu_page_table_tests>)
+	add_test(NAME gpu_page_table_mutant COMMAND $<TARGET_FILE:gpu_page_table_mutant_tests>)
+	set_tests_properties(gpu_page_table_mutant PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME write_fence_table COMMAND $<TARGET_FILE:write_fence_table_tests>)
+	add_test(NAME write_fence_table_mutant COMMAND $<TARGET_FILE:write_fence_table_mutant_tests>)
+	set_tests_properties(write_fence_table_mutant PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME uma_read_fence COMMAND $<TARGET_FILE:uma_read_fence_tests>)
+	foreach(mutant IN LISTS UMA_READ_FENCE_MUTANTS)
+		add_test(NAME uma_read_fence_mutant_${mutant}
+			COMMAND $<TARGET_FILE:uma_read_fence_mutant_${mutant}_tests>)
+		set_tests_properties(uma_read_fence_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME uma3_policy COMMAND $<TARGET_FILE:uma3_policy_tests>)
+	foreach(mutant IN LISTS UMA3_MUTANTS)
+		add_test(NAME uma3_policy_mutant_${mutant}
+			COMMAND $<TARGET_FILE:uma3_policy_mutant_${mutant}_tests>)
+		set_tests_properties(uma3_policy_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME uma_chunks COMMAND $<TARGET_FILE:uma_chunks_tests>)
+	foreach(mutant IN LISTS UMA_CHUNKS_MUTANTS)
+		add_test(NAME uma_chunks_mutant_${mutant}
+			COMMAND $<TARGET_FILE:uma_chunks_mutant_${mutant}_tests>)
+		set_tests_properties(uma_chunks_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME cp_wait COMMAND $<TARGET_FILE:cp_wait_tests>)
+	add_test(NAME cp_wait_mutant COMMAND $<TARGET_FILE:cp_wait_mutant_tests>)
+	set_tests_properties(cp_wait_mutant PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME uma_barrier_diag COMMAND $<TARGET_FILE:uma_barrier_diag_tests>)
+	add_test(NAME uma_barrier_diag_mutant COMMAND $<TARGET_FILE:uma_barrier_diag_mutant_tests>)
+	set_tests_properties(uma_barrier_diag_mutant PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME pad_script_parser COMMAND $<TARGET_FILE:pad_script_parser_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
@@ -2014,6 +2151,31 @@ if(BUILD_TESTING)
 		eager_submit_mutant_eager3_no_limit_tests
 		eager_submit_mutant_lowwater_any_backlog_tests
 		gpu_gap_mutant_clock_max_tests
+		uma_backing_map_tests
+		uma_sync_tests
+		uma_sync_mutant_tests
+		gpu_page_table_tests
+		gpu_page_table_mutant_tests
+		write_fence_table_tests
+		write_fence_table_mutant_tests
+		uma3_policy_tests
+		uma_read_fence_tests
+		uma_read_fence_mutant_IGNORE_PENDING_WRITER_tests
+		uma_read_fence_mutant_CHECK_ALWAYS_BIG_tests
+		uma_read_fence_mutant_DIFF_IGNORES_TAIL_tests
+		uma3_policy_mutant_TEXEL_WINDOW_tests
+		uma3_policy_mutant_WINDOW_NO_ADJUST_tests
+		uma3_policy_mutant_SKIP_LEGACY_tests
+		uma3_policy_mutant_GLOBAL_IGNORES_WRITES_tests
+		uma_chunks_tests
+		uma_chunks_mutant_STRADDLE_OK_tests
+		uma_chunks_mutant_TRUST_REPORTED_ALIGNMENT_tests
+		uma_chunks_mutant_RETRY_FAILED_tests
+		uma_chunks_mutant_NO_OVERLAP_tests
+		cp_wait_tests
+		cp_wait_mutant_tests
+		uma_barrier_diag_tests
+		uma_barrier_diag_mutant_tests
 		push_descriptor_policy_tests
 		null_descriptor_policy_tests
 		null_desc_diag_tests

@@ -25,6 +25,7 @@
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <magic_enum.hpp>
 #include <map>
 #include <memory>
@@ -889,6 +890,39 @@ bool QueryShaderGpuDirty(uint64_t vaddr, uint64_t size) {
 	       buffers.HasInflightDownloadBytes(vaddr, size);
 }
 
+bool UmaEnabled() {
+	return UmaRequested();
+}
+
+bool UmaShadow() {
+	return UmaShadowRequested();
+}
+
+uint32_t UmaStage() {
+	return UmaStageRequested();
+}
+
+GuestArenaInfo GetGuestArena(GuestArenaId id) {
+	if (g_guest_address_space == nullptr || id != GUEST_ARENA_DIRECT) {
+		return {};
+	}
+	return g_guest_address_space->GetArenaInfo();
+}
+
+bool TranslateGuestRange(uint64_t vaddr, uint64_t size, std::vector<GuestArenaSpan>* spans) {
+	return g_guest_address_space != nullptr && g_guest_address_space->Translate(vaddr, size, spans);
+}
+
+bool IsGuestRangeMapped(uint64_t vaddr, uint64_t size) {
+	return g_guest_address_space != nullptr && g_guest_address_space->IntersectsMapped(vaddr, size);
+}
+
+void SetGuestMappingListener(IGuestMappingListener* listener) {
+	if (g_guest_address_space != nullptr) {
+		g_guest_address_space->SetMappingListener(listener);
+	}
+}
+
 bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size)) {
 		if (!Graphics::GuestGpu::IsGpuThread()) {
@@ -904,8 +938,20 @@ bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 			Graphics::FrameTiming::Add(Graphics::FrameTiming::Counter::SpecBackingInflightN);
 			buffers.WaitInflightDownloads();
 		}
+		// UMA: shaders write guest memory in place, so the bytes are valid once the last
+		// submit with direct access has completed (no download copy exists to wait for).
+		auto& unified = GetGpuResources().GetUnifiedMemory();
+		if (unified.Active()) {
+			return unified.ReadForCpu(vaddr, data, size);
+		}
 	}
 	return TryReadBacking(vaddr, data, size);
+}
+
+// S447: with UMA active a GPU store leaves no dirty/in-flight trace in the buffer cache, so the page-quiet shortcuts of the
+// SRT pass and the spec page cache would read before the writer ticks retired; those reads take the full TryReadBufferBacking.
+static bool UmaDefeatsReadShortcuts() {
+	return g_gpu_resources != nullptr && GetGpuResources().GetUnifiedMemory().Active();
 }
 
 bool TryReadBufferBackingPass(uint64_t vaddr, void* data, uint64_t size, SrtReadPass* pass) {
@@ -916,6 +962,9 @@ bool TryReadBufferBackingPass(uint64_t vaddr, void* data, uint64_t size, SrtRead
 	}
 	if (!Graphics::GuestGpu::IsGpuThread()) {
 		return false;
+	}
+	if (UmaDefeatsReadShortcuts()) {
+		return TryReadBufferBacking(vaddr, data, size);
 	}
 	const uint64_t page = vaddr & PageMask;
 	if (pass->IsClean(page)) {
@@ -962,6 +1011,9 @@ bool TryReadBufferBackingFast(uint64_t vaddr, void* data, uint64_t size, bool* h
 	if (!Graphics::GuestGpu::IsGpuThread()) {
 		return false;
 	}
+	if (UmaDefeatsReadShortcuts()) {
+		return TryReadBufferBacking(vaddr, data, size);
+	}
 	auto&                               buffers = GetGpuResources().GetBufferCache();
 	SpecFastHooks<decltype(buffers)>    hooks {buffers, Graphics::CpReadBacking::EnvMode() != Graphics::CpReadBacking::Mode::Off};
 	return ReadViaPageCache(SpecPageCache::Global(), hooks, vaddr, data, size, hit);
@@ -969,7 +1021,7 @@ bool TryReadBufferBackingFast(uint64_t vaddr, void* data, uint64_t size, bool* h
 
 bool SpecPageQuietCached(uint64_t vaddr, uint64_t size) {
 	if (size == 0 || g_guest_address_space == nullptr || ((vaddr ^ (vaddr + size - 1)) & SpecPageCache::PageMask) != 0 ||
-	    !Graphics::GuestGpu::IsGpuThread()) {
+	    !Graphics::GuestGpu::IsGpuThread() || UmaDefeatsReadShortcuts()) {
 		return false;
 	}
 	return SpecPageCache::Global().Lookup(vaddr & SpecPageCache::PageMask, g_guest_address_space->MapSeq()) != nullptr;
@@ -982,12 +1034,27 @@ static void NoteGfBackingRead(uint64_t vaddr, uint64_t size, Graphics::GuestFaul
 	}
 }
 
+// UMA: GPU stores land in the arena without any page protection, so a CPU read of a guest table has
+// to wait for the writers the fences know about (and, in shadow mode, check that none is missing).
+static void UmaCpuReadFence(uint64_t vaddr, uint64_t size) {
+	if (!UmaStage3() || g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size) ||
+	    !Graphics::GuestGpu::IsGpuThread()) {
+		return;
+	}
+	auto& unified = GetGpuResources().GetUnifiedMemory();
+	if (unified.Active()) {
+		unified.WaitWriters(vaddr, size);
+		unified.ShadowCheckRead(vaddr, size);
+	}
+}
+
 void CpGuestRead(Graphics::CpReadBacking::Site site, uint64_t vaddr, void* dst, uint64_t size) {
 	using namespace Graphics::CpReadBacking;
 	using C = Graphics::FrameTiming::Counter;
 	if (size == 0) {
 		return;
 	}
+	UmaCpuReadFence(vaddr, size);
 	const auto mode = EnvMode();
 	if (mode == Mode::Off) {
 		std::memcpy(dst, reinterpret_cast<const void*>(vaddr), size);
