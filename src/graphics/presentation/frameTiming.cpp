@@ -456,6 +456,19 @@ constexpr const char* kCounterNames[] = {
     "prog_disk_reject_n",
     "prog_disk_skip_call_n",
     "prog_disk_load_ns",
+    "prewarm_queued_n",
+    "prewarm_done_n",
+    "prewarm_fail_n",
+    "prewarm_hit_n",
+    "prewarm_wait_n",
+    "prewarm_wait_ns",
+    "prewarm_cancel_n",
+    "prewarm_timeout_n",
+    "prewarm_mismatch_n",
+    "prewarm_skip_n",
+    "prewarm_manifest_n",
+    "prewarm_ne_n",
+    "prewarm_build_ns",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

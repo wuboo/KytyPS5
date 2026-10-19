@@ -2395,6 +2395,39 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 			add_dependencies(kyty_tests ${permrec_target})
 		endif()
 	endforeach()
+	# S435 (S446): KYTY_SHADER_PREWARM mailbox, manifest, shadow compare and mapped hook (src/graphics/shader/shaderPrewarm.cpp). Mutants (WILL_FAIL):
+	# DOUBLE_COMPILE, NO_WAIT_ON_BUILDING, FORGET_TAKEN, WAIT_UNBOUNDED, MANIFEST_ACCEPTS_CORRUPT, SHADOW_IGNORES_DIFF. The base also runs with the variable unset ("off").
+	foreach(mutant IN ITEMS "" DOUBLE_COMPILE NO_WAIT_ON_BUILDING FORGET_TAKEN WAIT_UNBOUNDED MANIFEST_ACCEPTS_CORRUPT SHADOW_IGNORES_DIFF)
+		if(mutant STREQUAL "")
+			set(prewarm_target shader_prewarm_tests)
+			set(prewarm_test shader_prewarm)
+		else()
+			string(TOLOWER ${mutant} mutant_lower)
+			set(prewarm_target shader_prewarm_mutant_${mutant_lower}_tests)
+			set(prewarm_test shader_prewarm_mutant_${mutant_lower})
+		endif()
+		add_executable(${prewarm_target} EXCLUDE_FROM_ALL
+			"${KYTY_TESTS_DIR}/ShaderPrewarmTests.cpp"
+			"${KYTY_SOURCE_DIR}/graphics/shader/shaderPrewarm.cpp"
+			"${KYTY_SOURCE_DIR}/graphics/shader/programDiskCache.cpp"
+		)
+		target_link_libraries(${prewarm_target} common fmt::fmt xxhash)
+		target_include_directories(${prewarm_target} PRIVATE ${inc_headers})
+		if(NOT mutant STREQUAL "")
+			target_compile_definitions(${prewarm_target} PRIVATE KYTY_PREWARM_MUTANT_${mutant}=1)
+		endif()
+		if(BUILD_TESTING)
+			add_test(NAME ${prewarm_test} COMMAND $<TARGET_FILE:${prewarm_target}>)
+			set_tests_properties(${prewarm_test} PROPERTIES TIMEOUT 60 ENVIRONMENT "KYTY_SHADER_PREWARM=1")
+			if(NOT mutant STREQUAL "")
+				set_tests_properties(${prewarm_test} PROPERTIES WILL_FAIL TRUE)
+			else()
+				add_test(NAME ${prewarm_test}_off COMMAND $<TARGET_FILE:${prewarm_target}> off)
+				set_tests_properties(${prewarm_test}_off PROPERTIES TIMEOUT 60)
+			endif()
+			add_dependencies(kyty_tests ${prewarm_target})
+		endif()
+	endforeach()
 	# S434 (S442): every known KYTY_* name is classified as codegen or not. Mutant (WILL_FAIL): UNCLASSIFIED (a known name in neither list).
 	foreach(mutant IN ITEMS "" UNCLASSIFIED)
 		if(mutant STREQUAL "")
