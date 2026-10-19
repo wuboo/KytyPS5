@@ -468,6 +468,7 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		                                          std::chrono::steady_clock::now() - wait_begin)
 		                                          .count());
 		FrameTiming::Add(FrameTiming::Counter::ReadbackWaitNs, ns);
+		FrameTiming::Add(GuestGpu::IsGpuThread() ? FrameTiming::Counter::ReadbackWaitCpNs : FrameTiming::Counter::ReadbackWaitOtherNs, ns); // S441
 		if (census) {
 			FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncDccN, site));
 			FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncDccNs, site), ns);

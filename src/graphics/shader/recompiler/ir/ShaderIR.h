@@ -682,6 +682,11 @@ struct ResourcePlan {
 	ShaderInfo                          info;
 	UniformFillPlan                     uniform_fill;
 	std::unique_ptr<Xbyak::CodeGenerator> srt_code;
+	// S441 DIAG: why srt_code was not compiled (SrtTreeReject::Reason; 0 = compiled or not tried), the opcode / detail of it and, per slot, why the
+	// per-slot JIT left the slot to the interpreter. The strings are filled only with KYTY_DIAG_JIT_TREE_REJECT=1.
+	uint8_t                               tree_reject = 0;
+	std::string                           tree_reject_detail;
+	std::vector<std::string>              srt_slot_reject;
 	// Per-slot compiled reads when srt_code is absent: entry offsets (UINT32_MAX: interpreted)
 	// and room for the addresses one slot reads.
 	std::unique_ptr<Xbyak::CodeGenerator> srt_read_code;

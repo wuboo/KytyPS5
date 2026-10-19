@@ -461,6 +461,7 @@ void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cach
 
 void GuestGpu::Enqueue(Submission submission) {
 	EXIT_IF(submission.queue_id >= QueueCount);
+	submission.enqueue_ns = FrameTiming::SteadyNowNs();
 	Common::LockGuard lock(m_queue_mutex);
 	EXIT_IF(!m_accepting);
 	m_queues[submission.queue_id].push_back(std::move(submission));
@@ -552,6 +553,7 @@ void GuestGpu::ThreadRun(void* data) {
 				gpu->m_next_queue = (static_cast<uint32_t>(selected_queue) + 1) % QueueCount;
 				gpu->m_processing = true;
 				has_submission    = true;
+				FrameTiming::NoteGuestLead(FrameTiming::ElapsedNs(submission.enqueue_ns, FrameTiming::SteadyNowNs())); // S441
 			}
 		}
 		if (should_stop) {

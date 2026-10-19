@@ -66,6 +66,7 @@ private:
 		bool                      constant_complete = false;
 		bool                      blocked           = false;
 		uint64_t                  flip_request_id   = 0;
+		int64_t                   enqueue_ns        = 0; // S441: when the guest enqueued it (guest lead = pick-up - enqueue)
 	};
 
 	void              Enqueue(Submission submission);
