@@ -393,6 +393,7 @@ void DrainSrtJitCover() {
 	using Cell = ShaderRecompiler::IR::SrtJitCover::Cell;
 	using C    = FrameTiming::Counter;
 	if (ShaderRecompiler::IR::SrtJitCover::Current() == ShaderRecompiler::IR::SrtJitCover::Mode::Off) return;
+	ShaderRecompiler::IR::SrtJitCover::LogSink() = +[](const char* text) { LOGF("%s", text); };
 	const auto cells = ShaderRecompiler::IR::SrtJitCover::Drain();
 	FrameTiming::Add(C::SrtCoverNoreadsN, cells[static_cast<size_t>(Cell::NoReads)]);
 	FrameTiming::Add(C::SrtCoverCbN, cells[static_cast<size_t>(Cell::ConstBuffer)]);

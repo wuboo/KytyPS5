@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 
@@ -59,6 +60,12 @@ inline std::array<uint64_t, kCellCount> Drain() {
 }
 
 constexpr uint32_t kMaxNeLines = 20;
+
+// Where `[srt-cover-ne]` lines go: stdout until the pipeline cache installs the emulator log (the walker is linked into test binaries without it).
+inline void (*&LogSink())(const char*) {
+	static void (*sink)(const char*) = +[](const char* text) { std::fputs(text, stdout); };
+	return sink;
+}
 
 // True for the first kMaxNeLines mismatches (the caller prints a `[srt-cover-ne]` line).
 inline bool ShouldLogNe() {
