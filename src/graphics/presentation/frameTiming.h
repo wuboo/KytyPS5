@@ -324,6 +324,12 @@ enum class Counter : uint32_t {
 	// files refused (damaged, other key, does not answer the request) / lookups skipped because the program has a call source / time of the lookups.
 	ProgDiskHitN, ProgDiskMissN, ProgDiskWriteN, ProgDiskBytes, ProgDiskWriteFailN, ProgDiskEqN, ProgDiskNeN, ProgDiskRejectN, ProgDiskSkipCallN,
 	ProgDiskLoadNs,
+	// S435 (KYTY_SHADER_PREWARM): jobs queued from the manifest / finished by the worker (with a result or a failure) / failures / results CP took
+	// finished (hit) or after waiting (wait) and the time it waited / queued jobs CP cancelled / waits that ran out / results refused (key or options
+	// differ) / programs not pre-warmable (call source, back code) / manifest entries / shadow: SPIR-V of the pre-warmed translation differs (must be 0) /
+	// worker time in the builds.
+	PrewarmQueuedN, PrewarmDoneN, PrewarmFailN, PrewarmHitN, PrewarmWaitN, PrewarmWaitNs, PrewarmCancelN, PrewarmTimeoutN, PrewarmMismatchN,
+	PrewarmSkipN, PrewarmManifestN, PrewarmNeN, PrewarmBuildNs,
 	Count,
 };
 
