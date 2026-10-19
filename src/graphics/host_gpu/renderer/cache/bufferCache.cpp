@@ -546,6 +546,7 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		// a copy. Nothing is downloaded (false), so a read fault restores access itself.
 		m_unified.CountReadbackSkipped();
 		if (!is_write) {
+			const UnifiedMemory::WaitSourceScope wait_scope(Uma3::WaitSource::ReadMemory);
 			m_unified.WaitWriters(vaddr, size);
 		}
 		return false;
@@ -1223,6 +1224,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		}
 		// The copy path serves this range (counted by reason): bytes the GPU wrote in place must
 		// reach the backing before the copy is made from it.
+		const UnifiedMemory::WaitSourceScope wait_scope(Uma3::WaitSource::Obtain);
 		m_unified.WaitWriters(vaddr, size);
 	}
 
@@ -1314,6 +1316,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferForImage(uint64_t vaddr, u
 	}
 
 	// The staging copy is made from the backing: GPU writers of the range must be done first.
+	const UnifiedMemory::WaitSourceScope wait_scope(Uma3::WaitSource::Obtain);
 	m_unified.WaitWriters(vaddr, size);
 	return UploadMemory(m_graphics, m_scheduler, m_staging_buffer, size, 16,
 	    vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eStorageBuffer,
@@ -1347,6 +1350,7 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 			window->first->Fill(window->second, size, value);
 			return;
 		}
+		const UnifiedMemory::WaitSourceScope wait_scope(Uma3::WaitSource::Dma);
 		m_unified.WaitWriters(vaddr, size);
 	}
 	if (!force_gpu && !IsRegionGpuModified(vaddr, size)) {
@@ -1386,6 +1390,7 @@ void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t si
 		const bool overlap = src_vaddr < dst_vaddr + size && dst_vaddr < src_vaddr + size;
 		if (overlap) {
 			// memmove semantics: wait for the writers, then move the bytes in place.
+			const UnifiedMemory::WaitSourceScope wait_scope(Uma3::WaitSource::Dma);
 			m_unified.WaitWriters(src_vaddr, size);
 			m_unified.WaitWriters(dst_vaddr, size);
 			std::memmove(reinterpret_cast<void*>(dst_vaddr), reinterpret_cast<const void*>(src_vaddr),
@@ -1402,6 +1407,7 @@ void BufferCache::CopyBuffer(uint64_t dst_vaddr, uint64_t src_vaddr, uint64_t si
 				return;
 			}
 		}
+		const UnifiedMemory::WaitSourceScope wait_scope(Uma3::WaitSource::Dma);
 		m_unified.WaitWriters(src_vaddr, size);
 		m_unified.WaitWriters(dst_vaddr, size);
 	}

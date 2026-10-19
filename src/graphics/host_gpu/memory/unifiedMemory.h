@@ -112,6 +112,8 @@ public:
 	// True when one contiguous run inside one non-failed chunk backs the whole range (View without
 	// side effects: nothing is imported).
 	[[nodiscard]] bool Covers(uint64_t vaddr, uint64_t size) const;
+	// True when the chunk that backs the whole range is imported into the GPU (no side effects).
+	[[nodiscard]] bool RangeImported(uint64_t vaddr, uint64_t size) const;
 	// Records a GPU writer of the range for the submit being recorded (fills, copies, labels).
 	void RecordWriter(uint64_t vaddr, uint64_t size);
 	// Records a writer that completes at a given tick (an EOP label written when `tick` retires).
@@ -147,6 +149,18 @@ public:
 
 	[[nodiscard]] static bool ShadowCompareRequested();
 
+	// Names the caller of the WaitWriters calls made in its scope (this thread), for the
+	// uma_wait_<source>_<reason> counters. Nests: the innermost scope wins.
+	class WaitSourceScope {
+	public:
+		explicit WaitSourceScope(Uma3::WaitSource source);
+		~WaitSourceScope();
+		KYTY_CLASS_NO_COPY(WaitSourceScope);
+
+	private:
+		Uma3::WaitSource m_previous;
+	};
+
 private:
 	struct VisibleRange {
 		uint64_t vaddr;
@@ -176,7 +190,11 @@ private:
 	// Rewrites the 4 KB entries of [first, last) from the current mapping mirror (GPU thread).
 	void Mirror(uint64_t first, uint64_t last);
 	// Timelines (bit mask) a reader of the range must still wait on.
-	[[nodiscard]] uint32_t PendingTimelines(uint64_t vaddr, uint64_t size, WriteFenceTable::Ticks* ticks);
+	// reason (optional) receives why a pending wait is needed; skipped_by_narrow (optional) is set
+	// when KYTY_OPT_ON=bda_wait_narrow removed the only reason to wait.
+	[[nodiscard]] uint32_t PendingTimelines(uint64_t vaddr, uint64_t size, WriteFenceTable::Ticks* ticks,
+	                                        Uma3::WaitReason* reason = nullptr,
+	                                        bool* skipped_by_narrow = nullptr);
 	[[nodiscard]] bool TimelineRetired(uint32_t timeline, uint64_t tick);
 	void               TimelineWait(uint32_t timeline, uint64_t tick);
 	void               ShadowCompare();
@@ -243,6 +261,15 @@ private:
 	std::mutex                   m_fence_mutex;
 	std::atomic<uint64_t>        m_bda_tick {0};
 	Uma3::UnknownWriterTick      m_unknown_writer; // GPU thread (Prepare)
+	// KYTY_OPT_ON=bda_wait_narrow: ranges outside every cell ever written by a window / fill /
+	// copy / label do not wait for the global pointer-writer tick.
+	Uma3::WrittenCells           m_written;
+	bool                         m_bda_narrow = false;
+	std::atomic<uint64_t>        m_narrow_skipped {0};
+	static constexpr uint32_t    WaitSources = static_cast<uint32_t>(Uma3::WaitSource::Count);
+	static constexpr uint32_t    WaitReasons = static_cast<uint32_t>(Uma3::WaitReason::Count);
+	std::array<std::atomic<uint64_t>, WaitSources * WaitReasons> m_wait_by_ns {};
+	std::array<std::atomic<uint64_t>, WaitSources * WaitReasons> m_wait_by_n {};
 
 	// counters (see Log summary)
 	std::atomic<uint64_t> m_views {0};

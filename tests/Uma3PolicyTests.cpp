@@ -6,7 +6,7 @@
 
 // Built five times: normally, and once per mutant (KYTY_UMA_MUTANT_TEXEL_WINDOW,
 // KYTY_UMA_MUTANT_WINDOW_NO_ADJUST, KYTY_UMA_MUTANT_SKIP_LEGACY,
-// KYTY_UMA_MUTANT_GLOBAL_IGNORES_WRITES). Every mutant build must FAIL (ctest WILL_FAIL).
+// KYTY_UMA_MUTANT_GLOBAL_IGNORES_WRITES, KYTY_UMA_MUTANT_NARROW_IGNORES_WRITTEN). Every mutant build must FAIL (ctest WILL_FAIL).
 
 namespace {
 
@@ -134,6 +134,49 @@ void TestPendingTimelines() {
 	      "timeline 2 writer: wait on timeline 2");
 }
 
+
+// KYTY_OPT_ON=bda_wait_narrow: ranges of cells that were never written as a window / fill / copy /
+// label ignore the global pointer-writer tick; written cells and the "all ranges" read keep it.
+void TestBdaWaitNarrow() {
+	Uma3::WrittenCells written;
+	constexpr uint64_t window = 0x40000000;           // a window written once
+	constexpr uint64_t other  = 0x80000000;           // never written
+	written.Mark(window + 0x1000, 0x2000);
+	Check(written.Any(window, 0x1000000 - 1) && !written.Any(other, 0x1000), "cell bookkeeping");
+	// Marks across a cell boundary cover both cells.
+	written.Mark(0x100000 * 5 - 8, 16);
+	Check(written.Any(0x100000 * 4, 16) && written.Any(0x100000 * 5, 16), "mark across a cell boundary");
+	const uint64_t global = 9;
+	Check(Uma3::EffectiveUnknownTick(global, false, written, other, 64) == global,
+	      "option off: the global tick always applies");
+	Check(Uma3::EffectiveUnknownTick(global, true, written, other, 64) == 0,
+	      "narrow: a range in an unwritten cell ignores the global tick");
+	Check(Uma3::EffectiveUnknownTick(global, true, written, window + 0x1800, 64) == global,
+	      "narrow: a range in a written cell keeps the global tick");
+	Check(Uma3::EffectiveUnknownTick(global, true, written, other, 0) == global,
+	      "narrow: size 0 (all ranges) keeps the global tick");
+	// End to end with PendingTimelines: the in-flight pointer writer (tick 9) stalls only written cells.
+	const auto is_retired = [](uint32_t, uint64_t tick) { return tick <= 7; };
+	Fence      fence;
+	Check(Uma3::PendingTimelines(fence.MaxTicks(other, 64),
+	                             Uma3::EffectiveUnknownTick(global, true, written, other, 64), is_retired) == 0u,
+	      "narrow: read of an unwritten range does not wait");
+	Check(Uma3::PendingTimelines(fence.MaxTicks(window + 0x1800, 64),
+	                             Uma3::EffectiveUnknownTick(global, true, written, window + 0x1800, 64),
+	                             is_retired) == 1u,
+	      "narrow: read of a written range waits for the pointer writer");
+	// A recorded writer of the range itself is never narrowed away.
+	fence.Record(other, 64, 0, 8);
+	Check(Uma3::PendingTimelines(fence.MaxTicks(other, 64),
+	                             Uma3::EffectiveUnknownTick(global, true, written, other, 64), is_retired) == 1u,
+	      "narrow: the range's own writer still waits");
+	// Wait attribution: range writer pending -> Range; only the global tick -> Global.
+	Fence global_only;
+	Check(Uma3::ClassifyWait(fence.MaxTicks(other, 64), is_retired) == Uma3::WaitReason::Range, "reason range");
+	Check(Uma3::ClassifyWait(global_only.MaxTicks(other, 64), is_retired) == Uma3::WaitReason::Global,
+	      "reason global");
+}
+
 } // namespace
 
 int main() {
@@ -142,6 +185,7 @@ int main() {
 	TestLegacyRanges();
 	TestUnknownWriterTick();
 	TestPendingTimelines();
+	TestBdaWaitNarrow();
 	std::puts("Uma3PolicyTests: ok");
 	return 0;
 }

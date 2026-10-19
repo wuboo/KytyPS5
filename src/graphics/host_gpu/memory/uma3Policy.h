@@ -3,9 +3,11 @@
 
 #include "graphics/host_gpu/memory/writeFenceTable.h"
 
+#include <atomic>
 #include <cstdint>
 #include <iterator>
 #include <map>
+#include <memory>
 
 // Decisions of UMA stage 3 (KYTY_UMA=3) that need no GPU, kept apart so CPU tests can pin them.
 namespace Libs::Graphics::Uma3 {
@@ -170,6 +172,88 @@ template <typename IsRetired>
 		}
 	}
 	return mask;
+}
+
+// Who waits (WaitWriters caller) and why the wait was needed. Reason Range: a writer recorded for
+// the range itself has not retired. Reason Global: only the conservative "unknown pointer writer"
+// tick keeps the range pending. Names feed the uma_wait_<source>_<reason>_ms counters.
+enum class WaitSource : uint32_t { Other, ReadMemory, Obtain, Dma, Cp, Cpu, Count };
+enum class WaitReason : uint32_t { Range, Global, Count };
+
+[[nodiscard]] constexpr const char* WaitSourceName(WaitSource source) {
+	switch (source) {
+		case WaitSource::ReadMemory: return "readmem";
+		case WaitSource::Obtain: return "obtain";
+		case WaitSource::Dma: return "dma";
+		case WaitSource::Cp: return "cp";
+		case WaitSource::Cpu: return "cpu";
+		default: return "other";
+	}
+}
+
+[[nodiscard]] constexpr const char* WaitReasonName(WaitReason reason) {
+	return reason == WaitReason::Range ? "range" : "global";
+}
+
+// KYTY_OPT_ON=bda_wait_narrow. Guest ranges (1 MiB cells) that were bound at least once as a window
+// to write or recorded as a GPU writer (fills, copies, labels). Heuristic: a range in a cell that
+// was never written that way is not waited for on the global pointer-writer tick alone; a shader
+// that stores through a pointer into such a cell is NOT covered (the option is off by default
+// and must be validated on the game). Marked by any writer recorder, read by any thread (relaxed).
+class WrittenCells {
+public:
+	static constexpr uint32_t CellBits    = 20;
+	static constexpr uint32_t AddressBits = 44; // guest address space bits
+
+	WrittenCells(): m_words(new std::atomic<uint64_t>[WordCount()]()) {}
+
+	void Mark(uint64_t vaddr, uint64_t size) {
+		if (size == 0) {
+			return;
+		}
+		for (uint64_t cell = Cell(vaddr); cell <= Cell(vaddr + size - 1); ++cell) {
+			m_words[cell >> 6].fetch_or(uint64_t {1} << (cell & 63), std::memory_order_relaxed);
+		}
+	}
+	// True when any cell of the range was marked (size 0 = everything: true).
+	[[nodiscard]] bool Any(uint64_t vaddr, uint64_t size) const {
+		if (size == 0) {
+			return true;
+		}
+		for (uint64_t cell = Cell(vaddr); cell <= Cell(vaddr + size - 1); ++cell) {
+			if ((m_words[cell >> 6].load(std::memory_order_relaxed) >> (cell & 63) & 1u) != 0) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+private:
+	static constexpr uint64_t WordCount() { return (uint64_t {1} << (AddressBits - CellBits)) / 64; }
+	static constexpr uint64_t Cell(uint64_t vaddr) {
+		return (vaddr >> CellBits) & ((uint64_t {1} << (AddressBits - CellBits)) - 1);
+	}
+	std::unique_ptr<std::atomic<uint64_t>[]> m_words;
+};
+
+// The pointer-writer tick a reader of [vaddr, size) must honour. size 0 = every range: always the
+// global tick. With narrow, ranges outside every written cell ignore it.
+[[nodiscard]] inline uint64_t EffectiveUnknownTick(uint64_t unknown_tick, bool narrow,
+                                                   const WrittenCells& written, uint64_t vaddr,
+                                                   uint64_t size) {
+#ifdef KYTY_UMA_MUTANT_NARROW_IGNORES_WRITTEN
+	(void)written;
+	return narrow && size != 0 ? 0 : unknown_tick; // wrong: a range written through a window is not waited for
+#else
+	return narrow && size != 0 && !written.Any(vaddr, size) ? 0 : unknown_tick;
+#endif
+}
+
+// Reason of a wait that is needed: Range when the range's own writers are pending without the
+// unknown-range tick, else Global.
+template <typename IsRetired>
+[[nodiscard]] WaitReason ClassifyWait(WriteFenceTable::Ticks range_ticks, IsRetired&& is_retired) {
+	return PendingTimelines(range_ticks, 0, is_retired) != 0 ? WaitReason::Range : WaitReason::Global;
 }
 
 } // namespace Libs::Graphics::Uma3

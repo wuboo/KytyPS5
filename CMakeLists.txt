@@ -822,7 +822,7 @@ target_include_directories(uma3_policy_tests PRIVATE ${inc_headers})
 # Mutants: the arena window is used for image memory, the descriptor offset is not aligned, the
 # buffer tracker skips copy-path ranges, every submit keeps the unknown-range writer tick alive.
 # Each must be caught (WILL_FAIL).
-set(UMA3_MUTANTS TEXEL_WINDOW WINDOW_NO_ADJUST SKIP_LEGACY GLOBAL_IGNORES_WRITES)
+set(UMA3_MUTANTS TEXEL_WINDOW WINDOW_NO_ADJUST SKIP_LEGACY GLOBAL_IGNORES_WRITES NARROW_IGNORES_WRITTEN)
 foreach(mutant IN LISTS UMA3_MUTANTS)
 	add_executable(uma3_policy_mutant_${mutant}_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/Uma3PolicyTests.cpp"
@@ -2167,6 +2167,7 @@ if(BUILD_TESTING)
 		uma3_policy_mutant_WINDOW_NO_ADJUST_tests
 		uma3_policy_mutant_SKIP_LEGACY_tests
 		uma3_policy_mutant_GLOBAL_IGNORES_WRITES_tests
+		uma3_policy_mutant_NARROW_IGNORES_WRITTEN_tests
 		uma_chunks_tests
 		uma_chunks_mutant_STRADDLE_OK_tests
 		uma_chunks_mutant_TRUST_REPORTED_ALIGNMENT_tests

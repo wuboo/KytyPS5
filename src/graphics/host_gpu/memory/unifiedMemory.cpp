@@ -27,6 +27,8 @@ namespace Libs::Graphics {
 
 namespace {
 
+thread_local Uma3::WaitSource t_wait_source = Uma3::WaitSource::Other;
+
 constexpr uint64_t MiB = 1024 * 1024;
 
 #if !defined(_WIN32)
@@ -127,6 +129,7 @@ UnifiedMemory::UnifiedMemory(GraphicContext& graphics, CommandScheduler& schedul
 		                                                     : "count only");
 	}
 	m_stage3 = LibKernel::Memory::UmaStage3();
+	m_bda_narrow = FrameTiming::OptEnabled("bda_wait_narrow");
 	if (m_stage3) {
 		LOGF("UMA: stage 3 (all buffers are arena windows; buffer tracker watches images only)\n");
 	}
@@ -224,6 +227,23 @@ void UnifiedMemory::LogProgress(const char* tag) {
 	     flips != 0 ? static_cast<double>(submits) / static_cast<double>(flips) : 0.0,
 	     static_cast<int>(m_diag_barriers), m_diag_raw_missing.load(), m_diag_waw_missing.load(),
 	     m_diag_covered.load(), m_diag_inserted.load());
+	// S81: who waits and why (count/ms per source x reason; global = only the pointer-writer tick).
+	{
+		std::string waits;
+		for (uint32_t src = 0; src < WaitSources; ++src) {
+			for (uint32_t why = 0; why < WaitReasons; ++why) {
+				char part[96];
+				const auto slot = src * WaitReasons + why;
+				std::snprintf(part, sizeof(part), " uma_wait_%s_%s_ms=%" PRIu64 "/%" PRIu64,
+				              Uma3::WaitSourceName(static_cast<Uma3::WaitSource>(src)),
+				              Uma3::WaitReasonName(static_cast<Uma3::WaitReason>(why)),
+				              m_wait_by_ns[slot].load() / 1000000, m_wait_by_n[slot].load());
+				waits += part;
+			}
+		}
+		LOGF("%s uma waits (ms/count):%s bda_narrow=%d narrow_skipped=%" PRIu64 "\n", prefix.c_str(),
+		     waits.c_str(), m_bda_narrow ? 1 : 0, m_narrow_skipped.load());
+	}
 }
 
 void UnifiedMemory::LogDeviceBudget(const char* when) {
@@ -775,6 +795,7 @@ bool UnifiedMemory::View(uint64_t vaddr, uint64_t size, bool is_written, Window*
 	}
 	if (is_written) {
 		++m_views_written;
+		m_written.Mark(vaddr, size);
 		std::lock_guard lock(m_fence_mutex);
 		m_fences.Record(vaddr, size, 0, m_scheduler.CurrentTick());
 	}
@@ -842,6 +863,17 @@ bool UnifiedMemory::Covers(uint64_t vaddr, uint64_t size) const {
 	           UmaChunks::State::Failed;
 }
 
+bool UnifiedMemory::RangeImported(uint64_t vaddr, uint64_t size) const {
+	uint64_t offset = 0;
+	if (!m_active || size == 0 || !m_sync.Map().RangeOffset(vaddr, size, &offset)) {
+		return false;
+	}
+	UmaChunks::Place place;
+	return ResolveChunk(offset, size, &place) &&
+	       static_cast<UmaChunks::State>(m_slots[place.index].state.load(std::memory_order_acquire)) ==
+	           UmaChunks::State::Imported;
+}
+
 void UnifiedMemory::RecordWriter(uint64_t vaddr, uint64_t size) {
 	if (m_active) {
 		RecordWriterAt(vaddr, size, m_scheduler.CurrentTick());
@@ -855,6 +887,7 @@ void UnifiedMemory::RecordWriterAt(uint64_t vaddr, uint64_t size, uint64_t tick)
 	if (!m_active) {
 		return;
 	}
+	m_written.Mark(vaddr, size);
 	std::lock_guard lock(m_fence_mutex);
 	m_fences.Record(vaddr, size, 0, tick);
 }
@@ -911,19 +944,28 @@ void UnifiedMemory::TimelineWait(uint32_t timeline, uint64_t tick) {
 	m_scheduler.WaitPriorityOperations(tick);
 }
 
-uint32_t UnifiedMemory::PendingTimelines(uint64_t vaddr, uint64_t size,
-                                          WriteFenceTable::Ticks* ticks_out) {
+uint32_t UnifiedMemory::PendingTimelines(uint64_t vaddr, uint64_t size, WriteFenceTable::Ticks* ticks_out,
+                                          Uma3::WaitReason* reason, bool* skipped_by_narrow) {
 	WriteFenceTable::Ticks ticks {};
 	{
 		std::lock_guard lock(m_fence_mutex);
 		m_fences.Prune([this](uint32_t timeline, uint64_t t) { return TimelineRetired(timeline, t); });
 		ticks = size == 0 ? m_fences.MaxTicks(0, UINT64_MAX - 1) : m_fences.MaxTicks(vaddr, size);
 	}
-	return Uma3::PendingTimelines(ticks, m_bda_tick.load(std::memory_order_acquire),
-	                              [this](uint32_t timeline, uint64_t tick) {
-		                              return TimelineRetired(timeline, tick);
-	                              },
-	                              ticks_out);
+	const auto retired = [this](uint32_t timeline, uint64_t tick) {
+		return TimelineRetired(timeline, tick);
+	};
+	const auto global  = m_bda_tick.load(std::memory_order_acquire);
+	const auto unknown = Uma3::EffectiveUnknownTick(global, m_bda_narrow, m_written, vaddr, size);
+	const auto mask    = Uma3::PendingTimelines(ticks, unknown, retired, ticks_out);
+	if (reason != nullptr) {
+		*reason = Uma3::ClassifyWait(ticks, retired);
+	}
+	if (skipped_by_narrow != nullptr) {
+		*skipped_by_narrow = mask == 0 && unknown != global &&
+		                     Uma3::PendingTimelines(ticks, global, retired) != 0;
+	}
+	return mask;
 }
 
 bool UnifiedMemory::HasPendingWriters(uint64_t vaddr, uint64_t size) {
@@ -939,8 +981,13 @@ void UnifiedMemory::WaitWriters(uint64_t vaddr, uint64_t size) {
 		return;
 	}
 	WriteFenceTable::Ticks ticks {};
-	const auto             pending = PendingTimelines(vaddr, size, &ticks);
+	Uma3::WaitReason       reason  = Uma3::WaitReason::Range;
+	bool                   skipped = false;
+	const auto             pending = PendingTimelines(vaddr, size, &ticks, &reason, &skipped);
 	if (pending == 0) {
+		if (skipped) {
+			m_narrow_skipped.fetch_add(1, std::memory_order_relaxed);
+		}
 		return;
 	}
 	const auto start = std::chrono::steady_clock::now();
@@ -949,12 +996,22 @@ void UnifiedMemory::WaitWriters(uint64_t vaddr, uint64_t size) {
 			TimelineWait(timeline, ticks[timeline]);
 		}
 	}
+	const auto elapsed_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+	                                                  std::chrono::steady_clock::now() - start)
+	                                                  .count());
 	m_waits.fetch_add(1, std::memory_order_relaxed);
-	m_wait_ns.fetch_add(
-	    static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
-	                              std::chrono::steady_clock::now() - start)
-	                              .count()),
-	    std::memory_order_relaxed);
+	m_wait_ns.fetch_add(elapsed_ns, std::memory_order_relaxed);
+	const auto slot = static_cast<uint32_t>(t_wait_source) * WaitReasons + static_cast<uint32_t>(reason);
+	m_wait_by_n[slot].fetch_add(1, std::memory_order_relaxed);
+	m_wait_by_ns[slot].fetch_add(elapsed_ns, std::memory_order_relaxed);
+}
+
+UnifiedMemory::WaitSourceScope::WaitSourceScope(Uma3::WaitSource source): m_previous(t_wait_source) {
+	t_wait_source = source;
+}
+
+UnifiedMemory::WaitSourceScope::~WaitSourceScope() {
+	t_wait_source = m_previous;
 }
 
 void UnifiedMemory::WaitWritersForCp(uint64_t vaddr, uint64_t size) {
@@ -962,11 +1019,17 @@ void UnifiedMemory::WaitWritersForCp(uint64_t vaddr, uint64_t size) {
 		return;
 	}
 	m_cp_waits.fetch_add(1, std::memory_order_relaxed);
+	const WaitSourceScope scope(Uma3::WaitSource::Cp);
 	WaitWriters(vaddr, size);
 }
 
 bool UnifiedMemory::ReadForCpu(uint64_t vaddr, void* data, uint64_t size) {
-	WaitWriters(vaddr, size);
+	{
+		// A caller that named itself keeps its name (ReadMemory ...); an anonymous one is the CPU read.
+		const WaitSourceScope scope(t_wait_source == Uma3::WaitSource::Other ? Uma3::WaitSource::Cpu
+		                                                                      : t_wait_source);
+		WaitWriters(vaddr, size);
+	}
 	ShadowCheckRead(vaddr, size);
 	return LibKernel::Memory::TryReadBacking(vaddr, data, size);
 }
