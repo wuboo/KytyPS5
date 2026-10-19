@@ -544,6 +544,11 @@ constexpr const char* kCounterNames[] = {
     "srt_cover_cb_n",
     "srt_cover_capture_n",
     "srt_jit_cover_ne_n",
+    "srt_batch_runs_n",
+    "srt_batch_slots_n",
+    "srt_batch_single_n",
+    "srt_batch_fail_n",
+    "srt_batch_mismatch_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

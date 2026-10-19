@@ -693,6 +693,14 @@ struct ResourcePlan {
 	std::vector<uint32_t>                 srt_read_entries;
 	std::vector<uint8_t>                  srt_read_cb; // S442: the compiled slot reads a constant buffer (KYTY_SRT_JIT_COVER)
 	mutable std::vector<uint64_t>         srt_read_addresses;
+	// S445 (KYTY_SRT_SLOT_BATCH): per control-flow block, the runs of compiled slots (consecutive entries of block.srt_reads) that one batch entry fills.
+	// `first` indexes block.srt_reads, `entry` is the code offset in srt_batch_code (UINT32_MAX: a run of one, left to the per-slot entry), `cb` counts the
+	// constant-buffer slots of the run. The runs of a block are ordered by `first`.
+	struct SrtBatchRun {
+		uint32_t first = 0, count = 0, entry = 0, cb = 0;
+	};
+	std::unique_ptr<Xbyak::CodeGenerator> srt_batch_code;
+	std::vector<std::vector<SrtBatchRun>> srt_block_runs;
 	// GPU-thread scratch for nested clean/EXEC memos, activity and material keys.
 	mutable std::deque<EvaluationContext> evaluation_contexts;
 	mutable uint32_t                       evaluation_value_count = 0;
