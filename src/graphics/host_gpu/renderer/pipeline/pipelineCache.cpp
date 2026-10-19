@@ -943,7 +943,7 @@ struct PipelineCache::ProgramCache {
 		FrameTiming::Add(FrameTiming::Counter::PrewarmManifestN, prewarm.builder.Size());
 		prewarm.writer = std::make_unique<ProgramDisk::AsyncWriter>();
 		prewarm.box    = std::make_unique<ShaderPrewarm::Mailbox<std::unique_ptr<PrewarmProgram>>>(
-            1, std::chrono::milliseconds(30000),
+            1, ShaderPrewarm::kDefaultMaxWait,
             [] {
 #if defined(__APPLE__)
                 pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
@@ -981,6 +981,7 @@ struct PipelineCache::ProgramCache {
 		FrameTiming::Add(C::PrewarmWaitNs, now.wait_ns - was.wait_ns);
 		FrameTiming::Add(C::PrewarmCancelN, now.cancelled - was.cancelled);
 		FrameTiming::Add(C::PrewarmTimeoutN, now.timeout - was.timeout);
+		FrameTiming::Add(C::PrewarmEvictN, now.evicted - was.evicted);
 		FrameTiming::Max(C::PrewarmReadyPeak, now.ready_peak);
 		prewarm.reported = now;
 	}
