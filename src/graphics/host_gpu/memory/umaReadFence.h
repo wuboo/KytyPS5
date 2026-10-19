@@ -2,7 +2,9 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_MEMORY_UMAREADFENCE_H_
 
 #include <cstddef>
+#include <cinttypes>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 
 // UMA (KYTY_UMA=1|shadow): rules for CPU reads of guest memory the GPU may write in place. Kept free of
@@ -50,6 +52,17 @@ namespace Libs::Graphics::UmaReadFence {
 		*first = i;
 	}
 	return true;
+}
+
+// The data shadow-compare counters as they appear at the end of the periodic [uma] line (S447: in the 426 port they were only in the
+// final summary). Written even when the mode is off (uma_shadow=0), so a log parser always finds the keys.
+inline int FormatShadowCounters(char* out, size_t capacity, bool shadow, uint64_t calls, uint64_t eq, uint64_t ne) {
+#ifdef KYTY_UMA_MUTANT_SHADOW_LINE_OMITS_NE
+	return std::snprintf(out, capacity, " uma_shadow=%d uma_dshadow_calls=%" PRIu64 " uma_dshadow_eq=%" PRIu64, shadow ? 1 : 0, calls, eq);
+#else
+	return std::snprintf(out, capacity, " uma_shadow=%d uma_dshadow_calls=%" PRIu64 " uma_dshadow_eq=%" PRIu64 " uma_dshadow_ne=%" PRIu64,
+	                     shadow ? 1 : 0, calls, eq, ne);
+#endif
 }
 
 } // namespace Libs::Graphics::UmaReadFence

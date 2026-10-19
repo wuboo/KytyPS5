@@ -194,6 +194,9 @@ void UnifiedMemory::LogProgress(const char* tag) {
 	// First line: the counters that were there before; second part of the same line: the
 	// S76 totals (mismatch, chunks, EOP writer, barriers) so one line is enough after a kill.
 	const std::string prefix = tag[0] != '\0' ? std::string(tag) + " " : std::string();
+	char              shadow_part[128];
+	UmaReadFence::FormatShadowCounters(shadow_part, sizeof(shadow_part), m_dshadow, m_dshadow_calls.load(), m_dshadow_eq.load(),
+	                                   m_dshadow_ne.load());
 	LOGF("[uma] %st=%" PRIu64 " stage=%d events_queued=%" PRIu64 " events=%" PRIu64
 	     " pages_written=%" PRIu64 " prepares=%" PRIu64 " since_prepare_ms=%" PRId64
 	     " pending_unmaps=%" PRIu64 " uma_bda_waits=%" PRIu64 " bda_wait_ms=%" PRIu64
@@ -208,7 +211,8 @@ void UnifiedMemory::LogProgress(const char* tag) {
 	     " wait_submits=%" PRIu64 " cp_writes_deferred=%" PRIu64 " gds_eop_sync=%" PRIu64
 	     " submits=%" PRIu64 " flips=%" PRIu64 " submits_per_flip=%.1f"
 	     " diag_barriers=%d diag_raw_missing=%" PRIu64 " diag_waw_missing=%" PRIu64
-	     " diag_covered=%" PRIu64 " diag_inserted=%" PRIu64 "\n",
+	     " diag_covered=%" PRIu64 " diag_inserted=%" PRIu64
+	     "%s\n",
 	     prefix.c_str(), now_ms, m_stage.load(), m_events_queued.load(),
 	     m_events_applied.load(), m_pages_written.load(), m_prepares.load(),
 	     m_prepares.load() == 0 ? int64_t {-1} : static_cast<int64_t>(now_ms - last),
@@ -226,7 +230,7 @@ void UnifiedMemory::LogProgress(const char* tag) {
 	     uint64_t {0}, submits, flips,
 	     flips != 0 ? static_cast<double>(submits) / static_cast<double>(flips) : 0.0,
 	     static_cast<int>(m_diag_barriers), m_diag_raw_missing.load(), m_diag_waw_missing.load(),
-	     m_diag_covered.load(), m_diag_inserted.load());
+	     m_diag_covered.load(), m_diag_inserted.load(), shadow_part);
 	// S81: who waits and why (count/ms per source x reason; global = only the pointer-writer tick).
 	{
 		std::string waits;

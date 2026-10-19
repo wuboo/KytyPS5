@@ -3,9 +3,10 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 // Built normally and once per mutant (KYTY_UMA_MUTANT_IGNORE_PENDING_WRITER, KYTY_UMA_MUTANT_CHECK_ALWAYS_BIG,
-// KYTY_UMA_MUTANT_DIFF_IGNORES_TAIL). Every mutant build must FAIL (ctest WILL_FAIL).
+// KYTY_UMA_MUTANT_DIFF_IGNORES_TAIL, KYTY_UMA_MUTANT_SHADOW_LINE_OMITS_NE). Every mutant build must FAIL (ctest WILL_FAIL).
 
 namespace {
 
@@ -46,9 +47,21 @@ void TestDiffers() {
 	Check(Fence::Differs(a, b, 8, &first) && first == 2, "the first differing offset is reported");
 }
 
+void TestShadowCounters() {
+	char out[128];
+	Fence::FormatShadowCounters(out, sizeof(out), true, 10, 9, 1);
+	Check(std::strstr(out, "uma_shadow=1") != nullptr && std::strstr(out, "uma_dshadow_calls=10") != nullptr &&
+	          std::strstr(out, "uma_dshadow_eq=9") != nullptr && std::strstr(out, "uma_dshadow_ne=1") != nullptr,
+	      "the periodic [uma] line carries calls, eq and ne of the data shadow-compare");
+	Fence::FormatShadowCounters(out, sizeof(out), false, 0, 0, 0);
+	Check(std::strstr(out, "uma_shadow=0") != nullptr && std::strstr(out, "uma_dshadow_ne=0") != nullptr,
+	      "the keys are present with the mode off");
+}
+
 } // namespace
 
 int main() {
+	TestShadowCounters();
 	TestGpuDirty();
 	TestShouldCheck();
 	TestDiffers();
