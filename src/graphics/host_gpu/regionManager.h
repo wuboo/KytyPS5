@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "graphics/host_gpu/hotPages.h"
 #include "graphics/host_gpu/pageManager.h"
+#include "graphics/host_gpu/protectRing.h"
 #include "graphics/host_gpu/regionDefinitions.h"
 
 #include <algorithm>
@@ -231,6 +232,7 @@ public:
 		if (!HasHot()) {
 			return;
 		}
+		const ProtectRing::TagScope tag("buf-release-hot");
 		const auto [start, end] = GetPageRange(vaddr, size);
 		auto&      hs           = *m_hot_state;
 		bool       any          = false;
@@ -310,6 +312,7 @@ public:
 	// ForEachModifiedRange<Cpu, true> that knows hot pages. keep_hot: the caller will not hand the pages to the GPU for writing.
 	template <typename Func>
 	void ConsumeCpuDirty(uint64_t vaddr, uint64_t size, bool keep_hot, Func&& func) {
+		const ProtectRing::TagScope tag(keep_hot ? "buf-consume" : "buf-consume-gpu-write");
 		if (!HasHot()) {
 			ForEachModifiedRange<DirtySource::Cpu, true>(vaddr, size, func);
 			return;
@@ -494,6 +497,15 @@ private:
 
 	// The second write fault of `page` in guest flip `epoch` (S443): keep the page unprotected until the flip ends (On) / remember it as a candidate (shadow).
 	void NoteFlipFault(HotState& hs, size_t page, uint32_t epoch, HotPages::Mode mode) {
+#if !defined(KYTY_MEMTRACKER_MUTANT_STICKY_REFAULT_BLIND)
+		if (hs.sticky.Get(page)) {
+			// S444: a write fault on a page the tracker keeps unprotected: somebody put the host protection back.
+			FlipUnprotect::GetStats().sticky_refault.fetch_add(1, std::memory_order_relaxed);
+			if (const auto observer = FlipUnprotect::StickyRefaultObserver().load(std::memory_order_relaxed)) {
+				observer(m_cpu_addr + page * TRACKER_PAGE_SIZE, epoch, hs.sticky_epoch[page]);
+			}
+		}
+#endif
 		if (!hs.fault_seen.Get(page) || hs.fault_epoch[page] != epoch) {
 			hs.fault_seen.Set(page);
 			hs.fault_epoch[page] = epoch;
@@ -554,6 +566,7 @@ private:
 
 	template <bool track, bool is_read>
 	void UpdateProtection() {
+		const ProtectRing::DefaultTagScope tag(is_read ? (track ? "buf-gpu-own" : "buf-gpu-release") : (track ? "buf-protect" : "buf-unprotect"));
 		const auto protection = is_read ? ~m_gpu_dirty : m_cpu_dirty;
 		auto&      previous   = is_read ? m_readable : m_writable;
 		auto       mask       = protection ^ previous;

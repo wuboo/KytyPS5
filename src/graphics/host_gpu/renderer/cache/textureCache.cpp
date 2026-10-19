@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 
+#include "graphics/host_gpu/protectRing.h"
 #include "common/memEvents.h"
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -339,6 +340,7 @@ void TextureCache::MarkAsMaybeDirty(ImageId id, Image& image) {
 }
 
 void TextureCache::TrackImage(ImageId id) {
+	const ProtectRing::TagScope protect_tag("img-track");
 	auto& image = m_slot_images[id];
 	if (!image.registered) {
 		return;
@@ -363,6 +365,7 @@ void TextureCache::TrackImage(ImageId id) {
 }
 
 void TextureCache::TrackImageHead(ImageId id) {
+	const ProtectRing::TagScope protect_tag("img-track-head");
 	auto& image = m_slot_images[id];
 	if (!image.registered) {
 		return;
@@ -380,6 +383,7 @@ void TextureCache::TrackImageHead(ImageId id) {
 }
 
 void TextureCache::TrackImageTail(ImageId id) {
+	const ProtectRing::TagScope protect_tag("img-track-tail");
 	auto& image = m_slot_images[id];
 	if (!image.registered) {
 		return;
@@ -398,6 +402,7 @@ void TextureCache::TrackImageTail(ImageId id) {
 }
 
 void TextureCache::UntrackImage(ImageId id) {
+	const ProtectRing::TagScope protect_tag("img-untrack");
 	auto& image = m_slot_images[id];
 	if (!image.IsTracked()) {
 		return;
@@ -412,6 +417,7 @@ void TextureCache::UntrackImage(ImageId id) {
 }
 
 void TextureCache::UntrackImageHead(ImageId id) {
+	const ProtectRing::TagScope protect_tag("img-untrack-head");
 	auto&      image = m_slot_images[id];
 	const auto begin = image.info.data.address;
 	if (!image.IsTracked() || begin < image.track_addr) {
@@ -429,6 +435,7 @@ void TextureCache::UntrackImageHead(ImageId id) {
 }
 
 void TextureCache::UntrackImageTail(ImageId id) {
+	const ProtectRing::TagScope protect_tag("img-untrack-tail");
 	auto&      image = m_slot_images[id];
 	const auto end   = image.info.data.End();
 	if (!image.IsTracked() || image.track_addr_end < end) {

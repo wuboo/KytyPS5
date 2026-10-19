@@ -779,7 +779,7 @@ add_executable(memory_tracker_tests EXCLUDE_FROM_ALL
 target_link_libraries(memory_tracker_tests fmt::fmt common)
 target_include_directories(memory_tracker_tests PRIVATE ${inc_headers})
 # S406: the page-stamp mutants (a CPU / GPU modification takes no stamp) must fail TestPageGeneration. S440: HOT_SKIPS_HASH (a changed hot page is not noticed) / HOT_NEVER_REPROTECT must fail TestHotPages.
-foreach(mutant IN ITEMS NO_BUMP_CPU NO_BUMP_GPU HOT_SKIPS_HASH HOT_NEVER_REPROTECT FLIP_NEVER_DEMOTE FLIP_SKIPS_UPLOAD FLIP_SHADOW_BLIND)
+foreach(mutant IN ITEMS NO_BUMP_CPU NO_BUMP_GPU HOT_SKIPS_HASH HOT_NEVER_REPROTECT FLIP_NEVER_DEMOTE FLIP_SKIPS_UPLOAD FLIP_SHADOW_BLIND STICKY_REFAULT_BLIND RING_NO_TAG RING_NO_MATCH)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(memory_tracker_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL
 		"${KYTY_TESTS_DIR}/MemoryTrackerTests.cpp"
@@ -1614,7 +1614,7 @@ if(BUILD_TESTING)
 		set_tests_properties(image_page_summary_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
 	add_test(NAME memory_tracker COMMAND $<TARGET_FILE:memory_tracker_tests>)
-	foreach(mutant IN ITEMS no_bump_cpu no_bump_gpu hot_skips_hash hot_never_reprotect flip_never_demote flip_skips_upload flip_shadow_blind)
+	foreach(mutant IN ITEMS no_bump_cpu no_bump_gpu hot_skips_hash hot_never_reprotect flip_never_demote flip_skips_upload flip_shadow_blind sticky_refault_blind ring_no_tag ring_no_match)
 		add_test(NAME memory_tracker_mutant_${mutant} COMMAND $<TARGET_FILE:memory_tracker_mutant_${mutant}_tests>)
 		set_tests_properties(memory_tracker_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
@@ -1893,6 +1893,9 @@ if(BUILD_TESTING)
 		memory_tracker_mutant_flip_never_demote_tests
 		memory_tracker_mutant_flip_skips_upload_tests
 		memory_tracker_mutant_flip_shadow_blind_tests
+		memory_tracker_mutant_sticky_refault_blind_tests
+		memory_tracker_mutant_ring_no_tag_tests
+		memory_tracker_mutant_ring_no_match_tests
 		image_page_summary_tests
 		image_page_summary_mutant_never_covers_tests
 		image_page_summary_mutant_no_add_tests

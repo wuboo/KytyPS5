@@ -1,5 +1,6 @@
 #include "common/hostException.h"
 #include "common/virtualMemory.h"
+#include "graphics/host_gpu/protectRing.h"
 #include "graphics/host_gpu/hotPages.h"
 #include "graphics/host_gpu/memoryTracker.h"
 #include "graphics/host_gpu/rangeSet.h"
@@ -55,7 +56,8 @@ void Check(bool value, const char *text) {
     std::fprintf(stderr, "MemoryTrackerTests: failed: %s\n", text);
 #if defined(KYTY_MEMTRACKER_MUTANT_NO_BUMP_CPU) || defined(KYTY_MEMTRACKER_MUTANT_NO_BUMP_GPU) || \
     defined(KYTY_MEMTRACKER_MUTANT_HOT_SKIPS_HASH) || defined(KYTY_MEMTRACKER_MUTANT_HOT_NEVER_REPROTECT) || \
-    defined(KYTY_MEMTRACKER_MUTANT_FLIP_NEVER_DEMOTE) || defined(KYTY_MEMTRACKER_MUTANT_FLIP_SKIPS_UPLOAD) || defined(KYTY_MEMTRACKER_MUTANT_FLIP_SHADOW_BLIND)
+    defined(KYTY_MEMTRACKER_MUTANT_FLIP_NEVER_DEMOTE) || defined(KYTY_MEMTRACKER_MUTANT_FLIP_SKIPS_UPLOAD) || defined(KYTY_MEMTRACKER_MUTANT_FLIP_SHADOW_BLIND) || \
+    defined(KYTY_MEMTRACKER_MUTANT_STICKY_REFAULT_BLIND) || defined(KYTY_MEMTRACKER_MUTANT_RING_NO_TAG) || defined(KYTY_MEMTRACKER_MUTANT_RING_NO_MATCH)
     std::_Exit(1); // a mutant must fail with an exit code (an abort is not inverted by WILL_FAIL)
 #else
     std::abort();
@@ -1607,6 +1609,92 @@ void TestFlipUnprotect() {
   Release(memory);
 }
 
+// S444: a page kept unprotected for its flip stays writable through the uploads of that flip (no protection change is recorded for it after the promotion);
+// a protection put back by another watcher (an image) is the cause of a refault and the ring names it.
+uint64_t g_sticky_n = 0;
+uint64_t g_sticky_page = 0;
+uint32_t g_sticky_flip = 0;
+size_t g_sticky_why_n = 0;
+const char *g_sticky_why_tag = nullptr;
+
+void OnStickyRefault(uint64_t page, uint32_t flip, uint32_t sticky_flip) {
+  using namespace Libs::Graphics::ProtectRing;
+  g_sticky_n++;
+  g_sticky_page = page;
+  g_sticky_flip = sticky_flip;
+  (void)flip;
+  Entry why[kMaxWhy];
+  g_sticky_why_n = Find(page, why, kMaxWhy);
+  g_sticky_why_tag = g_sticky_why_n != 0 ? why[0].tag : nullptr;
+}
+
+void TestStickyRefault() {
+  using namespace Libs::Graphics::ProtectRing;
+  using Libs::Graphics::HotPages::Mode;
+  Libs::Graphics::HotPages::EpochSource().store(&HotEpoch);
+  Libs::Graphics::HotPages::HasherSource().store(&HotHash);
+  Libs::Graphics::FlipUnprotect::ModeOverride().store(static_cast<int>(Mode::On));
+  Libs::Graphics::FlipUnprotect::StickyRefaultObserver().store(&OnStickyRefault);
+  EnabledFlag().store(true);
+
+  TrackerHarness harness;
+  auto &tracker = harness.tracker;
+  const auto page_size = harness.page_manager.GetPageSize();
+  auto *memory = Allocate(harness.page_manager, 4);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+  const auto page = address + page_size;
+  g_hot_epoch = 300;
+  Check(HotUpload(tracker, address, page_size * 4) == 1, "first upload did not report the new region");
+
+  // Ring: tag of the caller, newest first, only entries that cover the page.
+  tracker.UntrackMemory(address + 3 * page_size, page_size); // no watcher left on page 3: the next watcher changes the host protection
+  {
+    const TagScope tag("test-tag");
+    harness.page_manager.UpdatePageWatchers<true>(address + 3 * page_size, page_size);
+  }
+  Entry found[kMaxWhy];
+  Check(Find(address + 3 * page_size, found, kMaxWhy) >= 1 && found[0].tag != nullptr && std::strcmp(found[0].tag, "test-tag") == 0,
+        "ring entry lost the tag of its caller");
+  Check(found[0].flip == 300 && found[0].size == page_size, "ring entry lost flip or size");
+  harness.page_manager.UpdatePageWatchers<false>(address + 3 * page_size, page_size);
+  Check(Find(address + 3 * page_size, found, 1) == 1 && found[0].mode == static_cast<int>(Common::VirtualMemory::Mode::ReadWrite),
+        "newest ring entry is not the last change");
+  Check(Find(address - page_size, found, kMaxWhy) == 0, "ring matched a page outside every range");
+
+  // fault -> sticky -> upload in the same flip -> write: nothing restores the protection.
+  HotFault(tracker, page, 1);
+  (void)HotUpload(tracker, page, 1);
+  HotFault(tracker, page, 1);
+  Check(IsWritable(memory + page_size) && g_sticky_n == 0, "second fault of a flip did not leave the page writable");
+  const auto cursor = Cursor().load();
+  Check(HotUpload(tracker, page, 1) == 1, "kept page was not uploaded");
+  memory[page_size] = 7;
+  Check(HotUpload(tracker, page, 1) == 1 && IsWritable(memory + page_size), "kept page was protected by a later upload");
+  for (uint64_t seq = cursor + 1; seq <= Cursor().load(); ++seq) {
+    const auto &entry = Slots()[seq % kRingSize];
+    Check(!(entry.seq == seq && page >= entry.addr && page - entry.addr < entry.size), "a protection change covered the kept page after its promotion");
+  }
+
+  // An image watcher re-protects the kept page (TrackImage after an upload of the image): the next write faults and the tracker names the caller.
+  {
+    const TagScope tag("img-track");
+    harness.page_manager.UpdatePageWatchers<true>(page, page_size);
+  }
+  Check(!IsWritable(memory + page_size), "image watcher did not protect the page");
+  HotFault(tracker, page, 1);
+  Check(g_sticky_n == 1 && g_sticky_page == page && g_sticky_flip == 300, "refault of a kept page was not reported");
+  Check(g_sticky_why_n >= 1 && g_sticky_why_tag != nullptr && std::strcmp(g_sticky_why_tag, "img-track") == 0, "refault did not name the caller that put the protection back");
+  const auto text = FormatRefault(page, 300, 300, nullptr, 0);
+  Check(text.find("host_page16k=") != std::string::npos && text.find("none-in-ring") != std::string::npos, "refault line malformed");
+
+  harness.page_manager.UpdatePageWatchers<false>(page, page_size);
+  EnabledFlag().store(false);
+  Libs::Graphics::FlipUnprotect::StickyRefaultObserver().store(nullptr);
+  Libs::Graphics::FlipUnprotect::ModeOverride().store(-1);
+  tracker.UntrackMemory(address, page_size * 4);
+  Release(memory);
+}
+
 int main(int argc, char **argv) {
   if (argc == 3 && std::strcmp(argv[1], "--death") == 0) {
     RunDeathCase(argv[2]);
@@ -1637,6 +1725,7 @@ int main(int argc, char **argv) {
   TestFullRegionGpuUnmarkBatching();
   TestHotPages();
   TestFlipUnprotect();
+  TestStickyRefault();
   TestFatalPaths();
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
   TestFaultOnProtectedStack();

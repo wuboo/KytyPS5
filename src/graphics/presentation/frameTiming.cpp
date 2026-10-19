@@ -526,6 +526,7 @@ constexpr const char* kCounterNames[] = {
     "wf_fast_n",
     "wf_slow_n",
     "wf_fast_ne_n",
+    "wf_flip_sticky_refault_n",
     "prewarm_deferred_n",
     "prewarm_ready_bytes",
     "prewarm_ready_bytes_peak",
@@ -677,6 +678,7 @@ static void PublishHotPages() {
 	Set(Counter::WfFastN, fast.fast.load(std::memory_order_relaxed));
 	Set(Counter::WfSlowN, fast.slow.load(std::memory_order_relaxed));
 	Set(Counter::WfFastNeN, fast.ne.load(std::memory_order_relaxed));
+	Set(Counter::WfFlipStickyRefaultN, flip.sticky_refault.load(std::memory_order_relaxed));
 }
 
 // ---- S441: CP frame interval, guest lead, thread CPU ---------------------------------------------------------------------------------------------

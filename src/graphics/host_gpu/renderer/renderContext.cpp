@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/wfDiag.h"
+#include "graphics/host_gpu/protectRing.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/gfDiag.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
@@ -90,6 +91,16 @@ const char* WfThreadName() {
 	}
 	return name;
 }
+
+// S444 (KYTY_DIAG_WRITE_FAULT): a write fault on a page kept unprotected for its flip: print who put the host protection back (ring of protection changes).
+void StickyRefaultLine(uint64_t page, uint32_t flip, uint32_t sticky_flip) {
+	if (ProtectRing::LinesPrinted().fetch_add(1, std::memory_order_relaxed) >= ProtectRing::kMaxLines) {
+		return;
+	}
+	ProtectRing::Entry why[ProtectRing::kMaxWhy];
+	const auto         n = ProtectRing::Find(page, why, ProtectRing::kMaxWhy);
+	LOGF("%s\n", ProtectRing::FormatRefault(page, flip, sticky_flip, why, n).c_str());
+}
 } // namespace
 
 bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) noexcept {
@@ -105,6 +116,14 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		                               : FrameTiming::Counter::WriteFaults);
 		// S440 (KYTY_DIAG_WRITE_FAULT): owner of the page before the invalidation untracks it, then the handler's time.
 		const bool wf_diag  = WriteFault::Enabled();
+			static const bool ring_on = [wf_diag] {
+				if (wf_diag) {
+					ProtectRing::EnabledFlag().store(true, std::memory_order_relaxed);
+					FlipUnprotect::StickyRefaultObserver().store(&StickyRefaultLine, std::memory_order_relaxed);
+				}
+				return wf_diag;
+			}();
+			(void)ring_on;
 		const auto wf_begin = wf_diag ? FrameTiming::SteadyNowNs() : int64_t {0};
 		if (wf_diag) {
 			const auto page      = fault_vaddr & ~(m_page_manager.GetPageSize() - 1);
