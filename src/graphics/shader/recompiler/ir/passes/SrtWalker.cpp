@@ -1,5 +1,6 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
+#include "graphics/shader/recompiler/ir/passes/srtJitCover.h"
 #include "graphics/shader/recompiler/ir/passes/srtTreeReject.h"
 #include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
 #include "graphics/presentation/cpPcSampler.h"
@@ -8,6 +9,7 @@
 #include "graphics/shader/nullDescDiag.h"
 #include "graphics/shader/recompiler/srtReader.h"
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
 #include <xbyak/xbyak.h>
@@ -1401,7 +1403,39 @@ static void NoteTreeRejectFor(uint64_t plan, SrtTreeReject::Reason reason, const
 	if (SrtTreeReject::Active().load(std::memory_order_relaxed)) SrtTreeReject::Global().Note(plan, reason, detail);
 }
 
+// S442: a plan that reads nothing from guest memory and has no block conditions. Its walk evaluates no value at all, so the flat buffer is empty and
+// no descriptor source is switched off, whatever the user data and the guest memory hold.
+static bool IsNoReadsPlan(const ResourcePlan& program) {
+	return program.srt_plan_complete && program.srt_reads.empty() && program.control_flow.empty() &&
+	       !program.capture_specialization_reads;
+}
+
 bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
+	const auto mode = SrtJitCover::Current();
+	if (mode == SrtJitCover::Mode::Off || !IsNoReadsPlan(m_program)) return RefreshFlatBufferWalk(flat);
+	std::vector<uint32_t> planned;
+#ifdef KYTY_SRTCOVER_MUTANT_NOREADS_IGNORES_USERDATA
+	if (!m_runtime.user_data.empty()) planned.push_back(m_runtime.user_data[0]);
+#endif
+	if (mode == SrtJitCover::Mode::On) {
+		SrtJitCover::Note(SrtJitCover::Cell::NoReads);
+		flat = std::move(planned);
+		m_program.active_sources.clear();
+		return true;
+	}
+	// shadow: the walk is the result; the plan's answer must equal it bit for bit.
+	const bool walked = RefreshFlatBufferWalk(flat);
+	SrtJitCover::Note(SrtJitCover::Cell::NoReads);
+	if (!walked || flat != planned || !m_program.active_sources.empty()) {
+		SrtJitCover::Note(SrtJitCover::Cell::Ne);
+		if (SrtJitCover::ShouldLogNe())
+			LOGF("[srt-cover-ne] noreads plan=0x%016llx walked=%d flat=%zu planned=%zu\n", static_cast<unsigned long long>(m_program.shader_hash),
+			     walked ? 1 : 0, flat.size(), planned.size());
+	}
+	return walked;
+}
+
+bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	const auto NoteTreeReject = [&](SrtTreeReject::Reason reason, const std::string& detail) { NoteTreeRejectFor(m_program.shader_hash, reason, detail); };
 	if (!m_program.srt_plan_complete) return false;
 	// nojit keeps the interpreted memcpy walk so a bad compiled walker can be separated from the read itself.

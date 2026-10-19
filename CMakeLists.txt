@@ -613,6 +613,25 @@ target_link_libraries(srt_reader_mutant_no_record_tests fmt::fmt xbyak::xbyak co
 target_include_directories(srt_reader_mutant_no_record_tests PRIVATE ${inc_headers})
 target_compile_definitions(srt_reader_mutant_no_record_tests PRIVATE KYTY_TREEREJECT_MUTANT_NO_RECORD=1)
 
+# S442: KYTY_SRT_JIT_COVER (srtJitCover.h). Mutants: NOREADS_IGNORES_USERDATA, CB_WRONG_OFFSET.
+set(SRT_JIT_COVER_TEST_SOURCES
+	"${KYTY_TESTS_DIR}/SrtJitCoverTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
+)
+add_executable(srt_jit_cover_tests EXCLUDE_FROM_ALL ${SRT_JIT_COVER_TEST_SOURCES})
+target_link_libraries(srt_jit_cover_tests fmt::fmt xbyak::xbyak common)
+target_include_directories(srt_jit_cover_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS noreads_ignores_userdata)
+	string(TOUPPER ${mutant} mutant_upper)
+	add_executable(srt_jit_cover_mutant_${mutant}_tests EXCLUDE_FROM_ALL ${SRT_JIT_COVER_TEST_SOURCES})
+	target_link_libraries(srt_jit_cover_mutant_${mutant}_tests fmt::fmt xbyak::xbyak common)
+	target_include_directories(srt_jit_cover_mutant_${mutant}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(srt_jit_cover_mutant_${mutant}_tests PRIVATE KYTY_SRTCOVER_MUTANT_${mutant_upper}=1)
+endforeach()
+
 add_executable(guest_driver_memory_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GuestDriverMemoryTests.cpp"
 )
@@ -1681,6 +1700,11 @@ if(BUILD_TESTING)
 	add_test(NAME srt_tree_reject COMMAND $<TARGET_FILE:srt_tree_reject_tests>)
 	add_test(NAME srt_tree_reject_mutant_all_one_row COMMAND $<TARGET_FILE:srt_tree_reject_mutant_all_one_row_tests>)
 	set_tests_properties(srt_tree_reject_mutant_all_one_row PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME srt_jit_cover COMMAND $<TARGET_FILE:srt_jit_cover_tests>)
+	foreach(mutant IN ITEMS noreads_ignores_userdata)
+		add_test(NAME srt_jit_cover_mutant_${mutant} COMMAND $<TARGET_FILE:srt_jit_cover_mutant_${mutant}_tests>)
+		set_tests_properties(srt_jit_cover_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME srt_reader_mutant_no_record COMMAND $<TARGET_FILE:srt_reader_mutant_no_record_tests>)
 	set_tests_properties(srt_reader_mutant_no_record PROPERTIES ENVIRONMENT "KYTY_DIAG_NULLDESC=1" WILL_FAIL TRUE)
 	add_test(NAME gpu_done COMMAND $<TARGET_FILE:gpu_done_tests>)
@@ -1902,6 +1926,8 @@ if(BUILD_TESTING)
 		srt_reader_mutant_no_record_tests
 		srt_tree_reject_tests
 		srt_tree_reject_mutant_all_one_row_tests
+		srt_jit_cover_tests
+		srt_jit_cover_mutant_noreads_ignores_userdata_tests
 		guest_driver_memory_tests
 		pad_script_parser_tests
 		shader_vertex_metadata_tests

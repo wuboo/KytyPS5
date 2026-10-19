@@ -526,6 +526,10 @@ constexpr const char* kCounterNames[] = {
     "thread_cpu_cp_ns",
     "thread_cpu_other_ns",
     "thread_cpu_n",
+    "srt_cover_noreads_n",
+    "srt_cover_cb_n",
+    "srt_cover_capture_n",
+    "srt_jit_cover_ne_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

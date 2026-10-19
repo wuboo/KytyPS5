@@ -22,6 +22,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/cpSampler.h"
+#include "graphics/shader/recompiler/ir/passes/srtJitCover.h"
 #include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
 #include "kernel/specPageCache.h"
 #include "graphics/presentation/frameTiming.h"
@@ -387,6 +388,18 @@ bool SpecDiagOn() {
 	return on;
 }
 
+// S442: KYTY_SRT_JIT_COVER cells (ungated: the cells only move while the mode is not 0).
+void DrainSrtJitCover() {
+	using Cell = ShaderRecompiler::IR::SrtJitCover::Cell;
+	using C    = FrameTiming::Counter;
+	if (ShaderRecompiler::IR::SrtJitCover::Current() == ShaderRecompiler::IR::SrtJitCover::Mode::Off) return;
+	const auto cells = ShaderRecompiler::IR::SrtJitCover::Drain();
+	FrameTiming::Add(C::SrtCoverNoreadsN, cells[static_cast<size_t>(Cell::NoReads)]);
+	FrameTiming::Add(C::SrtCoverCbN, cells[static_cast<size_t>(Cell::ConstBuffer)]);
+	FrameTiming::Add(C::SrtCoverCaptureN, cells[static_cast<size_t>(Cell::Capture)]);
+	FrameTiming::Add(C::SrtJitCoverNeN, cells[static_cast<size_t>(Cell::Ne)]);
+}
+
 void DrainSrtWalkPaths() {
 	if (!SpecDiagOn()) return;
 	using Path = ShaderRecompiler::IR::SrtWalkPaths::Path;
@@ -524,6 +537,7 @@ void NoteSrtMemo(const ShaderRecompiler::IR::ResourceSnapshot& snapshot, const S
                  ShaderType stage) {
 	using ShaderRecompiler::IR::SrtMemoOutcome;
 	DrainSrtWalkPaths();
+	DrainSrtJitCover();
 	if (Libs::LibKernel::Memory::SpecFastEnvMode() != Libs::LibKernel::Memory::SpecFastMode::Off) FlushSpecFastCounts(); // S437: nothing to flush when off
 	if (context.mode == ShaderRecompiler::IR::SrtFastMode::Off) {
 		return;
