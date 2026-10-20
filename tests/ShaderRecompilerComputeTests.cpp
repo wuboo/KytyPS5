@@ -1723,6 +1723,11 @@ void CheckSpirvEmission(const TestCase &test, const std::vector<u32> &spirv) {
   }
 }
 
+#if defined(_WIN32)
+static int setenv(const char *name, const char *value, int) { return _putenv_s(name, value); }
+static int unsetenv(const char *name) { return _putenv_s(name, ""); }
+#endif
+
 // Sets KYTY_RT_MISS for the lifetime of the object when asked to and restores the old value.
 struct RtMissScope {
   explicit RtMissScope(int mode) : on_(mode != 0) {
