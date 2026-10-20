@@ -41,6 +41,9 @@ constexpr uint64_t GUEST_MEMORY_MIN = 0x40000;
 
 // S451 (KYTY_PROGS_MEMO): the memo that records the reachability loop in progress on this thread, or null.
 thread_local SrtCfMemo* t_cf_rec = nullptr;
+// S451: the next EvaluateWide call is the evaluation of a handle word of a raw read (its answer is only an address part); the raw read being evaluated for it.
+thread_local bool        t_cf_handle_use  = false;
+thread_local const void* t_cf_handle_inst = nullptr;
 // S451 DIAG: true while the reachability loop of a graphics plan runs (times its guest reads).
 thread_local bool       t_cf_timing = false;
 
@@ -1003,6 +1006,22 @@ float SrtWalker::Float32(uint64_t bits) {
 }
 
 bool SrtWalker::EvaluateWide(Value value, uint64_t& result) {
+	const bool announced = t_cf_handle_use;
+	t_cf_handle_use      = false;
+	if (t_cf_rec == nullptr) return EvaluateWideImpl(value, result);
+	// S451: a raw read answered to something other than a handle word has to be compared by the memo.
+	const auto* inst = value.Resolve().TryInstruction();
+	const bool  raw  = inst != nullptr && (inst->GetOpcode() == ValueOpcode::LoadAddressU32 || inst->GetOpcode() == ValueOpcode::ReadConstBuffer);
+	const bool  handle_use = raw && (announced || inst == t_cf_handle_inst);
+	const void* saved      = t_cf_handle_inst;
+	if (announced && raw) t_cf_handle_inst = inst;
+	const bool ok    = EvaluateWideImpl(value, result);
+	t_cf_handle_inst = saved;
+	if (raw && !handle_use && t_cf_rec != nullptr) t_cf_rec->MarkConsumed(inst);
+	return ok;
+}
+
+bool SrtWalker::EvaluateWideImpl(Value value, uint64_t& result) {
 	value = value.Resolve();
 	if (value.IsImmediate()) {
 		switch (value.GetType()) {
@@ -1140,54 +1159,131 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 	uint64_t low    = 0;
 	uint64_t high   = 0;
 	uint64_t offset = 0;
-	if (!Arg(*handle, 0, low) || !Arg(*handle, 1, high) || !Arg(inst, 1, offset)) {
+	const bool constbuf = inst.GetOpcode() == ValueOpcode::ReadConstBuffer;
+	const auto reader   = vector ? m_runtime.read_specialization_memory : m_runtime.read_memory;
+	const bool host_rule = reader == nullptr || SrtReadCapture::ReadsHostMemory(m_runtime);
+
+	// S451 (KYTY_PROGS_MEMO): while the reachability loop is recorded, a scalar read whose handle words are user data words or other such reads is a node
+	// (srtCfMemo.h). The words of its handle are then not part of the key: the node asks for them again.
+	SrtCfMemo* const rec = vector ? nullptr : t_cf_rec;
+	bool             node_ok = rec != nullptr && handle->NumArgs() == (constbuf ? 4u : 2u) && inst.Arg(1).Resolve().IsImmediate() &&
+	                           inst.Arg(1).Resolve().GetType() == Type::U32;
+	CfNode           node;
+	std::array<const Inst*, 4> sources {};
+	std::array<uint64_t, 4>    values {};
+	// A node that turns out not to be one after all: its user data words are keyed, the reads feeding it are compared.
+	const auto demote = [&](size_t upto) {
+		node_ok = false;
+		for (size_t k = 0; k < upto; ++k) {
+			if (node.src_kind[k] == CfNode::Src::User) rec->NoteUserData(node.src_index[k], static_cast<uint32_t>(values[k]));
+			else rec->MarkConsumedNode(node.src_index[k]);
+		}
+	};
+	const auto handle_word = [&](size_t k) -> bool {
+		if (!node_ok) return Arg(*handle, k, values[k]);
+		const auto* source = handle->Arg(k).Resolve().TryInstruction();
+		sources[k]         = source;
+		if (source != nullptr && source->GetOpcode() == ValueOpcode::GetUserData && source->NumArgs() == 1 && source->Arg(0).GetType() == Type::ScalarReg) {
+			const auto reg = RegIndex(source->Arg(0).ScalarRegister());
+			if (reg < m_program.user_data_base || reg - m_program.user_data_base >= m_runtime.user_data.size()) {
+				rec->overflow = true; // the interpreter fails here as well
+				return false;
+			}
+			node.src_kind[k]  = CfNode::Src::User;
+			node.src_index[k] = reg - m_program.user_data_base;
+			values[k]         = m_runtime.user_data[reg - m_program.user_data_base];
+			return true;
+		}
+		const bool raw_source = source != nullptr && (source->GetOpcode() == ValueOpcode::LoadAddressU32 || source->GetOpcode() == ValueOpcode::ReadConstBuffer);
+		t_cf_handle_use = raw_source; // the answer of this one evaluation is used as a handle word
+		const bool ok   = Arg(*handle, k, values[k]);
+		t_cf_handle_use = false;
+		if (!ok) {
+			rec->overflow = true;
+			return false;
+		}
+		const auto index = raw_source ? rec->NodeOf(source) : UINT32_MAX;
+		if (index == UINT32_MAX) {
+			demote(k);
+			// this word's source was not a node: whatever it read is compared (the evaluation above ran without the handle mark only if it was not a raw read)
+			if (raw_source) rec->MarkConsumed(source);
+			return true;
+		}
+		node.src_kind[k]  = CfNode::Src::Node;
+		node.src_index[k] = index;
+		return true;
+	};
+	if (!handle_word(0) || !handle_word(1) || !Arg(inst, 1, offset)) {
 		return false;
 	}
+	if (constbuf || vector) {
+		if (handle->NumArgs() != 4u) return false;
+		if (!handle_word(2) || !handle_word(3)) return false;
+	}
+	const uint64_t records = values[2];
+	const uint64_t word3   = values[3];
+	low                    = values[0];
+	high                   = values[1];
 	const auto base      = ((high << 32u) | static_cast<uint32_t>(low)) & AddressMask;
 	const auto immediate = static_cast<int64_t>(static_cast<int32_t>(mem.offset));
 	uint64_t   address   = 0;
-	if (inst.GetOpcode() == ValueOpcode::ReadConstBuffer || vector) {
-		uint64_t records = 0;
-		uint64_t word3   = 0;
-		if (handle->NumArgs() != 4u || !Arg(*handle, 2, records) || !Arg(*handle, 3, word3)) {
-			return false;
-		}
+	CfReadKind kind      = CfReadKind::Read;
+	if (vector) {
 		if (immediate < 0) {
 			return false;
 		}
+		const auto stride = (static_cast<uint32_t>(high) >> 16u) & 0x3fffu;
+		// Only the uniform, unswizzled structured DWORD address is evaluated on the host.
+		if ((high & (1u << 31u)) != 0u || (word3 & ((1u << 23u) | 0xf0000000u)) != 0u)
+			return false;
+		if (stride == 0u || records == 0u || ((word3 >> 12u) & 0x7fu) == 0u) {
+			result = 0u;
+			return true;
+		}
 		const auto byte_offset =
 		    (static_cast<uint64_t>(immediate) & ~uint64_t {3}) + (static_cast<uint32_t>(offset) & ~3u);
-		const auto stride  = (static_cast<uint32_t>(high) >> 16u) & 0x3fffu;
-		if (vector) {
-			// Only the uniform, unswizzled structured DWORD address is evaluated on the host.
-			if ((high & (1u << 31u)) != 0u || (word3 & ((1u << 23u) | 0xf0000000u)) != 0u)
-				return false;
-			if (stride == 0u || records == 0u || ((word3 >> 12u) & 0x7fu) == 0u) {
-				result = 0u;
-				return true;
-			}
-		}
-		const auto size = stride == 0u
-		                      ? static_cast<uint64_t>(static_cast<uint32_t>(records))
-		                      : static_cast<uint64_t>(stride) * static_cast<uint32_t>(records);
+		const auto size = static_cast<uint64_t>(stride) * static_cast<uint32_t>(records);
 		if (byte_offset > size || size - byte_offset < sizeof(uint32_t)) {
 			result = 0u;
 			return true;
 		}
 		address = (base & ~uint64_t {3}) + byte_offset;
 	} else {
-		const auto relative = (immediate & ~int64_t {3}) +
-		                      static_cast<int64_t>(static_cast<uint32_t>(offset) & ~3u);
-		if (!AddSignedAddress(base & ~uint64_t {3}, relative, address)) {
-			return false;
-		}
+		const auto where = constbuf ? CfConstBufferAddress(low, high, records, mem.offset, static_cast<uint32_t>(offset), host_rule)
+		                            : CfLoadAddress(low, high, mem.offset, static_cast<uint32_t>(offset), host_rule);
+		kind    = where.kind;
+		address = where.address;
+	}
+	// S451: the node, as far as it is known before the read.
+	if (node_ok) {
+		node.constbuf   = constbuf;
+		node.mem_offset = mem.offset;
+		node.offset_arg = static_cast<uint32_t>(offset);
+		node.reader     = reader;
+		node.host_rule  = host_rule;
+		node.kind       = kind;
+		node.inst       = &inst;
+	}
+	const auto finish_node = [&](bool ok, uint32_t word) {
+		if (!node_ok) return;
+		node.ok   = ok;
+		node.word = ok ? word : 0u;
+		rec->AddNode(node);
+	};
+	if (kind == CfReadKind::Fail) {
+		finish_node(false, 0u);
+		return false;
+	}
+	if (kind == CfReadKind::Outside) {
+		finish_node(true, 0u);
+		result = 0u;
+		return true;
 	}
 	uint32_t word = 0;
-	const auto reader = vector ? m_runtime.read_specialization_memory : m_runtime.read_memory;
 	// A host-memory read through a table below guest memory reads zero, whatever its offset.
-	if (!vector && base < GUEST_MEMORY_MIN &&
-	    (reader == nullptr || SrtReadCapture::ReadsHostMemory(m_runtime))) {
+	if (kind == CfReadKind::NullTable) {
 		NullDesc::NoteNullTable(base);
+		finish_node(true, 0u);
 		result = 0;
 		return true;
 	}
@@ -1198,7 +1294,8 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 			WalkProbe::Add(WalkProbe::Id::CfReadN);
 			WalkProbe::Add(WalkProbe::Id::CfReadNs, static_cast<uint64_t>(WalkProbe::Now() - read_t0));
 		}
-		if (t_cf_rec != nullptr) t_cf_rec->NoteRead(reader, address, word, read_ok); // S451
+		if (t_cf_rec != nullptr && !node_ok) t_cf_rec->NoteRead(reader, address, word, read_ok); // S451
+		finish_node(read_ok, word);
 		if (!read_ok) {
 			return false;
 		}
@@ -1209,7 +1306,8 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		} else {
 			NullDesc::NoteUnresolved(address);
 		}
-		if (t_cf_rec != nullptr) t_cf_rec->NoteRead(nullptr, address, word, true); // S451
+		if (t_cf_rec != nullptr && !node_ok) t_cf_rec->NoteRead(nullptr, address, word, true); // S451
+		finish_node(true, word);
 		NullDesc::NoteSrtRead(address, std::span<const uint32_t>(&word, 1), false);
 	}
 	result = word;
@@ -2045,10 +2143,13 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 		if (m_clean_evaluator != nullptr) m_clean_evaluator->m_reachable_blocks = &visited;
 	} else {
 		if (cf_mode != CfMemoMode::Off) {
-			if (cf_hit) cf_expect = cf_way->visited; // shadow: what the memo would have answered
-			cf_rec = &cf_set.Victim(m_runtime.user_data, m_runtime.shader_base, m_runtime.read_memory, m_runtime.read_specialization_memory);
-			cf_rec->Begin(static_cast<uint32_t>(m_runtime.user_data.size()), m_runtime.read_memory, m_runtime.read_specialization_memory);
-			t_cf_rec = cf_rec;
+			if (cf_hit) {
+				cf_expect = cf_way->visited; // shadow: what the memo would have answered
+			} else {
+				cf_rec = &cf_set.Victim();
+				cf_rec->Begin(static_cast<uint32_t>(m_runtime.user_data.size()), m_runtime.read_memory, m_runtime.read_specialization_memory);
+				t_cf_rec = cf_rec;
+			}
 		}
 		visited.assign(m_program.control_flow.size(), 1u);
 		ResetUnknowns();
@@ -2088,11 +2189,12 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 			ResetUnknowns();
 			if (m_clean_evaluator != nullptr) m_clean_evaluator->ResetUnknowns();
 		}
-		if (cf_mode != CfMemoMode::Off) {
+		if (cf_rec != nullptr) {
 			t_cf_rec = nullptr;
 			cf_rec->End(visited);
-			if (cf_hit && cf_expect != visited) WalkProbe::Add(WalkProbe::Id::MemoNeN); // shadow: the memo's answer differs (must be 0)
+			if (cf_rec->valid) cf_set.Promote(cf_rec);
 		}
+		if (cf_hit && cf_expect != visited) WalkProbe::Add(WalkProbe::Id::MemoNeN); // shadow: the memo's answer differs (must be 0)
 	}
 	t_cf_timing = false;
 	cf_timer.reset();

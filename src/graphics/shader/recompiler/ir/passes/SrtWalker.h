@@ -126,6 +126,7 @@ private:
 	void ResetUnknowns();
 	static float Float32(uint64_t bits);
 	bool EvaluateWide(Value value, uint64_t& result);
+	bool EvaluateWideImpl(Value value, uint64_t& result);
 	bool Arg(const Inst& inst, size_t index, uint64_t& result);
 	bool EvaluatePhi(const Inst& inst, uint64_t& result);
 	bool EvaluateExtract(const Inst& inst, uint64_t& result);
