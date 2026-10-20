@@ -11,6 +11,7 @@
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
+#include "graphics/guest_gpu/command_processor/cpScoutRuntime.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -975,10 +976,24 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "GetGraphicsPrograms");
 	}
-	state.programs = pipeline_cache.GetGraphicsPrograms(
-	    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
-	    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info,
-	    single_sample);
+	CpScout::Prepared scout_prep;
+	const auto        scout_kind = CpScout::Take(buffer, scout_prep);
+	if (scout_kind == CpScout::TakeKind::Hit) {
+		state.programs      = scout_prep.programs;
+		state.vertex_info   = scout_prep.vertex_info;
+		state.ps_input_info = scout_prep.pixel_info;
+	} else {
+		state.programs = pipeline_cache.GetGraphicsPrograms(
+		    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
+		    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info,
+		    single_sample);
+		if (scout_kind == CpScout::TakeKind::Shadow) {
+			if (state.programs.vertex[0].id != scout_prep.programs.vertex[0].id ||
+			    state.programs.pixel.id != scout_prep.programs.pixel.id) {
+				FrameTiming::Add(FrameTiming::Counter::ScoutNeN);
+			}
+		}
+	}
 	if (!state.programs.vertex[0]) {
 		// PrepareDrawRenderState() checks this right after calling us and skips the draw; bail out
 		// here too since state.ps_input_info was left unpopulated and is not safe to dereference.

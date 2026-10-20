@@ -391,6 +391,9 @@ enum class Counter : uint32_t {
 	GfpMemoSkipN, GfpMemoMissColdN, GfpMemoMissInputsN, GfpMemoMissReadsN,
 	// S451 DIAG: guest reads of the control-flow loop (calls, time in the reader).
 	GfpCfReadN, GfpCfReadNs,
+	// S454 (KYTY_CP_SCOUT): draws whose GetGraphicsPrograms came from the lookahead worker / CP had to
+	// compute itself / shadow: program ids differ (must be 0) / streams that stopped (WAIT_REG_MEM, multi-draw).
+	ScoutHitN, ScoutMissN, ScoutNeN, ScoutStopN,
 	Count,
 };
 

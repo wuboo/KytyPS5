@@ -74,9 +74,26 @@ public:
 	[[nodiscard]] bool FlushRequested() const;
 	void            BufferFlushAndWait();
 	void            BufferWait();
-	HW::Context&    GetCtx() { return m_ctx; }
-	HW::UserConfig& GetUcfg() { return m_ucfg; }
-	HW::Shader&     GetShCtx() { return m_sh_ctx; }
+	// S454: the scout thread points these at copies so SET_* handlers write the lookahead state.
+	struct ScoutRegs {
+		HW::Context*       ctx    = nullptr;
+		HW::Shader*        sh     = nullptr;
+		HW::UserConfig*    ucfg   = nullptr;
+		HW::UserSgprType*  marker = nullptr;
+	};
+	static ScoutRegs*& ScoutRegsTls() noexcept {
+		thread_local ScoutRegs* p = nullptr;
+		return p;
+	}
+	HW::Context&    GetCtx() { return ScoutRegsTls() && ScoutRegsTls()->ctx ? *ScoutRegsTls()->ctx : m_ctx; }
+	HW::UserConfig& GetUcfg() { return ScoutRegsTls() && ScoutRegsTls()->ucfg ? *ScoutRegsTls()->ucfg : m_ucfg; }
+	HW::Shader&     GetShCtx() { return ScoutRegsTls() && ScoutRegsTls()->sh ? *ScoutRegsTls()->sh : m_sh_ctx; }
+	void CopyRegs(HW::Context& ctx, HW::Shader& sh, HW::UserConfig& ucfg, HW::UserSgprType& marker) const {
+		ctx = m_ctx;
+		sh  = m_sh_ctx;
+		ucfg = m_ucfg;
+		marker = m_user_data_marker;
+	}
 
 	void SetIndexType(uint32_t index_type_and_size);
 	void SetIndexBaseAddress(uint64_t index_base_addr);
@@ -117,8 +134,17 @@ public:
 	void WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index);
 	void TriggerEvent(uint32_t event_type, uint32_t event_index, uint64_t event_address = 0);
 
-	void SetUserDataMarker(HW::UserSgprType type) { m_user_data_marker = type; }
-	[[nodiscard]] HW::UserSgprType GetUserDataMarker() const { return m_user_data_marker; }
+	void SetUserDataMarker(HW::UserSgprType type) {
+		if (auto* s = ScoutRegsTls(); s && s->marker) {
+			*s->marker = type;
+			return;
+		}
+		m_user_data_marker = type;
+	}
+	[[nodiscard]] HW::UserSgprType GetUserDataMarker() const {
+		if (auto* s = ScoutRegsTls(); s && s->marker) return *s->marker;
+		return m_user_data_marker;
+	}
 
 	void ResetDeCe();
 	void SetCeComplete(bool complete) { m_ce_complete = complete; }
