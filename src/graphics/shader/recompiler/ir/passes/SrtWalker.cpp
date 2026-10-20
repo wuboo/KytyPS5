@@ -1953,46 +1953,30 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 			cf_mode = CfMemoMode::Off;
 		}
 	}
-	auto&                cf_memo = m_program.cf_memo;
-	bool                 cf_hit  = false;
+	auto&                cf_set  = m_program.cf_memo;
+	const SrtCfMemo*     cf_way  = nullptr;
+	SrtCfMemo*           cf_rec  = nullptr;
 	std::vector<uint8_t> cf_expect;
 	if (cf_mode != CfMemoMode::Off) {
 		{
 			SpecShadow::PurposeScope purpose(SpecShadow::Purpose::Cond); // the replayed reads are the ones the loop issues under this purpose
-			const bool inputs = cf_memo.InputsMatch(m_runtime.user_data, m_runtime.shader_base, m_runtime.read_memory, m_runtime.read_specialization_memory) &&
-			                    cf_memo.visited.size() == m_program.control_flow.size();
-			cf_hit = inputs && cf_memo.ReadsUnchanged(m_runtime.userdata);
-			if (cf_mode == CfMemoMode::Shadow && !cf_hit) { // S451 DIAG: why it missed
-				FrameTiming::Add(inputs ? FrameTiming::Counter::GfpMemoMissReadsN : (cf_memo.valid ? FrameTiming::Counter::GfpMemoMissInputsN : FrameTiming::Counter::GfpMemoMissColdN));
-				static std::atomic<uint32_t> logged {0};
-				if (cf_memo.valid && !inputs && logged.fetch_add(1) < 40) {
-					std::string diff;
-					for (uint32_t i = 0; i < SrtCfMemo::kMaxUserData && i < m_runtime.user_data.size(); ++i)
-						if ((cf_memo.user_mask >> i & 1u) != 0 && m_runtime.user_data[i] != cf_memo.user_words[i]) {
-							char item[64];
-							std::snprintf(item, sizeof(item), " u%u:%08x->%08x", i, cf_memo.user_words[i], m_runtime.user_data[i]);
-							diff += item;
-						}
-					char line[400];
-					std::snprintf(line, sizeof(line), "[progs-memo] miss plan=0x%016llx mask=0x%llx size=%u/%zu base=%d reads=%zu diff:%s\n",
-					              static_cast<unsigned long long>(m_program.shader_hash), static_cast<unsigned long long>(cf_memo.user_mask), cf_memo.user_size,
-					              m_runtime.user_data.size(), cf_memo.base_used ? 1 : 0, cf_memo.reads.size(), diff.c_str());
-					std::fputs(line, stdout);
-				}
-			}
+			cf_way = cf_set.Find(m_runtime.user_data, m_runtime.shader_base, m_runtime.read_memory, m_runtime.read_specialization_memory, m_runtime.userdata);
+			if (cf_way != nullptr && cf_way->visited.size() != m_program.control_flow.size()) cf_way = nullptr;
 		}
-		FrameTiming::Add(cf_hit ? FrameTiming::Counter::GfpMemoHitN : FrameTiming::Counter::GfpMemoMissN);
+		FrameTiming::Add(cf_way != nullptr ? FrameTiming::Counter::GfpMemoHitN : FrameTiming::Counter::GfpMemoMissN);
 	}
+	const bool cf_hit  = cf_way != nullptr;
 	const bool cf_skip = cf_hit && cf_mode == CfMemoMode::On;
 	if (cf_skip) {
-		visited            = cf_memo.visited;
+		visited            = cf_way->visited;
 		m_reachable_blocks = &visited;
 		if (m_clean_evaluator != nullptr) m_clean_evaluator->m_reachable_blocks = &visited;
 	} else {
 		if (cf_mode != CfMemoMode::Off) {
-			if (cf_hit) cf_expect = cf_memo.visited; // shadow: what the memo would have answered
-			cf_memo.Begin(static_cast<uint32_t>(m_runtime.user_data.size()), m_runtime.read_memory, m_runtime.read_specialization_memory);
-			t_cf_rec = &cf_memo;
+			if (cf_hit) cf_expect = cf_way->visited; // shadow: what the memo would have answered
+			cf_rec = &cf_set.Victim(m_runtime.user_data, m_runtime.shader_base, m_runtime.read_memory, m_runtime.read_specialization_memory);
+			cf_rec->Begin(static_cast<uint32_t>(m_runtime.user_data.size()), m_runtime.read_memory, m_runtime.read_specialization_memory);
+			t_cf_rec = cf_rec;
 		}
 		visited.assign(m_program.control_flow.size(), 1u);
 		ResetUnknowns();
@@ -2034,7 +2018,7 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 		}
 		if (cf_mode != CfMemoMode::Off) {
 			t_cf_rec = nullptr;
-			cf_memo.End(visited);
+			cf_rec->End(visited);
 			if (cf_hit && cf_expect != visited) FrameTiming::Add(FrameTiming::Counter::GfpMemoNeN); // shadow: the memo's answer differs (must be 0)
 		}
 	}

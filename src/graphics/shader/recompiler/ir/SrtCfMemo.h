@@ -156,6 +156,34 @@ struct SrtCfMemo {
 	}
 };
 
+// The memos of one plan. The user data words that decide the loop are mostly pointers, and a frame ring hands out a few of them in turn (three constant
+// buffers: the pointer of draw N is the one of draw N-3), so one memo per plan would miss every time; a few ways keep the recent ones.
+struct SrtCfMemoSet {
+	static constexpr uint32_t kWays = 8;
+
+	std::array<SrtCfMemo, kWays> ways;
+	uint32_t                     next = 0;
+
+	// The way whose answer is current for these inputs (inputs equal and every recorded read answers the same), or null.
+	const SrtCfMemo* Find(std::span<const uint32_t> user, uint64_t base, CfMemoReader ordinary, CfMemoReader strict, void* userdata) const {
+		for (const auto& way: ways) {
+			if (way.Matches(user, base, ordinary, strict, userdata)) return &way;
+		}
+		return nullptr;
+	}
+
+	// The way to record into after a miss: the one whose inputs are equal (its reads changed), else an unused one, else the oldest.
+	SrtCfMemo& Victim(std::span<const uint32_t> user, uint64_t base, CfMemoReader ordinary, CfMemoReader strict) {
+		for (auto& way: ways) {
+			if (way.InputsMatch(user, base, ordinary, strict)) return way;
+		}
+		for (auto& way: ways) {
+			if (!way.valid && !way.recording) return way;
+		}
+		return ways[next++ % kWays];
+	}
+};
+
 } // namespace Libs::Graphics::ShaderRecompiler::IR
 
 #endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_SRTCFMEMO_H_ */

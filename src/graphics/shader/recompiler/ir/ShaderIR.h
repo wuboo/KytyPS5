@@ -707,7 +707,7 @@ struct ResourcePlan {
 	mutable uint32_t                       evaluation_value_count = 0;
 	mutable std::vector<uint8_t>            active_sources;
 	mutable std::vector<uint8_t>            visited_blocks;
-	mutable SrtCfMemo                       cf_memo; // S451 (KYTY_PROGS_MEMO): the answer of the last reachability loop of this plan
+	mutable SrtCfMemoSet                    cf_memo; // S451 (KYTY_PROGS_MEMO): the answers of the recent reachability loops of this plan
 	mutable std::vector<uint8_t>            reachable_blocks;
 	mutable std::vector<uint32_t>           pending_blocks;
 	mutable std::vector<uint32_t>           material_keys;
