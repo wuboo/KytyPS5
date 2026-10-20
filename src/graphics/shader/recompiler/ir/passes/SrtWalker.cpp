@@ -5,6 +5,8 @@
 #include "graphics/shader/recompiler/ir/passes/srtTreeReject.h"
 #include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
 #include "graphics/presentation/cpPcSampler.h"
+#include "graphics/presentation/frameTiming.h"
+#include <optional>
 
 #include "common/abi.h"
 #include "graphics/shader/nullDescDiag.h"
