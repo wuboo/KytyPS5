@@ -1959,8 +1959,27 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	if (cf_mode != CfMemoMode::Off) {
 		{
 			SpecShadow::PurposeScope purpose(SpecShadow::Purpose::Cond); // the replayed reads are the ones the loop issues under this purpose
-			cf_hit = cf_memo.Matches(m_runtime.user_data, m_runtime.shader_base, m_runtime.read_memory, m_runtime.read_specialization_memory, m_runtime.userdata) &&
-			         cf_memo.visited.size() == m_program.control_flow.size();
+			const bool inputs = cf_memo.InputsMatch(m_runtime.user_data, m_runtime.shader_base, m_runtime.read_memory, m_runtime.read_specialization_memory) &&
+			                    cf_memo.visited.size() == m_program.control_flow.size();
+			cf_hit = inputs && cf_memo.ReadsUnchanged(m_runtime.userdata);
+			if (cf_mode == CfMemoMode::Shadow && !cf_hit) { // S451 DIAG: why it missed
+				FrameTiming::Add(inputs ? FrameTiming::Counter::GfpMemoMissReadsN : (cf_memo.valid ? FrameTiming::Counter::GfpMemoMissInputsN : FrameTiming::Counter::GfpMemoMissColdN));
+				static std::atomic<uint32_t> logged {0};
+				if (cf_memo.valid && !inputs && logged.fetch_add(1) < 40) {
+					std::string diff;
+					for (uint32_t i = 0; i < SrtCfMemo::kMaxUserData && i < m_runtime.user_data.size(); ++i)
+						if ((cf_memo.user_mask >> i & 1u) != 0 && m_runtime.user_data[i] != cf_memo.user_words[i]) {
+							char item[64];
+							std::snprintf(item, sizeof(item), " u%u:%08x->%08x", i, cf_memo.user_words[i], m_runtime.user_data[i]);
+							diff += item;
+						}
+					char line[400];
+					std::snprintf(line, sizeof(line), "[progs-memo] miss plan=0x%016llx mask=0x%llx size=%u/%zu base=%d reads=%zu diff:%s\n",
+					              static_cast<unsigned long long>(m_program.shader_hash), static_cast<unsigned long long>(cf_memo.user_mask), cf_memo.user_size,
+					              m_runtime.user_data.size(), cf_memo.base_used ? 1 : 0, cf_memo.reads.size(), diff.c_str());
+					std::fputs(line, stdout);
+				}
+			}
 		}
 		FrameTiming::Add(cf_hit ? FrameTiming::Counter::GfpMemoHitN : FrameTiming::Counter::GfpMemoMissN);
 	}

@@ -387,7 +387,8 @@ enum class Counter : uint32_t {
 	// of those ReadFirstLane (each builds two SrtWalker objects).
 	GfpCfWalkN, GfpCfIterN, GfpCfBlocksN, GfpCfCondN, GfpCfEvalN, GfpCfRflN,
 	// S451 (KYTY_PROGS_MEMO): control-flow walks the memo could not serve by design (reads captured for the specialization, NullDesc diag, a nested mask).
-	GfpMemoSkipN,
+	// shadow only: why the memo missed - nothing stored yet / the inputs (user data words read, shader base, sizes, readers) differ / a re-read answered differently.
+	GfpMemoSkipN, GfpMemoMissColdN, GfpMemoMissInputsN, GfpMemoMissReadsN,
 	Count,
 };
 
