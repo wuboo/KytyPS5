@@ -1,5 +1,7 @@
 #include "graphics/shader/shaderPrewarm.h"
 
+#include "graphics/shader/shaderCompileWorkers.h"
+
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
@@ -18,7 +20,14 @@ Mode ParseMode(const char* text) {
 }
 
 Mode EnvMode() {
-	static const Mode mode = ParseMode(std::getenv("KYTY_SHADER_PREWARM"));
+	static const Mode mode = [] {
+		if (const char* text = std::getenv("KYTY_SHADER_PREWARM"); text != nullptr && *text != 0) {
+			const Mode parsed = ParseMode(text);
+			if (parsed != Mode::Off) return parsed;
+		}
+		if (ShaderCompileWorkers::ManifestEnabled()) return Mode::On;
+		return Mode::Off;
+	}();
 	return mode;
 }
 

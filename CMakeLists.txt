@@ -2761,6 +2761,36 @@ if(APPLE AND (CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64" OR
 			add_dependencies(kyty_tests ${prewarm_target})
 		endif()
 	endforeach()
+	# S455: KYTY_COMPILE_WORKERS pool and KYTY_SHADER_MANIFEST -> prewarm on. Mutant (WILL_FAIL): SYNC (pool disabled at compile time).
+	foreach(mutant IN ITEMS "" SYNC)
+		if(mutant STREQUAL "")
+			set(compile_workers_target shader_compile_workers_tests)
+			set(compile_workers_test shader_compile_workers)
+		else()
+			string(TOLOWER ${mutant} mutant_lower)
+			set(compile_workers_target shader_compile_workers_mutant_${mutant_lower}_tests)
+			set(compile_workers_test shader_compile_workers_mutant_${mutant_lower})
+		endif()
+		add_executable(${compile_workers_target} EXCLUDE_FROM_ALL
+			"${KYTY_TESTS_DIR}/ShaderCompileWorkersTests.cpp"
+			"${KYTY_SOURCE_DIR}/graphics/shader/shaderCompileWorkers.cpp"
+			"${KYTY_SOURCE_DIR}/graphics/shader/shaderPrewarm.cpp"
+			"${KYTY_SOURCE_DIR}/graphics/shader/programDiskCache.cpp"
+		)
+		target_link_libraries(${compile_workers_target} common fmt::fmt xxhash)
+		target_include_directories(${compile_workers_target} PRIVATE ${inc_headers})
+		if(NOT mutant STREQUAL "")
+			target_compile_definitions(${compile_workers_target} PRIVATE KYTY_COMPILE_WORKERS_MUTANT_SYNC=1)
+		endif()
+		if(BUILD_TESTING)
+			add_test(NAME ${compile_workers_test} COMMAND $<TARGET_FILE:${compile_workers_target}>)
+			set_tests_properties(${compile_workers_test} PROPERTIES TIMEOUT 60 ENVIRONMENT "KYTY_COMPILE_WORKERS=4;KYTY_SHADER_MANIFEST=1")
+			if(NOT mutant STREQUAL "")
+				set_tests_properties(${compile_workers_test} PROPERTIES WILL_FAIL TRUE)
+			endif()
+			add_dependencies(kyty_tests ${compile_workers_target})
+		endif()
+	endforeach()
 	# S434 (S442): every known KYTY_* name is classified as codegen or not. Mutant (WILL_FAIL): UNCLASSIFIED (a known name in neither list).
 	foreach(mutant IN ITEMS "" UNCLASSIFIED)
 		if(mutant STREQUAL "")

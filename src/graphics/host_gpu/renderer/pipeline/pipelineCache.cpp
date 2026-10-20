@@ -38,6 +38,7 @@
 #include "graphics/shader/shaderCompiler.h"
 #include "graphics/shader/shaderCost.h"
 #include "graphics/shader/permutationRecord.h"
+#include "graphics/shader/shaderCompileWorkers.h"
 #include "graphics/shader/shaderPrewarm.h"
 #include "graphics/shader/shaderPrewarmBuild.h"
 #include "kytyGitVersion.h"
@@ -895,8 +896,10 @@ struct PipelineCache::ProgramCache {
 		                                         Common::DebugCounters::Peak::ShaderCompileNs);
 		FrameTiming::ScopedCounterNs compile_total(FrameTiming::Counter::ShaderCompilePermNs); // S433 (S441)
 		std::optional<FrameTiming::ScopedCounterNs> stage_timer(std::in_place, FrameTiming::Counter::ShaderEmitSpirvNs);
-		auto result = ShaderRecompiler::CompileProgram(std::move(translated), options,
-		                                               specialization, push_data_start_dword);
+		auto emit = [&]() {
+			return ShaderRecompiler::CompileProgram(std::move(translated), options, specialization, push_data_start_dword);
+		};
+		auto result = ShaderCompileWorkers::WorkerCount() > 0 ? ShaderCompileWorkers::Pool::Instance().Run(emit) : emit();
 		stage_timer.emplace(FrameTiming::Counter::ShaderValidateNs);
 		const bool spirv_valid = ValidateShaderSpirv(options.dump_label, options.shader_hash, result.spirv,
 		                                             options.maintenance8_enabled);
@@ -1036,7 +1039,7 @@ struct PipelineCache::ProgramCache {
 		FrameTiming::Add(FrameTiming::Counter::PrewarmManifestN, prewarm.builder.Size());
 		prewarm.writer = std::make_unique<ProgramDisk::AsyncWriter>();
 		prewarm.box    = std::make_unique<ShaderPrewarm::Mailbox<std::unique_ptr<PrewarmProgram>>>(
-            1, ShaderPrewarm::kDefaultMaxWait,
+            ShaderCompileWorkers::PrewarmThreadCount(), ShaderPrewarm::kDefaultMaxWait,
             [] {
 #if defined(__APPLE__)
                 pthread_set_qos_class_self_np(QOS_CLASS_UTILITY, 0);
@@ -1057,8 +1060,11 @@ struct PipelineCache::ProgramCache {
 				});
 			}
 		});
-		LOGF("[prewarm] mode=%s dir=%s manifest=%s entries=%zu\n", mode == ShaderPrewarm::Mode::Shadow ? "shadow" : "on", dir_text.c_str(),
-		     loaded ? "loaded" : "none", prewarm.builder.Size());
+		LOGF("[prewarm] mode=%s dir=%s manifest=%s entries=%zu workers=%u\n", mode == ShaderPrewarm::Mode::Shadow ? "shadow" : "on", dir_text.c_str(),
+		     loaded ? "loaded" : "none", prewarm.builder.Size(), ShaderCompileWorkers::PrewarmThreadCount());
+		if (ShaderCompileWorkers::WorkerCount() > 0) {
+			LOGF("[compile-workers] KYTY_COMPILE_WORKERS=%u (translate/emit may use the pool)\n", ShaderCompileWorkers::WorkerCount());
+		}
 	}
 
 	void ReportPrewarm() {
@@ -1405,13 +1411,17 @@ struct PipelineCache::ProgramCache {
 			}
 		}
 		const bool use_prewarm = prewarmed != nullptr && prewarm.mode == ShaderPrewarm::Mode::On;
+		const bool offload_compile = ShaderCompileWorkers::WorkerCount() > 0 && !use_prewarm;
 		ShaderRecompiler::ShaderSource source;
 		if (entry == programs.end()) {
 			if (use_prewarm) {
 				source = std::move(*prewarmed->source); // non-call by construction; kept alive as long as this lookup uses the translation
 			} else {
-				FrameTiming::ScopedCounterNs prepare_timer(FrameTiming::Counter::ShaderPrepareNs);
-				source = ShaderRecompiler::PrepareShaderSource(params.code, options);
+				auto prepare = [&]() {
+					FrameTiming::ScopedCounterNs prepare_timer(FrameTiming::Counter::ShaderPrepareNs);
+					return ShaderRecompiler::PrepareShaderSource(params.code, options);
+				};
+				source = offload_compile ? ShaderCompileWorkers::Pool::Instance().Run(prepare) : prepare();
 			}
 		}
 		auto* current = entry == programs.end() ? &source : entry->second.call_source.get();
@@ -1426,16 +1436,20 @@ struct PipelineCache::ProgramCache {
 		std::optional<FrameTiming::ScopedCounterNs> translate_timer(std::in_place, FrameTiming::Counter::ShaderTranslateNs);
 		if (use_prewarm) {
 			translated = std::move(prewarmed->translated);
-		} else if (current != nullptr) {
-			if (current->call) {
-				if (entry == programs.end()) ShaderRecompiler::RefreshShaderSource(*current, runtime);
-				translated = ShaderRecompiler::TranslateProgram(current->linked->decoded, options);
-				translated.program.source_reads = current->reads;
-			} else {
-				translated = ShaderRecompiler::TranslateProgram(current->decoded, options);
-			}
 		} else {
-			translated = ShaderRecompiler::TranslateProgram(params.code, options);
+			auto run_translate = [&]() -> ShaderRecompiler::TranslateResult {
+				if (current != nullptr) {
+					if (current->call) {
+						if (entry == programs.end()) ShaderRecompiler::RefreshShaderSource(*current, runtime);
+						auto out = ShaderRecompiler::TranslateProgram(current->linked->decoded, options);
+						out.program.source_reads = current->reads;
+						return out;
+					}
+					return ShaderRecompiler::TranslateProgram(current->decoded, options);
+				}
+				return ShaderRecompiler::TranslateProgram(params.code, options);
+			};
+			translated = offload_compile ? ShaderCompileWorkers::Pool::Instance().Run(run_translate) : run_translate();
 		}
 		translate_timer.reset();
 		std::string own_ir;
