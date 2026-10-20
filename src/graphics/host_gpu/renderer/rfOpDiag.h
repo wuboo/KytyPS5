@@ -23,7 +23,9 @@
 #include <string>
 #include <unordered_map>
 
+#if !defined(_WIN32)
 #include <dlfcn.h>
+#endif
 #if defined(__APPLE__)
 #include <pthread.h>
 #endif
@@ -167,6 +169,10 @@ inline uint32_t WalkFrames(const FaultContext& ctx, uint64_t stack_lo, uint64_t 
 
 // "symbol+0xoff" through dladdr; "image+0xoff" when the symbol is not exported, "?" for an address outside every image.
 inline std::string ResolvePc(uint64_t pc) {
+#if defined(_WIN32)
+	(void)pc; // no dladdr on Windows
+	return "?";
+#else
 	Dl_info info {};
 	if (pc == 0 || dladdr(reinterpret_cast<void*>(pc), &info) == 0) {
 		return "?";
@@ -182,6 +188,7 @@ inline std::string ResolvePc(uint64_t pc) {
 		              static_cast<unsigned long long>(pc - reinterpret_cast<uint64_t>(info.dli_fbase)));
 	}
 	return text;
+#endif
 }
 
 // "a|b|c" of the frames through `resolve` (dladdr only for the frames of a logged line).

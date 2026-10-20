@@ -57,13 +57,17 @@ inline std::atomic<uintptr_t> g_main_thread {0};
 inline Sig SigFromHostSignal(int host_signal) {
 	switch (host_signal) {
 		case SIGSEGV: return Sig::Segv;
+#if !defined(_WIN32) // SIGBUS / SIGUSR1 do not exist on Windows
 #ifdef KYTY_SIGCENSUS_MUTANT_SIG_SWAP
 		case SIGBUS: return Sig::Segv;
 #else
 		case SIGBUS: return Sig::Bus;
 #endif
+#endif
 		case SIGILL: return Sig::Ill;
+#if !defined(_WIN32)
 		case SIGUSR1: return Sig::Usr1;
+#endif
 		default: return Sig::Other;
 	}
 }
