@@ -567,6 +567,9 @@ constexpr const char* kCounterNames[] = {
     "gfp_mat_walk_ns",
     "gfp_mat_total_ns",
     "gfp_perm_search_ns",
+    "gfp_walk_tree_ns",
+    "gfp_walk_cf_ns",
+    "gfp_walk_slots_ns",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

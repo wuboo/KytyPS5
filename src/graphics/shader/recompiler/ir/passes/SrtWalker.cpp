@@ -1660,6 +1660,8 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 		using Walker = bool KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*,
 		    ResourcePlan::EvaluationContext::Entry*, uint64_t, size_t);
 		if (CpSampler::Pc::WalkActive().load(std::memory_order_relaxed)) CpSampler::Pc::Tally().jit_tree_calls++; // S439 DIAG
+		std::optional<FrameTiming::ScopedCounterNs> tree_timer; // S451: graphics only
+		if (m_program.stage != ShaderType::Compute) tree_timer.emplace(FrameTiming::Counter::GfpWalkTreeNs);
 		if (m_program.srt_code->getCode<Walker>()(m_runtime.user_data.data(), flat.data(),
 		                                          m_context.values.data(), m_context.generation,
 		                                          m_runtime.user_data.size())) {
@@ -1905,11 +1907,15 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	if (m_program.control_flow.empty()) {
 		active.clear();
 		flat.resize(m_program.srt_reads.size());
+		std::optional<FrameTiming::ScopedCounterNs> slots_timer; // S451
+		if (m_program.stage != ShaderType::Compute) slots_timer.emplace(FrameTiming::Counter::GfpWalkSlotsNs);
 		for (uint32_t slot = 0; slot < m_program.srt_reads.size(); ++slot) {
 			if (!refresh(slot)) return false;
 		}
 		return true;
 	}
+	std::optional<FrameTiming::ScopedCounterNs> cf_timer; // S451
+	if (m_program.stage != ShaderType::Compute) cf_timer.emplace(FrameTiming::Counter::GfpWalkCfNs);
 	auto& visited = m_program.visited_blocks;
 	auto& reachable = m_program.reachable_blocks;
 	auto& pending = m_program.pending_blocks;
@@ -1949,6 +1955,9 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 		ResetUnknowns();
 		if (m_clean_evaluator != nullptr) m_clean_evaluator->ResetUnknowns();
 	}
+	cf_timer.reset();
+	std::optional<FrameTiming::ScopedCounterNs> slots_timer; // S451
+	if (m_program.stage != ShaderType::Compute) slots_timer.emplace(FrameTiming::Counter::GfpWalkSlotsNs);
 	flat.assign(m_program.srt_reads.size(), 0u);
 	active.assign(m_program.descriptor_sources.size(), 1u);
 	for (const auto& block: m_program.control_flow)

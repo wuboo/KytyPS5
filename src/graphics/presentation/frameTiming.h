@@ -381,6 +381,8 @@ enum class Counter : uint32_t {
 	GfpMemoHitN, GfpMemoMissN, GfpMemoEntriesN, GfpMemoNeN,
 	// S451: inside FindPermutation: the SRT walk (RefreshFlatBuffer) / all of MaterializeResources (walk included) / the permutation search.
 	GfpMatWalkNs, GfpMatTotalNs, GfpPermSearchNs,
+	// S451: inside RefreshFlatBufferWalk: the tree JIT call / the control-flow reachability loop (block conditions) / the slot loops.
+	GfpWalkTreeNs, GfpWalkCfNs, GfpWalkSlotsNs,
 	Count,
 };
 
