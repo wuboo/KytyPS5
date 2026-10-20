@@ -1,6 +1,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 
 #include "graphics/host_gpu/renderer/pipeline/matMemoShadow.h"
+#include <mutex>
 #include "graphics/host_gpu/renderer/syncCensus.h"
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -1753,6 +1754,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping, bool pixel_active,
     std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info,
     bool single_sample) {
+	const std::lock_guard get_lock(m_get_mutex); // S454: scout worker shares SourceEntry with CP
 	const FrameTiming::ScopedCounterNs cost_timer(FrameTiming::Counter::GetGraphicsProgramsNs); // S433 (S441)
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
 	std::array<ShaderParams, 3> vertex_params;
@@ -1924,6 +1926,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs,
                                                const HW::ShaderRegisters&   sh,
                                                ShaderComputeInputInfo&      input_info) {
+	const std::lock_guard get_lock(m_get_mutex); // S454
 	const FrameTiming::ScopedCounterNs cost_timer(FrameTiming::Counter::GetComputeProgramNs); // S433 (S441)
 	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	const auto        params      = PrepareProgram(regs, sh, input_info);

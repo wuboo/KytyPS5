@@ -12,6 +12,7 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
+#include "graphics/guest_gpu/command_processor/cpScoutRuntime.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
@@ -98,6 +99,7 @@ void GuestGpu::Shutdown() {
 	if (m_thread.joinable()) {
 		m_thread.join();
 	}
+	CpScout::Shutdown();
 	m_shutdown_complete = true;
 }
 
@@ -630,6 +632,9 @@ bool GuestGpu::Process(Submission& submission) {
 	}
 
 	cp.BufferInit();
+	if (first_slice && submission.type == SubmissionType::Graphics) {
+		CpScout::Begin(cp, m_renderer.GetPipelineCache(), submission.commands);
+	}
 	bool complete = true;
 
 	switch (submission.type) {

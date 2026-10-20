@@ -391,6 +391,7 @@ enum class Counter : uint32_t {
 	GfpMemoSkipN, GfpMemoMissColdN, GfpMemoMissInputsN, GfpMemoMissReadsN,
 	// S451 DIAG: guest reads of the control-flow loop (calls, time in the reader).
 	GfpCfReadN, GfpCfReadNs,
+<<<<<<< HEAD
 	// S463 DIAG (KYTY_DIAG_CP_PHASES=1): sub-phases of the CP thread. Draw bind (self ns, inside cp_draw_bind): PrepareBindings loop / FindBuffers /
 	// PrepareBda / RebindImages / render-target rebind / RebindBuffers. Dispatch: GetComputeProgram+Pipeline / bind preparation / CommitBindings.
 	// Handler self ns and packet counts by opcode class: draw, SET_*_REG, NOP, WAIT_REG_MEM, dispatch, other.
@@ -406,6 +407,11 @@ enum class Counter : uint32_t {
 	// copy_depth_to_color, primitive_type, primitive_restart, native_fetch - and those the command itself declined (cmd reason, any).
 	IndirectHostPvStoreN, IndirectHostPvProtoN, IndirectHostMeshN, IndirectHostCopyDepthN, IndirectHostPrimTypeN, IndirectHostPrimRestartN,
 	IndirectHostNativeFetchN, IndirectHostCmdN,
+=======
+	// S454 (KYTY_CP_SCOUT): draws whose GetGraphicsPrograms came from the lookahead worker / CP had to
+	// compute itself / shadow: program ids differ (must be 0) / streams that stopped (WAIT_REG_MEM, multi-draw).
+	ScoutHitN, ScoutMissN, ScoutNeN, ScoutStopN,
+>>>>>>> df9edaff (cp: KYTY_CP_SCOUT lookahead computes GetGraphicsPrograms off the CP thread)
 	Count,
 };
 

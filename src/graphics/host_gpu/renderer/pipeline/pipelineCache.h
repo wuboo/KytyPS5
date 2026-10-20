@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <filesystem>
 #include <memory>
+#include <mutex>
 #include <span>
 #include <type_traits>
 #include <unordered_map>
@@ -181,6 +182,7 @@ private:
 	};
 
 	GraphicContext&               m_graphics;
+	std::mutex                    m_get_mutex; // S454: ProgramCache::Get mutates SourceEntry; scout + CP
 	std::unique_ptr<ProgramCache> m_program_cache;
 	vk::PipelineCache             m_driver_cache = nullptr;
 	std::filesystem::path         m_driver_cache_path;
