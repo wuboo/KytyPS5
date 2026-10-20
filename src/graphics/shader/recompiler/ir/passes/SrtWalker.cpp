@@ -23,6 +23,8 @@
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <mutex>
+#include <atomic>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -1675,6 +1677,40 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 	return walked;
 }
 
+// S451 DIAG (KYTY_DIAG_CF_DUMP=1): the expression of a block condition as an S-expression (at most `budget` nodes), to see what the reachability loop evaluates.
+static void DumpCondition(const ResourcePlan& program, Value value, std::string& out, int& budget, int depth = 0) {
+	value = value.Resolve();
+	if (value.IsImmediate()) {
+		char text[32];
+		if (value.GetType() == Type::U32) std::snprintf(text, sizeof(text), "%u", value.U32());
+		else if (value.GetType() == Type::U1) std::snprintf(text, sizeof(text), "%s", value.U1() ? "T" : "F");
+		else std::snprintf(text, sizeof(text), "imm");
+		out += text;
+		return;
+	}
+	const auto* inst = value.TryInstruction();
+	if (inst == nullptr) {
+		out += "?";
+		return;
+	}
+	if (--budget < 0 || depth > 12) {
+		out += "...";
+		return;
+	}
+	const auto op = inst->GetOpcode();
+	if (op == ValueOpcode::GetUserData) {
+		out += "u" + std::to_string(RegIndex(inst->Arg(0).ScalarRegister()) - program.user_data_base);
+		return;
+	}
+	out += "(" + std::string(ValueOpcodeName(op));
+	if (IsRawRead(program, *inst)) out += "@" + std::to_string(program.memory_info[inst->Flags<SrtReadFlags>().index].offset);
+	for (size_t i = 0; i < inst->NumArgs(); ++i) {
+		out += " ";
+		DumpCondition(program, inst->Arg(i), out, budget, depth + 1);
+	}
+	out += ")";
+}
+
 bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	const auto NoteTreeReject = [&](SrtTreeReject::Reason reason, const std::string& detail) { NoteTreeRejectFor(m_program.shader_hash, reason, detail); };
 	if (!m_program.srt_plan_complete) return false;
@@ -1942,6 +1978,31 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	}
 	std::optional<WalkProbe::Timer> cf_timer; // S451
 	const bool gfp_cf = m_program.stage != ShaderType::Compute;
+	if (gfp_cf) { // S451 DIAG
+		static const bool dump = std::getenv("KYTY_DIAG_CF_DUMP") != nullptr;
+		static std::atomic<uint32_t> plans {0};
+		static std::mutex seen_mutex;
+		static std::unordered_set<uint64_t> seen;
+		if (dump && m_program.control_flow.size() >= 8) {
+			bool first = false;
+			{
+				const std::lock_guard lock(seen_mutex);
+				first = seen.insert(m_program.shader_hash).second;
+			}
+			if (first && plans.fetch_add(1) < 10) {
+				uint32_t shown = 0;
+				std::printf("[cf-dump] plan=0x%016llx blocks=%zu\n", static_cast<unsigned long long>(m_program.shader_hash), m_program.control_flow.size());
+				for (size_t b = 0; b < m_program.control_flow.size() && shown < 6; ++b) {
+					if (m_program.control_flow[b].condition.IsEmpty()) continue;
+					std::string text;
+					int budget = 60;
+					DumpCondition(m_program, m_program.control_flow[b].condition, text, budget);
+					std::printf("[cf-dump]   b%zu: %s\n", b, text.c_str());
+					++shown;
+				}
+			}
+		}
+	}
 	const uint64_t cf_eval0 = t_eval_inst_calls, cf_rfl0 = t_rfl_calls;
 	uint64_t       cf_iter = 0, cf_cond = 0;
 	if (gfp_cf) cf_timer.emplace(WalkProbe::Id::WalkCfNs);
