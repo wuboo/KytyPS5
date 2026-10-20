@@ -1942,12 +1942,13 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	auto& reachable = m_program.reachable_blocks;
 	auto& pending = m_program.pending_blocks;
 	// S451 (KYTY_PROGS_MEMO): the loop is a function of the user data words and shader base it reads and of the guest words it reads (srtCfMemo.h).
-	// Not for plans that capture their reads (the capture would miss the skipped ones), under the NullDesc diag, or for a nested active mask.
+	// The replay goes through the runtime's own readers, so a capturing runtime (SrtReadCapture) records the replayed reads as the loop's would have been.
+	// Not for plans with retained call-source reads (the plan is edited in place), under the NullDesc diag, or for a nested active mask.
 	CfMemoMode cf_mode = CfMemoMode::Off;
 	if (gfp_cf) {
 		cf_mode = CfMemoModeFromEnv();
 		if (cf_mode != CfMemoMode::Off &&
-		    (!m_active_mask.IsEmpty() || m_program.capture_specialization_reads || !m_program.source_reads.empty() || NullDesc::Enabled())) {
+		    (!m_active_mask.IsEmpty() || !m_program.source_reads.empty() || NullDesc::Enabled())) {
 			FrameTiming::Add(FrameTiming::Counter::GfpMemoSkipN);
 			cf_mode = CfMemoMode::Off;
 		}
