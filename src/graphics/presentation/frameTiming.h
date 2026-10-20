@@ -379,6 +379,8 @@ enum class Counter : uint32_t {
 	// (must be 0).
 	GfpVsPrepNs, GfpPsPrepNs, GfpKeyNs, GfpRuntimeNs, GfpFindNs, GfpGetN, GfpGetHitN, GfpVsGetNs, GfpPsGetNs,
 	GfpMemoHitN, GfpMemoMissN, GfpMemoEntriesN, GfpMemoNeN,
+	// S451: inside FindPermutation: the SRT walk (RefreshFlatBuffer) / all of MaterializeResources (walk included) / the permutation search.
+	GfpMatWalkNs, GfpMatTotalNs, GfpPermSearchNs,
 	Count,
 };
 

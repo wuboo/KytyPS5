@@ -773,9 +773,14 @@ struct PipelineCache::ProgramCache {
 		                             uint32_t push_data_cursor) {
 			SpecShadowRun shadow;
 			if (SyncCensus::Enabled()) RunSpecShadowBefore(resource_plan, runtime, shadow); // S406: before the real reads drain
+			std::optional<FrameTiming::ScopedCounterNs> gfp_mat_timer; // S451 (graphics only; compute shares this function)
+			if (resource_plan.stage != ShaderType::Compute) gfp_mat_timer.emplace(FrameTiming::Counter::GfpMatTotalNs);
 			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
 			    resource_plan, runtime, resources, specialization));
+			gfp_mat_timer.reset();
 			KYTY_CP_SITE(ShPermSearch);
+			std::optional<FrameTiming::ScopedCounterNs> gfp_search_timer;
+			if (resource_plan.stage != ShaderType::Compute) gfp_search_timer.emplace(FrameTiming::Counter::GfpPermSearchNs);
 			Permutation* found = nullptr;
 			uint32_t     found_index = UINT32_MAX;
 			uint32_t     index = 0;
@@ -794,6 +799,7 @@ struct PipelineCache::ProgramCache {
 				found_index = here;
 				break;
 			}
+			gfp_search_timer.reset();
 			if (MatMemoEnabled()) NoteMatMemo(runtime, push_data_cursor, found_index);
 			if (shadow.active) {
 				SpecShadow::Outcome fresh;
