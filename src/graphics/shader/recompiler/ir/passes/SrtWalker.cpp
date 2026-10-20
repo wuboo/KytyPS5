@@ -1200,7 +1200,12 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 	return true;
 }
 
+// S451 DIAG: calls of EvaluateInst / of ReadFirstLane on this thread; the control-flow loop reports the difference.
+static thread_local uint64_t t_eval_inst_calls = 0;
+static thread_local uint64_t t_rfl_calls       = 0;
+
 bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result) {
+	++t_eval_inst_calls;
 	uint64_t   a       = 0;
 	uint64_t   b       = 0;
 	uint64_t   c       = 0;
@@ -1221,6 +1226,7 @@ bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result) {
 		case ValueOpcode::GetShaderBase: result = m_runtime.shader_base; return true;
 		case ValueOpcode::Phi: return EvaluatePhi(inst, result);
 		case ValueOpcode::ReadFirstLane: {
+			++t_rfl_calls;
 			if (!m_active_mask.IsEmpty() && inst.Arg(1).Resolve() == m_active_mask) {
 				return EvaluateWide(inst.Arg(0), result);
 			}
@@ -1917,7 +1923,10 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 		return true;
 	}
 	std::optional<FrameTiming::ScopedCounterNs> cf_timer; // S451
-	if (m_program.stage != ShaderType::Compute) cf_timer.emplace(FrameTiming::Counter::GfpWalkCfNs);
+	const bool gfp_cf = m_program.stage != ShaderType::Compute;
+	const uint64_t cf_eval0 = t_eval_inst_calls, cf_rfl0 = t_rfl_calls;
+	uint64_t       cf_iter = 0, cf_cond = 0;
+	if (gfp_cf) cf_timer.emplace(FrameTiming::Counter::GfpWalkCfNs);
 	auto& visited = m_program.visited_blocks;
 	auto& reachable = m_program.reachable_blocks;
 	auto& pending = m_program.pending_blocks;
@@ -1929,6 +1938,7 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 		m_clean_evaluator->m_reachable_blocks = &visited;
 	}
 	for (;;) {
+		++cf_iter;
 		reachable.assign(m_program.control_flow.size(), 0u);
 		pending.clear();
 		pending.push_back(0u);
@@ -1941,6 +1951,7 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 			uint32_t condition = 0;
 			auto& predicate = m_clean_evaluator != nullptr ? *m_clean_evaluator : *this;
 			SpecShadow::PurposeScope purpose(SpecShadow::Purpose::Cond); // S406
+			if (!block.condition.IsEmpty()) ++cf_cond;
 			if (!block.condition.IsEmpty() &&
 			    (m_runtime.read_specialization_memory != nullptr || !m_program.capture_specialization_reads) &&
 			    predicate.Evaluate(block.condition, condition)) {
@@ -1958,6 +1969,14 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 		if (m_clean_evaluator != nullptr) m_clean_evaluator->ResetUnknowns();
 	}
 	cf_timer.reset();
+	if (gfp_cf) {
+		FrameTiming::Add(FrameTiming::Counter::GfpCfWalkN);
+		FrameTiming::Add(FrameTiming::Counter::GfpCfIterN, cf_iter);
+		FrameTiming::Add(FrameTiming::Counter::GfpCfBlocksN, m_program.control_flow.size());
+		FrameTiming::Add(FrameTiming::Counter::GfpCfCondN, cf_cond);
+		FrameTiming::Add(FrameTiming::Counter::GfpCfEvalN, t_eval_inst_calls - cf_eval0);
+		FrameTiming::Add(FrameTiming::Counter::GfpCfRflN, t_rfl_calls - cf_rfl0);
+	}
 	std::optional<FrameTiming::ScopedCounterNs> slots_timer; // S451
 	if (m_program.stage != ShaderType::Compute) slots_timer.emplace(FrameTiming::Counter::GfpWalkSlotsNs);
 	flat.assign(m_program.srt_reads.size(), 0u);

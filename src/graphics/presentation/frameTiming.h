@@ -383,6 +383,9 @@ enum class Counter : uint32_t {
 	GfpMatWalkNs, GfpMatTotalNs, GfpPermSearchNs,
 	// S451: inside RefreshFlatBufferWalk: the tree JIT call / the control-flow reachability loop (block conditions) / the slot loops.
 	GfpWalkTreeNs, GfpWalkCfNs, GfpWalkSlotsNs,
+	// S451: the control-flow loop: walks that ran it / iterations of the reachability loop / blocks of the plan / conditions evaluated / EvaluateInst calls /
+	// of those ReadFirstLane (each builds two SrtWalker objects).
+	GfpCfWalkN, GfpCfIterN, GfpCfBlocksN, GfpCfCondN, GfpCfEvalN, GfpCfRflN,
 	Count,
 };
 
