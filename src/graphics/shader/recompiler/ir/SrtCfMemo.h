@@ -171,7 +171,7 @@ struct SrtCfMemo {
 // The memos of one plan. The user data words that decide the loop are mostly pointers, and a frame ring hands out a few of them in turn (three constant
 // buffers: the pointer of draw N is the one of draw N-3), so one memo per plan would miss every time; a few ways keep the recent ones.
 struct SrtCfMemoSet {
-	static constexpr uint32_t kWays = 8;
+	static constexpr uint32_t kWays = 256;
 
 	std::array<SrtCfMemo, kWays> ways;
 	uint32_t                     next = 0;
