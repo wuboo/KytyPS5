@@ -563,6 +563,27 @@ bool ReadShaderGuestMemory(void* userdata, uint64_t address, std::span<uint32_t>
 	return ok;
 }
 
+// S451 (KYTY_DIAG_GFP=1): the counters that split GetGraphicsPrograms (gfp_*_ns, gfp_walk_*, gfp_cf_*) are off unless asked for: each one costs a clock read
+// or an atomic add per shader lookup (about 1% of a 30 ms frame all together). The memo counters (gfp_memo_*) are always on.
+bool GfpDetail() {
+	static const bool on = [] {
+		const char* text = std::getenv("KYTY_DIAG_GFP");
+		return text != nullptr && text[0] == '1';
+	}();
+	return on;
+}
+
+// A timer that exists only with KYTY_DIAG_GFP=1.
+class GfpTimer {
+public:
+	explicit GfpTimer(FrameTiming::Counter counter) {
+		if (GfpDetail()) m_timer.emplace(counter);
+	}
+
+private:
+	std::optional<FrameTiming::ScopedCounterNs> m_timer;
+};
+
 // S425: counters of one MaterializeResources and, in shadow mode, the first 16 mismatches (hash, stage, flat slot).
 void NoteSrtMemo(const ShaderRecompiler::IR::ResourceSnapshot& snapshot, const ShaderReadContext& context, uint64_t hash,
                  ShaderType stage) {
@@ -774,13 +795,13 @@ struct PipelineCache::ProgramCache {
 		                             uint32_t push_data_cursor) {
 			SpecShadowRun shadow;
 			if (SyncCensus::Enabled()) RunSpecShadowBefore(resource_plan, runtime, shadow); // S406: before the real reads drain
-			std::optional<FrameTiming::ScopedCounterNs> gfp_mat_timer; // S451 (graphics only; compute shares this function)
+			std::optional<GfpTimer> gfp_mat_timer; // S451 (graphics only; compute shares this function)
 			if (resource_plan.stage != ShaderType::Compute) gfp_mat_timer.emplace(FrameTiming::Counter::GfpMatTotalNs);
 			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
 			    resource_plan, runtime, resources, specialization));
 			gfp_mat_timer.reset();
 			KYTY_CP_SITE(ShPermSearch);
-			std::optional<FrameTiming::ScopedCounterNs> gfp_search_timer;
+			std::optional<GfpTimer> gfp_search_timer;
 			if (resource_plan.stage != ShaderType::Compute) gfp_search_timer.emplace(FrameTiming::Counter::GfpPermSearchNs);
 			Permutation* found = nullptr;
 			uint32_t     found_index = UINT32_MAX;
@@ -1235,9 +1256,9 @@ struct PipelineCache::ProgramCache {
 
 		// S451: graphics stages only (the compute path shares this function).
 		constexpr bool graphics_stage = !std::is_same_v<InputInfo, ShaderComputeInputInfo>;
-		std::optional<FrameTiming::ScopedCounterNs> gfp_get_timer;
+		std::optional<GfpTimer> gfp_get_timer;
 		if constexpr (graphics_stage) {
-			FrameTiming::Add(FrameTiming::Counter::GfpGetN);
+			if (GfpDetail()) FrameTiming::Add(FrameTiming::Counter::GfpGetN);
 			gfp_get_timer.emplace(std::is_same_v<InputInfo, ShaderPixelInputInfo> ? FrameTiming::Counter::GfpPsGetNs : FrameTiming::Counter::GfpVsGetNs);
 		}
 		InitDisk();
@@ -1248,7 +1269,7 @@ struct PipelineCache::ProgramCache {
 		lookup_key.code_size       = static_cast<uint32_t>(params.code.size());
 		std::optional<CpSampler::SiteScope> static_key_site;
 		if (CpSampler::Active().load(std::memory_order_relaxed)) static_key_site.emplace(CpSampler::SiteId(CpSampler::Site::ShStaticKeyFind));
-		std::optional<FrameTiming::ScopedCounterNs> gfp_key_timer;
+		std::optional<GfpTimer> gfp_key_timer;
 		if constexpr (graphics_stage) gfp_key_timer.emplace(FrameTiming::Counter::GfpKeyNs);
 		BuildStageStaticKey(input_info, lookup_key.static_state);
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
@@ -1266,7 +1287,7 @@ struct PipelineCache::ProgramCache {
 		// (keyed by the plan address) is off for them.
 		ShaderReadContext                            read_context {
 		    .mode = (entry != programs.end() && entry->second.call_source) ? ShaderRecompiler::IR::SrtFastMode::Off : SrtFast::Mode()};
-		std::optional<FrameTiming::ScopedCounterNs> gfp_runtime_timer;
+		std::optional<GfpTimer> gfp_runtime_timer;
 		if constexpr (graphics_stage) gfp_runtime_timer.emplace(FrameTiming::Counter::GfpRuntimeNs);
 		ShaderRecompiler::IR::SrtRuntime             runtime {
 		    .user_data                  = user_data,
@@ -1289,7 +1310,7 @@ struct PipelineCache::ProgramCache {
 		if (entry != programs.end()) {
 			auto& cached = entry->second;
 			Permutation* permutation = nullptr;
-			std::optional<FrameTiming::ScopedCounterNs> gfp_find_timer;
+			std::optional<GfpTimer> gfp_find_timer;
 			if constexpr (graphics_stage) gfp_find_timer.emplace(FrameTiming::Counter::GfpFindNs);
 			if (cached.call_source) {
 				{
@@ -1303,7 +1324,7 @@ struct PipelineCache::ProgramCache {
 			}
 			gfp_find_timer.reset();
 			if (permutation != nullptr) {
-				if constexpr (graphics_stage) FrameTiming::Add(FrameTiming::Counter::GfpGetHitN);
+				if constexpr (graphics_stage) { if (GfpDetail()) FrameTiming::Add(FrameTiming::Counter::GfpGetHitN); }
 				KYTY_CP_SITE(ShProgramsRest);
 				input_info.stage = {.program = &permutation->program, .resources = &entry->second.resources};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
@@ -1530,6 +1551,8 @@ void WalkProbeAdd(ShaderRecompiler::IR::WalkProbe::Id id, uint64_t value) {
 	    C::GfpMemoHitN, C::GfpMemoMissN, C::GfpMemoNeN, C::GfpMemoSkipN, C::GfpMemoMissColdN, C::GfpMemoMissInputsN, C::GfpMemoMissReadsN,
 	};
 	static_assert(std::size(map) == static_cast<size_t>(Id::Count), "WalkProbe::Id out of step with the FrameTiming counters");
+	// the timers and eval counters (everything before the memo counters) only with KYTY_DIAG_GFP=1
+	if (id < Id::MemoHitN && !GfpDetail()) return;
 	FrameTiming::Add(map[static_cast<size_t>(id)], value);
 }
 
@@ -1537,7 +1560,7 @@ void WalkProbeAdd(ShaderRecompiler::IR::WalkProbe::Id id, uint64_t value) {
 
 PipelineCache::PipelineCache(GraphicContext& graphics)
     : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics)) {
-	ShaderRecompiler::IR::WalkProbe::Hook() = {.add = WalkProbeAdd, .now_ns = &FrameTiming::SteadyNowNs}; // S451
+	ShaderRecompiler::IR::WalkProbe::Hook() = {.add = WalkProbeAdd, .now_ns = GfpDetail() ? &FrameTiming::SteadyNowNs : nullptr}; // S451
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	// S408: stale reads of the condition word are only allowed with a verification of the used bytes after GPU-done (plan-chainA 1b),
 	// which is not built. Not a silent 0.
@@ -1734,7 +1757,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
 	std::array<ShaderParams, 3> vertex_params;
 	{
-		const FrameTiming::ScopedCounterNs prep_timer(FrameTiming::Counter::GfpVsPrepNs); // S451
+		const GfpTimer prep_timer(FrameTiming::Counter::GfpVsPrepNs); // S451
 		if (tess_active) {
 			vertex_params = PrepareTessellationPrograms(vertex_regs, context, vertex_info);
 		} else {
@@ -1803,7 +1826,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	ShaderParams pixel_params;
 	if (pixel_active) {
 		{
-			const FrameTiming::ScopedCounterNs prep_timer(FrameTiming::Counter::GfpPsPrepNs); // S451
+			const GfpTimer prep_timer(FrameTiming::Counter::GfpPsPrepNs); // S451
 			pixel_params = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
 		}
 		pixel_info.object_primitive_id = object_primitive_id;

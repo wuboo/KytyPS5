@@ -2104,7 +2104,7 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	const uint64_t cf_eval0 = t_eval_inst_calls, cf_rfl0 = t_rfl_calls;
 	uint64_t       cf_iter = 0, cf_cond = 0;
 	if (gfp_cf) cf_timer.emplace(WalkProbe::Id::WalkCfNs);
-	t_cf_timing = gfp_cf;
+	t_cf_timing = gfp_cf && WalkProbe::Hook().now_ns != nullptr;
 	auto& visited = m_program.visited_blocks;
 	auto& reachable = m_program.reachable_blocks;
 	auto& pending = m_program.pending_blocks;
