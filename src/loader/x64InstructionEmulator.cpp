@@ -13,8 +13,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#if !defined(_WIN32)
 #include <fcntl.h>
 #include <unistd.h>
+#endif
 #include <vector>
 #include <emmintrin.h>
 #include <xmmintrin.h>
@@ -899,7 +901,9 @@ const std::vector<uint64_t>& WideStoreHotSites() {
 		}
 		std::sort(result.begin(), result.end());
 		result.erase(std::unique(result.begin(), result.end()), result.end());
+#if !defined(_WIN32) // the hot-site profile is written only where open()/write() exist; Windows keeps fd -1 (no recording)
 		g_wide_store_hot_fd = open(path, O_WRONLY | O_APPEND | O_CREAT, 0644);
+#endif
 		return result;
 	}();
 	return sites;
@@ -923,7 +927,9 @@ void RecordHotWideStore(uint64_t site) {
 		buffer[length++] = "0123456789abcdef"[(site >> shift) & 0xfu];
 	}
 	buffer[length++] = '\n';
+#if !defined(_WIN32)
 	(void)!write(g_wide_store_hot_fd, buffer, static_cast<size_t>(length));
+#endif
 }
 constexpr uint64_t                               WideStoreTrapCapacity = 1u << 15u;
 std::array<WideStoreTrap, WideStoreTrapCapacity> g_wide_store_traps {};
