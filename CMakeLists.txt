@@ -905,6 +905,31 @@ foreach(mutant IN ITEMS ADDR_ONLY NO_FAILED PAGE_ANY IGNORES_PLAN IGNORES_INDIRE
 	target_compile_definitions(srt_memo_mutant_${mutant_lower}_tests PRIVATE KYTY_SRTMEMO_MUTANT_${mutant}=1)
 endforeach()
 
+# S451 (KYTY_PROGS_MEMO): the memo of the reachability loop. srt_cf_memo_tests: the key and the ways (header only); resource_materialization tests: the walker
+# skips the loop exactly when the memo says. Mutants (each must be caught, WILL_FAIL): the user data words / the shader base / the guest words are not compared;
+# failed reads are not recorded (srt_cf_memo only).
+add_executable(srt_cf_memo_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SrtCfMemoTests.cpp")
+target_include_directories(srt_cf_memo_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS NO_FAILED IGNORES_BASE ADDR_ONLY IGNORES_USERDATA)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(srt_cf_memo_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SrtCfMemoTests.cpp")
+	target_include_directories(srt_cf_memo_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(srt_cf_memo_mutant_${mutant_lower}_tests PRIVATE KYTY_CFMEMO_MUTANT_${mutant}=1)
+endforeach()
+foreach(mutant IN ITEMS ADDR_ONLY IGNORES_USERDATA)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(srt_cf_memo_walker_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/ResourceMaterializationTests.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
+	)
+	target_link_libraries(srt_cf_memo_walker_mutant_${mutant_lower}_tests fmt::fmt xbyak::xbyak)
+	target_include_directories(srt_cf_memo_walker_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(srt_cf_memo_walker_mutant_${mutant_lower}_tests PRIVATE KYTY_CFMEMO_MUTANT_${mutant}=1)
+endforeach()
+
 add_executable(env_audit_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/EnvAuditTests.cpp"
 )
@@ -1724,6 +1749,15 @@ if(BUILD_TESTING)
 	add_test(NAME pad_script_parser COMMAND $<TARGET_FILE:pad_script_parser_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
+	add_test(NAME srt_cf_memo COMMAND $<TARGET_FILE:srt_cf_memo_tests>)
+	foreach(mutant IN ITEMS no_failed ignores_base addr_only ignores_userdata)
+		add_test(NAME srt_cf_memo_mutant_${mutant} COMMAND $<TARGET_FILE:srt_cf_memo_mutant_${mutant}_tests>)
+		set_tests_properties(srt_cf_memo_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	foreach(mutant IN ITEMS addr_only ignores_userdata)
+		add_test(NAME srt_cf_memo_walker_mutant_${mutant} COMMAND $<TARGET_FILE:srt_cf_memo_walker_mutant_${mutant}_tests>)
+		set_tests_properties(srt_cf_memo_walker_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME env_audit COMMAND $<TARGET_FILE:env_audit_tests>)
 	add_test(NAME env_audit_mutant COMMAND $<TARGET_FILE:env_audit_mutant_tests>)
 	add_test(NAME env_source_scan COMMAND $<TARGET_FILE:env_source_scan_tests>)
@@ -2226,6 +2260,8 @@ if(BUILD_TESTING)
 		add_dependencies(kyty_tests gpu_keepwarm_mutant_${mutant}_tests)
 	endforeach()
 	add_dependencies(kyty_tests pv_layout_fast_tests pv_layout_fast_mutant_drop_attr_tests pv_layout_fast_mutant_clip_ignored_tests pv_layout_fast_mutant_keep_builtin_vars_tests pv_layout_fast_mutant_no_output_filter_tests pv_layout_fast_mutant_no_ambiguity_check_tests pv_layout_fast_mutant_fast_skips_validate_tests)
+	add_dependencies(kyty_tests srt_cf_memo_tests srt_cf_memo_mutant_no_failed_tests srt_cf_memo_mutant_ignores_base_tests srt_cf_memo_mutant_addr_only_tests srt_cf_memo_mutant_ignores_userdata_tests
+		srt_cf_memo_walker_mutant_addr_only_tests srt_cf_memo_walker_mutant_ignores_userdata_tests)
 	add_dependencies(kyty_tests indirect_gpu_tests indirect_gpu_mutant_IGNORE_PV_tests indirect_gpu_mutant_DEFAULT_OFF_tests sync_census_tests dcc_known_tests eager_pages_tests eager_pages_mutant_one_page_tests)
 	add_dependencies(kyty_tests rfop_diag_tests rfop_diag_mutant_no_opcode_tests rfop_diag_mutant_no_site_tests
 	                 rfop_diag_mutant_walk_no_grow_tests cp_wait_diag_tests cp_wait_diag_mutant_no_cause_tests)

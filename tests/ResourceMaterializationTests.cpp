@@ -1,5 +1,6 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+#include "graphics/shader/recompiler/ir/passes/walkProbe.h"
 #include "kernel/srtReadPass.h"
 
 #include <algorithm>
@@ -1824,6 +1825,146 @@ void TestSrtMemoKey() {
 }
 
 // S425: the quiet page rule of the pass includes the S419 in-flight window.
+// S451 KYTY_PROGS_MEMO: the reachability loop is skipped exactly when the user data words it read, the shader base and every guest word it read are unchanged.
+struct CfProbe {
+  uint32_t hit = 0, miss = 0, ne = 0;
+};
+CfProbe g_cf_probe;
+
+void CountCfProbe(Libs::Graphics::ShaderRecompiler::IR::WalkProbe::Id id, uint64_t value) {
+  using Id = Libs::Graphics::ShaderRecompiler::IR::WalkProbe::Id;
+  if (id == Id::MemoHitN) g_cf_probe.hit += static_cast<uint32_t>(value);
+  if (id == Id::MemoMissN) g_cf_probe.miss += static_cast<uint32_t>(value);
+  if (id == Id::MemoNeN) g_cf_probe.ne += static_cast<uint32_t>(value);
+}
+
+void TestProgsMemo() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  using Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind;
+  const auto pointer_words = [](const void *pointer) {
+    const auto address = reinterpret_cast<uint64_t>(pointer);
+    return std::array<uint32_t, 2>{static_cast<uint32_t>(address) | 3u,
+                                  static_cast<uint32_t>(address >> 32u) | 0xabcd0000u};
+  };
+  // A table whose DWORD 3 decides the branch; DWORDs 4 and 5 are what the two arms read.
+  std::array<uint32_t, 8> table_a{0u, 0u, 0u, 1u, 0xa4u, 0xa5u};
+  std::array<uint32_t, 8> table_b{0u, 0u, 0u, 1u, 0xb4u, 0xb5u};
+  std::array<uint32_t, 8> table_c{0u, 0u, 0u, 0u, 0xc4u, 0xc5u};
+  const auto words_a = pointer_words(table_a.data());
+  const auto words_b = pointer_words(table_b.data());
+  const auto words_c = pointer_words(table_c.data());
+
+  Program program;
+  program.stage = Libs::Graphics::ShaderType::Pixel;
+  program.user_data_base = 4;
+  program.user_data_count = 6;
+  program.srt_plan_complete = program.resource_tracking_complete = true;
+  program.memory_info.push_back({.kind = ResourceKind::ScalarAddress});
+  auto &entry = AddValueBlock(program);
+  const auto emit = [](Block &block, ValueOpcode opcode, std::initializer_list<Value> args) {
+    return Value(&block.AppendNewInst(opcode, args));
+  };
+  // User data registers 4,5 (words 0,1) hold the table; the other words are never read.
+  const auto low = emit(entry, ValueOpcode::GetUserData, {Value(ScalarReg(4))});
+  const auto high = emit(entry, ValueOpcode::GetUserData, {Value(ScalarReg(5))});
+  const auto handle = emit(entry, ValueOpcode::GetAddressResource, {low, high});
+  const auto load = [&](Block &block, uint32_t offset) {
+    const auto value = emit(block, ValueOpcode::LoadAddressU32,
+                            {handle, Value(offset), Value(0u), Value(true)});
+    value.Instruction()->SetFlags(MemoryFlags{.index = 0});
+    return value;
+  };
+  const auto srt = emit(entry, ValueOpcode::GetSrtResource, {});
+  auto &true_arm = AddValueBlock(program);
+  auto &false_arm = AddValueBlock(program);
+  program.srt_reads.push_back({load(entry, 16u), 0u});
+  program.srt_reads.push_back({load(entry, 20u), 1u});
+  emit(true_arm, ValueOpcode::ReadConst, {srt, Value(0u)});
+  emit(false_arm, ValueOpcode::ReadConst, {srt, Value(1u)});
+  entry.condition = emit(entry, ValueOpcode::INotEqual32, {load(entry, 12u), Value(0u)});
+  entry.terminator.kind = TerminatorKind::ConditionalBranch;
+  entry.terminator.true_block = &true_arm;
+  entry.terminator.false_block = &false_arm;
+  true_arm.terminator.kind = TerminatorKind::Return;
+  false_arm.terminator.kind = TerminatorKind::Return;
+  auto plan = ExtractResourcePlan(program);
+  Check(plan.control_flow.size() == 3, "memo: the plan has no control flow");
+
+  WalkProbe::Hook() = {.add = CountCfProbe, .now_ns = nullptr};
+  const auto walk = [&](std::array<uint32_t, 8> &user_data, std::vector<uint32_t> &flat) {
+    SrtRuntime runtime{.user_data = std::span<const uint32_t>(user_data).first(6),
+                       .read_specialization_memory = +[](void *, uint64_t address, std::span<uint32_t> out) {
+                         std::memcpy(out.data(), reinterpret_cast<const void *>(address), out.size_bytes());
+                         return true;
+                       }};
+    ResourceSnapshot snapshot;
+    ResourceSpecialization specialization;
+    Check(MaterializeResources(plan, runtime, snapshot, specialization), "memo: walk failed");
+    flat = snapshot.flattened_srt;
+  };
+  std::array<uint32_t, 8> user_a{words_a[0], words_a[1], 0u, 0u, 1u, 2u};
+  std::array<uint32_t, 8> user_b{words_b[0], words_b[1], 0u, 0u, 1u, 2u};
+  std::array<uint32_t, 8> user_c{words_c[0], words_c[1], 0u, 0u, 1u, 2u};
+  std::vector<uint32_t> flat;
+  const auto taken = [&](uint32_t value, const char *text) { Check(flat.size() == 2 && (flat[0] == value || flat[1] == value), text); };
+
+  // Off: no memo is looked at.
+  CfMemoModeTestOverride() = CfMemoMode::Off;
+  g_cf_probe = {};
+  walk(user_a, flat);
+  walk(user_a, flat);
+  Check(g_cf_probe.hit == 0 && g_cf_probe.miss == 0, "memo: off looked at the memo");
+  taken(0xa4u, "memo: off took the wrong arm");
+
+  CfMemoModeTestOverride() = CfMemoMode::On;
+  g_cf_probe = {};
+  walk(user_a, flat);
+  Check(g_cf_probe.hit == 0 && g_cf_probe.miss == 1, "memo: first walk was not a recorded miss");
+  taken(0xa4u, "memo: first walk took the wrong arm");
+  walk(user_a, flat);
+  Check(g_cf_probe.hit == 1, "memo: unchanged inputs did not hit");
+  taken(0xa4u, "memo: hit took the wrong arm");
+
+  // A user data word nobody read changed: still a hit.
+  user_a[4] = 77u;
+  walk(user_a, flat);
+  Check(g_cf_probe.hit == 2, "memo: an unread user data word broke the hit");
+
+  // The word under a recorded read changed so that the branch flips: a miss, and the other arm is taken.
+  table_a[3] = 0u;
+  walk(user_a, flat);
+  Check(g_cf_probe.hit == 2 && g_cf_probe.miss == 2, "memo: a changed guest word hit");
+  taken(0xa5u, "memo: a changed guest word was answered from the memo");
+  table_a[3] = 1u;
+
+  // Three tables in turn (a frame ring): the user data word that was read differs, so each is a miss the first time and a hit afterwards; a table that
+  // decides the other way is never answered from another table's memo.
+  walk(user_a, flat);
+  taken(0xa4u, "memo: the first table took the wrong arm");
+  walk(user_b, flat);
+  taken(0xb4u, "memo: the second table took the wrong arm");
+  walk(user_c, flat);
+  taken(0xc5u, "memo: a table with the other branch was answered from another table's memo");
+  const auto misses = g_cf_probe.miss;
+  const auto hits = g_cf_probe.hit;
+  walk(user_a, flat);
+  walk(user_b, flat);
+  walk(user_c, flat);
+  Check(g_cf_probe.miss == misses && g_cf_probe.hit == hits + 3, "memo: the ways did not keep three tables");
+  taken(0xc5u, "memo: ring hit took the wrong arm");
+
+  // Shadow: the loop runs, the memo's answer is compared with it and must agree.
+  CfMemoModeTestOverride() = CfMemoMode::Shadow;
+  g_cf_probe = {};
+  walk(user_a, flat);
+  walk(user_a, flat);
+  walk(user_c, flat);
+  Check(g_cf_probe.hit >= 2 && g_cf_probe.ne == 0, "memo: shadow disagreed on unchanged inputs");
+  taken(0xc5u, "memo: shadow took the wrong arm");
+  CfMemoModeTestOverride().reset();
+  WalkProbe::Hook() = {};
+}
+
 void TestSrtPageQuiet() {
   using Libs::LibKernel::Memory::SrtPageQuiet;
   Check(SrtPageQuiet(false, false), "pass: a clean page was not quiet");
@@ -1862,6 +2003,7 @@ int main() {
   TestSrtFastMemoVectorRead();
   TestSrtMemoKey();
   TestSrtPageQuiet();
+  TestProgsMemo();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }

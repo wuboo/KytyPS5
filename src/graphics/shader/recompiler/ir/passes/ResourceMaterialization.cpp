@@ -6,7 +6,7 @@
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
 #include <optional>
 #include "graphics/presentation/cpSampler.h"
-#include "graphics/presentation/frameTiming.h"
+#include "graphics/shader/recompiler/ir/passes/walkProbe.h"
 #include "graphics/presentation/cpPcSampler.h"
 #include "graphics/shader/nullDescDiag.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -1668,8 +1668,8 @@ bool MaterializeResourcesWalk(const ResourcePlan& program, const SrtRuntime& run
 	bool walked;
 	{
 		KYTY_CP_SITE(ShWalk);
-		std::optional<FrameTiming::ScopedCounterNs> walk_timer; // S451: graphics only
-		if (program.stage != ShaderType::Compute) walk_timer.emplace(FrameTiming::Counter::GfpMatWalkNs);
+		std::optional<WalkProbe::Timer> walk_timer; // S451: graphics only
+		if (program.stage != ShaderType::Compute) walk_timer.emplace(WalkProbe::Id::MatWalkNs);
 		walked = walker.RefreshFlatBuffer(snapshot.flattened_srt);
 		if (CpSampler::Pc::WalkActive().load(std::memory_order_relaxed)) CpSampler::Pc::EndWalk(); // S439 DIAG
 	}

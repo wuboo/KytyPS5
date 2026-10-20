@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -30,6 +31,17 @@ inline CfMemoMode ParseCfMemoMode(const char* text) {
 inline CfMemoMode CfMemoModeFromEnv() {
 	static const CfMemoMode mode = ParseCfMemoMode(std::getenv("KYTY_PROGS_MEMO"));
 	return mode;
+}
+
+// Tests set a mode without the environment.
+inline std::optional<CfMemoMode>& CfMemoModeTestOverride() {
+	static std::optional<CfMemoMode> mode;
+	return mode;
+}
+
+inline CfMemoMode CfMemoModeCurrent() {
+	if (const auto& forced = CfMemoModeTestOverride()) return *forced;
+	return CfMemoModeFromEnv();
 }
 
 // A guest read as the loop issued it: through which reader (null = the direct host copy of the main walker, else the function), the address, and the answer.

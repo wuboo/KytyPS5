@@ -5,7 +5,7 @@
 #include "graphics/shader/recompiler/ir/passes/srtTreeReject.h"
 #include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
 #include "graphics/presentation/cpPcSampler.h"
-#include "graphics/presentation/frameTiming.h"
+#include "graphics/shader/recompiler/ir/passes/walkProbe.h"
 #include "graphics/shader/recompiler/ir/SrtCfMemo.h"
 #include <optional>
 
@@ -1190,11 +1190,11 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		return true;
 	}
 	if (reader != nullptr) {
-		const int64_t read_t0 = t_cf_timing ? FrameTiming::SteadyNowNs() : 0;
+		const int64_t read_t0 = t_cf_timing ? WalkProbe::Now() : 0;
 		const bool read_ok = reader(m_runtime.userdata, address, {&word, 1});
 		if (t_cf_timing) { // S451 DIAG
-			FrameTiming::Add(FrameTiming::Counter::GfpCfReadN);
-			FrameTiming::Add(FrameTiming::Counter::GfpCfReadNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - read_t0));
+			WalkProbe::Add(WalkProbe::Id::CfReadN);
+			WalkProbe::Add(WalkProbe::Id::CfReadNs, static_cast<uint64_t>(WalkProbe::Now() - read_t0));
 		}
 		if (t_cf_rec != nullptr) t_cf_rec->NoteRead(reader, address, word, read_ok); // S451
 		if (!read_ok) {
@@ -1686,8 +1686,8 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 		using Walker = bool KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*,
 		    ResourcePlan::EvaluationContext::Entry*, uint64_t, size_t);
 		if (CpSampler::Pc::WalkActive().load(std::memory_order_relaxed)) CpSampler::Pc::Tally().jit_tree_calls++; // S439 DIAG
-		std::optional<FrameTiming::ScopedCounterNs> tree_timer; // S451: graphics only
-		if (m_program.stage != ShaderType::Compute) tree_timer.emplace(FrameTiming::Counter::GfpWalkTreeNs);
+		std::optional<WalkProbe::Timer> tree_timer; // S451: graphics only
+		if (m_program.stage != ShaderType::Compute) tree_timer.emplace(WalkProbe::Id::WalkTreeNs);
 		if (m_program.srt_code->getCode<Walker>()(m_runtime.user_data.data(), flat.data(),
 		                                          m_context.values.data(), m_context.generation,
 		                                          m_runtime.user_data.size())) {
@@ -1933,18 +1933,18 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	if (m_program.control_flow.empty()) {
 		active.clear();
 		flat.resize(m_program.srt_reads.size());
-		std::optional<FrameTiming::ScopedCounterNs> slots_timer; // S451
-		if (m_program.stage != ShaderType::Compute) slots_timer.emplace(FrameTiming::Counter::GfpWalkSlotsNs);
+		std::optional<WalkProbe::Timer> slots_timer; // S451
+		if (m_program.stage != ShaderType::Compute) slots_timer.emplace(WalkProbe::Id::WalkSlotsNs);
 		for (uint32_t slot = 0; slot < m_program.srt_reads.size(); ++slot) {
 			if (!refresh(slot)) return false;
 		}
 		return true;
 	}
-	std::optional<FrameTiming::ScopedCounterNs> cf_timer; // S451
+	std::optional<WalkProbe::Timer> cf_timer; // S451
 	const bool gfp_cf = m_program.stage != ShaderType::Compute;
 	const uint64_t cf_eval0 = t_eval_inst_calls, cf_rfl0 = t_rfl_calls;
 	uint64_t       cf_iter = 0, cf_cond = 0;
-	if (gfp_cf) cf_timer.emplace(FrameTiming::Counter::GfpWalkCfNs);
+	if (gfp_cf) cf_timer.emplace(WalkProbe::Id::WalkCfNs);
 	t_cf_timing = gfp_cf;
 	auto& visited = m_program.visited_blocks;
 	auto& reachable = m_program.reachable_blocks;
@@ -1954,10 +1954,10 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	// Not for plans with retained call-source reads (the plan is edited in place), under the NullDesc diag, or for a nested active mask.
 	CfMemoMode cf_mode = CfMemoMode::Off;
 	if (gfp_cf) {
-		cf_mode = CfMemoModeFromEnv();
+		cf_mode = CfMemoModeCurrent();
 		if (cf_mode != CfMemoMode::Off &&
 		    (!m_active_mask.IsEmpty() || !m_program.source_reads.empty() || NullDesc::Enabled())) {
-			FrameTiming::Add(FrameTiming::Counter::GfpMemoSkipN);
+			WalkProbe::Add(WalkProbe::Id::MemoSkipN);
 			cf_mode = CfMemoMode::Off;
 		}
 	}
@@ -1972,9 +1972,9 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 			cf_way = cf_set.Find(m_runtime.user_data, m_runtime.shader_base, m_runtime.read_memory, m_runtime.read_specialization_memory, m_runtime.userdata, &why);
 			if (cf_way != nullptr && cf_way->visited.size() != m_program.control_flow.size()) cf_way = nullptr;
 			if (cf_way == nullptr) // S451 DIAG
-				FrameTiming::Add(why == 2 ? FrameTiming::Counter::GfpMemoMissReadsN : (why == 1 ? FrameTiming::Counter::GfpMemoMissInputsN : FrameTiming::Counter::GfpMemoMissColdN));
+				WalkProbe::Add(why == 2 ? WalkProbe::Id::MemoMissReadsN : (why == 1 ? WalkProbe::Id::MemoMissInputsN : WalkProbe::Id::MemoMissColdN));
 		}
-		FrameTiming::Add(cf_way != nullptr ? FrameTiming::Counter::GfpMemoHitN : FrameTiming::Counter::GfpMemoMissN);
+		WalkProbe::Add(cf_way != nullptr ? WalkProbe::Id::MemoHitN : WalkProbe::Id::MemoMissN);
 	}
 	const bool cf_hit  = cf_way != nullptr;
 	const bool cf_skip = cf_hit && cf_mode == CfMemoMode::On;
@@ -2030,21 +2030,21 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 		if (cf_mode != CfMemoMode::Off) {
 			t_cf_rec = nullptr;
 			cf_rec->End(visited);
-			if (cf_hit && cf_expect != visited) FrameTiming::Add(FrameTiming::Counter::GfpMemoNeN); // shadow: the memo's answer differs (must be 0)
+			if (cf_hit && cf_expect != visited) WalkProbe::Add(WalkProbe::Id::MemoNeN); // shadow: the memo's answer differs (must be 0)
 		}
 	}
 	t_cf_timing = false;
 	cf_timer.reset();
 	if (gfp_cf) {
-		FrameTiming::Add(FrameTiming::Counter::GfpCfWalkN);
-		FrameTiming::Add(FrameTiming::Counter::GfpCfIterN, cf_iter);
-		FrameTiming::Add(FrameTiming::Counter::GfpCfBlocksN, m_program.control_flow.size());
-		FrameTiming::Add(FrameTiming::Counter::GfpCfCondN, cf_cond);
-		FrameTiming::Add(FrameTiming::Counter::GfpCfEvalN, t_eval_inst_calls - cf_eval0);
-		FrameTiming::Add(FrameTiming::Counter::GfpCfRflN, t_rfl_calls - cf_rfl0);
+		WalkProbe::Add(WalkProbe::Id::CfWalkN);
+		WalkProbe::Add(WalkProbe::Id::CfIterN, cf_iter);
+		WalkProbe::Add(WalkProbe::Id::CfBlocksN, m_program.control_flow.size());
+		WalkProbe::Add(WalkProbe::Id::CfCondN, cf_cond);
+		WalkProbe::Add(WalkProbe::Id::CfEvalN, t_eval_inst_calls - cf_eval0);
+		WalkProbe::Add(WalkProbe::Id::CfRflN, t_rfl_calls - cf_rfl0);
 	}
-	std::optional<FrameTiming::ScopedCounterNs> slots_timer; // S451
-	if (m_program.stage != ShaderType::Compute) slots_timer.emplace(FrameTiming::Counter::GfpWalkSlotsNs);
+	std::optional<WalkProbe::Timer> slots_timer; // S451
+	if (m_program.stage != ShaderType::Compute) slots_timer.emplace(WalkProbe::Id::WalkSlotsNs);
 	flat.assign(m_program.srt_reads.size(), 0u);
 	active.assign(m_program.descriptor_sources.size(), 1u);
 	for (const auto& block: m_program.control_flow)

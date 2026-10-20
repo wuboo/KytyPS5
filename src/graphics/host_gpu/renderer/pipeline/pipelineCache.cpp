@@ -62,6 +62,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include "graphics/shader/recompiler/ir/passes/walkProbe.h"
 #include <span>
 #include <unordered_set>
 #include <spirv-tools/libspirv.hpp>
@@ -1517,8 +1518,26 @@ struct PipelineCache::ProgramCache {
 	uint64_t                                                    next_shader_id = 0;
 };
 
+namespace {
+
+// S451: the counters of the SRT walk (walkProbe.h) land in frames.csv.
+void WalkProbeAdd(ShaderRecompiler::IR::WalkProbe::Id id, uint64_t value) {
+	using Id = ShaderRecompiler::IR::WalkProbe::Id;
+	using C  = FrameTiming::Counter;
+	static constexpr C map[] = {
+	    C::GfpMatWalkNs, C::GfpWalkTreeNs, C::GfpWalkCfNs, C::GfpWalkSlotsNs,
+	    C::GfpCfWalkN, C::GfpCfIterN, C::GfpCfBlocksN, C::GfpCfCondN, C::GfpCfEvalN, C::GfpCfRflN, C::GfpCfReadN, C::GfpCfReadNs,
+	    C::GfpMemoHitN, C::GfpMemoMissN, C::GfpMemoNeN, C::GfpMemoSkipN, C::GfpMemoMissColdN, C::GfpMemoMissInputsN, C::GfpMemoMissReadsN,
+	};
+	static_assert(std::size(map) == static_cast<size_t>(Id::Count), "WalkProbe::Id out of step with the FrameTiming counters");
+	FrameTiming::Add(map[static_cast<size_t>(id)], value);
+}
+
+} // namespace
+
 PipelineCache::PipelineCache(GraphicContext& graphics)
     : m_graphics(graphics), m_program_cache(std::make_unique<ProgramCache>(graphics)) {
+	ShaderRecompiler::IR::WalkProbe::Hook() = {.add = WalkProbeAdd, .now_ns = &FrameTiming::SteadyNowNs}; // S451
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	// S408: stale reads of the condition word are only allowed with a verification of the used bytes after GPU-done (plan-chainA 1b),
 	// which is not built. Not a silent 0.
