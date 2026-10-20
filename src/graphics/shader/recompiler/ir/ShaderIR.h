@@ -9,6 +9,7 @@
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/recompiler/ir/Block.h"
 #include "graphics/shader/recompiler/ir/ResourceSnapshot.h"
+#include "graphics/shader/recompiler/ir/SrtCfMemo.h"
 #include "graphics/shader/recompiler/ir/opcodes/ValueOpcodes.h"
 #include "graphics/shader/minLodShift.h"
 #include "graphics/shader/shader.h"
@@ -706,6 +707,7 @@ struct ResourcePlan {
 	mutable uint32_t                       evaluation_value_count = 0;
 	mutable std::vector<uint8_t>            active_sources;
 	mutable std::vector<uint8_t>            visited_blocks;
+	mutable SrtCfMemo                       cf_memo; // S451 (KYTY_PROGS_MEMO): the answer of the last reachability loop of this plan
 	mutable std::vector<uint8_t>            reachable_blocks;
 	mutable std::vector<uint32_t>           pending_blocks;
 	mutable std::vector<uint32_t>           material_keys;

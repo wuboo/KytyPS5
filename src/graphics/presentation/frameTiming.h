@@ -386,6 +386,8 @@ enum class Counter : uint32_t {
 	// S451: the control-flow loop: walks that ran it / iterations of the reachability loop / blocks of the plan / conditions evaluated / EvaluateInst calls /
 	// of those ReadFirstLane (each builds two SrtWalker objects).
 	GfpCfWalkN, GfpCfIterN, GfpCfBlocksN, GfpCfCondN, GfpCfEvalN, GfpCfRflN,
+	// S451 (KYTY_PROGS_MEMO): control-flow walks the memo could not serve by design (reads captured for the specialization, NullDesc diag, a nested mask).
+	GfpMemoSkipN,
 	Count,
 };
 

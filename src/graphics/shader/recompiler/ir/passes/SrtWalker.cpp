@@ -6,6 +6,7 @@
 #include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
 #include "graphics/presentation/cpPcSampler.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/shader/recompiler/ir/SrtCfMemo.h"
 #include <optional>
 
 #include "common/abi.h"
@@ -35,6 +36,9 @@ namespace {
 // ordinary read below it comes from a null table pointer. The walker reaches such reads when it
 // follows both sides of a branch it cannot decide, so read zero there instead of faulting the host.
 constexpr uint64_t GUEST_MEMORY_MIN = 0x40000;
+
+// S451 (KYTY_PROGS_MEMO): the memo that records the reachability loop in progress on this thread, or null.
+thread_local SrtCfMemo* t_cf_rec = nullptr;
 
 } // namespace
 
@@ -1184,7 +1188,9 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		return true;
 	}
 	if (reader != nullptr) {
-		if (!reader(m_runtime.userdata, address, {&word, 1})) {
+		const bool read_ok = reader(m_runtime.userdata, address, {&word, 1});
+		if (t_cf_rec != nullptr) t_cf_rec->NoteRead(reader, address, word, read_ok); // S451
+		if (!read_ok) {
 			return false;
 		}
 	} else {
@@ -1194,6 +1200,7 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		} else {
 			NullDesc::NoteUnresolved(address);
 		}
+		if (t_cf_rec != nullptr) t_cf_rec->NoteRead(nullptr, address, word, true); // S451
 		NullDesc::NoteSrtRead(address, std::span<const uint32_t>(&word, 1), false);
 	}
 	result = word;
@@ -1221,9 +1228,13 @@ bool SrtWalker::EvaluateInst(const Inst& inst, uint64_t& result) {
 				return false;
 			}
 			result = m_runtime.user_data[reg - m_program.user_data_base];
+			if (t_cf_rec != nullptr) t_cf_rec->NoteUserData(reg - m_program.user_data_base, m_runtime.user_data[reg - m_program.user_data_base]); // S451
 			return true;
 		}
-		case ValueOpcode::GetShaderBase: result = m_runtime.shader_base; return true;
+		case ValueOpcode::GetShaderBase:
+			result = m_runtime.shader_base;
+			if (t_cf_rec != nullptr) t_cf_rec->NoteShaderBase(m_runtime.shader_base); // S451
+			return true;
 		case ValueOpcode::Phi: return EvaluatePhi(inst, result);
 		case ValueOpcode::ReadFirstLane: {
 			++t_rfl_calls;
@@ -1930,43 +1941,82 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	auto& visited = m_program.visited_blocks;
 	auto& reachable = m_program.reachable_blocks;
 	auto& pending = m_program.pending_blocks;
-	visited.assign(m_program.control_flow.size(), 1u);
-	ResetUnknowns();
-	m_reachable_blocks = &visited;
-	if (m_clean_evaluator != nullptr) {
-		m_clean_evaluator->ResetUnknowns();
-		m_clean_evaluator->m_reachable_blocks = &visited;
-	}
-	for (;;) {
-		++cf_iter;
-		reachable.assign(m_program.control_flow.size(), 0u);
-		pending.clear();
-		pending.push_back(0u);
-		while (!pending.empty()) {
-			const auto index = pending.back();
-			pending.pop_back();
-			if (reachable.at(index)) continue;
-			reachable[index] = 1u;
-			const auto& block = m_program.control_flow[index];
-			uint32_t condition = 0;
-			auto& predicate = m_clean_evaluator != nullptr ? *m_clean_evaluator : *this;
-			SpecShadow::PurposeScope purpose(SpecShadow::Purpose::Cond); // S406
-			if (!block.condition.IsEmpty()) ++cf_cond;
-			if (!block.condition.IsEmpty() &&
-			    (m_runtime.read_specialization_memory != nullptr || !m_program.capture_specialization_reads) &&
-			    predicate.Evaluate(block.condition, condition)) {
-				pending.push_back(block.successors[condition != 0u ? 0u : 1u]);
-			} else {
-				pending.insert(pending.end(), block.successors.begin(), block.successors.end());
-			}
+	// S451 (KYTY_PROGS_MEMO): the loop is a function of the user data words and shader base it reads and of the guest words it reads (srtCfMemo.h).
+	// Not for plans that capture their reads (the capture would miss the skipped ones), under the NullDesc diag, or for a nested active mask.
+	CfMemoMode cf_mode = CfMemoMode::Off;
+	if (gfp_cf) {
+		cf_mode = CfMemoModeFromEnv();
+		if (cf_mode != CfMemoMode::Off &&
+		    (!m_active_mask.IsEmpty() || m_program.capture_specialization_reads || !m_program.source_reads.empty() || NullDesc::Enabled())) {
+			FrameTiming::Add(FrameTiming::Counter::GfpMemoSkipN);
+			cf_mode = CfMemoMode::Off;
 		}
-		if (reachable == visited) break;
-		visited.swap(reachable);
-		if (m_program.control_phi_predecessors.empty()) break;
-		// Only unknown values need another evaluation: successful Phi facts remain
-		// true as their possible predecessors shrink. Keep uniform-read memos stable.
+	}
+	auto&                cf_memo = m_program.cf_memo;
+	bool                 cf_hit  = false;
+	std::vector<uint8_t> cf_expect;
+	if (cf_mode != CfMemoMode::Off) {
+		{
+			SpecShadow::PurposeScope purpose(SpecShadow::Purpose::Cond); // the replayed reads are the ones the loop issues under this purpose
+			cf_hit = cf_memo.Matches(m_runtime.user_data, m_runtime.shader_base, m_runtime.read_memory, m_runtime.read_specialization_memory, m_runtime.userdata) &&
+			         cf_memo.visited.size() == m_program.control_flow.size();
+		}
+		FrameTiming::Add(cf_hit ? FrameTiming::Counter::GfpMemoHitN : FrameTiming::Counter::GfpMemoMissN);
+	}
+	const bool cf_skip = cf_hit && cf_mode == CfMemoMode::On;
+	if (cf_skip) {
+		visited            = cf_memo.visited;
+		m_reachable_blocks = &visited;
+		if (m_clean_evaluator != nullptr) m_clean_evaluator->m_reachable_blocks = &visited;
+	} else {
+		if (cf_mode != CfMemoMode::Off) {
+			if (cf_hit) cf_expect = cf_memo.visited; // shadow: what the memo would have answered
+			cf_memo.Begin(static_cast<uint32_t>(m_runtime.user_data.size()), m_runtime.read_memory, m_runtime.read_specialization_memory);
+			t_cf_rec = &cf_memo;
+		}
+		visited.assign(m_program.control_flow.size(), 1u);
 		ResetUnknowns();
-		if (m_clean_evaluator != nullptr) m_clean_evaluator->ResetUnknowns();
+		m_reachable_blocks = &visited;
+		if (m_clean_evaluator != nullptr) {
+			m_clean_evaluator->ResetUnknowns();
+			m_clean_evaluator->m_reachable_blocks = &visited;
+		}
+		for (;;) {
+			++cf_iter;
+			reachable.assign(m_program.control_flow.size(), 0u);
+			pending.clear();
+			pending.push_back(0u);
+			while (!pending.empty()) {
+				const auto index = pending.back();
+				pending.pop_back();
+				if (reachable.at(index)) continue;
+				reachable[index] = 1u;
+				const auto& block = m_program.control_flow[index];
+				uint32_t condition = 0;
+				auto& predicate = m_clean_evaluator != nullptr ? *m_clean_evaluator : *this;
+				SpecShadow::PurposeScope purpose(SpecShadow::Purpose::Cond); // S406
+				if (!block.condition.IsEmpty()) ++cf_cond;
+				if (!block.condition.IsEmpty() &&
+				    (m_runtime.read_specialization_memory != nullptr || !m_program.capture_specialization_reads) &&
+				    predicate.Evaluate(block.condition, condition)) {
+					pending.push_back(block.successors[condition != 0u ? 0u : 1u]);
+				} else {
+					pending.insert(pending.end(), block.successors.begin(), block.successors.end());
+				}
+			}
+			if (reachable == visited) break;
+			visited.swap(reachable);
+			if (m_program.control_phi_predecessors.empty()) break;
+			// Only unknown values need another evaluation: successful Phi facts remain
+			// true as their possible predecessors shrink. Keep uniform-read memos stable.
+			ResetUnknowns();
+			if (m_clean_evaluator != nullptr) m_clean_evaluator->ResetUnknowns();
+		}
+		if (cf_mode != CfMemoMode::Off) {
+			t_cf_rec = nullptr;
+			cf_memo.End(visited);
+			if (cf_hit && cf_expect != visited) FrameTiming::Add(FrameTiming::Counter::GfpMemoNeN); // shadow: the memo's answer differs (must be 0)
+		}
 	}
 	cf_timer.reset();
 	if (gfp_cf) {
