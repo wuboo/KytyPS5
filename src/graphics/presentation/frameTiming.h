@@ -389,6 +389,8 @@ enum class Counter : uint32_t {
 	// S451 (KYTY_PROGS_MEMO): control-flow walks the memo could not serve by design (reads captured for the specialization, NullDesc diag, a nested mask).
 	// shadow only: why the memo missed - nothing stored yet / the inputs (user data words read, shader base, sizes, readers) differ / a re-read answered differently.
 	GfpMemoSkipN, GfpMemoMissColdN, GfpMemoMissInputsN, GfpMemoMissReadsN,
+	// S451 DIAG: guest reads of the control-flow loop (calls, time in the reader).
+	GfpCfReadN, GfpCfReadNs,
 	Count,
 };
 

@@ -39,6 +39,8 @@ constexpr uint64_t GUEST_MEMORY_MIN = 0x40000;
 
 // S451 (KYTY_PROGS_MEMO): the memo that records the reachability loop in progress on this thread, or null.
 thread_local SrtCfMemo* t_cf_rec = nullptr;
+// S451 DIAG: true while the reachability loop of a graphics plan runs (times its guest reads).
+thread_local bool       t_cf_timing = false;
 
 } // namespace
 
@@ -1188,7 +1190,12 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 		return true;
 	}
 	if (reader != nullptr) {
+		const int64_t read_t0 = t_cf_timing ? FrameTiming::SteadyNowNs() : 0;
 		const bool read_ok = reader(m_runtime.userdata, address, {&word, 1});
+		if (t_cf_timing) { // S451 DIAG
+			FrameTiming::Add(FrameTiming::Counter::GfpCfReadN);
+			FrameTiming::Add(FrameTiming::Counter::GfpCfReadNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - read_t0));
+		}
 		if (t_cf_rec != nullptr) t_cf_rec->NoteRead(reader, address, word, read_ok); // S451
 		if (!read_ok) {
 			return false;
@@ -1938,6 +1945,7 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	const uint64_t cf_eval0 = t_eval_inst_calls, cf_rfl0 = t_rfl_calls;
 	uint64_t       cf_iter = 0, cf_cond = 0;
 	if (gfp_cf) cf_timer.emplace(FrameTiming::Counter::GfpWalkCfNs);
+	t_cf_timing = gfp_cf;
 	auto& visited = m_program.visited_blocks;
 	auto& reachable = m_program.reachable_blocks;
 	auto& pending = m_program.pending_blocks;
@@ -2022,6 +2030,7 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 			if (cf_hit && cf_expect != visited) FrameTiming::Add(FrameTiming::Counter::GfpMemoNeN); // shadow: the memo's answer differs (must be 0)
 		}
 	}
+	t_cf_timing = false;
 	cf_timer.reset();
 	if (gfp_cf) {
 		FrameTiming::Add(FrameTiming::Counter::GfpCfWalkN);
