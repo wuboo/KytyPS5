@@ -95,10 +95,6 @@ static uint64_t AlignUp(uint64_t value, uint64_t alignment) {
 	return alignment != 0 ? (value + alignment - 1) & ~(alignment - 1) : value;
 }
 
-#if defined(__APPLE__)
-// KYTY_SPLIT_WIDE_STORES=0 turns splitting off and any other value turns it on. Unset, it follows
-// whether this x86-64 process is translated by Rosetta: native Intel Macs execute the stores as is.
-// Decided once per run; the reason is logged so a slow Rosetta run and a patched one can be told apart.
 static bool AmdCpuPatchEnabled() {
 	static const bool enabled = [] {
 		const auto host     = GetGuestInstructionHostFeatures();
@@ -112,6 +108,10 @@ static bool AmdCpuPatchEnabled() {
 	return enabled;
 }
 
+#if defined(__APPLE__)
+// KYTY_SPLIT_WIDE_STORES=0 turns splitting off and any other value turns it on. Unset, it follows
+// whether this x86-64 process is translated by Rosetta: native Intel Macs execute the stores as is.
+// Decided once per run; the reason is logged so a slow Rosetta run and a patched one can be told apart.
 static bool SplitWideStoresEnabled() {
 	if (const char* value = std::getenv("KYTY_SPLIT_WIDE_STORES"); value != nullptr) {
 		return std::strcmp(value, "0") != 0;
