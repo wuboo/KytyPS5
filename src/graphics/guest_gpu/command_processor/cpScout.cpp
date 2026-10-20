@@ -267,6 +267,7 @@ void WorkerLoop() {
 					g_live.slots.push_back(std::move(slot));
 					g_live.ready_n.fetch_add(1, std::memory_order_release);
 				}
+				g_cv.notify_all();
 			} else if (!IsIgnoreOpcode(opcode)) {
 				stopped = true;
 				break;
@@ -333,7 +334,15 @@ TakeKind Take(CommandBuffer& buffer, Prepared& out) {
 	const uint32_t idx = g_live.cp_draw++;
 	Slot*          slot = nullptr;
 	{
-		std::lock_guard lock(g_mu);
+		// Wait until the worker has this draw or has stopped. A miss-without-wait
+		// lets CP enter GetGraphicsPrograms and starve the worker on m_get_mutex,
+		// so every later draw also misses.
+		std::unique_lock lock(g_mu);
+		g_cv.wait(lock, [idx] {
+			return g_stop.load() || g_live.done.load(std::memory_order_acquire) ||
+			       (idx < g_live.slots.size() && g_live.slots[idx] &&
+			        g_live.slots[idx]->ready.load(std::memory_order_acquire));
+		});
 		if (idx < g_live.slots.size() && g_live.slots[idx] &&
 		    g_live.slots[idx]->ready.load(std::memory_order_acquire)) {
 			slot = g_live.slots[idx].get();
