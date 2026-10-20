@@ -1968,8 +1968,11 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	if (cf_mode != CfMemoMode::Off) {
 		{
 			SpecShadow::PurposeScope purpose(SpecShadow::Purpose::Cond); // the replayed reads are the ones the loop issues under this purpose
-			cf_way = cf_set.Find(m_runtime.user_data, m_runtime.shader_base, m_runtime.read_memory, m_runtime.read_specialization_memory, m_runtime.userdata);
+			uint32_t why = 0;
+			cf_way = cf_set.Find(m_runtime.user_data, m_runtime.shader_base, m_runtime.read_memory, m_runtime.read_specialization_memory, m_runtime.userdata, &why);
 			if (cf_way != nullptr && cf_way->visited.size() != m_program.control_flow.size()) cf_way = nullptr;
+			if (cf_way == nullptr) // S451 DIAG
+				FrameTiming::Add(why == 2 ? FrameTiming::Counter::GfpMemoMissReadsN : (why == 1 ? FrameTiming::Counter::GfpMemoMissInputsN : FrameTiming::Counter::GfpMemoMissColdN));
 		}
 		FrameTiming::Add(cf_way != nullptr ? FrameTiming::Counter::GfpMemoHitN : FrameTiming::Counter::GfpMemoMissN);
 	}

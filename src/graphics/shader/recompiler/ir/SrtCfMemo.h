@@ -165,10 +165,16 @@ struct SrtCfMemoSet {
 	uint32_t                     next = 0;
 
 	// The way whose answer is current for these inputs (inputs equal and every recorded read answers the same), or null.
-	const SrtCfMemo* Find(std::span<const uint32_t> user, uint64_t base, CfMemoReader ordinary, CfMemoReader strict, void* userdata) const {
+	// `why` (optional) tells a miss apart: 0 nothing stored, 1 no way has these inputs, 2 a way has them but a re-read answered differently.
+	const SrtCfMemo* Find(std::span<const uint32_t> user, uint64_t base, CfMemoReader ordinary, CfMemoReader strict, void* userdata, uint32_t* why = nullptr) const {
+		uint32_t reason = 0;
 		for (const auto& way: ways) {
-			if (way.Matches(user, base, ordinary, strict, userdata)) return &way;
+			if (way.valid && reason == 0) reason = 1;
+			if (!way.InputsMatch(user, base, ordinary, strict)) continue;
+			if (way.ReadsUnchanged(userdata)) return &way;
+			reason = 2;
 		}
+		if (why != nullptr) *why = reason;
 		return nullptr;
 	}
 
