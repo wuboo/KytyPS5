@@ -551,6 +551,19 @@ constexpr const char* kCounterNames[] = {
     "srt_batch_mismatch_n",
     "gpu_label_n",
     "gpu_label_ns",
+    "gfp_vs_prep_ns",
+    "gfp_ps_prep_ns",
+    "gfp_key_ns",
+    "gfp_runtime_ns",
+    "gfp_find_ns",
+    "gfp_get_n",
+    "gfp_get_hit_n",
+    "gfp_vs_get_ns",
+    "gfp_ps_get_ns",
+    "gfp_memo_hit_n",
+    "gfp_memo_miss_n",
+    "gfp_memo_entries_n",
+    "gfp_memo_ne_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

@@ -1226,6 +1226,13 @@ struct PipelineCache::ProgramCache {
 			stage = ShaderType::Compute;
 		}
 
+		// S451: graphics stages only (the compute path shares this function).
+		constexpr bool graphics_stage = !std::is_same_v<InputInfo, ShaderComputeInputInfo>;
+		std::optional<FrameTiming::ScopedCounterNs> gfp_get_timer;
+		if constexpr (graphics_stage) {
+			FrameTiming::Add(FrameTiming::Counter::GfpGetN);
+			gfp_get_timer.emplace(std::is_same_v<InputInfo, ShaderPixelInputInfo> ? FrameTiming::Counter::GfpPsGetNs : FrameTiming::Counter::GfpVsGetNs);
+		}
 		InitDisk();
 		const auto user_data = std::span(params.user_data).first(params.user_data_count);
 		lookup_key.stage           = stage;
@@ -1234,12 +1241,15 @@ struct PipelineCache::ProgramCache {
 		lookup_key.code_size       = static_cast<uint32_t>(params.code.size());
 		std::optional<CpSampler::SiteScope> static_key_site;
 		if (CpSampler::Active().load(std::memory_order_relaxed)) static_key_site.emplace(CpSampler::SiteId(CpSampler::Site::ShStaticKeyFind));
+		std::optional<FrameTiming::ScopedCounterNs> gfp_key_timer;
+		if constexpr (graphics_stage) gfp_key_timer.emplace(FrameTiming::Counter::GfpKeyNs);
 		BuildStageStaticKey(input_info, lookup_key.static_state);
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 			// Only when on, so the keys of runs without KYTY_RT_MISS stay as they were.
 			if (ShaderRecompiler::RtMissEnabled()) lookup_key.static_state.push_back(ShaderRecompiler::RtMissMode() == 2 ? 0x52544d32u : 0x52544d53u);
 		}
 		auto                                         entry = programs.find(lookup_key);
+		gfp_key_timer.reset();
 		static_key_site.reset();
 		// S404: the reader is named for the whole lookup (hit, call-source refresh, compile), not only the compile.
 		const SyncCensus::ReaderScope reader_tag(
@@ -1249,6 +1259,8 @@ struct PipelineCache::ProgramCache {
 		// (keyed by the plan address) is off for them.
 		ShaderReadContext                            read_context {
 		    .mode = (entry != programs.end() && entry->second.call_source) ? ShaderRecompiler::IR::SrtFastMode::Off : SrtFast::Mode()};
+		std::optional<FrameTiming::ScopedCounterNs> gfp_runtime_timer;
+		if constexpr (graphics_stage) gfp_runtime_timer.emplace(FrameTiming::Counter::GfpRuntimeNs);
 		ShaderRecompiler::IR::SrtRuntime             runtime {
 		    .user_data                  = user_data,
 		    .shader_base                = params.Base(),
@@ -1265,10 +1277,13 @@ struct PipelineCache::ProgramCache {
 			runtime.workgroup_counts = input_info.workgroup_counts;
 			runtime.indirect_args_address = input_info.indirect_args_address;
 		}
+		gfp_runtime_timer.reset();
 		bool source_changed = false;
 		if (entry != programs.end()) {
 			auto& cached = entry->second;
 			Permutation* permutation = nullptr;
+			std::optional<FrameTiming::ScopedCounterNs> gfp_find_timer;
+			if constexpr (graphics_stage) gfp_find_timer.emplace(FrameTiming::Counter::GfpFindNs);
 			if (cached.call_source) {
 				{
 					KYTY_CP_SITE(ShRefreshCallSource);
@@ -1279,7 +1294,9 @@ struct PipelineCache::ProgramCache {
 				permutation = cached.FindPermutation<false>(runtime, push_data_cursor);
 				NoteSrtMemo(cached.resources, read_context, params.hash, stage);
 			}
+			gfp_find_timer.reset();
 			if (permutation != nullptr) {
+				if constexpr (graphics_stage) FrameTiming::Add(FrameTiming::Counter::GfpGetHitN);
 				KYTY_CP_SITE(ShProgramsRest);
 				input_info.stage = {.program = &permutation->program, .resources = &entry->second.resources};
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
@@ -1691,10 +1708,13 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	const FrameTiming::ScopedCounterNs cost_timer(FrameTiming::Counter::GetGraphicsProgramsNs); // S433 (S441)
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
 	std::array<ShaderParams, 3> vertex_params;
-	if (tess_active) {
-		vertex_params = PrepareTessellationPrograms(vertex_regs, context, vertex_info);
-	} else {
-		vertex_params[0] = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
+	{
+		const FrameTiming::ScopedCounterNs prep_timer(FrameTiming::Counter::GfpVsPrepNs); // S451
+		if (tess_active) {
+			vertex_params = PrepareTessellationPrograms(vertex_regs, context, vertex_info);
+		} else {
+			vertex_params[0] = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
+		}
 	}
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
 	const bool object_primitive_id = context.HasObjectPrimitiveIdOutput();
@@ -1757,7 +1777,10 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	}
 	ShaderParams pixel_params;
 	if (pixel_active) {
-		pixel_params      = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
+		{
+			const FrameTiming::ScopedCounterNs prep_timer(FrameTiming::Counter::GfpPsPrepNs); // S451
+			pixel_params = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
+		}
 		pixel_info.object_primitive_id = object_primitive_id;
 		for (uint32_t export_index = 0; export_index < 8u; export_index++) {
 			const auto slot = ShaderPixelExportTarget(pixel_info.target_shader_mask, export_index);

@@ -372,6 +372,13 @@ enum class Counter : uint32_t {
 	SrtBatchRunsN, SrtBatchSlotsN, SrtBatchSingleN, SrtBatchFailN, SrtBatchMismatchN,
 	// S446 (KYTY_GPU_LABELS=1|2): labels put on encoders and the CPU time the label calls took (the last columns of frames.csv).
 	GpuLabelN, GpuLabelNs,
+	// S451: where GetGraphicsPrograms spends its time (graphics VS/PS/tess only, compute excluded). PrepareProgram of the vertex stages / of the pixel
+	// stage; ProgramCache::Get split into the stage static key + lookup, the SrtRuntime set-up (SrtReader::Apply) and FindPermutation (the check of the
+	// remembered specialization against guest memory); Get calls and Gets answered by a cached permutation; Get time of vertex / pixel stage.
+	// The memo (KYTY_PROGS_MEMO): draws answered from it / draws that went the full way / entries held / shadow: memo result differs from the full one
+	// (must be 0).
+	GfpVsPrepNs, GfpPsPrepNs, GfpKeyNs, GfpRuntimeNs, GfpFindNs, GfpGetN, GfpGetHitN, GfpVsGetNs, GfpPsGetNs,
+	GfpMemoHitN, GfpMemoMissN, GfpMemoEntriesN, GfpMemoNeN,
 	Count,
 };
 
