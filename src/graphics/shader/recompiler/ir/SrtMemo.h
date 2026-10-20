@@ -100,14 +100,14 @@ struct SrtMemo {
 
 	// Reads every logged address again; true when each returns what it returned during the walk.
 	bool ReadsUnchanged(SrtMemoReader strict, SrtMemoReader ordinary, void* userdata) const {
-		std::array<uint32_t, 32> small;
+		std::array<uint32_t, 32> small_buf; // not "small": windows.h defines it as a macro
 		std::vector<uint32_t>    large;
 		for (const auto& read: reads) {
 			const auto reader = read.ordinary ? ordinary : strict;
 			if (reader == nullptr) return false;
 			std::span<uint32_t> out;
-			if (read.count <= small.size()) {
-				out = std::span(small).first(read.count);
+			if (read.count <= small_buf.size()) {
+				out = std::span(small_buf).first(read.count);
 			} else {
 				large.resize(read.count);
 				out = large;
