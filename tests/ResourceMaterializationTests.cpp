@@ -1838,7 +1838,9 @@ void CountCfProbe(Libs::Graphics::ShaderRecompiler::IR::WalkProbe::Id id, uint64
   if (id == Id::MemoNeN) g_cf_probe.ne += static_cast<uint32_t>(value);
 }
 
-void TestProgsMemo() {
+// abs_pointer: the table pointer goes through an addition, so the read cannot be a node and the pointer itself is part of the key; otherwise the read is a node
+// and the pointer is not.
+void TestProgsMemo(bool abs_pointer) {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   using Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind;
   const auto pointer_words = [](const void *pointer) {
@@ -1865,7 +1867,8 @@ void TestProgsMemo() {
     return Value(&block.AppendNewInst(opcode, args));
   };
   // User data registers 4,5 (words 0,1) hold the table; the other words are never read.
-  const auto low = emit(entry, ValueOpcode::GetUserData, {Value(ScalarReg(4))});
+  auto low = emit(entry, ValueOpcode::GetUserData, {Value(ScalarReg(4))});
+  if (abs_pointer) low = emit(entry, ValueOpcode::IAdd32, {low, Value(0u)});
   const auto high = emit(entry, ValueOpcode::GetUserData, {Value(ScalarReg(5))});
   const auto handle = emit(entry, ValueOpcode::GetAddressResource, {low, high});
   const auto load = [&](Block &block, uint32_t offset) {
@@ -1907,51 +1910,62 @@ void TestProgsMemo() {
   std::array<uint32_t, 8> user_c{words_c[0], words_c[1], 0u, 0u, 1u, 2u};
   std::vector<uint32_t> flat;
   const auto taken = [&](uint32_t value, const char *text) { Check(flat.size() == 2 && (flat[0] == value || flat[1] == value), text); };
+  const auto expect = [&](uint32_t hit, uint32_t miss, const char *text) { Check(g_cf_probe.hit == hit && g_cf_probe.miss == miss, text); };
 
   // Off: no memo is looked at.
   CfMemoModeTestOverride() = CfMemoMode::Off;
   g_cf_probe = {};
   walk(user_a, flat);
   walk(user_a, flat);
-  Check(g_cf_probe.hit == 0 && g_cf_probe.miss == 0, "memo: off looked at the memo");
+  expect(0, 0, "memo: off looked at the memo");
   taken(0xa4u, "memo: off took the wrong arm");
 
   CfMemoModeTestOverride() = CfMemoMode::On;
   g_cf_probe = {};
   walk(user_a, flat);
-  Check(g_cf_probe.hit == 0 && g_cf_probe.miss == 1, "memo: first walk was not a recorded miss");
+  expect(0, 1, "memo: first walk was not a recorded miss");
   taken(0xa4u, "memo: first walk took the wrong arm");
   walk(user_a, flat);
-  Check(g_cf_probe.hit == 1, "memo: unchanged inputs did not hit");
+  expect(1, 1, "memo: unchanged inputs did not hit");
   taken(0xa4u, "memo: hit took the wrong arm");
 
   // A user data word nobody read changed: still a hit.
   user_a[4] = 77u;
   walk(user_a, flat);
-  Check(g_cf_probe.hit == 2, "memo: an unread user data word broke the hit");
+  expect(2, 1, "memo: an unread user data word broke the hit");
 
   // The word under a recorded read changed so that the branch flips: a miss, and the other arm is taken.
   table_a[3] = 0u;
   walk(user_a, flat);
-  Check(g_cf_probe.hit == 2 && g_cf_probe.miss == 2, "memo: a changed guest word hit");
+  expect(2, 2, "memo: a changed guest word hit");
   taken(0xa5u, "memo: a changed guest word was answered from the memo");
   table_a[3] = 1u;
 
-  // Three tables in turn (a frame ring): the user data word that was read differs, so each is a miss the first time and a hit afterwards; a table that
-  // decides the other way is never answered from another table's memo.
+  // The first combination is still there (the memo keeps a few).
   walk(user_a, flat);
-  taken(0xa4u, "memo: the first table took the wrong arm");
+  expect(3, 2, "memo: the older combination was lost");
+  taken(0xa4u, "memo: the older combination took the wrong arm");
+
+  // Another table, the same flag: a node does not depend on the pointer, a keyed pointer does.
   walk(user_b, flat);
   taken(0xb4u, "memo: the second table took the wrong arm");
+  if (abs_pointer) expect(3, 3, "memo: another pointer hit although the pointer is part of the key");
+  else expect(4, 2, "memo: another pointer with the same flag did not hit");
+  // Another table, the other flag: never answered from the memo of the first.
   walk(user_c, flat);
   taken(0xc5u, "memo: a table with the other branch was answered from another table's memo");
-  const auto misses = g_cf_probe.miss;
+  if (abs_pointer) expect(3, 4, "memo: the third table hit");
+  else expect(5, 2, "memo: the table with the other flag did not hit the combination recorded for it");
+
   const auto hits = g_cf_probe.hit;
+  const auto misses = g_cf_probe.miss;
   walk(user_a, flat);
+  taken(0xa4u, "memo: ring hit took the wrong arm");
   walk(user_b, flat);
+  taken(0xb4u, "memo: ring hit took the wrong arm");
   walk(user_c, flat);
-  Check(g_cf_probe.miss == misses && g_cf_probe.hit == hits + 3, "memo: the ways did not keep three tables");
   taken(0xc5u, "memo: ring hit took the wrong arm");
+  Check(g_cf_probe.miss == misses && g_cf_probe.hit == hits + 3, "memo: the tables did not all hit the second time");
 
   // Shadow: the loop runs, the memo's answer is compared with it and must agree.
   CfMemoModeTestOverride() = CfMemoMode::Shadow;
@@ -2003,7 +2017,8 @@ int main() {
   TestSrtFastMemoVectorRead();
   TestSrtMemoKey();
   TestSrtPageQuiet();
-  TestProgsMemo();
+  TestProgsMemo(false);
+  TestProgsMemo(true);
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }
