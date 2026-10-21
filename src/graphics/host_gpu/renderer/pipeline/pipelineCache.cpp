@@ -28,6 +28,7 @@
 #include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
 #include "kernel/specPageCache.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/shader/scoutTableLog.h"
 #include "graphics/presentation/srtFast.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/ir/passes/specCond.h"
@@ -1908,7 +1909,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		}
 	}
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
-	if (scout && mesh_active) {
+	if (scout && (mesh_active || (ScoutTableLog::Active() != nullptr && ScoutTableLog::Active()->unsafe))) {
 		ScoutFail(3);
 		return {};
 	}
