@@ -23,7 +23,9 @@
 #include <optional>
 #include <mutex>
 #include <span>
+#include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #ifdef _WIN32
@@ -154,8 +156,88 @@ std::atomic<uint32_t>     g_dbg_draws {0};
 std::atomic<uint64_t>     g_dbg_tick {0};
 std::thread               g_monitor;
 
+// S471 DIAG (KYTY_CP_SCOUT_PROF=1): a poor man's profiler of every thread, flips 6400..6440, one folded stack per thread per sample on stderr ("[prof] tid a;b;c").
+void ProfSample() {
+#ifdef _WIN32
+	struct One {
+		DWORD                 tid;
+		std::vector<DWORD64>  pcs;
+	};
+	std::vector<One> ones;
+	const HANDLE     process = GetCurrentProcess();
+	const DWORD      self    = GetCurrentThreadId();
+	HANDLE           snap    = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+	if (snap == INVALID_HANDLE_VALUE) return;
+	THREADENTRY32 entry {};
+	entry.dwSize = sizeof(entry);
+	for (BOOL ok = Thread32First(snap, &entry); ok; ok = Thread32Next(snap, &entry)) {
+		if (entry.th32OwnerProcessID != GetCurrentProcessId() || entry.th32ThreadID == self) continue;
+		HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, entry.th32ThreadID);
+		if (thread == nullptr) continue;
+		if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
+			CONTEXT context {};
+			context.ContextFlags = CONTEXT_FULL;
+			if (GetThreadContext(thread, &context)) {
+				One one {entry.th32ThreadID, {}};
+				STACKFRAME64 frame {};
+				frame.AddrPC.Offset    = context.Rip;
+				frame.AddrPC.Mode      = AddrModeFlat;
+				frame.AddrFrame.Offset = context.Rbp;
+				frame.AddrFrame.Mode   = AddrModeFlat;
+				frame.AddrStack.Offset = context.Rsp;
+				frame.AddrStack.Mode   = AddrModeFlat;
+				for (int depth = 0; depth < 14; depth++) {
+					if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, process, thread, &frame, &context, nullptr, SymFunctionTableAccess64, SymGetModuleBase64, nullptr)) break;
+					if (frame.AddrPC.Offset == 0) break;
+					one.pcs.push_back(frame.AddrPC.Offset);
+				}
+				ones.push_back(std::move(one));
+			}
+			ResumeThread(thread);
+		}
+		CloseHandle(thread);
+	}
+	CloseHandle(snap);
+	static std::unordered_map<DWORD64, std::string> names;
+	for (const auto& one: ones) {
+		std::string line;
+		for (const auto pc: one.pcs) {
+			auto it = names.find(pc);
+			if (it == names.end()) {
+				alignas(SYMBOL_INFO) char buffer[sizeof(SYMBOL_INFO) + 200] {};
+				auto*                     symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
+				symbol->SizeOfStruct             = sizeof(SYMBOL_INFO);
+				symbol->MaxNameLen               = 199;
+				DWORD64 displacement             = 0;
+				it = names.emplace(pc, SymFromAddr(process, pc, &displacement, symbol) ? std::string(symbol->Name) : std::string("?")).first;
+			}
+			line += it->second;
+			line += ';';
+		}
+		std::fprintf(stderr, "[prof] %lu %s\n", static_cast<unsigned long>(one.tid), line.c_str());
+	}
+#endif
+}
+
 // Says (once per stall) what the worker is doing when nothing moved for 10 s, whoever is stuck.
 void MonitorLoop() {
+	static const bool prof = [] { const char* v = std::getenv("KYTY_CP_SCOUT_PROF"); return v != nullptr && v[0] == '1'; }();
+	if (prof) {
+#ifdef _WIN32
+		SymSetOptions(SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
+		SymInitialize(GetCurrentProcess(), nullptr, TRUE);
+#endif
+		while (!g_stop.load()) {
+			const auto flips = FrameTiming::GuestFlips();
+			if (flips >= 6400 && flips < 6440) {
+				ProfSample();
+				std::this_thread::sleep_for(std::chrono::milliseconds(15));
+			} else {
+				std::this_thread::sleep_for(std::chrono::milliseconds(50));
+			}
+		}
+		return;
+	}
 	uint64_t last = ~uint64_t {0};
 	uint32_t same = 0;
 	bool     said = false;
