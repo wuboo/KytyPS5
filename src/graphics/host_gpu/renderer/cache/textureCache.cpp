@@ -1225,7 +1225,22 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 			EXIT("TextureCache: failed to read color metadata backing\n");
 		}
 		vk::ClearValue clear {};
-		if (!DecodeColorClear(desc, code, clear.color)) {
+		const bool decoded = DecodeColorClear(desc, code, clear.color);
+		{ // S461 DIAG: raw DCC code and decode inputs for KYTY_DIAG_S460_ADDR
+			static const uint64_t s461_addr = std::getenv("KYTY_DIAG_S460_ADDR") ? std::strtoull(std::getenv("KYTY_DIAG_S460_ADDR"), nullptr, 16) : 0;
+			if (s461_addr != 0 && desc.info.data.address == s461_addr) {
+				if (FILE* fp = std::fopen(std::getenv("KYTY_DIAG_S460_FILE") ? std::getenv("KYTY_DIAG_S460_FILE") : "s460-draws.txt", "a")) {
+					std::fprintf(fp, "[s461-dcc] flip=%llu code=0x%02x known=%d decoded=%d type=%d kind=%d alpha_msb=%d reg_valid=%d clear_word=%016llx vkfmt=%d out=%g,%g,%g,%g\n",
+					             static_cast<unsigned long long>(FrameTiming::GuestFlips() + 1), static_cast<unsigned>(code), known ? 1 : 0, decoded ? 1 : 0,
+					             static_cast<int>(desc.type), static_cast<int>(desc.info.metadata.kind), desc.info.metadata.dcc_alpha_msb ? 1 : 0,
+					             desc.info.metadata.clear_register_valid ? 1 : 0, static_cast<unsigned long long>(desc.info.metadata.clear_word),
+					             static_cast<int>(desc.view_info.format), static_cast<double>(clear.color.float32[0]), static_cast<double>(clear.color.float32[1]),
+					             static_cast<double>(clear.color.float32[2]), static_cast<double>(clear.color.float32[3]));
+					std::fclose(fp);
+				}
+			}
+		}
+		if (!decoded) {
 			continue;
 		}
 		std::vector<uint8_t> bytes(slice_size);
