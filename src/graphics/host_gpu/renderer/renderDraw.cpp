@@ -1453,6 +1453,25 @@ static void DiagTexDrawsDone(uint64_t index_count, const RenderColorInfo* colors
 // Called after a draw (or a batch of prototype draws) of `ps_hash`: dumps when the control file asks.
 static void DiagDumpAfterDraw(RenderContext& context, bool ps_active, uint64_t ps_hash, const RenderColorInfo* colors,
                               uint32_t color_count, const RenderDepthInfo& depth) {
+	{ // S460 DIAG: KYTY_DIAG_S460_ADDR=<hex> logs every draw that writes that colour target and reads it back in flips 140..165
+		static const uint64_t s460_addr = std::getenv("KYTY_DIAG_S460_ADDR") ? std::strtoull(std::getenv("KYTY_DIAG_S460_ADDR"), nullptr, 16) : 0;
+		if (s460_addr != 0 && ps_active) {
+			for (uint32_t i = 0; i < color_count; i++) {
+				if (colors[i].desc.info.data.address != s460_addr) continue;
+				const long gf = static_cast<long>(FrameTiming::GuestFlips() + 1);
+				if (FILE* fp = std::fopen(std::getenv("KYTY_DIAG_S460_FILE") ? std::getenv("KYTY_DIAG_S460_FILE") : "s460-draws.txt", "a")) {
+					std::fprintf(fp, "[s460-draw] flip=%ld ps=%016" PRIx64 " mrt=%u slot=%u fmt=%d colors=%u\n", gf, ps_hash, i,
+					             static_cast<unsigned>(colors[i].target_slot), static_cast<int>(colors[i].desc.info.pixel_format), color_count);
+					std::fclose(fp);
+				}
+				if (gf >= 140 && gf <= 165) {
+					context.GetCommandScheduler().EndRendering();
+					DumpRenderTargets(context, ps_hash, colors, color_count, depth);
+				}
+				break;
+			}
+		}
+	}
 	if (!ps_active || !DiagDump::Wants(ps_hash)) return;
 	context.GetCommandScheduler().EndRendering();
 	DumpRenderTargets(context, ps_hash, colors, color_count, depth);
