@@ -849,7 +849,9 @@ struct PipelineCache::ProgramCache {
 			if (priv == nullptr && SyncCensus::Enabled()) RunSpecShadowBefore(resource_plan, runtime, shadow); // S406: before the real reads drain
 			std::optional<GfpTimer> gfp_mat_timer; // S451 (graphics only; compute shares this function)
 			if (resource_plan.stage != ShaderType::Compute) gfp_mat_timer.emplace(FrameTiming::Counter::GfpMatTotalNs);
+			if (priv != nullptr) PipelineCache::ScoutScope::Mark(6);
 			const bool materialized = ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources, specialization);
+			if (priv != nullptr) PipelineCache::ScoutScope::Mark(7);
 			if (priv != nullptr) {
 				if (!materialized || !ScoutMemoUsable(resources)) {
 					ScoutFail(2);
@@ -1856,13 +1858,38 @@ uint32_t PipelineCache::ScoutScope::FailReason() {
 	return Scout().fail;
 }
 
+static std::atomic<uint32_t> g_scout_mark {0};
+static std::atomic<bool>     g_cp_in_gfp {false};
+
+void PipelineCache::ScoutScope::Mark(uint32_t where) {
+	if (Scout().active) g_scout_mark.store(where, std::memory_order_relaxed);
+}
+
+uint32_t PipelineCache::ScoutScope::Marked() {
+	return g_scout_mark.load(std::memory_order_relaxed);
+}
+
+void PipelineCache::ScoutScope::CpInGfp(bool in) {
+	g_cp_in_gfp.store(in, std::memory_order_relaxed);
+}
+
+bool PipelineCache::ScoutScope::CpIsInGfp() {
+	return g_cp_in_gfp.load(std::memory_order_relaxed);
+}
+
 PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
     const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
     std::span<const Prospero::ColorComponentMapping, 8> target_export_mapping, bool pixel_active,
     std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info,
     bool single_sample) {
+	ScoutScope::Mark(1);
 	const std::lock_guard get_lock(m_get_mutex); // S454: scout worker shares SourceEntry with CP
+	struct CpFlag { // DIAG
+		bool on = !ScoutActive();
+		CpFlag() { if (on) ScoutScope::CpInGfp(true); }
+		~CpFlag() { if (on) ScoutScope::CpInGfp(false); }
+	} cp_flag;
 	const FrameTiming::ScopedCounterNs cost_timer(FrameTiming::Counter::GetGraphicsProgramsNs); // S433 (S441)
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
 	const bool scout       = ScoutActive();
@@ -1871,6 +1898,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		return {};
 	}
 	std::array<ShaderParams, 3> vertex_params;
+	ScoutScope::Mark(2);
 	{
 		const GfpTimer prep_timer(FrameTiming::Counter::GfpVsPrepNs); // S451
 		if (tess_active) {
@@ -1943,6 +1971,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		}
 	}
 	ShaderParams pixel_params;
+	ScoutScope::Mark(3);
 	if (pixel_active) {
 		{
 			const GfpTimer prep_timer(FrameTiming::Counter::GfpPsPrepNs); // S451
@@ -2036,9 +2065,11 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	    mesh_active, object_primitive_id);
 	GraphicsPrograms  result;
 	if (pixel_active) {
+		ScoutScope::Mark(4);
 		result.pixel = m_program_cache->Get(pixel_params, pixel_info, push_data_cursor);
 	}
 	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
+		ScoutScope::Mark(5);
 		result.vertex[i] = m_program_cache->Get(vertex_params[i], vertex_info[i], push_data_cursor);
 	}
 	return result;

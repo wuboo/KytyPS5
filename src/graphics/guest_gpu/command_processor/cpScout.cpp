@@ -99,8 +99,8 @@ void MonitorLoop() {
 		last            = tick;
 		if (same >= 2 && !said) {
 			said = true;
-			std::fprintf(stderr, "[scout] MONITOR no progress 10 s: worker phase=%u last_op=0x%x draws=%u flips=%llu\n", g_dbg_phase.load(), g_dbg_op.load(),
-			             g_dbg_draws.load(), static_cast<unsigned long long>(FrameTiming::GuestFlips()));
+			std::fprintf(stderr, "[scout] MONITOR no progress 10 s: worker phase=%u last_op=0x%x draws=%u mark=%u cp_in_gfp=%d flips=%llu\n", g_dbg_phase.load(), g_dbg_op.load(),
+			             g_dbg_draws.load(), PipelineCache::ScoutScope::Marked(), PipelineCache::ScoutScope::CpIsInGfp() ? 1 : 0, static_cast<unsigned long long>(FrameTiming::GuestFlips()));
 			std::fflush(stderr);
 		}
 		if (same == 0) said = false;
