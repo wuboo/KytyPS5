@@ -950,6 +950,13 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	                       DiagDump::WantsDumpTex(ps_hash, slot,
 	                                              Common::ControlFile::TexKey {address, static_cast<uint32_t>(format), width, height});
 	DiagDump::NoteSampledTex(ps_hash, slot, address, static_cast<uint32_t>(format), width, height);
+	{ // S457 DIAG: KYTY_DIAG_S457_FLIP=<n> lists every T# resolved in that guest flip
+		static const long s457_flip = std::getenv("KYTY_DIAG_S457_FLIP") ? std::atol(std::getenv("KYTY_DIAG_S457_FLIP")) : -1;
+		if (s457_flip >= 0 && static_cast<long>(FrameTiming::GuestFlips() + 1) == s457_flip) {
+			LOGF("[s457-tex] flip=%ld ps=0x%016" PRIx64 " slot=%u addr=0x%" PRIx64 " fmt=%u %ux%u storage=%d\n", s457_flip, ps_hash, slot, address,
+			     static_cast<uint32_t>(format), width, height, storage ? 1 : 0);
+		}
+	}
 	const bool diag_watch = ps_hash != 0 &&
 	                        DiagDump::WantsWatchTex(ps_hash, slot,
 	                                                Common::ControlFile::TexKey {address, static_cast<uint32_t>(format), width, height});
