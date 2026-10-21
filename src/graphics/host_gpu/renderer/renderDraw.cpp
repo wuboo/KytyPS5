@@ -1001,7 +1001,27 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 			const bool ne_res = !same_res(state.vertex_info[0].stage, scout_prep.vertex_info[0].stage) ||
 			                    (state.ps_active && !same_res(state.ps_input_info.stage, scout_prep.pixel_info.stage));
 			if (ne_res) FrameTiming::Add(FrameTiming::Counter::ScoutNeResN);
-			if (ne_vs || ne_ps || ne_res) FrameTiming::Add(FrameTiming::Counter::ScoutNeN);
+			// The whole stage inputs (all but the snapshot pointer) must be the CP's own too: they decide the pipeline and the push data.
+			const auto info_diff = [&](const auto& cp, const auto& scout, const char* name) {
+				auto a = cp;
+				auto b = scout;
+				a.stage.resources = nullptr;
+				b.stage.resources = nullptr;
+				if (std::memcmp(&a, &b, sizeof(a)) == 0) return false;
+				static std::atomic<uint32_t> logged {0};
+				if (logged.fetch_add(1) < 6) {
+					const auto* pa = reinterpret_cast<const unsigned char*>(&a);
+					const auto* pb = reinterpret_cast<const unsigned char*>(&b);
+					size_t first = 0;
+					while (first < sizeof(a) && pa[first] == pb[first]) ++first;
+					std::printf("[scout] info differs: %s first byte offset %zu of %zu (cp %02x scout %02x)\n", name, first, sizeof(a), pa[first], pb[first]);
+				}
+				return true;
+			};
+			const bool ne_info = info_diff(state.vertex_info[0], scout_prep.vertex_info[0], "vs") ||
+			                     (state.ps_active && info_diff(state.ps_input_info, scout_prep.pixel_info, "ps"));
+			if (ne_info) FrameTiming::Add(FrameTiming::Counter::ScoutNeInfoN);
+			if (ne_vs || ne_ps || ne_res || ne_info) FrameTiming::Add(FrameTiming::Counter::ScoutNeN);
 			if (ne_vs) FrameTiming::Add(FrameTiming::Counter::ScoutNeVsN);
 			if (ne_ps) FrameTiming::Add(FrameTiming::Counter::ScoutNePsN);
 		}

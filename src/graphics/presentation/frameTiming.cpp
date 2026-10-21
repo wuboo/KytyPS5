@@ -669,6 +669,7 @@ constexpr const char* kCounterNames[] = {
     "scout_worker_gfp_ns",
     "scout_worker_draw_ns",
     "scout_cp_lock_wait_ns",
+    "scout_ne_info_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
