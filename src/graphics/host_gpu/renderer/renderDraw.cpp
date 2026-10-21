@@ -988,6 +988,7 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 		    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info,
 		    single_sample);
 		if (scout_kind == CpScout::TakeKind::Shadow) {
+			FrameTiming::Add(FrameTiming::Counter::ScoutCmpN);
 			if (state.programs.vertex[0].id != scout_prep.programs.vertex[0].id ||
 			    state.programs.pixel.id != scout_prep.programs.pixel.id) {
 				FrameTiming::Add(FrameTiming::Counter::ScoutNeN);

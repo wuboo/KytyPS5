@@ -12,6 +12,7 @@
 
 #include <array>
 #include <atomic>
+#include <cstdio>
 #include <condition_variable>
 #include <cstring>
 #include <memory>
@@ -109,29 +110,31 @@ void FillSlotRegs(Slot& slot, const HW::Context& ctx, const HW::Shader& sh, cons
 	}
 }
 
-bool RegsMatch(const Slot& slot, const HW::Context& ctx, const HW::Shader& sh, const HW::UserConfig& ucfg) {
-	if (sh.GetPs().ps_regs.data_addr != slot.sh.GetPs().ps_regs.data_addr) return false;
-	if (sh.GetVs().gs_regs.data_addr != slot.sh.GetVs().gs_regs.data_addr) return false;
+// Returns the counter of the first differing field, or Count when equal.
+FrameTiming::Counter RegsDiff(const Slot& slot, const HW::Context& ctx, const HW::Shader& sh, const HW::UserConfig& ucfg) {
+	using C = FrameTiming::Counter;
+	if (sh.GetPs().ps_regs.data_addr != slot.sh.GetPs().ps_regs.data_addr) return C::ScoutRegsPsAddrN;
+	if (sh.GetVs().gs_regs.data_addr != slot.sh.GetVs().gs_regs.data_addr) return C::ScoutRegsGsAddrN;
 	if (std::memcmp(sh.GetPs().ps_user_sgpr.value, slot.sh.GetPs().ps_user_sgpr.value,
 	                sizeof(sh.GetPs().ps_user_sgpr.value)) != 0)
-		return false;
+		return C::ScoutRegsPsSgprN;
 	if (std::memcmp(sh.GetVs().gs_user_sgpr.value, slot.sh.GetVs().gs_user_sgpr.value,
 	                sizeof(sh.GetVs().gs_user_sgpr.value)) != 0)
-		return false;
-	if (ucfg.GetPrimType() != slot.ucfg.GetPrimType()) return false;
-	if (ctx.GetRenderTargetMask() != slot.rt_mask) return false;
-	if (ctx.GetBlendControl(0).enable != slot.blend0) return false;
-	if (ctx.GetAaConfig().msaa_num_samples != slot.aa) return false;
-	if (ctx.GetClipControl().clip_disable != slot.clip_disable) return false;
-	if (ctx.GetModeControl().provoking_vtx_last != slot.provoking_last) return false;
+		return C::ScoutRegsGsSgprN;
+	if (ucfg.GetPrimType() != slot.ucfg.GetPrimType()) return C::ScoutRegsPrimN;
+	if (ctx.GetRenderTargetMask() != slot.rt_mask) return C::ScoutRegsRtN;
+	if (ctx.GetBlendControl(0).enable != slot.blend0) return C::ScoutRegsOtherN;
+	if (ctx.GetAaConfig().msaa_num_samples != slot.aa) return C::ScoutRegsOtherN;
+	if (ctx.GetClipControl().clip_disable != slot.clip_disable) return C::ScoutRegsOtherN;
+	if (ctx.GetModeControl().provoking_vtx_last != slot.provoking_last) return C::ScoutRegsOtherN;
 	for (uint32_t i = 0; i < 8; i++) {
 		const auto& rt = ctx.GetRenderTarget(i);
-		if (rt.base.addr != slot.rt_addr[i]) return false;
+		if (rt.base.addr != slot.rt_addr[i]) return C::ScoutRegsRtN;
 		const auto packed = static_cast<uint32_t>(rt.info.format) |
 		                    (static_cast<uint32_t>(rt.info.channel_type) << 16u);
-		if (packed != slot.rt_format[i]) return false;
+		if (packed != slot.rt_format[i]) return C::ScoutRegsRtN;
 	}
-	return true;
+	return C::Count;
 }
 
 void ComputePrograms(PipelineCache& cache, const HW::Context& ctx, const HW::Shader& sh,
@@ -152,6 +155,25 @@ void ComputePrograms(PipelineCache& cache, const HW::Context& ctx, const HW::Sha
 	slot.programs            = cache.GetGraphicsPrograms(sh.GetVs(), sh.GetPs(), ctx.GetShaderRegisters(),
 	                                                     ctx, ucfg, mapping, ps_active, slot.vertex_info,
 	                                                     slot.pixel_info, single_sample);
+}
+
+void NoteStopReason(uint32_t opcode, bool parse) {
+	using C = FrameTiming::Counter;
+	C c = C::ScoutStopOtherN;
+	if (parse) c = C::ScoutStopParseN;
+	else if (opcode == Pm4::IT_WAIT_REG_MEM || opcode == Pm4::IT_WAIT_REG_MEM_64) c = C::ScoutStopWaitN;
+	else if (opcode == Pm4::IT_COND_EXEC) c = C::ScoutStopCondN;
+	else if (opcode == Pm4::IT_DRAW_INDIRECT_MULTI || opcode == Pm4::IT_DRAW_INDEX_INDIRECT_MULTI) c = C::ScoutStopMultiN;
+	else if (opcode == Pm4::IT_WRITE_CONST_RAM || opcode == Pm4::IT_DUMP_CONST_RAM || opcode == Pm4::IT_WAIT_ON_CE_COUNTER ||
+	         opcode == Pm4::IT_WAIT_ON_DE_COUNTER_DIFF) c = C::ScoutStopCeN;
+	else if (opcode == Pm4::IT_DISPATCH_DIRECT || opcode == Pm4::IT_DISPATCH_INDIRECT || opcode == Pm4::IT_DISPATCH_DRAW) c = C::ScoutStopDispatchN;
+	else if (opcode == Pm4::IT_WRITE_DATA) c = C::ScoutStopWriteDataN;
+	FrameTiming::Add(c);
+	if (c == C::ScoutStopOtherN) {
+		static std::atomic<uint64_t> seen[4] {};
+		const uint64_t               bit = 1ull << (opcode & 63u);
+		if ((seen[(opcode >> 6u) & 3u].fetch_or(bit) & bit) == 0) std::printf("[scout] stop on opcode 0x%x\n", opcode);
+	}
 }
 
 void ApplySet(CommandProcessor& cp, uint32_t header, const uint32_t* packet, uint32_t remaining_dw,
@@ -214,15 +236,18 @@ void WorkerLoop() {
 				continue;
 			}
 			if (remaining_dw < 2) {
+				NoteStopReason(opcode, true);
 				stopped = true;
 				break;
 			}
 			const auto packet_dw = Pm4::PacketSizeDw(header);
 			if (packet_dw == 0 || packet_dw > remaining_dw) {
+				NoteStopReason(opcode, true);
 				stopped = true;
 				break;
 			}
 			if (IsStopOpcode(opcode)) {
+				NoteStopReason(opcode, false);
 				stopped = true;
 				break;
 			}
@@ -262,6 +287,7 @@ void WorkerLoop() {
 					ComputePrograms(*job.cache, job.ctx, job.sh, job.ucfg, *slot);
 				}
 				slot->ready.store(true, std::memory_order_release);
+				FrameTiming::Add(FrameTiming::Counter::ScoutWalkDrawsN);
 				{
 					std::lock_guard lock(g_mu);
 					g_live.slots.push_back(std::move(slot));
@@ -269,6 +295,7 @@ void WorkerLoop() {
 				}
 				g_cv.notify_all();
 			} else if (!IsIgnoreOpcode(opcode)) {
+				NoteStopReason(opcode, false);
 				stopped = true;
 				break;
 			}
@@ -298,6 +325,7 @@ void EnsureWorker() {
 
 void Begin(CommandProcessor& cp, PipelineCache& cache, std::span<const uint32_t> commands) {
 	if (Current() == Mode::Off) return;
+	FrameTiming::Add(FrameTiming::Counter::ScoutBeginN);
 	EnsureWorker();
 	{
 		std::unique_lock lock(g_mu);
@@ -333,6 +361,7 @@ TakeKind Take(CommandBuffer& buffer, Prepared& out) {
 	if (Current() == Mode::Off) return TakeKind::Miss;
 	const uint32_t idx = g_live.cp_draw++;
 	Slot*          slot = nullptr;
+	FrameTiming::Add(FrameTiming::Counter::ScoutTakeN);
 	{
 		// Wait until the worker has this draw or has stopped. A miss-without-wait
 		// lets CP enter GetGraphicsPrograms and starve the worker on m_get_mutex,
@@ -350,12 +379,20 @@ TakeKind Take(CommandBuffer& buffer, Prepared& out) {
 	}
 	if (slot == nullptr) {
 		FrameTiming::Add(FrameTiming::Counter::ScoutMissN);
+		FrameTiming::Add(g_live.stopped.load(std::memory_order_relaxed) ? FrameTiming::Counter::ScoutMissNoslotStopN
+		                                                                : FrameTiming::Counter::ScoutMissNoslotRunN);
 		return TakeKind::Miss;
 	}
-	const bool regs = RegsMatch(*slot, buffer.GetRegisters(), buffer.GetShaders(), buffer.GetUserConfig());
-	const bool mem  = Matches(slot->snap, ReadGuestWord);
-	if (!regs || !mem) {
+	const auto regs_diff = RegsDiff(*slot, buffer.GetRegisters(), buffer.GetShaders(), buffer.GetUserConfig());
+	if (regs_diff != FrameTiming::Counter::Count) {
 		FrameTiming::Add(FrameTiming::Counter::ScoutMissN);
+		FrameTiming::Add(FrameTiming::Counter::ScoutMissRegsN);
+		FrameTiming::Add(regs_diff);
+		return TakeKind::Miss;
+	}
+	if (!Matches(slot->snap, ReadGuestWord)) {
+		FrameTiming::Add(FrameTiming::Counter::ScoutMissN);
+		FrameTiming::Add(FrameTiming::Counter::ScoutMissMemN);
 		return TakeKind::Miss;
 	}
 	out.programs    = slot->programs;
