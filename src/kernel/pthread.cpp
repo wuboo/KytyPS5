@@ -1,4 +1,5 @@
 #include "kernel/pthread.h"
+#include "common/cpTuning.h"
 
 #include "common/assert.h"
 #include "common/common.h"
@@ -3191,6 +3192,8 @@ static void* RunThread(void* arg) {
 
 	thread->unique_id = Common::Thread::GetThreadIdUnique();
 
+	::Common::CpTuning::ApplyToGuestThread(); // KYTY_CP_AFFINITY: guest threads stay off the CP core (Windows)
+
 	g_pthread_self = thread;
 
 	uint64_t os_thread_id = 0;
@@ -4432,4 +4435,73 @@ int KYTY_SYSV_ABI pthread_getstack(const LibKernel::PthreadAttr* __restrict attr
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 #pragma GCC diagnostic pop
+#endif
+
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+namespace Common::CpTuning {
+
+// Mask (group 0) of the physical core that contains logical processor lp; 0 if unknown.
+static uint64_t CoreMaskOfLp(int lp) {
+	if (lp < 0 || lp >= 64) return 0;
+	DWORD len = 0;
+	GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
+	if (len == 0) return 0;
+	std::vector<uint8_t> buf(len);
+	if (!GetLogicalProcessorInformationEx(RelationProcessorCore, reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data()), &len)) return 0;
+	for (DWORD off = 0; off < len;) {
+		auto* info = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data() + off);
+		if (info->Relationship == RelationProcessorCore) {
+			for (WORD g = 0; g < info->Processor.GroupCount; g++) {
+				const GROUP_AFFINITY& ga = info->Processor.GroupMask[g];
+				if (ga.Group == 0 && (ga.Mask & (1ull << lp)) != 0) return static_cast<uint64_t>(ga.Mask);
+			}
+		}
+		off += info->Size;
+	}
+	return 0;
+}
+
+static uint64_t ProcessMask() {
+	DWORD_PTR proc = 0, sys = 0;
+	if (!GetProcessAffinityMask(GetCurrentProcess(), &proc, &sys)) return 0;
+	return static_cast<uint64_t>(proc);
+}
+
+static void NameCurrentThreadWin(const char* name) {
+	using SetDesc = HRESULT(WINAPI*)(HANDLE, PCWSTR);
+	static const SetDesc set_desc = reinterpret_cast<SetDesc>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "SetThreadDescription")));
+	if (set_desc == nullptr || name == nullptr) return;
+	wchar_t w[64] = {};
+	for (size_t i = 0; i + 1 < 64 && name[i] != 0; i++) w[i] = static_cast<wchar_t>(static_cast<unsigned char>(name[i]));
+	set_desc(GetCurrentThread(), w);
+}
+
+// Called once on Thread_Gpu.
+void ApplyToCpThread() {
+	NameCurrentThreadWin("Thread_Gpu"); // the name the thread-cpu snapshot looks for
+	if (const int p = Priority(); p > 0) {
+		const BOOL ok = SetThreadPriority(GetCurrentThread(), p >= 2 ? THREAD_PRIORITY_HIGHEST : THREAD_PRIORITY_ABOVE_NORMAL);
+		std::fprintf(stderr, "[cp-tuning] KYTY_CP_PRIORITY=%d ok=%d now=%d\n", p, ok ? 1 : 0, GetThreadPriority(GetCurrentThread()));
+	}
+	if (const int lp = Affinity(); lp >= 0) {
+		const uint64_t core = CoreMaskOfLp(lp);
+		const DWORD_PTR prev = SetThreadAffinityMask(GetCurrentThread(), static_cast<DWORD_PTR>(1ull << lp));
+		std::fprintf(stderr, "[cp-tuning] KYTY_CP_AFFINITY=%d core_mask=0x%llx ok=%d\n", lp, static_cast<unsigned long long>(core), prev != 0 ? 1 : 0);
+	}
+}
+
+// Called at the start of every guest (kernel pthread) thread.
+void ApplyToGuestThread() {
+	const int lp = Affinity();
+	if (lp < 0) return;
+	static const uint64_t mask = GuestMask(ProcessMask(), CoreMaskOfLp(lp));
+	if (mask != 0) SetThreadAffinityMask(GetCurrentThread(), static_cast<DWORD_PTR>(mask));
+}
+
+} // namespace Common::CpTuning
+#else
+namespace Common::CpTuning {
+void ApplyToCpThread() {}
+void ApplyToGuestThread() {}
+} // namespace Common::CpTuning
 #endif

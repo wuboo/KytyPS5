@@ -21,6 +21,9 @@
 #include <mach/mach.h>
 #include <pthread.h>
 #endif
+#if defined(_WIN32)
+#include "graphics/presentation/threadCpuWin.h"
+#endif
 #include <algorithm>
 #include <array>
 #include <atomic>
@@ -843,21 +846,33 @@ std::vector<CpFrameStats::ThreadSample> SnapshotThreads() {
 }
 #endif
 
-// KYTY_THREAD_CPU=0 switches the snapshots off (default on: one task_threads + 2 thread_info per thread per guest flip).
+// KYTY_THREAD_CPU=0 switches the snapshots off (default on: one task_threads + 2 thread_info per thread per guest flip; on Windows one
+// Toolhelp snapshot + OpenThread/QueryThreadCycleTime per thread every kThreadCpuEvery-th flip, the deltas are between snapshots so the sums stay exact).
 void SampleThreadCpu(uint64_t flip) {
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(_WIN32)
 	static const bool on = [] {
 		const char* v = std::getenv("KYTY_THREAD_CPU");
 		return v == nullptr || v[0] != '0';
 	}();
 	if (!on) return;
+#if defined(_WIN32)
+	constexpr uint64_t kThreadCpuEvery = 10;
+	if (flip % kThreadCpuEvery != 0) return;
+	constexpr uint64_t kWindowSamples = 10;
+#else
+	constexpr uint64_t kWindowSamples = 100;
+#endif
 	static std::mutex                                           mutex;
 	static CpFrameStats::ThreadCpu                              tracker;
 	static std::unordered_map<std::string, uint64_t>            window;
 	static uint64_t                                             window_from = 0, window_n = 0;
 	std::unique_lock                                            lock(mutex, std::try_to_lock);
 	if (!lock.owns_lock()) return;
+#if defined(_WIN32)
+	const auto snapshot = ThreadCpuWin::SnapshotThreads();
+#else
 	const auto snapshot = SnapshotThreads();
+#endif
 	if (snapshot.empty()) return;
 	const auto delta = tracker.Update(snapshot, "Thread_Gpu");
 	Add(Counter::ThreadCpuCpNs, delta.cp);
@@ -865,15 +880,27 @@ void SampleThreadCpu(uint64_t flip) {
 	Add(Counter::ThreadCpuN);
 	for (const auto& [name, ns]: delta.by_name) window[name] += ns;
 	window_n++;
-	if (window_n >= 100) {
+	if (window_n >= kWindowSamples) {
+		// ms per flip: every sample spans (flip - window_from) / window_n flips
+		const double flips = static_cast<double>(std::max<uint64_t>(1, flip - window_from));
 		std::vector<std::pair<std::string, uint64_t>> top(window.begin(), window.end());
 		std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second != b.second ? a.second > b.second : a.first < b.first; });
 		std::string line;
 		for (size_t i = 0; i < top.size() && i < 8; i++) {
 			char item[96];
-			std::snprintf(item, sizeof(item), " %s=%.2f", top[i].first.c_str(), static_cast<double>(top[i].second) / 1e6 / static_cast<double>(window_n));
+			std::snprintf(item, sizeof(item), " %s=%.2f", top[i].first.c_str(), static_cast<double>(top[i].second) / 1e6 / flips);
 			line += item;
 		}
+#if defined(_WIN32)
+		// To a file next to KYTY_FRAME_LOG (stdout is lost when the bench kills the process); flushed per line.
+		if (const char* fl = std::getenv("KYTY_FRAME_LOG"); fl != nullptr && fl[0] != 0) {
+			const std::string path = std::string(fl) + ".thread-cpu.txt";
+			if (FILE* f = std::fopen(path.c_str(), "ab")) {
+				std::fprintf(f, "[thread-cpu] flips=%llu-%llu ms_per_flip:%s\n", static_cast<unsigned long long>(window_from), static_cast<unsigned long long>(flip), line.c_str());
+				std::fclose(f);
+			}
+		}
+#endif
 		LOGF("[thread-cpu] flips=%llu-%llu ms_per_flip:%s\n", static_cast<unsigned long long>(window_from), static_cast<unsigned long long>(flip), line.c_str());
 		window.clear();
 		window_n    = 0;

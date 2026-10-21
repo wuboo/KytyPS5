@@ -1,4 +1,5 @@
 #include "graphics/guest_gpu/graphicsRun.h"
+#include "common/cpTuning.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
 
@@ -488,6 +489,7 @@ void GuestGpu::ThreadRun(void* data) {
 	g_gpu_state  = gpu;
 	CpPhases::BindCpThread();
 	CpPhases::NameCurrentThread("Thread_Gpu");
+	Common::CpTuning::ApplyToCpThread();
 
 	for (;;) {
 		// Lazy flush: before the thread waits (no command, no runnable submission), submit what
