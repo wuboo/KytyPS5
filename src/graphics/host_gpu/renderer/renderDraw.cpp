@@ -1880,6 +1880,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
                                          vk::PrimitiveTopology topology, const DrawEmitInfo& emit_in,
                                          const DrawIndexBufferSource& index_source_in,
 	                                     bool primitive_restart_enable, PvIndirectDraw* pvi) {
+	std::optional<CpPhases::SubTimer> seg(std::in_place, FrameTiming::Counter::DrawPrologNs); // S463 DIAG
 	DrawCallInfo          draw         = draw_in; // S404: the indirect buffer is filled in below
 	DrawEmitInfo          emit         = emit_in;
 	DrawIndexBufferSource index_source = index_source_in;
@@ -2011,6 +2012,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                                                index_source.guest_element_size);
 	}
 	LogDrawPhase(draw.Name(), "PrepareBindings");
+	seg.reset();
 	std::optional<CpPhases::Scope> bind_phase;
 	bind_phase.emplace(CpPhases::Phase::DrawBind);
 	auto&                            bindings = m_graphics_bindings;
@@ -2031,6 +2033,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	const auto stages = std::span {descriptor_stages.data(), stage_count};
 	PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
 	bind_phase.reset();
+	seg.emplace(FrameTiming::Counter::DrawVbNs);
 	PreparedVertexBuffers vertex_bindings;
 	PreparedIndexBuffer   index_binding;
 	vk::Buffer            pvi_args_buffer = nullptr;
@@ -2084,6 +2087,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		}
 		if (run_prototype()) return;
 	}
+	seg.reset();
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "CreatePipeline");
 	}
@@ -2100,6 +2104,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
 	                         feedback_aspects, stages);
 	pipeline_phase.reset();
+	seg.emplace(FrameTiming::Counter::DrawPreEmitNs);
 	// S327: the pass about to be needed differs from the open one (BeginRendering would close it below): split here, before this draw
 	// records anything into the buffer.
 	{
@@ -2203,6 +2208,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		                        draw_dwords * sizeof(uint32_t), draw_data.data());
 	}
 
+	seg.emplace(FrameTiming::Counter::DrawDynNs);
 	auto& dynamic_state = m_context.GetCommandScheduler().GetDynamicState();
 	UpdateGraphicsDynamicState(buffer, dynamic_state, vertex_stages.back(), state.depth_info,
 	                           rendering);
@@ -2218,6 +2224,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x500u);
 	}
+	seg.emplace(FrameTiming::Counter::DrawEmitNs);
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
 	} else {
@@ -2287,6 +2294,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		m_context.GetCommandScheduler().MaybeEagerSplit();
 	}
 
+	std::optional<CpPhases::SubTimer> head_timer(std::in_place, FrameTiming::Counter::DrawHeadNs); // S463 DIAG
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
 	m_context.GetCommandScheduler().PopPendingOperations();
@@ -2373,10 +2381,12 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	const DrawCallInfo draw {CommandBufferDebugOp::DrawIndex, args.index_count, args.instance_count,
 	                         args.first_instance};
 	DrawRenderState    state {};
+	head_timer.emplace(FrameTiming::Counter::DrawStateNs);
 	if (!PrepareDrawRenderState(buffer, draw, args.render_target_slice_offset, state)) {
 		ResetBindings();
 		return;
 	}
+	head_timer.reset();
 
 	LogDrawStateIfNeeded(buffer, draw, state, args.index_type_and_size, args.index_addr);
 
