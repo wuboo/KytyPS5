@@ -611,6 +611,14 @@ constexpr const char* kCounterNames[] = {
     "draw_dyn_ns",
     "draw_emit_ns",
     "gfp_cf_loop_ns",
+    "indirect_host_pv_store_n",
+    "indirect_host_pv_proto_n",
+    "indirect_host_mesh_n",
+    "indirect_host_copy_depth_to_color_n",
+    "indirect_host_primitive_type_n",
+    "indirect_host_primitive_restart_n",
+    "indirect_host_native_fetch_n",
+    "indirect_host_cmd_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

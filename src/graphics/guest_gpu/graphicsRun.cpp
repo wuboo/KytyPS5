@@ -1233,6 +1233,17 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		if (ig_mode == IndirectGpu::Mode::On) {
 			// Mode 1 and the draw takes the CPU path: say why.
 			FrameTiming::Add(FrameTiming::Counter::IndirectGpuFallbackN);
+			using C = FrameTiming::Counter;
+			switch (ig_cmd_reason != IndirectGpu::Reason::Eligible ? IndirectGpu::Reason::Count : ig_request.host_reason) {
+				case IndirectGpu::Reason::PerVertexStore: FrameTiming::Add(C::IndirectHostPvStoreN); break;
+				case IndirectGpu::Reason::PerVertexProto: FrameTiming::Add(C::IndirectHostPvProtoN); break;
+				case IndirectGpu::Reason::Mesh: FrameTiming::Add(C::IndirectHostMeshN); break;
+				case IndirectGpu::Reason::CopyDepthToColor: FrameTiming::Add(C::IndirectHostCopyDepthN); break;
+				case IndirectGpu::Reason::PrimitiveType: FrameTiming::Add(C::IndirectHostPrimTypeN); break;
+				case IndirectGpu::Reason::PrimitiveRestart: FrameTiming::Add(C::IndirectHostPrimRestartN); break;
+				case IndirectGpu::Reason::NativeFetch: FrameTiming::Add(C::IndirectHostNativeFetchN); break;
+				default: FrameTiming::Add(C::IndirectHostCmdN); break;
+			}
 			LogIndirectGpu("fallback", ig_request.args_addr, ig_cmd_reason, ig_request.host_reason, m_index_buffer_size, false, 0,
 			               false);
 		}
