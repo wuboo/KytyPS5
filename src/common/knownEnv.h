@@ -22,6 +22,7 @@ inline constexpr std::string_view kKnownKytyEnv[] = {
 #ifndef KYTY_KNOWNENV_MUTANT_NO_DIAG
     "KYTY_INDIRECT_GPU",
 #endif
+    "KYTY_INDIRECT_GPU_MESH",
 
     "KYTY_LAZY_FLUSH_MAX", "KYTY_LOD_STATS", "KYTY_NGG_VCOUNT", "KYTY_OPT_OFF",
     "KYTY_OPT_ON", "KYTY_PAD_FRAME_HOLD", "KYTY_PAD_HOLD", "KYTY_PAD_SCRIPT",
