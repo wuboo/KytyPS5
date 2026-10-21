@@ -13,6 +13,9 @@
 #include "common/platform/sysTimer.h"
 #include "common/stringUtils.h"
 
+#include <atomic>
+#include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <vector>
@@ -63,11 +66,43 @@ static DWORD GetCacheAccessType(sys_file_cache_type_t t) {
 	return FILE_ATTRIBUTE_NORMAL;
 }
 
+static bool EnvFlag(const char* name) {
+	const char* v = std::getenv(name);
+	return v != nullptr && v[0] == '1';
+}
+
+// S462: ReadFile into a page the GPU resource tracker has made PAGE_READONLY fails with ERROR_NOACCESS (it
+// does not fault into the SIGSEGV-style handler as read(2) on a guest-protected page would not either) and
+// delivers 0 bytes. The result used to be ignored, so the guest got a silent short read of its own level data.
+// KYTY_FIX_WIN_READ_EFAULT=1 reports such a failure as EFAULT so the caller's bounce-buffer retry (S394) runs.
 void SysFileReadEx(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read, int* err) {
 	if (err != nullptr) {
 		*err = 0;
 	}
-	SysFileRead(data, size, f, bytes_read);
+	if (f.type != SYS_FILE_FILE) {
+		SysFileRead(data, size, f, bytes_read);
+		return;
+	}
+	static const bool fix  = EnvFlag("KYTY_FIX_WIN_READ_EFAULT");
+	static const bool diag = EnvFlag("KYTY_DIAG_READSHORT");
+	DWORD             w    = 0;
+	const BOOL        ok   = ReadFile(f.handle, data, size, &w, nullptr);
+	const DWORD       gle  = (ok != 0 ? 0 : GetLastError());
+	if (bytes_read != nullptr) {
+		*bytes_read = w;
+	}
+	if (ok == 0) {
+		static std::atomic<uint32_t> n {0};
+		const auto                   k = n.fetch_add(1) + 1;
+		if (diag && k <= 64) {
+			std::printf("[read-fail] buf=%p want=%u got=%lu gle=%lu fix=%d n=%u\n", data, size,
+			            static_cast<unsigned long>(w), static_cast<unsigned long>(gle), fix ? 1 : 0, k);
+			std::fflush(stdout);
+		}
+		if (fix && err != nullptr && (gle == ERROR_NOACCESS || gle == ERROR_INVALID_USER_BUFFER)) {
+			*err = EFAULT;
+		}
+	}
 }
 
 void SysFileRead(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_read) {

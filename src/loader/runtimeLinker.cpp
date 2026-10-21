@@ -824,6 +824,81 @@ static void GfEmuShadowFinish(const GfEmuShadow& shadow) {
 	}
 }
 
+static bool SignalCensusResolve(uint64_t rip, char* module, size_t module_size, uint64_t* offset);
+
+// S462 DIAG (KYTY_DIAG_S462=1): wider guest context at a fatal fault - module base, code before pc, the call
+// target stub with its GOT slot, return addresses on the stack and the memory behind the registers.
+static void S462HexDump(const char* tag, uint64_t addr, uint64_t size) {
+	if (!IsReadableRange(addr, size)) {
+		std::printf("S462 %s 0x%016" PRIx64 " unreadable\n", tag, addr);
+		return;
+	}
+	const auto* p = reinterpret_cast<const uint8_t*>(addr);
+	for (uint64_t o = 0; o < size; o += 32) {
+		std::printf("S462 %s %016" PRIx64 ":", tag, addr + o);
+		for (uint64_t i = o; i < o + 32 && i < size; i++) {
+			std::printf(" %02x", p[i]);
+		}
+		std::printf("\n");
+	}
+}
+
+static void S462DumpFaultContext(const Common::HostException::ExceptionInfo* info) {
+	const uint64_t pc = info->exception_address;
+	auto*          prog = Common::Singleton<RuntimeLinker>::Instance()->FindProgramByAddr(pc);
+	if (prog != nullptr) {
+		std::printf("S462 module base=0x%016" PRIx64 " pc_off=0x%" PRIx64 "\n", static_cast<uint64_t>(prog->base_vaddr),
+		            pc - static_cast<uint64_t>(prog->base_vaddr));
+	}
+	S462HexDump("code", pc - 1536, 1536 + 64);
+	if (IsReadableRange(pc - 16, 16)) {
+		const auto* c = reinterpret_cast<const uint8_t*>(pc - 16);
+		for (int i = 0; i + 5 <= 16; i++) {
+			if (c[i] != 0xe8) {
+				continue;
+			}
+			int32_t rel = 0;
+			std::memcpy(&rel, c + i + 1, 4);
+			const uint64_t target = pc - 16 + i + 5 + static_cast<int64_t>(rel);
+			std::printf("S462 call at pc-%d -> 0x%016" PRIx64 "\n", 16 - i, target);
+			S462HexDump("callee", target, 32);
+			if (IsReadableRange(target, 8)) {
+				const auto* t = reinterpret_cast<const uint8_t*>(target);
+				if (t[0] == 0xff && t[1] == 0x25) {
+					int32_t d = 0;
+					std::memcpy(&d, t + 2, 4);
+					const uint64_t slot = target + 6 + static_cast<int64_t>(d);
+					if (IsReadableRange(slot, 8)) {
+						const uint64_t dest = *reinterpret_cast<const uint64_t*>(slot);
+						char           mod[64] = "?";
+						uint64_t       off     = 0;
+						SignalCensusResolve(dest, mod, sizeof(mod), &off);
+						std::printf("S462 got slot 0x%016" PRIx64 " -> 0x%016" PRIx64 " (%s+0x%" PRIx64 ")\n", slot, dest, mod, off);
+					}
+				}
+			}
+		}
+	}
+	void* frames[24] = {};
+	const int depth = WalkGuestStack(info->rbp, info->rsp, frames, 24);
+	for (int i = 0; i < depth; i++) {
+		char     mod[64] = "?";
+		uint64_t off     = 0;
+		SignalCensusResolve(reinterpret_cast<uint64_t>(frames[i]), mod, sizeof(mod), &off);
+		std::printf("S462 frame %d ret=%p (%s+0x%" PRIx64 ")\n", i, frames[i], mod, off);
+	}
+	S462HexDump("stack", info->rsp, 96 * 8);
+	const struct {
+		const char* n;
+		uint64_t    v;
+	} regs[] = {{"rdi", info->rdi}, {"rsi", info->rsi}, {"rdx", info->rdx}, {"r12", info->r12},
+	            {"r13", info->r13}, {"r14", info->r14}, {"r15", info->r15}, {"rbx", info->rbx}};
+	for (const auto& r: regs) {
+		S462HexDump(r.n, r.v, 128);
+	}
+	std::fflush(stdout);
+}
+
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
@@ -899,6 +974,9 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 				std::printf("%s %016" PRIx64, (i % 4 == 0) ? "\n " : "", stack[i]);
 			}
 			std::printf("\n");
+		}
+		if (const char* v = std::getenv("KYTY_DIAG_S462"); v != nullptr && v[0] == '1') {
+			S462DumpFaultContext(info);
 		}
 		std::fflush(stdout);
 	}

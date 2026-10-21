@@ -271,6 +271,11 @@ static bool ReadIntoGuest(File* file, void* buf, uint32_t want, uint64_t pos, ui
 		}
 	}
 	*got = done;
+	if (DiagReadShortEnabled()) {
+		// S462: stdout, not LOGF - the bench runs with --printf-direction Silent.
+		std::printf("[read-retry] buf=%p want=%u direct_got=%u done=%u\n", buf, want, direct_got, done);
+		std::fflush(stdout);
+	}
 	if (done < want) DiagReadShort(file, buf, want, done, pos, 0, true);
 	return true;
 }
