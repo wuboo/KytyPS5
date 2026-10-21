@@ -289,6 +289,9 @@ void FlipReport(uint64_t flip) {
 		const auto values = RtDecode(layout, t.data.data(), texels);
 		const auto stats  = RtComputeStats(values, layout.channels);
 		LOGF("%s\n", RtDescribe(what, layout, t.width, t.height, stats).c_str());
+		if (const char* f457 = std::getenv("KYTY_DIAG_S457_RTFILE"); f457 != nullptr) { // S457 DIAG: LOGF is silent in the bench
+			if (FILE* o = std::fopen(f457, "a")) { std::fprintf(o, "%s\n", RtDescribe(what, layout, t.width, t.height, stats).c_str()); std::fclose(o); }
+		}
 		if (dir == nullptr) continue;
 		const auto path = RtDumpPath(dir, label, flip, t.mrt);
 		const auto ppm  = RtPpm(RtToRgb8(layout, values, stats), t.width, t.height);

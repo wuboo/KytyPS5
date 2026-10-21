@@ -804,6 +804,9 @@ RenderExecutor::FindTextureDescription(const ShaderRecompiler::IR::ImageResource
 	return entry.description;
 }
 
+static thread_local uint64_t g_s457_shader = 0; // S457 DIAG
+static thread_local int g_s457_stage = -1;
+
 TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
                                               const ShaderRecompiler::IR::DescriptorValue& value,
                                               uint64_t ps_hash, uint32_t slot,
@@ -955,8 +958,8 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		if (s457_flip >= 0 && static_cast<long>(FrameTiming::GuestFlips() + 1) >= s457_flip && static_cast<long>(FrameTiming::GuestFlips() + 1) < s457_flip + 60) {
 			static FILE* s457_file = std::fopen((std::string(std::getenv("KYTY_DIAG_S457_FILE") ? std::getenv("KYTY_DIAG_S457_FILE") : "s457-tex.txt")).c_str(), "a");
 			if (s457_file) {
-				std::fprintf(s457_file, "[s457-tex] flip=%ld ps=0x%016" PRIx64 " slot=%u addr=0x%" PRIx64 " fmt=%u %ux%u storage=%d\n",
-				             static_cast<long>(FrameTiming::GuestFlips() + 1), ps_hash, slot, address, static_cast<uint32_t>(format), width, height, storage ? 1 : 0);
+				std::fprintf(s457_file, "[s457-tex] flip=%ld ps=0x%016" PRIx64 " slot=%u addr=0x%" PRIx64 " fmt=%u %ux%u storage=%d stage=%d sh=0x%016" PRIx64 "\n",
+				             static_cast<long>(FrameTiming::GuestFlips() + 1), ps_hash, slot, address, static_cast<uint32_t>(format), width, height, storage ? 1 : 0, g_s457_stage, g_s457_shader);
 				std::fflush(s457_file);
 			}
 		}
@@ -1096,6 +1099,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 			null_hint.addr   = snapshot.image_null_notes[i].addr;
 		}
 		null_hint.shader = program.shader_hash;
+		g_s457_shader = program.shader_hash; g_s457_stage = static_cast<int>(program.stage); // S457 DIAG
 		auto binding = ResolveTexture(program.info.images[i], snapshot.images[i],
 		                              program.stage == ShaderType::Pixel ? program.shader_hash : 0, i, &null_hint);
 		BindImage(binding.image_id, binding.desc.type == TextureCache::BindingType::Storage);
@@ -1230,6 +1234,7 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 				null_hint.addr   = snapshot.image_null_notes[i].addr;
 			}
 			null_hint.shader = program.shader_hash;
+			g_s457_shader = program.shader_hash; g_s457_stage = static_cast<int>(program.stage); // S457 DIAG
 			KYTY_CP_SITE(BindResolveTexture);
 			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i],
 			                           program.stage == ShaderType::Pixel ? program.shader_hash : 0, i, &null_hint);
