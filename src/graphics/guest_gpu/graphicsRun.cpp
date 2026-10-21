@@ -752,10 +752,18 @@ void CommandProcessor::SuspendPm4() {
 	g_current_execution->m_suspended = true;
 }
 
+// S469 (KYTY_CP_FAST_LOOP=1, default 0): the per-packet overhead of the PM4 loop - the pending-command queue and the prototype batch are asked with an
+// inline load before the scope + call, and a plain NOP (R_ZERO, no marker) is stepped over without the handler dispatch. Same effects, fewer calls.
+static bool CpFastLoop() {
+	static const bool on = FrameTiming::DiagFlagOn(std::getenv("KYTY_CP_FAST_LOOP"));
+	return on;
+}
+
 void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	CpPhases::Scope parse_phase(CpPhases::Phase::Parse); // S323: handler bodies are Phase::Handler, children subtract
+	const bool fast_loop = CpFastLoop();
 	while (!execution.m_buffer_stack.empty()) {
-		if (g_gpu_state != nullptr) {
+		if (g_gpu_state != nullptr && (!fast_loop || g_gpu_state->HasPendingCommands())) {
 			CpPhases::Scope phase(CpPhases::Phase::Cmds);
 			g_gpu_state->ProcessCommands();
 		}
@@ -841,7 +849,8 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		                            opcode == Pm4::IT_SET_CONTEXT_REG_INDIRECT ||
 		                            opcode == Pm4::IT_NUM_INSTANCES;
 		if (opcode != Pm4::IT_DRAW_INDEX_2 && opcode != Pm4::IT_DISPATCH_DRAW_PREAMBLE &&
-		    opcode != Pm4::IT_DRAW_INDEX_AUTO && !register_write) {
+		    opcode != Pm4::IT_DRAW_INDEX_AUTO && !register_write &&
+		    (!fast_loop || m_renderer.GetRenderExecutor().PrototypeBatchActive())) {
 			// Every op other than a (possibly per-vertex-prototype) draw must see this op's
 			// effects fully applied first: flush any prototype draws whose replay was deferred for
 			// batching (bench-notes.md 2026-09-27 "Kierunek A") before this op runs, so nothing
@@ -852,6 +861,14 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
 		}
 
+		if (fast_loop && opcode == Pm4::IT_NOP && KYTY_PM4_R(packet_header) == Pm4::R_ZERO && (packet[1] & 0xffff0000u) != 0x68750000u &&
+		    !CpPhases::Enabled() && !CpSampler::Active().load(std::memory_order_relaxed) && !RfOp::Enabled()) {
+			const auto nop_dw = KYTY_PM4_LEN(packet_header);
+			EXIT_IF(nop_dw > remaining_dw);
+			cursor.offset_dw += nop_dw;
+			execution.m_made_progress = true;
+			continue;
+		}
 		if (CpPhases::Enabled()) FrameTiming::Add(FrameTiming::Counter::Pm4Packets);
 		uint32_t packet_dw;
 		{
