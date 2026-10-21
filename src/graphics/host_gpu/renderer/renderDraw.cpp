@@ -2016,14 +2016,17 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	auto&                            bindings = m_graphics_bindings;
 	std::array<PreparedBindings*, 4> descriptor_stages {};
 	uint32_t                         stage_count = 0;
-	for (uint32_t i = 0; i < vertex_stages.size(); i++) {
-		PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i]);
-		descriptor_stages[stage_count++] = &bindings.vertex[i];
-	}
-	if (state.ps_active) {
-		if (!bindings.pixel) bindings.pixel.emplace();
-		PrepareBindings(state.ps_input_info.stage, *bindings.pixel);
-		descriptor_stages[stage_count++] = &*bindings.pixel;
+	{
+		CpPhases::SubTimer prep_timer(FrameTiming::Counter::BindPrepNs);
+		for (uint32_t i = 0; i < vertex_stages.size(); i++) {
+			PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i]);
+			descriptor_stages[stage_count++] = &bindings.vertex[i];
+		}
+		if (state.ps_active) {
+			if (!bindings.pixel) bindings.pixel.emplace();
+			PrepareBindings(state.ps_input_info.stage, *bindings.pixel);
+			descriptor_stages[stage_count++] = &*bindings.pixel;
+		}
 	}
 	const auto stages = std::span {descriptor_stages.data(), stage_count};
 	PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});

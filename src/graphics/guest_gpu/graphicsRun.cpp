@@ -854,6 +854,21 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		uint32_t packet_dw;
 		{
 			CpPhases::Scope handler_phase(CpPhases::Phase::Handler);
+			if (CpPhases::Enabled()) {
+				using C = FrameTiming::Counter;
+				switch (opcode) { // S463 DIAG: handler self time by opcode class
+				case Pm4::IT_DRAW_INDEX_2: case Pm4::IT_DRAW_INDEX_AUTO: case Pm4::IT_DRAW_INDIRECT: case Pm4::IT_DRAW_INDEX_INDIRECT:
+				case Pm4::IT_DRAW_INDEX_OFFSET_2: case Pm4::IT_DRAW_INDIRECT_MULTI: case Pm4::IT_DRAW_INDEX_INDIRECT_MULTI: case Pm4::IT_DISPATCH_DRAW:
+					handler_phase.SetSub(C::HdlDrawNs, C::HdlDrawN); break;
+				case Pm4::IT_SET_SH_REG: case Pm4::IT_SET_CONTEXT_REG: case Pm4::IT_SET_CONTEXT_REG_INDIRECT: case Pm4::IT_SET_UCONFIG_REG:
+				case Pm4::IT_NUM_INSTANCES: case Pm4::IT_SET_CONFIG_REG: case Pm4::IT_SET_SH_REG_INDIRECT:
+					handler_phase.SetSub(C::HdlRegNs, C::HdlRegN); break;
+				case Pm4::IT_NOP: handler_phase.SetSub(C::HdlNopNs, C::HdlNopN); break;
+				case Pm4::IT_WAIT_REG_MEM: case Pm4::IT_WAIT_REG_MEM_64: handler_phase.SetSub(C::HdlWaitNs, C::HdlWaitN); break;
+				case Pm4::IT_DISPATCH_DIRECT: case Pm4::IT_DISPATCH_INDIRECT: handler_phase.SetSub(C::HdlDispNs, C::HdlDispN); break;
+				default: handler_phase.SetSub(C::HdlOtherNs, C::HdlOtherN); break;
+				}
+			}
 			if (CpSampler::Active().load(std::memory_order_relaxed)) CpSampler::CpOpcode().store(opcode, std::memory_order_relaxed);
 			const bool rf_op = RfOp::Enabled(); // S412 (KYTY_DIAG_RFOP): the opcode and packet a page read fault is attributed to
 			if (rf_op) RfOp::BeginPacket(opcode, packet, remaining_dw);

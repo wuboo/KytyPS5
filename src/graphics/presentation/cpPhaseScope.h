@@ -51,6 +51,24 @@ inline void BindCpThread() {
 	}
 }
 
+// S463 DIAG: wall ns of a region (children included) added to `counter`; one flag test when KYTY_DIAG_CP_PHASES is off or off the CP thread.
+class SubTimer {
+public:
+	explicit SubTimer(FrameTiming::Counter counter): m_counter(counter), m_on(State().bound) {
+		if (m_on) m_begin = FrameTiming::SteadyNowNs();
+	}
+	~SubTimer() {
+		if (m_on) FrameTiming::Add(m_counter, FrameTiming::ElapsedNs(m_begin, FrameTiming::SteadyNowNs()));
+	}
+	SubTimer(const SubTimer&)            = delete;
+	SubTimer& operator=(const SubTimer&) = delete;
+
+private:
+	FrameTiming::Counter m_counter;
+	bool                 m_on;
+	int64_t              m_begin = 0;
+};
+
 class Scope {
 public:
 	explicit Scope(Phase phase) {
@@ -67,12 +85,23 @@ public:
 		FrameTiming::Add(static_cast<FrameTiming::Counter>(static_cast<uint32_t>(FrameTiming::Counter::CpParseNs) +
 		                                                  static_cast<uint32_t>(closed)),
 		                 self);
+		if (m_count != FrameTiming::Counter::Count) {
+			FrameTiming::Add(m_sub, self);
+			FrameTiming::Add(m_count);
+		}
+	}
+	// S463 DIAG: also charge this scope's self ns to `sub` and count the packet in `count`.
+	void SetSub(FrameTiming::Counter sub, FrameTiming::Counter count) {
+		m_sub = sub;
+		m_count = count;
 	}
 	Scope(const Scope&)            = delete;
 	Scope& operator=(const Scope&) = delete;
 
 private:
 	bool                          m_active = false;
+	FrameTiming::Counter          m_sub   = FrameTiming::Counter::Count;
+	FrameTiming::Counter          m_count = FrameTiming::Counter::Count;
 	std::optional<CpSampler::SiteScope> m_site;
 };
 

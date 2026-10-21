@@ -33,12 +33,14 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/shader.h"
 #include "kernel/memory.h"
 
+#include <optional>
 #include <algorithm>
 #include <atomic>
 #include <bit>
@@ -1287,18 +1289,24 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 	bool uses_dma = false;
 	{
 		KYTY_CP_SITE(BindFindBuffers);
+		CpPhases::SubTimer timer(FrameTiming::Counter::BindFindNs); // S463 DIAG
 		FindBuffers(stages);
 	}
 	for (auto* stage: stages) {
 		uses_dma |= stage->runtime->program->info.uses_dma;
 	}
 	if (uses_dma) {
+		CpPhases::SubTimer timer(FrameTiming::Counter::BindBdaNs); // S463 DIAG
 		m_context.PrepareBda();
 	}
-	for (auto* stage: stages) {
-		RebindImages(*stage);
+	{
+		CpPhases::SubTimer timer(FrameTiming::Counter::BindImgNs); // S463 DIAG
+		for (auto* stage: stages) {
+			RebindImages(*stage);
+		}
 	}
 	auto& cache = m_context.GetTextureCache();
+	std::optional<CpPhases::SubTimer> rt_timer(std::in_place, FrameTiming::Counter::BindRtNs); // S463 DIAG
 	for (auto& target: colors) {
 		EXIT_IF(!target.image_id);
 		const auto old_image = cache.m_slot_images.try_get(target.image_id);
@@ -1315,6 +1323,8 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 	}
 	// Discovery can read back PS5 metadata and submit the scheduler. Reserve draw buffers only
 	// after image identities are final; attachment layout transitions follow buffer alias copies.
+	rt_timer.reset();
+	CpPhases::SubTimer buf_timer(FrameTiming::Counter::BindBufNs); // S463 DIAG
 	for (auto* stage: stages) {
 		RebindBuffers(*stage);
 	}

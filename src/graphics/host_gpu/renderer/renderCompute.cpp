@@ -333,6 +333,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 			input_info.workgroup_counts[axis] = threads / size + (threads % size != 0u);
 		}
 	}
+	std::optional<CpPhases::SubTimer> disp_timer(std::in_place, FrameTiming::Counter::DispProgNs); // S463 DIAG
 	const auto compute_program =
 	    m_context.GetPipelineCache().GetComputeProgram(cs_regs, sh_regs, input_info);
 	if (use_thread_dimensions) {
@@ -376,6 +377,7 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	buffer.EndRendering();
 	auto& pipeline =
 	    m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
+	disp_timer.emplace(FrameTiming::Counter::DispPrepNs);
 	std::optional<CpSampler::SiteScope> disp_site;
 	if (CpSampler::Active().load(std::memory_order_relaxed)) disp_site.emplace(CpSampler::SiteId(CpSampler::Site::DispBind));
 	auto& bindings = m_compute_bindings;
@@ -395,11 +397,13 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	auto              vk_buffer        = buffer.Handle();
 	disp_site.reset();
+	disp_timer.emplace(FrameTiming::Counter::DispCommitNs);
 	{
 		KYTY_CP_SITE(DispDesc);
 		CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 		               std::span {&descriptor_stage, 1u});
 	}
+	disp_timer.reset();
 	KYTY_CP_SITE(DispRecord);
 	bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
 	    HasShaderBufferWrites(input_info.stage);
@@ -522,10 +526,12 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	ShaderComputeInputInfo input_info {};
 	input_info.async_compute = async_compute;
 	input_info.indirect_args_address = args_addr;
+	std::optional<CpPhases::SubTimer> disp_timer(std::in_place, FrameTiming::Counter::DispProgNs); // S463 DIAG
 	const auto compute_program = m_context.GetPipelineCache().GetComputeProgram(
 	    cs_regs, buffer.GetRegisters().GetShaderRegisters(), input_info);
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
+	disp_timer.emplace(FrameTiming::Counter::DispPrepNs);
 	std::optional<CpSampler::SiteScope> disp_site;
 	if (CpSampler::Active().load(std::memory_order_relaxed)) disp_site.emplace(CpSampler::SiteId(CpSampler::Site::DispBind));
 	auto& bindings = m_compute_bindings;
@@ -544,11 +550,13 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
 	RebindBuffers(bindings);
 	disp_site.reset();
+	disp_timer.emplace(FrameTiming::Counter::DispCommitNs);
 	{
 		KYTY_CP_SITE(DispDesc);
 		CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 		               std::span {&descriptor_stage, 1u});
 	}
+	disp_timer.reset();
 	KYTY_CP_SITE(DispRecord);
 	const auto vk_buffer = buffer.Handle();
 	const bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||

@@ -391,6 +391,13 @@ enum class Counter : uint32_t {
 	GfpMemoSkipN, GfpMemoMissColdN, GfpMemoMissInputsN, GfpMemoMissReadsN,
 	// S451 DIAG: guest reads of the control-flow loop (calls, time in the reader).
 	GfpCfReadN, GfpCfReadNs,
+	// S463 DIAG (KYTY_DIAG_CP_PHASES=1): sub-phases of the CP thread. Draw bind (self ns, inside cp_draw_bind): PrepareBindings loop / FindBuffers /
+	// PrepareBda / RebindImages / render-target rebind / RebindBuffers. Dispatch: GetComputeProgram+Pipeline / bind preparation / CommitBindings.
+	// Handler self ns and packet counts by opcode class: draw, SET_*_REG, NOP, WAIT_REG_MEM, dispatch, other.
+	BindPrepNs, BindFindNs, BindBdaNs, BindImgNs, BindRtNs, BindBufNs,
+	DispProgNs, DispPrepNs, DispCommitNs,
+	HdlDrawNs, HdlRegNs, HdlNopNs, HdlWaitNs, HdlDispNs, HdlOtherNs,
+	HdlDrawN, HdlRegN, HdlNopN, HdlWaitN, HdlDispN, HdlOtherN,
 	Count,
 };
 
