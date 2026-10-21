@@ -25,8 +25,74 @@
 #include <thread>
 #include <vector>
 
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <dbghelp.h>
+#include <tlhelp32.h>
+#pragma comment(lib, "dbghelp.lib")
+#endif
+
 namespace Libs::Graphics::CpScout {
 namespace {
+
+// S471 DIAG: the stacks of every thread of the process (symbols from the pdb next to the exe), printed to stderr when the monitor sees a stall.
+void DumpAllStacks() {
+#ifdef _WIN32
+	const HANDLE process = GetCurrentProcess();
+	SymSetOptions(SYMOPT_LOAD_LINES | SYMOPT_DEFERRED_LOADS | SYMOPT_UNDNAME);
+	SymInitialize(process, nullptr, TRUE);
+	const DWORD self = GetCurrentThreadId();
+	HANDLE      snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+	if (snap == INVALID_HANDLE_VALUE) return;
+	THREADENTRY32 entry {};
+	entry.dwSize = sizeof(entry);
+	for (BOOL ok = Thread32First(snap, &entry); ok; ok = Thread32Next(snap, &entry)) {
+		if (entry.th32OwnerProcessID != GetCurrentProcessId() || entry.th32ThreadID == self) continue;
+		HANDLE thread = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, entry.th32ThreadID);
+		if (thread == nullptr) continue;
+		if (SuspendThread(thread) != static_cast<DWORD>(-1)) {
+			CONTEXT context {};
+			context.ContextFlags = CONTEXT_FULL;
+			if (GetThreadContext(thread, &context)) {
+				std::fprintf(stderr, "[scout] STACK tid=%lu\n", static_cast<unsigned long>(entry.th32ThreadID));
+				STACKFRAME64 frame {};
+				frame.AddrPC.Offset    = context.Rip;
+				frame.AddrPC.Mode      = AddrModeFlat;
+				frame.AddrFrame.Offset = context.Rbp;
+				frame.AddrFrame.Mode   = AddrModeFlat;
+				frame.AddrStack.Offset = context.Rsp;
+				frame.AddrStack.Mode   = AddrModeFlat;
+				for (int depth = 0; depth < 24; depth++) {
+					if (!StackWalk64(IMAGE_FILE_MACHINE_AMD64, process, thread, &frame, &context, nullptr, SymFunctionTableAccess64, SymGetModuleBase64, nullptr)) break;
+					if (frame.AddrPC.Offset == 0) break;
+					alignas(SYMBOL_INFO) char buffer[sizeof(SYMBOL_INFO) + 256] {};
+					auto*                     symbol = reinterpret_cast<SYMBOL_INFO*>(buffer);
+					symbol->SizeOfStruct             = sizeof(SYMBOL_INFO);
+					symbol->MaxNameLen               = 255;
+					DWORD64 displacement             = 0;
+					DWORD   line_displacement        = 0;
+					IMAGEHLP_LINE64 line {};
+					line.SizeOfStruct = sizeof(line);
+					if (SymFromAddr(process, frame.AddrPC.Offset, &displacement, symbol)) {
+						const bool has_line = SymGetLineFromAddr64(process, frame.AddrPC.Offset, &line_displacement, &line) != 0;
+						std::fprintf(stderr, "[scout]   %s+0x%llx %s:%lu\n", symbol->Name, static_cast<unsigned long long>(displacement),
+						             has_line ? line.FileName : "", has_line ? static_cast<unsigned long>(line.LineNumber) : 0ul);
+					} else {
+						std::fprintf(stderr, "[scout]   0x%llx\n", static_cast<unsigned long long>(frame.AddrPC.Offset));
+					}
+				}
+			}
+			ResumeThread(thread);
+		}
+		CloseHandle(thread);
+	}
+	CloseHandle(snap);
+	std::fflush(stderr);
+#endif
+}
 
 struct Slot {
 	HW::Shader                           sh;
@@ -102,6 +168,7 @@ void MonitorLoop() {
 			std::fprintf(stderr, "[scout] MONITOR no progress 10 s: worker phase=%u last_op=0x%x draws=%u mark=%u cp_in_gfp=%d flips=%llu\n", g_dbg_phase.load(), g_dbg_op.load(),
 			             g_dbg_draws.load(), PipelineCache::ScoutScope::Marked(), PipelineCache::ScoutScope::CpIsInGfp() ? 1 : 0, static_cast<unsigned long long>(FrameTiming::GuestFlips()));
 			std::fflush(stderr);
+			DumpAllStacks();
 		}
 		if (same == 0) said = false;
 	}
