@@ -1549,11 +1549,10 @@ void WalkProbeAdd(ShaderRecompiler::IR::WalkProbe::Id id, uint64_t value) {
 	    C::GfpMatWalkNs, C::GfpWalkTreeNs, C::GfpWalkCfNs, C::GfpWalkSlotsNs,
 	    C::GfpCfWalkN, C::GfpCfIterN, C::GfpCfBlocksN, C::GfpCfCondN, C::GfpCfEvalN, C::GfpCfRflN, C::GfpCfReadN, C::GfpCfReadNs, C::GfpCfLoopNs,
 	    C::GfpMemoHitN, C::GfpMemoMissN, C::GfpMemoNeN, C::GfpMemoSkipN, C::GfpMemoMissColdN, C::GfpMemoMissInputsN, C::GfpMemoMissReadsN,
-	    C::GfpCfFindNs, C::GfpCfFindScanN, C::GfpCfFindTriesN, C::GfpCfFindReadsN, C::GfpCfFastNeN,
 	};
 	static_assert(std::size(map) == static_cast<size_t>(Id::Count), "WalkProbe::Id out of step with the FrameTiming counters");
 	// the timers and eval counters (everything before the memo counters) only with KYTY_DIAG_GFP=1
-	if ((id < Id::MemoHitN || (id >= Id::CfFindNs && id != Id::CfFastNeN)) && !GfpDetail()) return;
+	if (id < Id::MemoHitN && !GfpDetail()) return;
 	FrameTiming::Add(map[static_cast<size_t>(id)], value);
 }
 

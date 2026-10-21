@@ -12,8 +12,6 @@ enum class Id : uint8_t {
 	MatWalkNs, WalkTreeNs, WalkCfNs, WalkSlotsNs,
 	CfWalkN, CfIterN, CfBlocksN, CfCondN, CfEvalN, CfRflN, CfReadN, CfReadNs, CfLoopNs,
 	MemoHitN, MemoMissN, MemoNeN, MemoSkipN, MemoMissColdN, MemoMissInputsN, MemoMissReadsN,
-	// S466 DIAG: the memo lookup (time, ways looked at, ways tried, guest words read again) and shadow: fast lookup differs from the plain one (must be 0).
-	CfFindNs, CfFindScanN, CfFindTriesN, CfFindReadsN, CfFastNeN,
 	Count,
 };
 

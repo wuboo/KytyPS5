@@ -43,31 +43,10 @@ inline std::optional<CfMemoMode>& CfMemoModeTestOverride() {
 	return mode;
 }
 
-inline std::optional<CfMemoMode>& CfMemoFastTestOverride() {
-	static std::optional<CfMemoMode> mode;
-	return mode;
-}
-
 inline CfMemoMode CfMemoModeCurrent() {
 	if (const auto& forced = CfMemoModeTestOverride()) return *forced;
 	return CfMemoModeFromEnv();
 }
-
-// S466 KYTY_PROGS_MEMO_FAST=0|1|shadow (default 0): the cheaper hit path of the memo (SrtCfMemoSet::FindFast): a hash of the inputs in front of the exact
-// comparison, no 64-step scan of the user data mask, no re-zeroing of the node results, a promotion that moves a byte of an order table instead of whole ways.
-// Shadow = the fast lookup answers and the plain one is asked as well; the answers (way and miss reason) are compared.
-inline CfMemoMode CfMemoFastCurrent() {
-	static const CfMemoMode env_mode = ParseCfMemoMode(std::getenv("KYTY_PROGS_MEMO_FAST"));
-	if (const auto& forced = CfMemoFastTestOverride()) return *forced;
-	return env_mode;
-}
-
-// What a lookup did (diagnostics): ways looked at / ways whose inputs matched (and were tried) / guest words read again.
-struct CfFindStats {
-	uint32_t scanned = 0;
-	uint32_t tries   = 0;
-	uint32_t reads   = 0;
-};
 
 // A guest read as the loop issued it: through which reader (null = the direct host copy of the main walker, else the function).
 using CfMemoReader = bool (*)(void* userdata, uint64_t address, std::span<uint32_t> values);
@@ -164,7 +143,6 @@ struct SrtCfMemo {
 	std::vector<Read>     reads;
 	std::vector<CfNode>   nodes;
 	std::vector<uint8_t>  visited;
-	uint64_t              sig = 0;           // S466: hash of the inputs (InputSig), set by End; a filter in front of the exact comparison
 	// The reader functions of the runtime the loop ran with (null = none): the loop's reads mean other things under other readers.
 	CfMemoReader          ordinary_fn = nullptr;
 	CfMemoReader          strict_fn   = nullptr;
@@ -255,41 +233,7 @@ struct SrtCfMemo {
 		}
 		for (auto& node: nodes) node.inst = nullptr;
 		visited.assign(final_visited.begin(), final_visited.end());
-		sig = InputSig(std::span<const uint32_t>(user_words.data(), kMaxUserData), user_mask, base_used, shader_base);
 		valid = true;
-	}
-
-	// S466: a hash of the user data words selected by `mask`, of the shader base (when `base_used`) and of the mask itself. Equal inputs have equal hashes; the
-	// converse is not relied on (a hit is confirmed by InputsMatchExact).
-	static uint64_t InputSig(std::span<const uint32_t> user, uint64_t mask, bool base_used, uint64_t base) {
-#ifdef KYTY_CFMEMO_MUTANT_IGNORES_USERDATA
-		mask = 0;
-#endif
-#ifdef KYTY_CFMEMO_MUTANT_IGNORES_BASE
-		base_used = false;
-#endif
-		uint64_t h = mask * 0x9e3779b97f4a7c15ull + (base_used ? (base ^ 0xc2b2ae3d27d4eb4full) * 0xff51afd7ed558ccdull : 0x165667b19e3779f9ull);
-		for (uint64_t bits = mask; bits != 0; bits &= bits - 1) {
-			const auto i = static_cast<uint32_t>(__builtin_ctzll(bits));
-			h = (h ^ user[i]) * 0x9e3779b97f4a7c15ull;
-			h ^= h >> 29u;
-		}
-		return h;
-	}
-
-	// InputsMatch with the user data compared only at the words that were read (no 64-step scan). Same answer.
-	bool InputsMatchExact(std::span<const uint32_t> user, uint64_t base, CfMemoReader ordinary, CfMemoReader strict) const {
-		if (!valid || user.size() != user_size || ordinary != ordinary_fn || strict != strict_fn) return false;
-#ifndef KYTY_CFMEMO_MUTANT_IGNORES_BASE
-		if (base_used && base != shader_base) return false;
-#endif
-#ifndef KYTY_CFMEMO_MUTANT_IGNORES_USERDATA
-		for (uint64_t bits = user_mask; bits != 0; bits &= bits - 1) {
-			const auto i = static_cast<uint32_t>(__builtin_ctzll(bits));
-			if (user[i] != user_words[i]) return false;
-		}
-#endif
-		return true;
 	}
 
 	void Abort() {
@@ -312,9 +256,8 @@ struct SrtCfMemo {
 	}
 
 	// Reads every recorded address again; true when each answers as it did.
-	bool ReadsUnchanged(void* userdata, uint32_t* read_count = nullptr) const {
+	bool ReadsUnchanged(void* userdata) const {
 		for (const auto& read: reads) {
-			if (read_count != nullptr) ++*read_count;
 			uint32_t word = 0;
 			bool     ok   = true;
 			if (read.reader != nullptr) {
@@ -332,7 +275,7 @@ struct SrtCfMemo {
 
 	// Asks every node again with the current user data: the same address computation, the same reader. True when each node takes the same path (kind), succeeds
 	// as before and, where something other than a handle word uses it, answers the same.
-	bool NodesUnchanged(std::span<const uint32_t> user, void* userdata, uint32_t* read_count = nullptr) const {
+	bool NodesUnchanged(std::span<const uint32_t> user, void* userdata) const {
 		std::array<uint64_t, kMaxNodes> result {};
 		for (size_t i = 0; i < nodes.size(); ++i) {
 			const auto&             node  = nodes[i];
@@ -356,49 +299,6 @@ struct SrtCfMemo {
 				case CfReadKind::Outside:
 				case CfReadKind::NullTable: break;
 				case CfReadKind::Read:
-					if (read_count != nullptr) ++*read_count;
-					if (node.reader != nullptr) {
-						ok = node.reader(userdata, address.address, std::span<uint32_t>(&word, 1));
-					} else if (address.address >= kCfGuestMemoryMin) {
-						std::memcpy(&word, reinterpret_cast<const void*>(address.address), sizeof(word));
-					}
-					break;
-			}
-			if (ok != node.ok) return false;
-#ifndef KYTY_CFMEMO_MUTANT_NODE_VALUE_IGNORED
-			if (ok && node.compare && word != node.word) return false;
-#endif
-			result[i] = ok ? word : 0;
-		}
-		return true;
-	}
-
-	// S466: NodesUnchanged without zeroing 64 results and 4 words per call (an entry is read only after it was written: sources are earlier nodes).
-	bool NodesUnchangedFast(std::span<const uint32_t> user, void* userdata, uint32_t* read_count) const {
-		uint64_t result[kMaxNodes];
-		for (size_t i = 0; i < nodes.size(); ++i) {
-			const auto& node  = nodes[i];
-			uint64_t    words[4];
-			const size_t count = node.constbuf ? 4 : 2;
-			for (size_t k = 0; k < count; ++k) {
-				if (node.src_kind[k] == CfNode::Src::User) {
-					if (node.src_index[k] >= user.size()) return false;
-					words[k] = user[node.src_index[k]];
-				} else {
-					words[k] = result[node.src_index[k]];
-				}
-			}
-			const auto address = node.constbuf ? CfConstBufferAddress(words[0], words[1], words[2], node.mem_offset, node.offset_arg, node.host_rule)
-			                                   : CfLoadAddress(words[0], words[1], node.mem_offset, node.offset_arg, node.host_rule);
-			if (address.kind != node.kind) return false;
-			uint32_t word = 0;
-			bool     ok   = true;
-			switch (address.kind) {
-				case CfReadKind::Fail: ok = false; break;
-				case CfReadKind::Outside:
-				case CfReadKind::NullTable: break;
-				case CfReadKind::Read:
-					++*read_count;
 					if (node.reader != nullptr) {
 						ok = node.reader(userdata, address.address, std::span<uint32_t>(&word, 1));
 					} else if (address.address >= kCfGuestMemoryMin) {
@@ -422,103 +322,28 @@ struct SrtCfMemo {
 
 // The memos of one plan, most recently used first. Draws of a plan mostly differ in a few flags, so a few ways cover the combinations; a lookup tries at most
 // kTries of them (each one asks the guest words again).
-//
-// Two layouts of the recency list. The plain one (Find / Victim / Promote) keeps the ways themselves in order (a promotion swaps whole ways: user_words and
-// vector headers, up to 15 of them). The fast one (FindFast / VictimFast / PromoteFast, S466) leaves the ways where they are and moves bytes of `order`; a set is
-// used with one of them only.
 struct SrtCfMemoSet {
 	static constexpr uint32_t kWays  = 16;
 	static constexpr uint32_t kTries = 6;
 
 	std::array<SrtCfMemo, kWays> ways;
-	std::array<uint8_t, kWays>   order {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}; // fast layout: order[0] = the most recent way
 
 	// The way whose answer is current for these inputs (inputs equal and every recorded read answers the same), or null. A hit moves to the front.
 	// `why` (optional) tells a miss apart: 0 nothing stored, 1 no way has these inputs, 2 a way has them but a re-read answered differently.
-	const SrtCfMemo* Find(std::span<const uint32_t> user, uint64_t base, CfMemoReader ordinary, CfMemoReader strict, void* userdata, uint32_t* why = nullptr,
-	                      CfFindStats* stats = nullptr) {
+	const SrtCfMemo* Find(std::span<const uint32_t> user, uint64_t base, CfMemoReader ordinary, CfMemoReader strict, void* userdata, uint32_t* why = nullptr) {
 		uint32_t reason = 0;
 		uint32_t tried  = 0;
 		for (uint32_t i = 0; i < kWays; ++i) {
 			auto& way = ways[i];
-			if (stats != nullptr) ++stats->scanned;
 			if (way.valid && reason == 0) reason = 1;
 			if (!way.InputsMatch(user, base, ordinary, strict)) continue;
 			if (tried++ >= kTries) break;
-			if (stats != nullptr) ++stats->tries;
-			if (way.NodesUnchanged(user, userdata, stats != nullptr ? &stats->reads : nullptr) &&
-			    way.ReadsUnchanged(userdata, stats != nullptr ? &stats->reads : nullptr)) {
+			if (way.NodesUnchanged(user, userdata) && way.ReadsUnchanged(userdata)) {
 				Promote(i);
 				return &ways[0];
 			}
 			reason = 2;
 		}
-		if (why != nullptr) *why = reason;
-		return nullptr;
-	}
-
-	// The same lookup over the fast layout, without the hash filter and the cheaper pieces (the reference the shadow mode compares FindFast with).
-	const SrtCfMemo* FindOrdered(std::span<const uint32_t> user, uint64_t base, CfMemoReader ordinary, CfMemoReader strict, void* userdata, uint32_t* why = nullptr) const {
-		uint32_t reason = 0;
-		uint32_t tried  = 0;
-		for (uint32_t pos = 0; pos < kWays; ++pos) {
-			const auto& way = ways[order[pos]];
-			if (way.valid && reason == 0) reason = 1;
-			if (!way.InputsMatch(user, base, ordinary, strict)) continue;
-			if (tried++ >= kTries) break;
-			if (way.NodesUnchanged(user, userdata) && way.ReadsUnchanged(userdata)) return &way;
-			reason = 2;
-		}
-		if (why != nullptr) *why = reason;
-		return nullptr;
-	}
-
-	// S466: Find over the fast layout. A way is rejected by one compare of its input hash; the hash of the incoming inputs is computed once per distinct
-	// (mask, base_used) among the ways (one or two in practice). The accepted way is confirmed by the exact comparison. A hit moves to the front of `order`.
-	const SrtCfMemo* FindFast(std::span<const uint32_t> user, uint64_t base, CfMemoReader ordinary, CfMemoReader strict, void* userdata, uint32_t* why = nullptr,
-	                          CfFindStats* stats = nullptr) {
-		struct Cached {
-			uint64_t mask;
-			bool     base_used;
-			uint64_t sig;
-		};
-		std::array<Cached, 4> cache {};
-		uint32_t              cached = 0;
-		uint32_t              reason = 0;
-		uint32_t              tried  = 0;
-		uint32_t              reads  = 0;
-		uint32_t              scanned = 0;
-		for (uint32_t pos = 0; pos < kWays; ++pos) {
-			const uint32_t index = order[pos];
-			auto&          way   = ways[index];
-			++scanned;
-			if (!way.valid) continue;
-			if (reason == 0) reason = 1;
-			if (user.size() != way.user_size) continue;
-			uint64_t sig = 0;
-			bool     found = false;
-			for (uint32_t c = 0; c < cached; ++c) {
-				if (cache[c].mask == way.user_mask && cache[c].base_used == way.base_used) {
-					sig   = cache[c].sig;
-					found = true;
-					break;
-				}
-			}
-			if (!found) {
-				sig = SrtCfMemo::InputSig(user, way.user_mask, way.base_used, base);
-				if (cached < cache.size()) cache[cached++] = {way.user_mask, way.base_used, sig};
-			}
-			if (sig != way.sig) continue;
-			if (!way.InputsMatchExact(user, base, ordinary, strict)) continue;
-			if (tried++ >= kTries) break;
-			if (way.NodesUnchangedFast(user, userdata, &reads) && way.ReadsUnchanged(userdata, &reads)) {
-				PromoteFast(index);
-				if (stats != nullptr) *stats = {scanned, tried, reads};
-				return &ways[index];
-			}
-			reason = 2;
-		}
-		if (stats != nullptr) *stats = {scanned, tried, reads};
 		if (why != nullptr) *why = reason;
 		return nullptr;
 	}
@@ -531,29 +356,12 @@ struct SrtCfMemoSet {
 		return ways[kWays - 1];
 	}
 
-	SrtCfMemo& VictimFast() {
-		for (auto& way: ways) {
-			if (!way.valid && !way.recording) return way;
-		}
-		return ways[order[kWays - 1]];
-	}
-
 	// Moves a way to the front (after it was recorded or hit).
 	void Promote(uint32_t index) {
 		for (; index > 0; --index) std::swap(ways[index], ways[index - 1]);
 	}
 	void Promote(const SrtCfMemo* way) {
 		Promote(static_cast<uint32_t>(way - ways.data()));
-	}
-
-	void PromoteFast(uint32_t index) {
-		uint32_t pos = 0;
-		while (order[pos] != index) ++pos;
-		for (; pos > 0; --pos) order[pos] = order[pos - 1];
-		order[0] = static_cast<uint8_t>(index);
-	}
-	void PromoteFast(const SrtCfMemo* way) {
-		PromoteFast(static_cast<uint32_t>(way - ways.data()));
 	}
 };
 

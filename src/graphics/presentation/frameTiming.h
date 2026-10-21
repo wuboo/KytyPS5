@@ -402,8 +402,6 @@ enum class Counter : uint32_t {
 	DrawHeadNs, DrawStateNs, DrawPrologNs, DrawVbNs, DrawPreEmitNs, DrawDynNs, DrawEmitNs,
 	// S456 DIAG: time of the reachability loop itself (the walks the memo did not serve).
 	GfpCfLoopNs,
-	// S466 DIAG: the memo lookup (Find): time / ways looked at / ways tried / guest words read again; shadow KYTY_PROGS_MEMO_FAST: fast lookup differs (must be 0).
-	GfpCfFindNs, GfpCfFindScanN, GfpCfFindTriesN, GfpCfFindReadsN, GfpCfFastNeN,
 	// S465 DIAG: KYTY_INDIRECT_GPU=1 draws that went to the CPU read although the command qualified, by the host reason (QualifyHost) - pv_store, pv_proto, mesh,
 	// copy_depth_to_color, primitive_type, primitive_restart, native_fetch - and those the command itself declined (cmd reason, any).
 	IndirectHostPvStoreN, IndirectHostPvProtoN, IndirectHostMeshN, IndirectHostCopyDepthN, IndirectHostPrimTypeN, IndirectHostPrimRestartN,
