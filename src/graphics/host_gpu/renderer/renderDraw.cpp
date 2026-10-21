@@ -994,6 +994,15 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 			// S471: the snapshots the descriptors are built from must be equal too (same programs with different resources would draw wrongly).
 			const auto same_res = [](const ShaderStageRuntime& a, const ShaderStageRuntime& b) {
 				if (a.resources == nullptr || b.resources == nullptr) return a.resources == b.resources;
+				if (a.resources->specialization_reads != b.resources->specialization_reads) {
+					static std::atomic<uint32_t> logged {0};
+					if (logged.fetch_add(1) < 8) {
+						std::fprintf(stderr, "[scout] specialization_reads differ: cp %zu ranges, scout %zu ranges\n", a.resources->specialization_reads.size(),
+						             b.resources->specialization_reads.size());
+						std::fflush(stderr);
+					}
+					FrameTiming::Add(FrameTiming::Counter::ScoutNeReadsN);
+				}
 				return a.resources->flattened_srt == b.resources->flattened_srt && a.resources->buffers == b.resources->buffers &&
 				       a.resources->images == b.resources->images && a.resources->samplers == b.resources->samplers &&
 				       a.resources->uniform_fill == b.resources->uniform_fill;

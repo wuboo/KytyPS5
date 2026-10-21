@@ -420,7 +420,7 @@ enum class Counter : uint32_t {
 	// CP: reads replayed, a strict read on a busy page, a read or table that changed, a table the log cannot replay, no memo / shadow: snapshot content differs.
 	ScoutBailEntryN, ScoutBailMemoN, ScoutBailShapeN, ScoutBailTableN, ScoutMissDirtyN, ScoutValReadsN, ScoutValBusyN, ScoutValChangedN, ScoutValTableN, ScoutNeResN, ScoutBailMeshN,
 	// S471 time (ns): CP waiting in Take for the worker / CP validating a slot / worker in GetGraphicsPrograms / worker per draw (slot, regs, GFP, copies).
-	ScoutTakeWaitNs, ScoutValidateNs, ScoutWorkerGfpNs, ScoutWorkerDrawNs, ScoutCpLockWaitNs, ScoutNeInfoN,
+	ScoutTakeWaitNs, ScoutValidateNs, ScoutWorkerGfpNs, ScoutWorkerDrawNs, ScoutCpLockWaitNs, ScoutNeInfoN, ScoutNeReadsN,
 	Count,
 };
 
