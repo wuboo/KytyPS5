@@ -2127,8 +2127,29 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	if (cf_mode != CfMemoMode::Off) {
 		{
 			SpecShadow::PurposeScope purpose(SpecShadow::Purpose::Cond); // the replayed reads are the ones the loop issues under this purpose
-			uint32_t why = 0;
-			cf_way = cf_set.Find(m_runtime.user_data, m_runtime.shader_base, m_runtime.read_memory, m_runtime.read_specialization_memory, m_runtime.userdata, &why);
+			uint32_t    why = 0;
+			CfFindStats find_stats;
+			std::optional<WalkProbe::Timer> find_timer; // S466 DIAG
+			if (gfp_cf) find_timer.emplace(WalkProbe::Id::CfFindNs);
+			const auto fast_mode = CfMemoFastCurrent(); // S466
+			if (fast_mode == CfMemoMode::Off) {
+				cf_way = cf_set.Find(m_runtime.user_data, m_runtime.shader_base, m_runtime.read_memory, m_runtime.read_specialization_memory, m_runtime.userdata, &why,
+				                     &find_stats);
+			} else {
+				uint32_t ref_why = 0;
+				const SrtCfMemo* ref = nullptr;
+				if (fast_mode == CfMemoMode::Shadow) // the plain lookup first: a hit moves its way, so it asks before FindFast promotes
+					ref = cf_set.FindOrdered(m_runtime.user_data, m_runtime.shader_base, m_runtime.read_memory, m_runtime.read_specialization_memory, m_runtime.userdata, &ref_why);
+				cf_way = cf_set.FindFast(m_runtime.user_data, m_runtime.shader_base, m_runtime.read_memory, m_runtime.read_specialization_memory, m_runtime.userdata, &why,
+				                         &find_stats);
+				if (fast_mode == CfMemoMode::Shadow && (ref != cf_way || (cf_way == nullptr && ref_why != why))) WalkProbe::Add(WalkProbe::Id::CfFastNeN);
+			}
+			find_timer.reset();
+			if (gfp_cf) {
+				WalkProbe::Add(WalkProbe::Id::CfFindScanN, find_stats.scanned);
+				WalkProbe::Add(WalkProbe::Id::CfFindTriesN, find_stats.tries);
+				WalkProbe::Add(WalkProbe::Id::CfFindReadsN, find_stats.reads);
+			}
 			if (cf_way != nullptr && cf_way->visited.size() != m_program.control_flow.size()) cf_way = nullptr;
 			if (cf_way == nullptr) // S451 DIAG
 				WalkProbe::Add(why == 2 ? WalkProbe::Id::MemoMissReadsN : (why == 1 ? WalkProbe::Id::MemoMissInputsN : WalkProbe::Id::MemoMissColdN));
@@ -2146,7 +2167,7 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 			if (cf_hit) {
 				cf_expect = cf_way->visited; // shadow: what the memo would have answered
 			} else {
-				cf_rec = &cf_set.Victim();
+				cf_rec = CfMemoFastCurrent() != CfMemoMode::Off ? &cf_set.VictimFast() : &cf_set.Victim();
 				cf_rec->Begin(static_cast<uint32_t>(m_runtime.user_data.size()), m_runtime.read_memory, m_runtime.read_specialization_memory);
 				t_cf_rec = cf_rec;
 			}
@@ -2195,7 +2216,10 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 		if (cf_rec != nullptr) {
 			t_cf_rec = nullptr;
 			cf_rec->End(visited);
-			if (cf_rec->valid) cf_set.Promote(cf_rec);
+			if (cf_rec->valid) {
+				if (CfMemoFastCurrent() != CfMemoMode::Off) cf_set.PromoteFast(cf_rec);
+				else cf_set.Promote(cf_rec);
+			}
 		}
 		if (cf_hit && cf_expect != visited) WalkProbe::Add(WalkProbe::Id::MemoNeN); // shadow: the memo's answer differs (must be 0)
 	}

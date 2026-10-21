@@ -291,6 +291,66 @@ void TestAddress() {
 	Check(where.kind == CfReadKind::NullTable, "address: a null table pointer under the host rule");
 }
 
+// S466: the fast lookup (hash filter, order table) against the plain one, operation by operation.
+void TestFastSet() {
+	Memory memory {.value = 0x55u};
+	SrtCfMemoSet fast, plain;
+	const auto store = [&](const std::array<uint32_t, 4>& user, uint64_t base, bool with_base) {
+		const auto record = [&](SrtCfMemo& way) {
+			way.Begin(4u, nullptr, ReadStrict);
+			way.NoteUserData(1u, user[1]);
+			if (user[1] % 3u == 0u) way.NoteUserData(3u, user[3]);
+			if (with_base) way.NoteShaderBase(base);
+			way.NoteRead(ReadStrict, 0x100000, memory.value, true);
+			way.End(std::array<uint8_t, 1> {static_cast<uint8_t>(user[1] & 1u)});
+		};
+		auto& f = fast.VictimFast();
+		record(f);
+		fast.PromoteFast(&f);
+		auto& q = plain.Victim();
+		record(q);
+		plain.Promote(&q);
+	};
+	const auto same = [&](const std::array<uint32_t, 4>& user, uint64_t base, const char* text) {
+		uint32_t why_fast = 9, why_plain = 9, why_ref = 9;
+		CfFindStats stats;
+		const auto* ref = fast.FindOrdered(user, base, nullptr, ReadStrict, &memory, &why_ref);
+		const auto* f = fast.FindFast(user, base, nullptr, ReadStrict, &memory, &why_fast, &stats);
+		const auto* q = plain.Find(user, base, nullptr, ReadStrict, &memory, &why_plain);
+		Check(ref == f && (f != nullptr || why_ref == why_fast), text);
+		Check((f == nullptr) == (q == nullptr) && (f == nullptr ? why_fast == why_plain : f->visited == q->visited), text);
+		if (f != nullptr) Check(f == &fast.ways[fast.order[0]] && stats.tries >= 1 && stats.reads >= 1, "fast: a hit did not move to the front or was not counted");
+		return f != nullptr;
+	};
+	for (uint32_t i = 0; i < 40; ++i) store({0u, 100u + i, 0u, 7u + i}, 0x7000 + (i % 2u) * 0x1000, i % 2u == 0u);
+	Check(same({0u, 139u, 0u, 7u + 39u}, 0x8000, "fast: the newest entry"), "fast: the newest entry was lost");
+	Check(!same({0u, 100u, 0u, 7u}, 0x7000, "fast: an evicted entry"), "fast: an evicted entry was kept");
+	// a user data word that was read, a base that was read, a guest word under the read
+	Check(same({5u, 138u, 5u, 7u + 38u}, 0x7000, "fast: unread words"), "fast: an unread user data word broke the match");
+	Check(!same({0u, 138u, 0u, 7u + 38u}, 0x7001, "fast: base changed"), "fast: a changed shader base matched");
+	Check(!same({0u, 999u, 0u, 7u + 38u}, 0x7000, "fast: user word changed"), "fast: a changed user data word matched");
+	Check(!same({0u, 138u, 0u, 7u + 38u + 1u}, 0x7000, "fast: user word 3 changed"), "fast: a changed user data word 3 matched");
+	memory.value = 0x56u;
+	Check(!same({0u, 139u, 0u, 7u + 39u}, 0x8000, "fast: guest word changed"), "fast: a changed guest word matched");
+	uint32_t why = 0;
+	fast.FindFast(std::array<uint32_t, 4> {0u, 139u, 0u, 7u + 39u}, 0x8000, nullptr, ReadStrict, &memory, &why);
+	Check(why == 2u, "fast: the miss reason of a changed guest word is not 2");
+	memory.value = 0x55u;
+	// a pseudo-random sequence of stores and lookups: same answers throughout
+	uint32_t seed = 12345u;
+	const auto next = [&] { seed = seed * 1664525u + 1013904223u; return seed >> 8u; };
+	for (uint32_t i = 0; i < 2000; ++i) {
+		const std::array<uint32_t, 4> user {0u, 100u + next() % 24u, 0u, 7u + next() % 3u};
+		const uint64_t base = 0x7000 + (next() % 2u) * 0x1000;
+		if (next() % 3u == 0u) {
+			memory.value = 0x55u + next() % 2u;
+			store(user, base, next() % 2u == 0u);
+		} else {
+			same(user, base, "fast: random sequence");
+		}
+	}
+}
+
 void TestMode() {
 	Check(ParseCfMemoMode(nullptr) == CfMemoMode::Off, "mode: unset is not off");
 	Check(ParseCfMemoMode("0") == CfMemoMode::Off, "mode: 0 is not off");
@@ -305,6 +365,7 @@ int main() {
 	TestKey();
 	TestReads();
 	TestSet();
+	TestFastSet();
 	TestNodes();
 	TestNodeChain();
 	TestAddress();
