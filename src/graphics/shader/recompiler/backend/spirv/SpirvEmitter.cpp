@@ -21,10 +21,8 @@ void SetHostFragmentSubgroupSize(uint32_t size) {
 }
 
 bool PixelWave32OnWideHost(uint32_t wave_size) {
-	static const bool fix = [] {
-		const char* v = std::getenv("KYTY_FIX_PS_WAVE32_MASK");
-		return v != nullptr && v[0] == '1';
-	}();
+	const char* v   = std::getenv("KYTY_FIX_PS_WAVE32_MASK");
+	const bool  fix = v != nullptr && v[0] == '1';
 	return fix && wave_size == 32u && g_host_fragment_subgroup_size.load(std::memory_order_relaxed) >= 64u;
 }
 
