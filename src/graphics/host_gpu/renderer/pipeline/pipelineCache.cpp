@@ -1839,6 +1839,18 @@ void PipelineCache::Save() {
 	                                           .count()));
 }
 
+// S471 DIAG: how long the CP waits for the lock the scout worker holds while it computes.
+std::unique_lock<std::mutex> PipelineCache::LockGet() {
+	std::unique_lock<std::mutex> lock(m_get_mutex, std::try_to_lock);
+	if (!lock.owns_lock()) {
+		const bool cp = !ScoutActive();
+		const auto begin = FrameTiming::SteadyNowNs();
+		lock.lock();
+		if (cp) FrameTiming::Add(FrameTiming::Counter::ScoutCpLockWaitNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - begin));
+	}
+	return lock;
+}
+
 PipelineCache::ScoutScope::ScoutScope() {
 	Scout().active = true;
 }
@@ -1885,7 +1897,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info,
     bool single_sample) {
 	ScoutScope::Mark(1);
-	const std::lock_guard get_lock(m_get_mutex); // S454: scout worker shares SourceEntry with CP
+	const auto get_lock = LockGet(); // S454: scout worker shares SourceEntry with CP
 	struct CpFlag { // DIAG
 		bool on = !ScoutActive();
 		CpFlag() { if (on) ScoutScope::CpInGfp(true); }
@@ -2083,7 +2095,7 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 ShaderProgram PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs,
                                                const HW::ShaderRegisters&   sh,
                                                ShaderComputeInputInfo&      input_info) {
-	const std::lock_guard get_lock(m_get_mutex); // S454
+	const auto get_lock = LockGet(); // S454
 	const FrameTiming::ScopedCounterNs cost_timer(FrameTiming::Counter::GetComputeProgramNs); // S433 (S441)
 	input_info.host_subgroup_size = m_graphics.SupportsComputeWave64() ? 64u : 32u;
 	const auto        params      = PrepareProgram(regs, sh, input_info);

@@ -394,6 +394,11 @@ void WorkerLoop() {
 		const char* raw = std::getenv("KYTY_CP_SCOUT_RAW");
 		Libs::LibKernel::Memory::SetScoutRawReadThread(raw != nullptr && raw[0] == '1');
 	}
+#ifdef _WIN32
+	if (const char* prio = std::getenv("KYTY_CP_SCOUT_PRIO"); prio != nullptr && prio[0] != '\0') { // S471 DIAG: -2 idle ... 0 normal ... 2 above normal
+		SetThreadPriority(GetCurrentThread(), std::atoi(prio));
+	}
+#endif
 	PipelineCache::ScoutScope scout_scope; // S471: this thread's GetGraphicsPrograms is the private, read-only-on-shared-state one
 	for (;;) {
 		Job job;

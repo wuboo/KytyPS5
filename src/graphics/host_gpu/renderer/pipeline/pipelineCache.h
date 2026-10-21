@@ -199,6 +199,7 @@ private:
 	};
 
 	GraphicContext&               m_graphics;
+	std::unique_lock<std::mutex> LockGet();
 	std::mutex                    m_get_mutex; // S454: ProgramCache::Get mutates SourceEntry; scout + CP
 	std::unique_ptr<ProgramCache> m_program_cache;
 	vk::PipelineCache             m_driver_cache = nullptr;
