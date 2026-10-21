@@ -1789,6 +1789,18 @@ void TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format for
 	                               range.levelCount == image.info.resources.levels &&
 	                               range.baseArrayLayer == 0 && range.layerCount == layers;
 	const bool full_image = range.aspectMask == aspects && full_subresources;
+	{ // S460 DIAG: KYTY_DIAG_S460_ADDR=<hex> logs the clears of that colour target
+		static const uint64_t s460_addr = std::getenv("KYTY_DIAG_S460_ADDR") ? std::strtoull(std::getenv("KYTY_DIAG_S460_ADDR"), nullptr, 16) : 0;
+		if (s460_addr != 0 && image.info.data.address == s460_addr) {
+			if (FILE* fp = std::fopen(std::getenv("KYTY_DIAG_S460_FILE") ? std::getenv("KYTY_DIAG_S460_FILE") : "s460-draws.txt", "a")) {
+				std::fprintf(fp, "[s460-clear] flip=%llu fmt=%d view_fmt=%d rgba=%g,%g,%g,%g guest_word=%016llx full=%d\n",
+				             static_cast<unsigned long long>(FrameTiming::GuestFlips() + 1), static_cast<int>(image.backing.format), static_cast<int>(format),
+				             static_cast<double>(clear.color.float32[0]), static_cast<double>(clear.color.float32[1]), static_cast<double>(clear.color.float32[2]),
+				             static_cast<double>(clear.color.float32[3]), static_cast<unsigned long long>(image.info.metadata.clear_word), full_image ? 1 : 0);
+				std::fclose(fp);
+			}
+		}
+	}
 	TrackImage(id);
 	if (!full_image && (image.IsBufferModified() || image.IsCpuDirty())) {
 		InitializeImage(id);
