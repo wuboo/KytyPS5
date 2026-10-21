@@ -112,6 +112,7 @@ struct EmitterState {
 
 	uint32_t                                         lane_count              = 1;
 	uint32_t                                         lane_half               = 0;
+	bool                                             pixel_wave32_wide_host  = false; // S459
 	const VertexCaptureInfo*                         vertex_capture          = nullptr;
 	// S149 PerVertex VS-store: cap records (set 1 b0), PS index buffer (set 1 b1), the flat instance
 	// carried VS -> PS (location 31) and the VS record computed once at the start of main.
@@ -463,6 +464,12 @@ uint32_t EmitLocalInvocationIndex(EmitterState& state);
 uint32_t EmitBallotLaneActiveBool(EmitterState& state, uint32_t ballot, uint32_t lane);
 
 uint32_t EmitSubgroupLaneActiveBool(EmitterState& state, uint32_t lane);
+// S459: ballot as a v4uint whose word 0 holds the 32 lanes of this lane's own half (guest wave32 on a 64-lane host subgroup).
+uint32_t EmitOwnHalfBallot(EmitterState& state, uint32_t ballot);
+// S459: lane number of the guest wave (0..31) from the host subgroup lane id.
+uint32_t EmitGuestLaneId(EmitterState& state);
+// S459: host subgroup lane of guest lane `lane` of this lane's own wave.
+uint32_t EmitHostLaneOfGuestLane(EmitterState& state, uint32_t lane);
 
 inline constexpr auto EmitAddU32 = EmitNative<spv::OpIAdd, IR::Type::U32, uint32_t, uint32_t>;
 

@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/renderer/indirectGpu.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
 #include "common/common.h"
+#include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -614,6 +615,7 @@ static vk::Device VulkanCreateDevice(GraphicContext&                 graphics,
 	EXIT_NOT_IMPLEMENTED(!(properties11.subgroupSupportedOperations & vk::SubgroupFeatureFlagBits::eVote));
 
 	graphics.subgroup_size                 = properties11.subgroupSize;
+	ShaderRecompiler::Spirv::SetHostFragmentSubgroupSize(properties11.subgroupSize);
 	graphics.min_subgroup_size             = subgroup_size_control.minSubgroupSize;
 	graphics.max_subgroup_size             = subgroup_size_control.maxSubgroupSize;
 	graphics.required_subgroup_size_stages = subgroup_size_control.requiredSubgroupSizeStages;

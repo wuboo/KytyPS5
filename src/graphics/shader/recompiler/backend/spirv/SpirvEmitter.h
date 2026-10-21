@@ -10,6 +10,12 @@
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv {
 
+// S459: the host runs fragment shaders in subgroups of 64 lanes (AMD default; fragment cannot be pinned to 32). A guest wave32
+// pixel shader then shares a subgroup with another wave: with KYTY_FIX_PS_WAVE32_MASK=1 its ballots/lane ids use only the 32 lanes
+// of its own half. Set once at device init to the device's default subgroup size.
+void SetHostFragmentSubgroupSize(uint32_t size);
+bool PixelWave32OnWideHost(uint32_t wave_size);
+
 // PerVertex capture ABI: set 1 contains attributes (uvec4), outputs (vec4), and IDs (uvec2).
 struct VertexCaptureInfo {
 	uint32_t                     host_subgroup_size = 32;
