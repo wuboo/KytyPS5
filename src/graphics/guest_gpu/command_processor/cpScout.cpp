@@ -84,6 +84,29 @@ std::atomic<uint32_t>     g_dbg_phase {0}; // 0 waiting for a job, 1 walking pac
 std::atomic<uint32_t>     g_dbg_op {0};
 std::atomic<uint32_t>     g_dbg_draws {0};
 
+std::atomic<uint64_t>     g_dbg_tick {0};
+std::thread               g_monitor;
+
+// Says (once per stall) what the worker is doing when nothing moved for 10 s, whoever is stuck.
+void MonitorLoop() {
+	uint64_t last = ~uint64_t {0};
+	uint32_t same = 0;
+	bool     said = false;
+	while (!g_stop.load()) {
+		std::this_thread::sleep_for(std::chrono::seconds(5));
+		const auto tick = g_dbg_tick.load();
+		same            = tick == last ? same + 1 : 0;
+		last            = tick;
+		if (same >= 2 && !said) {
+			said = true;
+			std::fprintf(stderr, "[scout] MONITOR no progress 10 s: worker phase=%u last_op=0x%x draws=%u flips=%llu\n", g_dbg_phase.load(), g_dbg_op.load(),
+			             g_dbg_draws.load(), static_cast<unsigned long long>(FrameTiming::GuestFlips()));
+			std::fflush(stderr);
+		}
+		if (same == 0) said = false;
+	}
+}
+
 void Dead(const char* where) {
 	if (g_dead.exchange(true)) return;
 	std::fprintf(stderr, "[scout] WATCHDOG at %s: worker phase=%u last_op=0x%x draws=%u slots=%zu done=%d stopped=%d first=%u\n", where, g_dbg_phase.load(),
@@ -349,6 +372,7 @@ void WorkerLoop() {
 			const auto  header       = packet[0];
 			const auto  opcode       = (header >> 8u) & 0xffu;
 			g_dbg_op.store(opcode, std::memory_order_relaxed);
+			g_dbg_tick.fetch_add(1, std::memory_order_relaxed);
 			if (header == 0x80000000u || Pm4::PacketSizeDw(header) == 1u) {
 				cursor.offset++;
 				continue;
@@ -469,6 +493,7 @@ void EnsureWorker() {
 	g_live.done.store(true);
 	g_job.pending.store(false);
 	g_worker = std::thread(WorkerLoop);
+	g_monitor = std::thread(MonitorLoop);
 }
 
 } // namespace
@@ -476,6 +501,7 @@ void EnsureWorker() {
 void Begin(CommandProcessor& cp, PipelineCache& cache, std::span<const uint32_t> commands) {
 	if (Current() == Mode::Off || g_dead.load()) return;
 	FrameTiming::Add(FrameTiming::Counter::ScoutBeginN);
+	g_dbg_tick.fetch_add(1, std::memory_order_relaxed);
 	EnsureWorker();
 	{
 		std::unique_lock lock(g_mu);
@@ -506,6 +532,7 @@ void Shutdown() {
 	}
 	g_cv.notify_all();
 	if (g_worker.joinable()) g_worker.join();
+	if (g_monitor.joinable()) g_monitor.join();
 	g_started = false;
 	g_stop.store(false);
 }
