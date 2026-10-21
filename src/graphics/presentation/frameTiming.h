@@ -412,7 +412,7 @@ enum class Counter : uint32_t {
 	// S470 gate: draws the worker walk produced / Take calls from the CP / shadow comparisons done / Begin calls; miss by reason: no slot (worker stopped
 	// before the draw / worker finished without stopping - the draw index is out of step) / registers differ / guest dwords changed; the register field
 	// that differed first; why the walk stopped.
-	ScoutWalkDrawsN, ScoutTakeN, ScoutCmpN, ScoutBeginN,
+	ScoutWalkDrawsN, ScoutSkipN, ScoutTakeN, ScoutCmpN, ScoutBeginN,
 	ScoutMissNoslotStopN, ScoutMissNoslotRunN, ScoutMissRegsN, ScoutMissMemN,
 	ScoutRegsPsAddrN, ScoutRegsGsAddrN, ScoutRegsPsSgprN, ScoutRegsGsSgprN, ScoutRegsPrimN, ScoutRegsRtN, ScoutRegsOtherN,
 	ScoutStopWaitN, ScoutStopCondN, ScoutStopMultiN, ScoutStopCeN, ScoutStopDispatchN, ScoutStopWriteDataN, ScoutStopParseN, ScoutStopOtherN,

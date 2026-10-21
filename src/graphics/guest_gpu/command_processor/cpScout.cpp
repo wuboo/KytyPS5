@@ -27,13 +27,14 @@ namespace {
 struct Slot {
 	HW::Shader                           sh;
 	HW::UserConfig                       ucfg;
+	HW::ShaderRegisters                  shr;
+	HW::RenderTarget                     rt[8];
+	HW::BlendControl                     blend[8];
+	HW::ClipControl                      clip;
+	HW::ModeControl                      mode;
+	HW::AaConfig                         aa_cfg;
+	HW::ScreenViewport                   viewport;
 	uint32_t                             rt_mask = 0;
-	uint64_t                             rt_addr[8] {};
-	uint32_t                             rt_format[8] {};
-	bool                                 blend0 = false;
-	uint32_t                             aa     = 0;
-	bool                                 clip_disable = false;
-	bool                                 provoking_last = false;
 	DrawSnap                             snap;
 	PipelineCache::GraphicsPrograms      programs;
 	std::array<ShaderVertexInputInfo, 3> vertex_info {};
@@ -95,45 +96,55 @@ uint32_t ColorOutputMask(const HW::Context& ctx) {
 }
 
 void FillSlotRegs(Slot& slot, const HW::Context& ctx, const HW::Shader& sh, const HW::UserConfig& ucfg) {
-	slot.sh   = sh;
-	slot.ucfg = ucfg;
+	slot.sh      = sh;
+	slot.ucfg    = ucfg;
+	slot.shr     = ctx.GetShaderRegisters();
 	slot.rt_mask = ctx.GetRenderTargetMask();
-	slot.blend0  = ctx.GetBlendControl(0).enable;
-	slot.aa      = ctx.GetAaConfig().msaa_num_samples;
-	slot.clip_disable   = ctx.GetClipControl().clip_disable;
-	slot.provoking_last = ctx.GetModeControl().provoking_vtx_last;
 	for (uint32_t i = 0; i < 8; i++) {
-		const auto& rt = ctx.GetRenderTarget(i);
-		slot.rt_addr[i]   = rt.base.addr;
-		slot.rt_format[i] = static_cast<uint32_t>(rt.info.format) |
-		                    (static_cast<uint32_t>(rt.info.channel_type) << 16u);
+		slot.rt[i]    = ctx.GetRenderTarget(i);
+		slot.blend[i] = ctx.GetBlendControl(i);
 	}
+	slot.clip     = ctx.GetClipControl();
+	slot.mode     = ctx.GetModeControl();
+	slot.aa_cfg   = ctx.GetAaConfig();
+	slot.viewport = ctx.GetScreenViewport();
 }
 
-// Returns the counter of the first differing field, or Count when equal.
+template <class T>
+bool Same(const T& a, const T& b) {
+	return std::memcmp(&a, &b, sizeof(T)) == 0;
+}
+
+bool SameSgpr(const HW::UserSgprInfo& a, const HW::UserSgprInfo& b) {
+	return a.count == b.count && std::memcmp(a.value, b.value, sizeof(a.value)) == 0 &&
+	       std::memcmp(a.type, b.type, sizeof(a.type)) == 0;
+}
+
+// Returns the counter of the first differing field of everything GetGraphicsPrograms reads, or Count when equal.
+// Whole structs are compared byte for byte; a spurious miss from padding shows up in the counters.
 FrameTiming::Counter RegsDiff(const Slot& slot, const HW::Context& ctx, const HW::Shader& sh, const HW::UserConfig& ucfg) {
 	using C = FrameTiming::Counter;
-	if (sh.GetPs().ps_regs.data_addr != slot.sh.GetPs().ps_regs.data_addr) return C::ScoutRegsPsAddrN;
-	if (sh.GetVs().gs_regs.data_addr != slot.sh.GetVs().gs_regs.data_addr) return C::ScoutRegsGsAddrN;
-	if (std::memcmp(sh.GetPs().ps_user_sgpr.value, slot.sh.GetPs().ps_user_sgpr.value,
-	                sizeof(sh.GetPs().ps_user_sgpr.value)) != 0)
-		return C::ScoutRegsPsSgprN;
-	if (std::memcmp(sh.GetVs().gs_user_sgpr.value, slot.sh.GetVs().gs_user_sgpr.value,
-	                sizeof(sh.GetVs().gs_user_sgpr.value)) != 0)
-		return C::ScoutRegsGsSgprN;
+	const auto& ps = sh.GetPs();
+	const auto& vs = sh.GetVs();
+	const auto& sp = slot.sh.GetPs();
+	const auto& sv = slot.sh.GetVs();
+	if (!Same(ps.ps_regs, sp.ps_regs)) return C::ScoutRegsPsAddrN;
+	if (!Same(vs.es_regs, sv.es_regs) || !Same(vs.ls_regs, sv.ls_regs) || !Same(vs.hs_regs, sv.hs_regs) ||
+	    !Same(vs.gs_regs, sv.gs_regs))
+		return C::ScoutRegsGsAddrN;
+	if (!SameSgpr(ps.ps_user_sgpr, sp.ps_user_sgpr)) return C::ScoutRegsPsSgprN;
+	if (!SameSgpr(vs.gs_user_sgpr, sv.gs_user_sgpr) || !SameSgpr(vs.hs_user_sgpr, sv.hs_user_sgpr)) return C::ScoutRegsGsSgprN;
 	if (ucfg.GetPrimType() != slot.ucfg.GetPrimType()) return C::ScoutRegsPrimN;
 	if (ctx.GetRenderTargetMask() != slot.rt_mask) return C::ScoutRegsRtN;
-	if (ctx.GetBlendControl(0).enable != slot.blend0) return C::ScoutRegsOtherN;
-	if (ctx.GetAaConfig().msaa_num_samples != slot.aa) return C::ScoutRegsOtherN;
-	if (ctx.GetClipControl().clip_disable != slot.clip_disable) return C::ScoutRegsOtherN;
-	if (ctx.GetModeControl().provoking_vtx_last != slot.provoking_last) return C::ScoutRegsOtherN;
 	for (uint32_t i = 0; i < 8; i++) {
-		const auto& rt = ctx.GetRenderTarget(i);
-		if (rt.base.addr != slot.rt_addr[i]) return C::ScoutRegsRtN;
-		const auto packed = static_cast<uint32_t>(rt.info.format) |
-		                    (static_cast<uint32_t>(rt.info.channel_type) << 16u);
-		if (packed != slot.rt_format[i]) return C::ScoutRegsRtN;
+		if (!Same(ctx.GetRenderTarget(i), slot.rt[i])) return C::ScoutRegsRtN;
+		if (!Same(ctx.GetBlendControl(i), slot.blend[i])) return C::ScoutRegsOtherN;
 	}
+	if (!Same(ctx.GetShaderRegisters(), slot.shr)) return C::ScoutRegsOtherN;
+	if (!Same(ctx.GetClipControl(), slot.clip) || !Same(ctx.GetModeControl(), slot.mode) ||
+	    !Same(ctx.GetAaConfig(), slot.aa_cfg))
+		return C::ScoutRegsOtherN;
+	if (slot.clip.clip_disable && !Same(ctx.GetScreenViewport(), slot.viewport)) return C::ScoutRegsOtherN;
 	return C::Count;
 }
 
@@ -176,6 +187,14 @@ void NoteStopReason(uint32_t opcode, bool parse) {
 	}
 }
 
+// Opcodes that do not change any register GetGraphicsPrograms reads; the guest memory they write is covered by the re-read in Take.
+bool IsMemoryOnlyOpcode(uint32_t op) {
+	return op == Pm4::IT_DISPATCH_DIRECT || op == Pm4::IT_DISPATCH_INDIRECT || op == Pm4::IT_DISPATCH_DRAW ||
+	       op == Pm4::IT_WRITE_DATA || op == Pm4::IT_COPY_DATA || op == Pm4::IT_DMA_DATA || op == Pm4::IT_CP_DMA ||
+	       op == Pm4::IT_WAIT_REG_MEM || op == Pm4::IT_WAIT_REG_MEM_64 || op == Pm4::IT_MEM_SEMAPHORE ||
+	       op == Pm4::IT_SET_BASE;
+}
+
 void ApplySet(CommandProcessor& cp, uint32_t header, const uint32_t* packet, uint32_t remaining_dw,
               uint32_t total_dw) {
 	const auto opcode = (header >> 8u) & 0xffu;
@@ -209,6 +228,7 @@ void WorkerLoop() {
 		CommandProcessor::ScoutRegsTls() = &tls;
 
 		std::array<uint32_t, kShNum> sh_words {};
+		HW::Context                  saved_ctx;
 		struct Cursor {
 			std::span<const uint32_t> commands;
 			uint32_t                  offset = 0;
@@ -246,7 +266,7 @@ void WorkerLoop() {
 				stopped = true;
 				break;
 			}
-			if (IsStopOpcode(opcode)) {
+			if (IsStopOpcode(opcode) && !IsMemoryOnlyOpcode(opcode)) {
 				NoteStopReason(opcode, false);
 				stopped = true;
 				break;
@@ -264,7 +284,34 @@ void WorkerLoop() {
 				}
 				continue;
 			}
-			if (opcode == Pm4::IT_SET_SH_REG) {
+			if (opcode == Pm4::IT_CLEAR_STATE) {
+				job.ctx.Reset();
+			} else if (opcode == Pm4::IT_NOP) {
+				// Custom codes ride on NOP; only those that change the registers matter (the others only touch guest memory, which Take re-reads).
+				const auto r = KYTY_PM4_R(header);
+				if (r == Pm4::R_CONTEXT_STATE && packet_dw >= 3u) {
+					switch (static_cast<ContextStateOperation>(packet[1])) {
+						case ContextStateOperation::Clear: job.ctx.Reset(); break;
+						case ContextStateOperation::Push:
+							saved_ctx = job.ctx;
+							break;
+						case ContextStateOperation::Pop: job.ctx = saved_ctx; break;
+						case ContextStateOperation::PushClear:
+							saved_ctx = job.ctx;
+							job.ctx.Reset();
+							break;
+						default: NoteStopReason(opcode, true); stopped = true; break;
+					}
+					if (stopped) break;
+				} else if (r == Pm4::R_DISPATCH_RESET) {
+					job.ctx.Reset();
+					job.sh.Reset();
+					job.ucfg.Reset();
+					saved_ctx.Reset();
+					job.marker = HW::UserSgprType::Unknown;
+					sh_words.fill(0);
+				}
+			} else if (opcode == Pm4::IT_SET_SH_REG) {
 				const uint32_t cmd_offset = packet[1];
 				if (cmd_offset != Pm4::SH_NOP) {
 					const uint32_t n = packet_dw - 2u;
@@ -294,7 +341,7 @@ void WorkerLoop() {
 					g_live.ready_n.fetch_add(1, std::memory_order_release);
 				}
 				g_cv.notify_all();
-			} else if (!IsIgnoreOpcode(opcode)) {
+			} else if (!IsIgnoreOpcode(opcode) && !IsMemoryOnlyOpcode(opcode)) {
 				NoteStopReason(opcode, false);
 				stopped = true;
 				break;
@@ -359,47 +406,72 @@ void Shutdown() {
 
 TakeKind Take(CommandBuffer& buffer, Prepared& out) {
 	if (Current() == Mode::Off) return TakeKind::Miss;
-	const uint32_t idx = g_live.cp_draw++;
-	Slot*          slot = nullptr;
-	FrameTiming::Add(FrameTiming::Counter::ScoutTakeN);
+	using C = FrameTiming::Counter;
+	FrameTiming::Add(C::ScoutTakeN);
+	constexpr uint32_t kWindow = 8;
+	Slot*              cand[kWindow] {};
+	uint32_t           n       = 0;
+	bool               stopped = false;
+	const uint32_t     first   = g_live.cp_draw;
 	{
-		// Wait until the worker has this draw or has stopped. A miss-without-wait
-		// lets CP enter GetGraphicsPrograms and starve the worker on m_get_mutex,
-		// so every later draw also misses.
+		// Wait until the worker has the next draw or has finished. A miss-without-wait lets CP enter
+		// GetGraphicsPrograms and starve the worker on m_get_mutex, so every later draw also misses.
 		std::unique_lock lock(g_mu);
-		g_cv.wait(lock, [idx] {
+		g_cv.wait(lock, [first] {
 			return g_stop.load() || g_live.done.load(std::memory_order_acquire) ||
-			       (idx < g_live.slots.size() && g_live.slots[idx] &&
-			        g_live.slots[idx]->ready.load(std::memory_order_acquire));
+			       (first < g_live.slots.size() && g_live.slots[first] &&
+			        g_live.slots[first]->ready.load(std::memory_order_acquire));
 		});
-		if (idx < g_live.slots.size() && g_live.slots[idx] &&
-		    g_live.slots[idx]->ready.load(std::memory_order_acquire)) {
-			slot = g_live.slots[idx].get();
+		for (uint32_t i = first; i < g_live.slots.size() && n < kWindow; i++) {
+			if (g_live.slots[i] && g_live.slots[i]->ready.load(std::memory_order_acquire)) cand[n++] = g_live.slots[i].get();
 		}
+		stopped = g_live.stopped.load(std::memory_order_relaxed);
+	}
+	if (n == 0) {
+		FrameTiming::Add(C::ScoutMissN);
+		FrameTiming::Add(stopped ? C::ScoutMissNoslotStopN : C::ScoutMissNoslotRunN);
+		return TakeKind::Miss;
+	}
+	// The draw index is not trusted: CP takes only the draws that reach RefreshShaders, the walk also sees
+	// draws CP drops. The slot is picked by the registers it was computed from and the guest dwords it read.
+	const auto& regs_ctx = buffer.GetRegisters();
+	const auto& regs_sh  = buffer.GetShaders();
+	const auto& regs_uc  = buffer.GetUserConfig();
+	C           first_diff = C::Count;
+	bool        mem_miss   = false;
+	Slot*       slot       = nullptr;
+	uint32_t    at         = 0;
+	for (uint32_t j = 0; j < n; j++) {
+		const auto diff = RegsDiff(*cand[j], regs_ctx, regs_sh, regs_uc);
+		if (diff != C::Count) {
+			if (j == 0) first_diff = diff;
+			continue;
+		}
+		if (!Matches(cand[j]->snap, ReadGuestWord)) {
+			mem_miss = true;
+			continue;
+		}
+		slot = cand[j];
+		at   = j;
+		break;
 	}
 	if (slot == nullptr) {
-		FrameTiming::Add(FrameTiming::Counter::ScoutMissN);
-		FrameTiming::Add(g_live.stopped.load(std::memory_order_relaxed) ? FrameTiming::Counter::ScoutMissNoslotStopN
-		                                                                : FrameTiming::Counter::ScoutMissNoslotRunN);
+		FrameTiming::Add(C::ScoutMissN);
+		if (mem_miss) {
+			FrameTiming::Add(C::ScoutMissMemN);
+		} else {
+			FrameTiming::Add(C::ScoutMissRegsN);
+			FrameTiming::Add(first_diff);
+		}
 		return TakeKind::Miss;
 	}
-	const auto regs_diff = RegsDiff(*slot, buffer.GetRegisters(), buffer.GetShaders(), buffer.GetUserConfig());
-	if (regs_diff != FrameTiming::Counter::Count) {
-		FrameTiming::Add(FrameTiming::Counter::ScoutMissN);
-		FrameTiming::Add(FrameTiming::Counter::ScoutMissRegsN);
-		FrameTiming::Add(regs_diff);
-		return TakeKind::Miss;
-	}
-	if (!Matches(slot->snap, ReadGuestWord)) {
-		FrameTiming::Add(FrameTiming::Counter::ScoutMissN);
-		FrameTiming::Add(FrameTiming::Counter::ScoutMissMemN);
-		return TakeKind::Miss;
-	}
+	g_live.cp_draw = first + at + 1;
+	if (at != 0) FrameTiming::Add(C::ScoutSkipN, at);
 	out.programs    = slot->programs;
 	out.vertex_info = slot->vertex_info;
 	out.pixel_info  = slot->pixel_info;
 	if (Current() == Mode::Shadow) return TakeKind::Shadow;
-	FrameTiming::Add(FrameTiming::Counter::ScoutHitN);
+	FrameTiming::Add(C::ScoutHitN);
 	return TakeKind::Hit;
 }
 

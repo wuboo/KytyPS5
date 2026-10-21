@@ -627,6 +627,7 @@ constexpr const char* kCounterNames[] = {
     "scout_ne_n",
     "scout_stop_n",
     "scout_walk_draws_n",
+    "scout_skip_n",
     "scout_take_n",
     "scout_cmp_n",
     "scout_begin_n",
