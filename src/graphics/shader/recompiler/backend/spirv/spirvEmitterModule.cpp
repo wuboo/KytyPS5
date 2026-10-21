@@ -617,7 +617,7 @@ void DefineInputs(EmitterState& state) {
 		state.vertex_lane_from_index = true;
 	} else
 #endif
-	    if (state.program.info.subgroup_local_invocation_id) {
+	    if (state.program.info.subgroup_local_invocation_id || state.pixel_wave32_wide_host) {
 		const auto variable = DefineInterfaceVariable(state, TypeU32(state), spv::StorageClassInput,
 		                                              "gl_SubgroupInvocationID");
 		state.subgroup_local_invocation_id_variable = variable;
@@ -838,7 +838,8 @@ void DefineModule(EmitterState& state) {
 	if (state.lane_count == 2 || state.program.info.subgroup_barrier ||
 	    state.program.info.subgroup_ballot || state.program.info.subgroup_vote ||
 	    state.program.info.subgroup_shuffle ||
-	    state.program.info.subgroup_arithmetic || state.program.info.subgroup_local_invocation_id) {
+	    state.program.info.subgroup_arithmetic || state.program.info.subgroup_local_invocation_id ||
+	    state.pixel_wave32_wide_host) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniform);
 	}
 	if (state.lane_count == 2 || state.program.info.subgroup_ballot) {
