@@ -2008,6 +2008,15 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	const bool mesh_gpu    = mesh_active && draw.indirect_addr != 0;
 	const bool mesh_shadow = mesh_active && !mesh_gpu && draw.mesh_request != nullptr && draw.mesh_request->mode == MeshIndirect::Mode::Shadow &&
 	                         draw.IsIndexed();
+	if (mesh_active && draw.IsIndexed()) { // S472 DIAG
+		static std::atomic<uint32_t> diag_n {0};
+		const auto                   n = diag_n.fetch_add(1, std::memory_order_relaxed);
+		if (n < 8 || n % 1000 == 0) {
+			LOGF("[mesh-ind-diag] n=%u flip=%" PRIu64 " mesh_gpu=%d mesh_shadow=%d req=%d mode=%d indirect_addr=0x%" PRIx64 " index_count=%u inst=%u\n", n,
+			     FrameTiming::GuestFlips(), mesh_gpu ? 1 : 0, mesh_shadow ? 1 : 0, draw.mesh_request != nullptr ? 1 : 0,
+			     draw.mesh_request != nullptr ? static_cast<int>(draw.mesh_request->mode) : -1, draw.indirect_addr, draw.index_count, draw.instance_count);
+		}
+	}
 	EXIT_IF(mesh_gpu && (draw.mesh_request == nullptr || draw.mesh_request->mode != MeshIndirect::Mode::On || !draw.IsIndexed()));
 	if (mesh_active) {
 		const auto& mesh = state.vertex_info[0].mesh;
