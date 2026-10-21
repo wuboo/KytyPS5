@@ -99,7 +99,7 @@ bool FullscreenEnabled() {
 }
 
 bool HdrEnabled() {
-	return g_config->hdr_enabled;
+	return g_config->hdr_enabled || std::getenv("KYTY_DIAG_S458_HDR") != nullptr;
 }
 
 bool HideCursorEnabled() {

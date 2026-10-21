@@ -1344,6 +1344,14 @@ KYTY_SYSV_ABI void VideoOutSetBufferAttribute2(VideoOutBufferAttribute2* attribu
 
 	EXIT_NOT_IMPLEMENTED(attribute == nullptr);
 
+	if (const char* f = std::getenv("KYTY_DIAG_S458_FILE")) {
+		if (FILE* fp = std::fopen(f, "a")) {
+			std::fprintf(fp, "SetBufferAttribute2 pixel_format=%016" PRIx64 " tiling=%u %ux%u option=%016" PRIx64 "\n",
+			             pixel_format, tiling_mode, width, height, option);
+			std::fclose(fp);
+		}
+	}
+
 	LOGF("\t pixel_format                = %016" PRIx64 "\n"
 	     "\t tiling_mode                 = %" PRIu32 "\n"
 	     "\t width                       = %" PRIu32 "\n"
@@ -1816,6 +1824,13 @@ KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* stat
 	status->resolution =
 	    ((attribute3 & 4) != 0 && ctx->width < 3840 && ctx->height < 2160 ? 1u : 2u);
 	status->dynamicRange = hdr_allowed && DriverState().IsHdrSupported() ? 2u : 1u;
+	if (const char* f = std::getenv("KYTY_DIAG_S458_FILE")) {
+		if (FILE* fp = std::fopen(f, "a")) {
+			std::fprintf(fp, "GetOutputStatus dynamicRange=%u hdr_allowed=%d supported=%d\n",
+			             status->dynamicRange, hdr_allowed ? 1 : 0, DriverState().IsHdrSupported() ? 1 : 0);
+			std::fclose(fp);
+		}
+	}
 	status->refreshRate =
 	    (ctx->output_mode == VIDEO_OUT_OUTPUT_MODE_119_88HZ || Config::GetVblankFrequency() >= 119
 	         ? VIDEO_OUT_REFRESH_RATE_119_88HZ

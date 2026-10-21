@@ -221,6 +221,12 @@ SystemServiceGetHdrToneMapLuminance(SystemServiceHdrToneMapLuminance* luminance)
 		return SYSTEM_SERVICE_ERROR_PARAMETER;
 	}
 
+	if (const char* f = std::getenv("KYTY_DIAG_S458_FILE")) {
+		if (FILE* fp = std::fopen(f, "a")) {
+			std::fputs("GetHdrToneMapLuminance called\n", fp);
+			std::fclose(fp);
+		}
+	}
 	luminance->max_full_frame_tone_map_luminance = 80.0f;
 	luminance->max_tone_map_luminance            = 1000.0f;
 	luminance->min_tone_map_luminance            = 0.0f;
