@@ -400,6 +400,8 @@ enum class Counter : uint32_t {
 	HdlDrawN, HdlRegN, HdlNopN, HdlWaitN, HdlDispN, HdlOtherN,
 	// S463 DIAG round 2 (wall ns, children included): DrawIndex head / PrepareDrawRenderState / ExecutePreparedDraw segments.
 	DrawHeadNs, DrawStateNs, DrawPrologNs, DrawVbNs, DrawPreEmitNs, DrawDynNs, DrawEmitNs,
+	// S456 DIAG: time of the reachability loop itself (the walks the memo did not serve).
+	GfpCfLoopNs,
 	Count,
 };
 

@@ -610,6 +610,7 @@ constexpr const char* kCounterNames[] = {
     "draw_preemit_ns",
     "draw_dyn_ns",
     "draw_emit_ns",
+    "gfp_cf_loop_ns",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

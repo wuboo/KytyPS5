@@ -10,7 +10,7 @@ namespace Libs::Graphics::ShaderRecompiler::IR::WalkProbe {
 
 enum class Id : uint8_t {
 	MatWalkNs, WalkTreeNs, WalkCfNs, WalkSlotsNs,
-	CfWalkN, CfIterN, CfBlocksN, CfCondN, CfEvalN, CfRflN, CfReadN, CfReadNs,
+	CfWalkN, CfIterN, CfBlocksN, CfCondN, CfEvalN, CfRflN, CfReadN, CfReadNs, CfLoopNs,
 	MemoHitN, MemoMissN, MemoNeN, MemoSkipN, MemoMissColdN, MemoMissInputsN, MemoMissReadsN,
 	Count,
 };
