@@ -398,6 +398,8 @@ enum class Counter : uint32_t {
 	DispProgNs, DispPrepNs, DispCommitNs,
 	HdlDrawNs, HdlRegNs, HdlNopNs, HdlWaitNs, HdlDispNs, HdlOtherNs,
 	HdlDrawN, HdlRegN, HdlNopN, HdlWaitN, HdlDispN, HdlOtherN,
+	// S463 DIAG round 2 (wall ns, children included): DrawIndex head / PrepareDrawRenderState / ExecutePreparedDraw segments.
+	DrawHeadNs, DrawStateNs, DrawPrologNs, DrawVbNs, DrawPreEmitNs, DrawDynNs, DrawEmitNs,
 	Count,
 };
 

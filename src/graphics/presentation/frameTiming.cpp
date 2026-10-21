@@ -603,6 +603,13 @@ constexpr const char* kCounterNames[] = {
     "hdl_wait_n",
     "hdl_disp_n",
     "hdl_other_n",
+    "draw_head_ns",
+    "draw_state_ns",
+    "draw_prolog_ns",
+    "draw_vb_ns",
+    "draw_preemit_ns",
+    "draw_dyn_ns",
+    "draw_emit_ns",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
