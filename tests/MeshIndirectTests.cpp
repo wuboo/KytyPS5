@@ -123,6 +123,16 @@ void TestQualifyHost() {
 	host.restart = true;
 	Check(IndirectGpu::QualifyHost(host) == IndirectGpu::Reason::PrimitiveRestart, "the other host reasons still apply to a mesh draw");
 	host = {};
+	host.mesh = true;
+	host.native_fetch = true;
+	Check(IndirectGpu::QualifyHost(host) == IndirectGpu::Reason::Mesh, "native fetch, mesh not on the GPU: mesh");
+	host.mesh_gpu = true;
+	Check(IndirectGpu::QualifyHost(host) == IndirectGpu::Reason::Eligible, "a mesh draw on the GPU path zeroes the offsets itself: native fetch is no obstacle");
+	host = {};
+	host.native_fetch = true;
+	host.mesh_gpu = true;
+	Check(IndirectGpu::QualifyHost(host) == IndirectGpu::Reason::NativeFetch, "a non-mesh draw with native fetch stays on the CPU");
+	host = {};
 	host.mesh_gpu = true;
 	Check(IndirectGpu::QualifyHost(host) == IndirectGpu::Reason::Eligible, "mesh_gpu alone changes nothing for a non-mesh draw");
 	Check(MeshCanGoGpu({3, 3, 64, false}) && !MeshCanGoGpu({3, 3, 64, true}) && !MeshCanGoGpu({3, 3, 0, false}), "fast launch / no group size: CPU");

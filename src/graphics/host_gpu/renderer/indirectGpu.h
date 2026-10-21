@@ -156,7 +156,8 @@ inline Reason QualifyHost(const HostPath& h) {
 	if (h.restart) {
 		return Reason::PrimitiveRestart;
 	}
-	if (h.native_fetch) {
+	// S472: a mesh draw that the GPU path takes zeroes the vertex offset and first instance itself (push dword 3 bit 30), so native fetch is no obstacle.
+	if (h.native_fetch && !(h.mesh && h.mesh_gpu)) {
 		return Reason::NativeFetch;
 	}
 	return Reason::Eligible;
