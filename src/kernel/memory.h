@@ -18,6 +18,8 @@ enum class PageFaultAccess;
 namespace Libs::LibKernel::Memory {
 
 void Initialize();
+// S470 DIAG (KYTY_CP_SCOUT_RAW=1): the scout worker reads GPU-visible ranges straight from the backing instead of failing off the GPU thread.
+void SetScoutRawReadThread(bool on);
 void Shutdown();
 
 // Guest memory usage for the performance panel. Takes only bookkeeping locks, so it never

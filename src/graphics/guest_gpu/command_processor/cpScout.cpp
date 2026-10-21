@@ -206,6 +206,10 @@ void ApplySet(CommandProcessor& cp, uint32_t header, const uint32_t* packet, uin
 }
 
 void WorkerLoop() {
+	{
+		const char* raw = std::getenv("KYTY_CP_SCOUT_RAW");
+		Libs::LibKernel::Memory::SetScoutRawReadThread(raw != nullptr && raw[0] == '1');
+	}
 	for (;;) {
 		Job job;
 		{

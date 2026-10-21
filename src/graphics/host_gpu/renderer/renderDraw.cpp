@@ -989,10 +989,11 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 		    single_sample);
 		if (scout_kind == CpScout::TakeKind::Shadow) {
 			FrameTiming::Add(FrameTiming::Counter::ScoutCmpN);
-			if (state.programs.vertex[0].id != scout_prep.programs.vertex[0].id ||
-			    state.programs.pixel.id != scout_prep.programs.pixel.id) {
-				FrameTiming::Add(FrameTiming::Counter::ScoutNeN);
-			}
+			const bool ne_vs = state.programs.vertex[0].id != scout_prep.programs.vertex[0].id;
+			const bool ne_ps = state.programs.pixel.id != scout_prep.programs.pixel.id;
+			if (ne_vs || ne_ps) FrameTiming::Add(FrameTiming::Counter::ScoutNeN);
+			if (ne_vs) FrameTiming::Add(FrameTiming::Counter::ScoutNeVsN);
+			if (ne_ps) FrameTiming::Add(FrameTiming::Counter::ScoutNePsN);
 		}
 	}
 	if (!state.programs.vertex[0]) {

@@ -889,10 +889,22 @@ bool QueryShaderGpuDirty(uint64_t vaddr, uint64_t size) {
 	       buffers.HasInflightDownloadBytes(vaddr, size);
 }
 
+static thread_local bool t_scout_raw_read = false;
+
+void SetScoutRawReadThread(bool on) {
+	t_scout_raw_read = on;
+}
+
+// Off the GPU thread a read of a GPU-visible range fails (the dirty state is not thread safe); S470 counts it, and the scout worker may read the backing raw.
+static bool ReadOffGpuThread(uint64_t vaddr, void* data, uint64_t size) {
+	Graphics::FrameTiming::Add(Graphics::FrameTiming::Counter::ScoutWorkerReadFailN);
+	return t_scout_raw_read && TryReadBacking(vaddr, data, size);
+}
+
 bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size)) {
 		if (!Graphics::GuestGpu::IsGpuThread()) {
-			return false;
+			return ReadOffGpuThread(vaddr, data, size);
 		}
 		auto& buffers = GetGpuResources().GetBufferCache();
 		if (buffers.HasGpuDirtyBytes(vaddr, size)) {
@@ -915,7 +927,7 @@ bool TryReadBufferBackingPass(uint64_t vaddr, void* data, uint64_t size, SrtRead
 		return TryReadBufferBacking(vaddr, data, size);
 	}
 	if (!Graphics::GuestGpu::IsGpuThread()) {
-		return false;
+		return ReadOffGpuThread(vaddr, data, size);
 	}
 	const uint64_t page = vaddr & PageMask;
 	if (pass->IsClean(page)) {
@@ -960,7 +972,7 @@ bool TryReadBufferBackingFast(uint64_t vaddr, void* data, uint64_t size, bool* h
 		return TryReadBufferBacking(vaddr, data, size);
 	}
 	if (!Graphics::GuestGpu::IsGpuThread()) {
-		return false;
+		return ReadOffGpuThread(vaddr, data, size);
 	}
 	auto&                               buffers = GetGpuResources().GetBufferCache();
 	SpecFastHooks<decltype(buffers)>    hooks {buffers, Graphics::CpReadBacking::EnvMode() != Graphics::CpReadBacking::Mode::Off};
