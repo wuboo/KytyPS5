@@ -114,6 +114,12 @@ static int KYTY_SYSV_ABI SystemServiceParamGetInt(int param_id, int* value) {
 
 	int v = 0;
 
+	if (const char* f = std::getenv("KYTY_DIAG_S458_FILE")) {
+		if (FILE* fp = std::fopen(f, "a")) {
+			std::fprintf(fp, "ParamGetInt id=%d\n", param_id);
+			std::fclose(fp);
+		}
+	}
 	switch (param_id) {
 		case PARAM_ID_LANG:
 		case PARAM_ID_LANG_PS5: v = static_cast<int>(Config::GetConsoleLanguage()); break;
