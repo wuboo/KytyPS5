@@ -2009,13 +2009,11 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	const bool mesh_shadow = mesh_active && !mesh_gpu && draw.mesh_request != nullptr && draw.mesh_request->mode == MeshIndirect::Mode::Shadow &&
 	                         draw.IsIndexed();
 	if (mesh_active && draw.IsIndexed()) { // S472 DIAG
-		static std::atomic<uint32_t> diag_n {0};
-		const auto                   n = diag_n.fetch_add(1, std::memory_order_relaxed);
-		if (n < 8 || n % 1000 == 0) {
-			LOGF("[mesh-ind-diag] n=%u flip=%" PRIu64 " mesh_gpu=%d mesh_shadow=%d req=%d mode=%d indirect_addr=0x%" PRIx64 " index_count=%u inst=%u\n", n,
-			     FrameTiming::GuestFlips(), mesh_gpu ? 1 : 0, mesh_shadow ? 1 : 0, draw.mesh_request != nullptr ? 1 : 0,
-			     draw.mesh_request != nullptr ? static_cast<int>(draw.mesh_request->mode) : -1, draw.indirect_addr, draw.index_count, draw.instance_count);
-		}
+		using C = FrameTiming::Counter;
+		FrameTiming::Add(C::MeshIndDiagAN);
+		if (draw.mesh_request != nullptr) FrameTiming::Add(C::MeshIndDiagBN);
+		if (mesh_shadow) FrameTiming::Add(C::MeshIndDiagCN);
+		if (mesh_gpu) FrameTiming::Add(C::MeshIndDiagDN);
 	}
 	EXIT_IF(mesh_gpu && (draw.mesh_request == nullptr || draw.mesh_request->mode != MeshIndirect::Mode::On || !draw.IsIndexed()));
 	if (mesh_active) {
@@ -2219,6 +2217,8 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		job.native_fetch      = !mesh_stage.fetch_embedded;
 		job.shadow            = mesh_shadow;
 		mesh_prepared         = MeshIndirectRt().Reserve(job);
+		FrameTiming::Add(FrameTiming::Counter::MeshIndDiagEN); // S472 DIAG
+		if (mesh_prepared.ok) FrameTiming::Add(FrameTiming::Counter::MeshIndDiagFN);
 		if (!mesh_prepared.ok) {
 			FrameTiming::Add(FrameTiming::Counter::MeshIndRingFullN);
 			if (mesh_gpu) {

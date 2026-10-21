@@ -409,6 +409,7 @@ enum class Counter : uint32_t {
 	// S472 (KYTY_INDIRECT_GPU_MESH): mesh draws recorded with the prepare compute + vkCmdDrawMeshTasksIndirectEXT (gpu), those the ring refused
 	// (ring_full), shadow compares (n, equal, not equal) and plans that exceeded a host limit (violation).
 	MeshIndGpuN, MeshIndRingFullN, MeshIndShadowN, MeshIndShadowEqN, MeshIndShadowNeN, MeshIndViolationN,
+	MeshIndDiagAN, MeshIndDiagBN, MeshIndDiagCN, MeshIndDiagDN, MeshIndDiagEN, MeshIndDiagFN, // S472 DIAG
 	Count,
 };
 

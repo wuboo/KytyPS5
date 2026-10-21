@@ -628,6 +628,12 @@ constexpr const char* kCounterNames[] = {
     "mesh_ind_shadow_eq_n",
     "mesh_ind_shadow_ne_n",
     "mesh_ind_violation_n",
+    "mesh_ind_diag_a_n",
+    "mesh_ind_diag_b_n",
+    "mesh_ind_diag_c_n",
+    "mesh_ind_diag_d_n",
+    "mesh_ind_diag_e_n",
+    "mesh_ind_diag_f_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
