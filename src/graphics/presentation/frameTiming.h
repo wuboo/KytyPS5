@@ -418,7 +418,7 @@ enum class Counter : uint32_t {
 	ScoutStopWaitN, ScoutStopCondN, ScoutStopMultiN, ScoutStopCeN, ScoutStopDispatchN, ScoutStopWriteDataN, ScoutStopParseN, ScoutStopOtherN,
 	// S471: worker calls that could not answer (no entry / permutation / call source, unusable memo, shape) / Take found such a slot / validation of a slot on the
 	// CP: reads replayed, a strict read on a busy page, a read or table that changed, a table the log cannot replay, no memo / shadow: snapshot content differs.
-	ScoutBailEntryN, ScoutBailMemoN, ScoutBailShapeN, ScoutBailTableN, ScoutMissDirtyN, ScoutValReadsN, ScoutValBusyN, ScoutValChangedN, ScoutValTableN, ScoutNeResN,
+	ScoutBailEntryN, ScoutBailMemoN, ScoutBailShapeN, ScoutBailTableN, ScoutMissDirtyN, ScoutValReadsN, ScoutValBusyN, ScoutValChangedN, ScoutValTableN, ScoutNeResN, ScoutBailMeshN,
 	Count,
 };
 

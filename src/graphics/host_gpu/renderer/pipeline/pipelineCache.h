@@ -141,7 +141,7 @@ public:
 		KYTY_CLASS_NO_COPY(ScoutScope);
 		static void Reset();
 		[[nodiscard]] static bool Failed();
-		[[nodiscard]] static uint32_t FailReason(); // 0 none, 1 no entry / permutation / call source, 2 memo unusable, 3 shape (tess, mesh, object id, packed unorm)
+		[[nodiscard]] static uint32_t FailReason(); // 0 none, 1 no entry / permutation / call source, 2 memo unusable, 3 shape (tess, object id, packed unorm), 4 mesh limits, 5 vertex table the CP would reject
 		static void Mark(uint32_t where);   // DIAG: where the scout worker is (1 waits for the lock, 2 prepare VS, 3 prepare PS, 4 Get PS, 5 Get VS, 6 materialize, 7 permutation search)
 		[[nodiscard]] static uint32_t Marked();
 		static void CpInGfp(bool in);       // DIAG: the CP holds the lock inside GetGraphicsPrograms

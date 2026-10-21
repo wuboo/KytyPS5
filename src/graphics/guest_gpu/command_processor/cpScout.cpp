@@ -290,6 +290,8 @@ void ComputePrograms(PipelineCache& cache, const HW::Context& ctx, const HW::Sha
 		switch (PipelineCache::ScoutScope::FailReason()) {
 			case 2: FrameTiming::Add(C::ScoutBailMemoN); break;
 			case 3: FrameTiming::Add(C::ScoutBailShapeN); break;
+			case 4: FrameTiming::Add(C::ScoutBailMeshN); break;
+			case 5: FrameTiming::Add(C::ScoutBailTableN); break;
 			default: FrameTiming::Add(C::ScoutBailEntryN); break;
 		}
 		return;

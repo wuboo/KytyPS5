@@ -1909,8 +1909,8 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		}
 	}
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
-	if (scout && (mesh_active || (ScoutTableLog::Active() != nullptr && ScoutTableLog::Active()->unsafe))) {
-		ScoutFail(3);
+	if (scout && ScoutTableLog::Active() != nullptr && ScoutTableLog::Active()->unsafe) {
+		ScoutFail(5);
 		return {};
 	}
 	const bool object_primitive_id = context.HasObjectPrimitiveIdOutput();
@@ -1947,6 +1947,10 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		    host_threads > limits.maxMeshWorkGroupSize[0] ||
 		    mesh.max_vertices > limits.maxMeshOutputVertices ||
 		    mesh.max_primitives > limits.maxMeshOutputPrimitives) {
+			if (scout) { // the CP exits on this only for a draw it executes
+				ScoutFail(4);
+				return {};
+			}
 			EXIT("mesh shader exceeds host limits: threads=%u vertices=%u primitives=%u LDS=%u\n",
 			     host_threads, mesh.max_vertices, mesh.max_primitives, mesh.lds_size_dwords);
 		}
