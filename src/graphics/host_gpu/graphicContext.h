@@ -29,7 +29,6 @@ struct GraphicContext {
 	VmaAllocator                       allocator                             = nullptr;
 	bool                               memory_budget_ext_enabled             = false;
 	bool                               compute_subgroup_size_control_enabled = false;
-	bool                               fragment_subgroup32_available         = false; // S459: fragment stage may be pinned to 32 lanes
 	bool                               sample_rate_shading_enabled           = false;
 	bool                               shader_image_int64_atomics_enabled    = false;
 	// VK_EXT_image_view_min_lod enabled with its feature: the T# MinLod clamp goes to the image view natively.

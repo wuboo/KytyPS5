@@ -621,19 +621,6 @@ static vk::Device VulkanCreateDevice(GraphicContext&                 graphics,
 	    supported_features13.subgroupSizeControl == VK_TRUE &&
 	    (graphics.required_subgroup_size_stages & vk::ShaderStageFlagBits::eCompute) &&
 	    subgroup_size_control.minSubgroupSize <= 64 && subgroup_size_control.maxSubgroupSize >= 64;
-	graphics.fragment_subgroup32_available =
-	    supported_features13.subgroupSizeControl == VK_TRUE &&
-	    (graphics.required_subgroup_size_stages & vk::ShaderStageFlagBits::eFragment) &&
-	    subgroup_size_control.minSubgroupSize <= 32 && subgroup_size_control.maxSubgroupSize >= 32;
-	if (const char* f459 = std::getenv("KYTY_DIAG_S459_FILE"); f459 != nullptr) { // S459 DIAG: LOGF is silent in the bench
-		if (FILE* o = std::fopen(f459, "a")) {
-			std::fprintf(o, "[s459-subgroup] default=%u min=%u max=%u stages=0x%08x frag32=%d compute64=%d\n", graphics.subgroup_size,
-			             graphics.min_subgroup_size, graphics.max_subgroup_size,
-			             static_cast<unsigned>(static_cast<vk::ShaderStageFlags::MaskType>(graphics.required_subgroup_size_stages)),
-			             graphics.fragment_subgroup32_available ? 1 : 0, graphics.compute_subgroup_size_control_enabled ? 1 : 0);
-			std::fclose(o);
-		}
-	}
 
 	LOGF("Vulkan subgroup: default=%u min=%u max=%u stages=0x%08x size_control=%s wave64=%s\n",
 	     graphics.subgroup_size, graphics.min_subgroup_size, graphics.max_subgroup_size,
@@ -735,7 +722,7 @@ static vk::Device VulkanCreateDevice(GraphicContext&                 graphics,
 #endif
 	features13.robustImageAccess   = supported_features13.robustImageAccess;
 	features13.subgroupSizeControl =
-	    (graphics.compute_subgroup_size_control_enabled || graphics.fragment_subgroup32_available) ? VK_TRUE : VK_FALSE;
+	    graphics.compute_subgroup_size_control_enabled ? VK_TRUE : VK_FALSE;
 
 	LOGF("Vulkan robustness: robustImageAccess=%s robustImageAccess2=%s\n",
 	     features13.robustImageAccess == VK_TRUE ? "true" : "false",
