@@ -15,6 +15,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstdio>
 #include <condition_variable>
 #include <cstring>
@@ -76,6 +77,19 @@ Live                    g_live;
 std::thread             g_worker;
 std::atomic<bool>       g_stop {false};
 bool                    g_started = false;
+// S471: a worker that stops answering must not hang the CP: Take / Begin give up after kWatchdogMs, say where the worker was, and leave the scout off for the rest of the run.
+constexpr uint32_t        kWatchdogMs = 10000;
+std::atomic<bool>         g_dead {false};
+std::atomic<uint32_t>     g_dbg_phase {0}; // 0 waiting for a job, 1 walking packets, 2 in GetGraphicsPrograms
+std::atomic<uint32_t>     g_dbg_op {0};
+std::atomic<uint32_t>     g_dbg_draws {0};
+
+void Dead(const char* where) {
+	if (g_dead.exchange(true)) return;
+	std::fprintf(stderr, "[scout] WATCHDOG at %s: worker phase=%u last_op=0x%x draws=%u slots=%zu done=%d stopped=%d first=%u\n", where, g_dbg_phase.load(),
+	             g_dbg_op.load(), g_dbg_draws.load(), g_live.slots.size(), g_live.done.load() ? 1 : 0, g_live.stopped.load() ? 1 : 0, g_live.cp_draw);
+	std::fflush(stderr);
+}
 
 // A user-data word that is not a pointer must not fault the worker: the read goes through the guest backing store, which
 // fails for unmapped (and unbacked) addresses instead of faulting. Such addresses are not recorded.
@@ -308,6 +322,7 @@ void WorkerLoop() {
 		tls.ucfg   = &job.ucfg;
 		tls.marker = &job.marker;
 		CommandProcessor::ScoutRegsTls() = &tls;
+		g_dbg_phase.store(1, std::memory_order_relaxed);
 
 		std::array<uint32_t, kShNum> sh_words {};
 		HW::Context                  saved_ctx;
@@ -333,6 +348,7 @@ void WorkerLoop() {
 			const auto  remaining_dw = static_cast<uint32_t>(cursor.commands.size() - cursor.offset);
 			const auto  header       = packet[0];
 			const auto  opcode       = (header >> 8u) & 0xffu;
+			g_dbg_op.store(opcode, std::memory_order_relaxed);
 			if (header == 0x80000000u || Pm4::PacketSizeDw(header) == 1u) {
 				cursor.offset++;
 				continue;
@@ -414,7 +430,10 @@ void WorkerLoop() {
 				NoteUserDataReads(slot->snap, ReadGuestWord);
 				static const bool no_gfp = [] { const char* v = std::getenv("KYTY_CP_SCOUT_NOGFP"); return v != nullptr && v[0] == '1'; }(); // S470 DIAG: walk and apply the registers only
 				if (job.cache != nullptr && !no_gfp) {
+					g_dbg_phase.store(2, std::memory_order_relaxed);
+					g_dbg_draws.store(static_cast<uint32_t>(g_live.slots.size()), std::memory_order_relaxed);
 					ComputePrograms(*job.cache, job.ctx, job.sh, job.ucfg, *slot);
+					g_dbg_phase.store(1, std::memory_order_relaxed);
 				}
 				slot->ready.store(true, std::memory_order_release);
 				FrameTiming::Add(FrameTiming::Counter::ScoutWalkDrawsN);
@@ -433,6 +452,7 @@ void WorkerLoop() {
 		}
 
 		CommandProcessor::ScoutRegsTls() = nullptr;
+		g_dbg_phase.store(0, std::memory_order_relaxed);
 		{
 			std::lock_guard lock(g_mu);
 			g_live.stopped.store(stopped, std::memory_order_relaxed);
@@ -454,12 +474,15 @@ void EnsureWorker() {
 } // namespace
 
 void Begin(CommandProcessor& cp, PipelineCache& cache, std::span<const uint32_t> commands) {
-	if (Current() == Mode::Off) return;
+	if (Current() == Mode::Off || g_dead.load()) return;
 	FrameTiming::Add(FrameTiming::Counter::ScoutBeginN);
 	EnsureWorker();
 	{
 		std::unique_lock lock(g_mu);
-		g_cv.wait(lock, [] { return g_live.done.load(); });
+		if (!g_cv.wait_for(lock, std::chrono::milliseconds(kWatchdogMs), [] { return g_live.done.load(); })) {
+			Dead("Begin");
+			return;
+		}
 		g_live.slots.clear();
 		g_live.ready_n.store(0);
 		g_live.stopped.store(false);
@@ -488,7 +511,7 @@ void Shutdown() {
 }
 
 TakeKind Take(CommandBuffer& buffer, Prepared& out) {
-	if (Current() == Mode::Off) return TakeKind::Miss;
+	if (Current() == Mode::Off || g_dead.load()) return TakeKind::Miss;
 	using C = FrameTiming::Counter;
 	FrameTiming::Add(C::ScoutTakeN);
 	constexpr uint32_t kWindow = 8;
@@ -500,11 +523,14 @@ TakeKind Take(CommandBuffer& buffer, Prepared& out) {
 		// Wait until the worker has the next draw or has finished. A miss-without-wait lets CP enter
 		// GetGraphicsPrograms and starve the worker on m_get_mutex, so every later draw also misses.
 		std::unique_lock lock(g_mu);
-		g_cv.wait(lock, [first] {
-			return g_stop.load() || g_live.done.load(std::memory_order_acquire) ||
-			       (first < g_live.slots.size() && g_live.slots[first] &&
-			        g_live.slots[first]->ready.load(std::memory_order_acquire));
-		});
+		if (!g_cv.wait_for(lock, std::chrono::milliseconds(kWatchdogMs), [first] {
+			    return g_stop.load() || g_live.done.load(std::memory_order_acquire) ||
+			           (first < g_live.slots.size() && g_live.slots[first] &&
+			            g_live.slots[first]->ready.load(std::memory_order_acquire));
+		    })) {
+			Dead("Take");
+			return TakeKind::Miss;
+		}
 		for (uint32_t i = first; i < g_live.slots.size() && n < kWindow; i++) {
 			if (g_live.slots[i] && g_live.slots[i]->ready.load(std::memory_order_acquire)) cand[n++] = g_live.slots[i].get();
 		}
