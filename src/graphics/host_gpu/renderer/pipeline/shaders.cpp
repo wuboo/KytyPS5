@@ -297,10 +297,21 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 		                                       .module = tess_eval_shader_module,
 		                                       .pName  = "main"};
 	}
+	// S459: the recompiled pixel shader reads the guest wave32 exec/ballot masks from lanes 0..31 of the subgroup; a host
+	// fragment subgroup of 64 lanes (AMD default) feeds lanes 32..63 a mask that belongs to other pixels.
+	vk::PipelineShaderStageRequiredSubgroupSizeCreateInfo frag_subgroup_size {};
 	if (ps_active) {
 		shader_stages[shader_stage_count++] = {.stage  = vk::ShaderStageFlagBits::eFragment,
 		                                       .module = pixel_program.module,
 		                                       .pName  = "main"};
+		static const bool fix_ps_wave32 = [] {
+			const char* v = std::getenv("KYTY_FIX_PS_WAVE32");
+			return v != nullptr && v[0] == '1';
+		}();
+		if (fix_ps_wave32 && graphics.fragment_subgroup32_available) {
+			frag_subgroup_size.requiredSubgroupSize = 32;
+			shader_stages[shader_stage_count - 1].pNext = &frag_subgroup_size;
+		}
 	}
 
 	vk::VertexInputAttributeDescription input_attr[ShaderVertexInputInfo::RES_MAX] {};
