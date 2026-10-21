@@ -991,7 +991,17 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 			FrameTiming::Add(FrameTiming::Counter::ScoutCmpN);
 			const bool ne_vs = state.programs.vertex[0].id != scout_prep.programs.vertex[0].id;
 			const bool ne_ps = state.programs.pixel.id != scout_prep.programs.pixel.id;
-			if (ne_vs || ne_ps) FrameTiming::Add(FrameTiming::Counter::ScoutNeN);
+			// S471: the snapshots the descriptors are built from must be equal too (same programs with different resources would draw wrongly).
+			const auto same_res = [](const ShaderStageRuntime& a, const ShaderStageRuntime& b) {
+				if (a.resources == nullptr || b.resources == nullptr) return a.resources == b.resources;
+				return a.resources->flattened_srt == b.resources->flattened_srt && a.resources->buffers == b.resources->buffers &&
+				       a.resources->images == b.resources->images && a.resources->samplers == b.resources->samplers &&
+				       a.resources->uniform_fill == b.resources->uniform_fill;
+			};
+			const bool ne_res = !same_res(state.vertex_info[0].stage, scout_prep.vertex_info[0].stage) ||
+			                    (state.ps_active && !same_res(state.ps_input_info.stage, scout_prep.pixel_info.stage));
+			if (ne_res) FrameTiming::Add(FrameTiming::Counter::ScoutNeResN);
+			if (ne_vs || ne_ps || ne_res) FrameTiming::Add(FrameTiming::Counter::ScoutNeN);
 			if (ne_vs) FrameTiming::Add(FrameTiming::Counter::ScoutNeVsN);
 			if (ne_ps) FrameTiming::Add(FrameTiming::Counter::ScoutNePsN);
 		}

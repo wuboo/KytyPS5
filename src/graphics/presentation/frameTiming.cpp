@@ -653,6 +653,16 @@ constexpr const char* kCounterNames[] = {
     "scout_stop_write_data_n",
     "scout_stop_parse_n",
     "scout_stop_other_n",
+    "scout_bail_entry_n",
+    "scout_bail_memo_n",
+    "scout_bail_shape_n",
+    "scout_bail_table_n",
+    "scout_miss_dirty_n",
+    "scout_val_reads_n",
+    "scout_val_busy_n",
+    "scout_val_changed_n",
+    "scout_val_table_n",
+    "scout_ne_res_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

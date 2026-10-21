@@ -16,6 +16,7 @@
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "graphics/shader/shaderCost.h"
+#include "graphics/shader/scoutTableLog.h"
 #include "graphics/shader/shaderPrewarm.h"
 #include "graphics/shader/shaderPrewarm.h"
 #include "graphics/shader/shaderVertexMetadata.h"
@@ -331,6 +332,7 @@ static bool ShaderGetStaticVertexInputInfo(uint64_t shader_addr, const HW::UserS
 			if (attrib_dwords != 0) {
 				LibKernel::Memory::CpGuestRead(CpReadBacking::Site::VertexAttribTable, reinterpret_cast<uint64_t>(attrib),
 				                               attrib_copy.data(), attrib_dwords * sizeof(uint32_t));
+				ScoutTableLog::Note(reinterpret_cast<uint64_t>(attrib), attrib_dwords, static_cast<uint32_t>(CpReadBacking::Site::VertexAttribTable), attrib_copy.data()); // S471
 				uint32_t buffer_dwords = 0;
 				for (const auto& in: metadata.input_semantics) {
 					const uint32_t index = attrib_copy[in.semantic] & 0x1fu;
@@ -339,11 +341,14 @@ static bool ShaderGetStaticVertexInputInfo(uint64_t shader_addr, const HW::UserS
 				if (buffer_dwords != 0) {
 					LibKernel::Memory::CpGuestRead(CpReadBacking::Site::VertexBufferTable, reinterpret_cast<uint64_t>(buffer),
 					                               buffer_copy.data(), buffer_dwords * sizeof(uint32_t));
+					ScoutTableLog::Note(reinterpret_cast<uint64_t>(buffer), buffer_dwords, static_cast<uint32_t>(CpReadBacking::Site::VertexBufferTable), buffer_copy.data()); // S471
 					attrib = attrib_copy.data();
 					buffer = buffer_copy.data();
 				}
 			}
 		}
+		// S471: tables read straight from the guest pointers (or only partly copied) cannot be replayed by the CP.
+		if (!metadata.input_semantics.empty() && (attrib != attrib_copy.data() || buffer != buffer_copy.data())) ScoutTableLog::NoteUnsafe();
 		ShaderApplyAttribSemantics(info, metadata.input_semantics, attrib, buffer);
 		ShaderDetectBuffers(info);
 	}

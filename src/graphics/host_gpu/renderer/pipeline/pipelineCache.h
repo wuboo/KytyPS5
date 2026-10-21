@@ -131,6 +131,19 @@ public:
 		[[nodiscard]] uint32_t VertexStageCount() const { return vertex[1] ? 3u : 1u; }
 	};
 
+	// S471: while one of these lives on a thread, GetGraphicsPrograms on that thread is the scout worker's: it keeps a private snapshot / specialization per
+	// shader (the shared ones are never written), reads guest memory without draining the GPU, never compiles or adds an entry (Failed() is set instead), and
+	// leaves the snapshot it used behind in the returned stage input; the caller copies it before the next call. Reset() before each call.
+	class ScoutScope {
+	public:
+		ScoutScope();
+		~ScoutScope();
+		KYTY_CLASS_NO_COPY(ScoutScope);
+		static void Reset();
+		[[nodiscard]] static bool Failed();
+		[[nodiscard]] static uint32_t FailReason(); // 0 none, 1 no entry / permutation / call source, 2 memo unusable, 3 shape (tess, mesh, object id, packed unorm)
+	};
+
 	GraphicsPrograms
 	GetGraphicsPrograms(const HW::VertexShaderInfo& vertex_regs,
 	                    const HW::PixelShaderInfo& pixel_regs, const HW::ShaderRegisters& sh,

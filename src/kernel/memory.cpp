@@ -979,6 +979,30 @@ bool TryReadBufferBackingFast(uint64_t vaddr, void* data, uint64_t size, bool* h
 	return ReadViaPageCache(SpecPageCache::Global(), hooks, vaddr, data, size, hit);
 }
 
+namespace {
+// S471: SpecFastHooks whose full reader refuses: a page that is not quiet answers false instead of draining.
+template <typename Buffers>
+struct QuietHooks: SpecFastHooks<Buffers> {
+	bool Full(uint64_t, void*, uint64_t) { return false; }
+};
+} // namespace
+
+bool TryReadQuiet(uint64_t vaddr, void* data, uint64_t size) {
+	if (size == 0) return false;
+	if (g_gpu_resources == nullptr || g_guest_address_space == nullptr || !IsGpuAddressRange(vaddr, size)) {
+		return TryReadBacking(vaddr, data, size);
+	}
+	if (!Graphics::GuestGpu::IsGpuThread()) return false;
+	if (SpecFastEnvMode() != SpecFastMode::Off && ((vaddr ^ (vaddr + size - 1)) & SpecPageCache::PageMask) == 0) {
+		auto&                            buffers = GetGpuResources().GetBufferCache();
+		QuietHooks<decltype(buffers)>    hooks {{buffers, Graphics::CpReadBacking::EnvMode() != Graphics::CpReadBacking::Mode::Off}};
+		bool                             hit = false;
+		return ReadViaPageCache(SpecPageCache::Global(), hooks, vaddr, data, size, &hit);
+	}
+	if (QueryShaderGpuDirty(vaddr, size)) return false;
+	return TryReadBacking(vaddr, data, size);
+}
+
 bool SpecPageQuietCached(uint64_t vaddr, uint64_t size) {
 	if (size == 0 || g_guest_address_space == nullptr || ((vaddr ^ (vaddr + size - 1)) & SpecPageCache::PageMask) != 0 ||
 	    !Graphics::GuestGpu::IsGpuThread()) {

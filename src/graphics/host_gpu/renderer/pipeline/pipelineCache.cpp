@@ -50,6 +50,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <deque>
 #include <cstdio>
 #include <cstring>
 #if defined(__APPLE__)
@@ -623,6 +624,53 @@ bool ReadBackingForShader(void*, uint64_t address, void* data, uint64_t size, bo
 	return Libs::LibKernel::Memory::TryReadBufferBacking(address, data, size);
 }
 
+// S471: the scout worker's state on its thread. A private snapshot / specialization per shader entry (the shared ones belong to the CP), the reasons a call
+// could not be answered, and the two readers: guest backing without any GPU drain (the CP validates what they returned before it uses the result).
+struct ScoutPrivate {
+	ShaderRecompiler::IR::ResourceSnapshot       resources;
+	ShaderRecompiler::IR::ResourceSpecialization specialization;
+};
+
+struct ScoutState {
+	bool                                          active = false;
+	uint32_t                                      fail   = 0;
+	std::unordered_map<const void*, ScoutPrivate> priv;
+};
+
+ScoutState& Scout() {
+	static thread_local ScoutState state;
+	return state;
+}
+
+bool ScoutActive() {
+	return Scout().active;
+}
+
+void ScoutFail(uint32_t reason) {
+	auto& scout = Scout();
+	if (scout.fail == 0) scout.fail = reason;
+}
+
+bool ScoutReadStrict(void*, uint64_t address, std::span<uint32_t> values) {
+	if (values.empty()) return false;
+	return Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes());
+}
+
+// The ordinary reads of the compiled walker: zeros below guest memory, the bytes otherwise (a failed read fails the walk, which fails the call).
+bool ScoutReadOrdinary(void*, uint64_t address, std::span<uint32_t> values) {
+	if (address < SrtReader::kGuestMemoryMin) {
+		std::ranges::fill(values, 0u);
+		return true;
+	}
+	return Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes());
+}
+
+// A snapshot the CP can check: its walk recorded every read, none of them failed.
+bool ScoutMemoUsable(const ShaderRecompiler::IR::ResourceSnapshot& snapshot) {
+	if (!snapshot.srt_memo.valid) return false;
+	return std::ranges::all_of(snapshot.srt_memo.reads, [](const auto& read) { return read.ok; });
+}
+
 // checked mode: a miss is zeros, never a failed read. MaterializeResources EXIT_IF's on false.
 bool ReadShaderGuestMemoryOrZero(void*, uint64_t address, std::span<uint32_t> values) {
 	return SrtReader::ReadOrZero(address, values, ReadBackingForShader, nullptr);
@@ -747,7 +795,6 @@ struct PipelineCache::ProgramCache {
 		SourceEntry(ShaderRecompiler::IR::ResourcePlan plan,
 		            std::unique_ptr<ShaderRecompiler::ShaderSource> call_source)
 		    : call_source(std::move(call_source)), resource_plan(std::move(plan)) {
-			permutations.reserve(8);
 		}
 
 		std::span<const uint32_t> FunctionCode() const {
@@ -791,15 +838,26 @@ struct PipelineCache::ProgramCache {
 			NoteMatMemoResult(resource_plan.shader_hash, stage_index, result);
 		}
 
+		// S471: a scout worker passes its private snapshot / specialization (`priv`) and never writes the entry's own; it also never exits: a walk that
+		// fails, or whose reads were not recorded, makes the call fail (nullptr, ScoutFail).
 		template <bool HasCalls>
 		Permutation* FindPermutation(const ShaderRecompiler::IR::SrtRuntime& runtime,
-		                             uint32_t push_data_cursor) {
+		                             uint32_t push_data_cursor, ScoutPrivate* priv = nullptr) {
+			auto& resources      = priv != nullptr ? priv->resources : this->resources;
+			auto& specialization = priv != nullptr ? priv->specialization : this->specialization;
 			SpecShadowRun shadow;
-			if (SyncCensus::Enabled()) RunSpecShadowBefore(resource_plan, runtime, shadow); // S406: before the real reads drain
+			if (priv == nullptr && SyncCensus::Enabled()) RunSpecShadowBefore(resource_plan, runtime, shadow); // S406: before the real reads drain
 			std::optional<GfpTimer> gfp_mat_timer; // S451 (graphics only; compute shares this function)
 			if (resource_plan.stage != ShaderType::Compute) gfp_mat_timer.emplace(FrameTiming::Counter::GfpMatTotalNs);
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-			    resource_plan, runtime, resources, specialization));
+			const bool materialized = ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources, specialization);
+			if (priv != nullptr) {
+				if (!materialized || !ScoutMemoUsable(resources)) {
+					ScoutFail(2);
+					return nullptr;
+				}
+			} else {
+				EXIT_IF(!materialized);
+			}
 			gfp_mat_timer.reset();
 			KYTY_CP_SITE(ShPermSearch);
 			std::optional<GfpTimer> gfp_search_timer;
@@ -823,7 +881,7 @@ struct PipelineCache::ProgramCache {
 				break;
 			}
 			gfp_search_timer.reset();
-			if (MatMemoEnabled()) NoteMatMemo(runtime, push_data_cursor, found_index);
+			if (priv == nullptr && MatMemoEnabled()) NoteMatMemo(runtime, push_data_cursor, found_index);
 			if (shadow.active) {
 				SpecShadow::Outcome fresh;
 				fresh.ok             = true;
@@ -860,7 +918,7 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourcePlan           resource_plan;
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
-		std::vector<Permutation>                    permutations;
+		std::deque<Permutation>                     permutations; // S471: stable addresses: a slot's stage input points at a permutation's program
 		MatMemo::Shadow                             m_matmemo;          // S406
 		uint64_t                                    m_matmemo_plan_mask = 0;
 		bool                                        m_matmemo_mask_valid = false;
@@ -1280,6 +1338,15 @@ struct PipelineCache::ProgramCache {
 		auto                                         entry = programs.find(lookup_key);
 		gfp_key_timer.reset();
 		static_key_site.reset();
+		// S471: the scout worker only answers from what the CP has already translated: no entry, or a program with a call source (its refresh writes the
+		// shared source) is the CP's job.
+		const bool scout = ScoutActive();
+		if constexpr (!std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
+			if (scout && (entry == programs.end() || entry->second.call_source)) {
+				ScoutFail(1);
+				return {};
+			}
+		}
 		// S404: the reader is named for the whole lookup (hit, call-source refresh, compile), not only the compile.
 		const SyncCensus::ReaderScope reader_tag(
 		    params.hash, SyncStageName(stage),
@@ -1302,6 +1369,13 @@ struct PipelineCache::ProgramCache {
 		// CleanRuntime. That replaces read_memory with read_specialization_memory, so call-target
 		// fetches stay on ReadShaderGuestMemory and are not zero-filled here.
 		SrtReader::Apply(runtime, ReadShaderGuestMemoryOrZero);
+		if (scout) {
+			// S471: the walk records every read (SrtMemo) through readers that never drain; the memo makes a repeat walk of unchanged inputs a replay.
+			read_context.mode                  = ShaderRecompiler::IR::SrtFastMode::On;
+			runtime.fast_mode                  = ShaderRecompiler::IR::SrtFastMode::On;
+			runtime.read_specialization_memory = ScoutReadStrict;
+			runtime.read_memory                = ScoutReadOrdinary;
+		}
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 			runtime.workgroup_counts = input_info.workgroup_counts;
 			runtime.indirect_args_address = input_info.indirect_args_address;
@@ -1319,6 +1393,16 @@ struct PipelineCache::ProgramCache {
 					source_changed = cached.RefreshCallSource(runtime);
 				}
 				if (!source_changed) permutation = cached.FindPermutation<true>(runtime, push_data_cursor);
+			} else if (scout) {
+				auto& priv = Scout().priv[&cached];
+				permutation = cached.FindPermutation<false>(runtime, push_data_cursor, &priv);
+				if (permutation == nullptr) {
+					ScoutFail(1); // no permutation for this specialization yet (a failed walk already said why)
+					return {};
+				}
+				input_info.stage = {.program = &permutation->program, .resources = &priv.resources};
+				permutation->program.bindings.AdvancePushData(push_data_cursor);
+				return permutation->handle;
 			} else {
 				permutation = cached.FindPermutation<false>(runtime, push_data_cursor);
 				NoteSrtMemo(cached.resources, read_context, params.hash, stage);
@@ -1333,6 +1417,10 @@ struct PipelineCache::ProgramCache {
 			}
 		}
 
+		if (scout) { // the call source branch above does not fall through for a scout
+			ScoutFail(1);
+			return {};
+		}
 		ShaderStageInputInfo stage_input {};
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 			stage_input.vertex = &input_info;
@@ -1748,6 +1836,26 @@ void PipelineCache::Save() {
 	                                           .count()));
 }
 
+PipelineCache::ScoutScope::ScoutScope() {
+	Scout().active = true;
+}
+
+PipelineCache::ScoutScope::~ScoutScope() {
+	Scout().active = false;
+}
+
+void PipelineCache::ScoutScope::Reset() {
+	Scout().fail = 0;
+}
+
+bool PipelineCache::ScoutScope::Failed() {
+	return Scout().fail != 0;
+}
+
+uint32_t PipelineCache::ScoutScope::FailReason() {
+	return Scout().fail;
+}
+
 PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
     const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
@@ -1757,6 +1865,11 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 	const std::lock_guard get_lock(m_get_mutex); // S454: scout worker shares SourceEntry with CP
 	const FrameTiming::ScopedCounterNs cost_timer(FrameTiming::Counter::GetGraphicsProgramsNs); // S433 (S441)
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
+	const bool scout       = ScoutActive();
+	if (scout && (tess_active || context.HasObjectPrimitiveIdOutput())) { // S471: shapes the worker leaves to the CP
+		ScoutFail(3);
+		return {};
+	}
 	std::array<ShaderParams, 3> vertex_params;
 	{
 		const GfpTimer prep_timer(FrameTiming::Counter::GfpVsPrepNs); // S451
@@ -1767,6 +1880,10 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		}
 	}
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
+	if (scout && mesh_active) {
+		ScoutFail(3);
+		return {};
+	}
 	const bool object_primitive_id = context.HasObjectPrimitiveIdOutput();
 	if (object_primitive_id) {
 		// CxObjectIdMode: register source plus a 32-bit pipelined primitive-ID addition.
@@ -1846,6 +1963,10 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 			if (blend || (mapping.ApplyMask(target_mask) & 7u) != 7u ||
 			    (mapping.ApplyMask(shader_mask) & 7u) != 7u ||
 			    pixel_info.target_output_mode[export_index] != 9u) {
+				if (scout) { // the CP exits on this only for a draw it executes
+					ScoutFail(3);
+					return {};
+				}
 				EXIT("unsupported packed UNorm render-target export: slot=%u export=%u mode=%u "
 				     "target_mask=0x%x shader_mask=0x%x mapping=0x%02x blend=%u\n",
 				     slot, export_index, pixel_info.target_output_mode[export_index], target_mask,

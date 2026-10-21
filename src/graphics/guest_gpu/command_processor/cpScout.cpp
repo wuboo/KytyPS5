@@ -1,5 +1,7 @@
 #include "graphics/guest_gpu/command_processor/cpScoutRuntime.h"
 
+#include "graphics/guest_gpu/command_processor/cpScoutValidate.h"
+
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -40,6 +42,11 @@ struct Slot {
 	PipelineCache::GraphicsPrograms      programs;
 	std::array<ShaderVertexInputInfo, 3> vertex_info {};
 	ShaderPixelInputInfo                 pixel_info {};
+	// S471: the slot owns the snapshots its stage inputs point at (the worker's private ones are overwritten by its next call), and the table reads of the walk.
+	ShaderRecompiler::IR::ResourceSnapshot vs_res;
+	ShaderRecompiler::IR::ResourceSnapshot ps_res;
+	ScoutTableLog::Log                     tables;
+	bool                                   dirty = false; // the worker could not compute it safely: the CP does
 	std::atomic<bool>                    ready {false};
 };
 
@@ -165,9 +172,77 @@ void ComputePrograms(PipelineCache& cache, const HW::Context& ctx, const HW::Sha
 		}
 	}
 	const bool single_sample = render_sample_count(ctx.GetAaConfig().msaa_num_samples) == 1u;
-	slot.programs            = cache.GetGraphicsPrograms(sh.GetVs(), sh.GetPs(), ctx.GetShaderRegisters(),
-	                                                     ctx, ucfg, mapping, ps_active, slot.vertex_info,
-	                                                     slot.pixel_info, single_sample);
+	PipelineCache::ScoutScope::Reset();
+	ScoutTableLog::Log log;
+	ScoutTableLog::Active() = &log;
+	slot.programs           = cache.GetGraphicsPrograms(sh.GetVs(), sh.GetPs(), ctx.GetShaderRegisters(),
+	                                                    ctx, ucfg, mapping, ps_active, slot.vertex_info,
+	                                                    slot.pixel_info, single_sample);
+	ScoutTableLog::Active() = nullptr;
+	using C = FrameTiming::Counter;
+	if (PipelineCache::ScoutScope::Failed() || !slot.programs.vertex[0] || (ps_active && !slot.programs.pixel) ||
+	    slot.vertex_info[0].stage.resources == nullptr || (ps_active && slot.pixel_info.stage.resources == nullptr)) {
+		slot.dirty = true;
+		switch (PipelineCache::ScoutScope::FailReason()) {
+			case 2: FrameTiming::Add(C::ScoutBailMemoN); break;
+			case 3: FrameTiming::Add(C::ScoutBailShapeN); break;
+			default: FrameTiming::Add(C::ScoutBailEntryN); break;
+		}
+		return;
+	}
+	if (log.unsafe) {
+		slot.dirty = true;
+		FrameTiming::Add(C::ScoutBailTableN);
+		return;
+	}
+	slot.tables = std::move(log);
+	// The stage inputs point at the worker's private snapshots, which its next call overwrites: the slot keeps copies.
+	slot.vs_res                          = *slot.vertex_info[0].stage.resources;
+	slot.vertex_info[0].stage.resources = &slot.vs_res;
+	if (ps_active) {
+		slot.ps_res                       = *slot.pixel_info.stage.resources;
+		slot.pixel_info.stage.resources = &slot.ps_res;
+	}
+}
+
+// The CP's own readers for the replay of a slot (see cpScoutValidate.h).
+bool ReplayStrict(uint64_t address, std::span<uint32_t> values) {
+	return Libs::LibKernel::Memory::TryReadQuiet(address, values.data(), values.size_bytes());
+}
+
+bool ReplayOrdinary(uint64_t address, std::span<uint32_t> values) {
+	if (address < 0x40000ull) {
+		std::fill(values.begin(), values.end(), 0u);
+		return true;
+	}
+	return Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes());
+}
+
+// True when the slot's result is what the CP would compute now.
+bool ValidateSlot(const Slot& slot) {
+	using C = FrameTiming::Counter;
+	uint32_t      reads = 0;
+	Verdict       verdict = ReadSetVerdict(slot.vs_res.srt_memo, ReplayStrict, ReplayOrdinary, &reads);
+	if (verdict == Verdict::Ok && slot.pixel_info.stage.resources != nullptr) {
+		verdict = ReadSetVerdict(slot.ps_res.srt_memo, ReplayStrict, ReplayOrdinary, &reads);
+	}
+	FrameTiming::Add(C::ScoutValReadsN, reads);
+	if (verdict == Verdict::Busy) {
+		FrameTiming::Add(C::ScoutValBusyN);
+		return false;
+	}
+	if (verdict != Verdict::Ok) {
+		FrameTiming::Add(C::ScoutValChangedN);
+		return false;
+	}
+	const bool tables_ok = TablesUnchanged(slot.tables, [](uint32_t site, uint64_t address, uint32_t* dst, uint32_t dwords) {
+		Libs::LibKernel::Memory::CpGuestRead(static_cast<Graphics::CpReadBacking::Site>(site), address, dst, dwords * sizeof(uint32_t));
+	});
+	if (!tables_ok) {
+		FrameTiming::Add(C::ScoutValTableN);
+		return false;
+	}
+	return true;
 }
 
 void NoteStopReason(uint32_t opcode, bool parse) {
@@ -210,6 +285,7 @@ void WorkerLoop() {
 		const char* raw = std::getenv("KYTY_CP_SCOUT_RAW");
 		Libs::LibKernel::Memory::SetScoutRawReadThread(raw != nullptr && raw[0] == '1');
 	}
+	PipelineCache::ScoutScope scout_scope; // S471: this thread's GetGraphicsPrograms is the private, read-only-on-shared-state one
 	for (;;) {
 		Job job;
 		{
@@ -476,6 +552,16 @@ TakeKind Take(CommandBuffer& buffer, Prepared& out) {
 	g_live.cp_draw = first + at + 1;
 	if (no_gfp) return TakeKind::Miss;
 	if (at != 0) FrameTiming::Add(C::ScoutSkipN, at);
+	if (slot->dirty) { // S471: the worker could not answer this one safely
+		FrameTiming::Add(C::ScoutMissN);
+		FrameTiming::Add(C::ScoutMissDirtyN);
+		return TakeKind::Miss;
+	}
+	if (!ValidateSlot(*slot)) { // S471: what the worker read is not what the CP reads now
+		FrameTiming::Add(C::ScoutMissN);
+		FrameTiming::Add(C::ScoutMissMemN);
+		return TakeKind::Miss;
+	}
 	out.programs    = slot->programs;
 	out.vertex_info = slot->vertex_info;
 	out.pixel_info  = slot->pixel_info;

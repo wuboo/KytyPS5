@@ -149,6 +149,9 @@ bool                   TryReadBufferBackingPass(uint64_t vaddr, void* data, uint
 // is remembered as quiet (the answer "not GPU-dirty" without a query).
 bool                   TryReadBufferBackingFast(uint64_t vaddr, void* data, uint64_t size, bool* hit);
 bool                   SpecPageQuietCached(uint64_t vaddr, uint64_t size);
+// S471: the read of a range that is neither GPU-dirty nor in flight, else false (no drain, no wait). The CP validates what the scout worker read with it:
+// where TryReadBufferBacking would have drained, the answer is "cannot tell". GPU thread only (a GPU-visible range off it fails).
+bool                   TryReadQuiet(uint64_t vaddr, void* data, uint64_t size);
 // True when the GPU thread still has unflushed bytes for this range (S419, KYTY_CP_READ_BACKING != 0: or a GPU->host copy of it is not published yet).
 // Safe off that thread: returns false.
 bool                   QueryShaderGpuDirty(uint64_t vaddr, uint64_t size);

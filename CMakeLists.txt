@@ -918,6 +918,15 @@ target_include_directories(cp_scout_tests PRIVATE ${inc_headers})
 add_executable(cp_scout_mutant_skip_validate_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpScoutTests.cpp")
 target_include_directories(cp_scout_mutant_skip_validate_tests PRIVATE ${inc_headers})
 target_compile_definitions(cp_scout_mutant_skip_validate_tests PRIVATE KYTY_CPSCOUT_MUTANT_SKIP_VALIDATE=1)
+# S471: the validation of a worker result (cpScoutValidate.h) and its mutants.
+add_executable(cp_scout_validate_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpScoutValidateTests.cpp")
+target_include_directories(cp_scout_validate_tests PRIVATE ${inc_headers})
+foreach(mutant VALUES_NOT_COMPARED FIRST_READ_ONLY BUSY_OK TABLES_IGNORED)
+	string(TOLOWER "${mutant}" mutant_lower)
+	add_executable(cp_scout_validate_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpScoutValidateTests.cpp")
+	target_include_directories(cp_scout_validate_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_scout_validate_mutant_${mutant_lower}_tests PRIVATE KYTY_CPSCOUT_MUTANT_${mutant}=1)
+endforeach()
 foreach(mutant IN ITEMS NO_FAILED IGNORES_BASE ADDR_ONLY IGNORES_USERDATA NODE_VALUE_IGNORED)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(srt_cf_memo_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SrtCfMemoTests.cpp")
@@ -1773,6 +1782,11 @@ if(BUILD_TESTING)
 	add_test(NAME cp_scout COMMAND $<TARGET_FILE:cp_scout_tests>)
 	add_test(NAME cp_scout_mutant_skip_validate COMMAND $<TARGET_FILE:cp_scout_mutant_skip_validate_tests>)
 	set_tests_properties(cp_scout_mutant_skip_validate PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME cp_scout_validate COMMAND $<TARGET_FILE:cp_scout_validate_tests>)
+	foreach(mutant values_not_compared first_read_only busy_ok tables_ignored)
+		add_test(NAME cp_scout_validate_mutant_${mutant} COMMAND $<TARGET_FILE:cp_scout_validate_mutant_${mutant}_tests>)
+		set_tests_properties(cp_scout_validate_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	foreach(mutant IN ITEMS no_failed ignores_base addr_only ignores_userdata node_value_ignored)
 		add_test(NAME srt_cf_memo_mutant_${mutant} COMMAND $<TARGET_FILE:srt_cf_memo_mutant_${mutant}_tests>)
 		set_tests_properties(srt_cf_memo_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
@@ -2097,6 +2111,11 @@ if(BUILD_TESTING)
 		srt_slot_batch_mutant_all_blocks_tests
 		cp_scout_tests
 		cp_scout_mutant_skip_validate_tests
+		cp_scout_validate_tests
+		cp_scout_validate_mutant_values_not_compared_tests
+		cp_scout_validate_mutant_first_read_only_tests
+		cp_scout_validate_mutant_busy_ok_tests
+		cp_scout_validate_mutant_tables_ignored_tests
 		srt_jit_cover_tests
 		srt_jit_cover_mutant_noreads_ignores_userdata_tests
 		srt_jit_cover_mutant_cb_wrong_offset_tests
@@ -2292,7 +2311,7 @@ if(BUILD_TESTING)
 	add_dependencies(kyty_tests pv_layout_fast_tests pv_layout_fast_mutant_drop_attr_tests pv_layout_fast_mutant_clip_ignored_tests pv_layout_fast_mutant_keep_builtin_vars_tests pv_layout_fast_mutant_no_output_filter_tests pv_layout_fast_mutant_no_ambiguity_check_tests pv_layout_fast_mutant_fast_skips_validate_tests)
 	add_dependencies(kyty_tests srt_cf_memo_tests srt_cf_memo_mutant_no_failed_tests srt_cf_memo_mutant_ignores_base_tests srt_cf_memo_mutant_addr_only_tests srt_cf_memo_mutant_ignores_userdata_tests srt_cf_memo_mutant_node_value_ignored_tests
 		srt_cf_memo_walker_mutant_addr_only_tests srt_cf_memo_walker_mutant_ignores_userdata_tests srt_cf_memo_walker_mutant_node_value_ignored_tests)
-	add_dependencies(kyty_tests cp_scout_tests cp_scout_mutant_skip_validate_tests)
+	add_dependencies(kyty_tests cp_scout_tests cp_scout_mutant_skip_validate_tests cp_scout_validate_tests cp_scout_validate_mutant_values_not_compared_tests cp_scout_validate_mutant_first_read_only_tests cp_scout_validate_mutant_busy_ok_tests cp_scout_validate_mutant_tables_ignored_tests)
 	add_dependencies(kyty_tests indirect_gpu_tests indirect_gpu_mutant_IGNORE_PV_tests indirect_gpu_mutant_DEFAULT_OFF_tests sync_census_tests dcc_known_tests eager_pages_tests eager_pages_mutant_one_page_tests)
 	add_dependencies(kyty_tests rfop_diag_tests rfop_diag_mutant_no_opcode_tests rfop_diag_mutant_no_site_tests
 	                 rfop_diag_mutant_walk_no_grow_tests cp_wait_diag_tests cp_wait_diag_mutant_no_cause_tests)
