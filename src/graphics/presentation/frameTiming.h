@@ -406,6 +406,9 @@ enum class Counter : uint32_t {
 	// copy_depth_to_color, primitive_type, primitive_restart, native_fetch - and those the command itself declined (cmd reason, any).
 	IndirectHostPvStoreN, IndirectHostPvProtoN, IndirectHostMeshN, IndirectHostCopyDepthN, IndirectHostPrimTypeN, IndirectHostPrimRestartN,
 	IndirectHostNativeFetchN, IndirectHostCmdN,
+	// S472 (KYTY_INDIRECT_GPU_MESH): mesh draws recorded with the prepare compute + vkCmdDrawMeshTasksIndirectEXT (gpu), those the ring refused
+	// (ring_full), shadow compares (n, equal, not equal) and plans that exceeded a host limit (violation).
+	MeshIndGpuN, MeshIndRingFullN, MeshIndShadowN, MeshIndShadowEqN, MeshIndShadowNeN, MeshIndViolationN,
 	Count,
 };
 

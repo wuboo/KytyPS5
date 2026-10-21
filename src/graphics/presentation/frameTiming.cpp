@@ -622,6 +622,12 @@ constexpr const char* kCounterNames[] = {
     "indirect_host_primitive_restart_n",
     "indirect_host_native_fetch_n",
     "indirect_host_cmd_n",
+    "mesh_ind_gpu_n",
+    "mesh_ind_ring_full_n",
+    "mesh_ind_shadow_n",
+    "mesh_ind_shadow_eq_n",
+    "mesh_ind_shadow_ne_n",
+    "mesh_ind_violation_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

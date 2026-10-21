@@ -1,0 +1,71 @@
+// S472 (KYTY_INDIRECT_GPU_MESH): prepares vkCmdDrawMeshTasksIndirectEXT for an indexed indirect draw whose host shader is a mesh shader.
+// Same arithmetic as MeshIndirect::MakePlan (src/graphics/host_gpu/renderer/meshIndirect.h, pinned by tests/MeshIndirectTests.cpp).
+//   in   the 5 dwords the guest wrote (VkDrawIndexedIndirectCommand layout), read from the buffer cache
+//   out  8 dwords per slot: [0..2] groups x, y, z (the indirect command), [3] index_count (clamped), [4] vertex_offset, [5] first_instance,
+//        [6] start_index, [7] violation (a host limit would be exceeded: the command is all zero)
+
+#version 450
+
+layout(local_size_x = 1, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer InArgs {
+	uint in_args[];
+};
+layout(std430, set = 0, binding = 1) writeonly buffer Out {
+	uint out_words[];
+};
+
+layout(push_constant) uniform Push {
+	uint in_word;              // first dword of the args inside the bound range (the descriptor offset is aligned down)
+	uint out_word;             // first dword of the slot
+	uint index_buffer_size;    // INDEX_BUFFER_SIZE, in indices (non-zero)
+	uint primitives_per_group;
+	uint primitive_size;       // vertices of one input primitive
+	uint primitive_step;       // vertices between two input primitives
+	uint native_fetch;         // 1: vertex_offset and first_instance are 0 (native vertex fetch reads the patched SGPRs)
+	uint max_x;
+	uint max_y;
+	uint max_total;
+}
+push;
+
+void main() {
+	const uint i = push.in_word;
+	const uint o = push.out_word;
+
+	const uint instance_count = in_args[i + 1u];
+	const uint start_index    = in_args[i + 2u];
+	uint       index_count    = in_args[i + 0u];
+	if (push.index_buffer_size != 0u && index_count > push.index_buffer_size) {
+		index_count = push.index_buffer_size;
+	}
+	const uint vertex_offset  = push.native_fetch != 0u ? 0u : in_args[i + 3u];
+	const uint first_instance = push.native_fetch != 0u ? 0u : in_args[i + 4u];
+
+	uint groups_x   = 0u;
+	uint groups_y   = 0u;
+	uint groups_z   = 0u;
+	uint violation  = 0u;
+	const uint primitives =
+	    index_count < push.primitive_size ? 0u : (index_count - push.primitive_size) / push.primitive_step + 1u;
+	if (primitives != 0u && instance_count != 0u && push.primitives_per_group != 0u) {
+		const uint groups = (primitives - 1u) / push.primitives_per_group + 1u;
+		uint       total_lo, total_hi;
+		umulExtended(groups, instance_count, total_hi, total_lo);
+		if (groups > push.max_x || instance_count > push.max_y || total_hi != 0u || total_lo > push.max_total) {
+			violation = 1u;
+		} else {
+			groups_x = groups;
+			groups_y = instance_count;
+			groups_z = 1u;
+		}
+	}
+	out_words[o + 0u] = groups_x;
+	out_words[o + 1u] = groups_y;
+	out_words[o + 2u] = groups_z;
+	out_words[o + 3u] = index_count;
+	out_words[o + 4u] = vertex_offset;
+	out_words[o + 5u] = first_instance;
+	out_words[o + 6u] = start_index;
+	out_words[o + 7u] = violation;
+}

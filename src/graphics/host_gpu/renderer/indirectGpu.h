@@ -124,6 +124,7 @@ struct HostPath {
 	bool pv_store_possible = false; // KYTY_PV_VSSTORE is on and the program pair is one the store knows
 	bool proto_possible    = false; // the vertex program has a per-vertex prototype
 	bool mesh              = false;
+	bool mesh_gpu          = false; // S472: KYTY_INDIRECT_GPU_MESH is on and the mesh shader can read the args itself (MeshIndirect::MeshCanGoGpu)
 	bool copy_depth        = false;
 	bool quad_list_legacy  = false;
 	bool restart           = false; // primitive restart control is set for a strip / fan topology
@@ -143,7 +144,7 @@ inline Reason QualifyHost(const HostPath& h) {
 	if (proto) {
 		return Reason::PerVertexProto;
 	}
-	if (h.mesh) {
+	if (h.mesh && !h.mesh_gpu) {
 		return Reason::Mesh;
 	}
 	if (h.copy_depth) {

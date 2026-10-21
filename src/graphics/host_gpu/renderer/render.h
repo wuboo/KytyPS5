@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/indirectGpu.h"
+#include "graphics/host_gpu/renderer/meshIndirect.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -47,6 +48,7 @@ struct DrawRenderState;
 struct PerVertexPrototypePrograms;
 class PvVsStoreRuntime;
 class PvIndirectRuntime;
+class MeshIndirectRuntime;
 struct PvVsStoreDrawSetup;
 class RenderContext;
 class CommandScheduler;
@@ -69,6 +71,18 @@ enum class DrawOffsetSource : uint8_t {
 //   On      index_count / instance_count of the DrawIndexArgs are placeholders. The executor records vkCmdDrawIndexedIndirect(args_addr)
 //           or sets `declined` (before recording anything) and the caller takes the CPU path.
 //   Shadow  the DrawIndexArgs are the real ones; the executor only reports what it would have decided (host_reason).
+// S472 (KYTY_INDIRECT_GPU_MESH): what the command processor tells the executor about an indexed indirect draw that may be a mesh draw.
+//   On      the first call of an eligible candidate (together with IndirectGpuRequest, args not read): a mesh shader takes the draw as
+//           prepare compute + vkCmdDrawMeshTasksIndirectEXT, any other shader declines (the caller takes the CPU path).
+//   Shadow  the call that carries the args the CPU read (cpu_args): the executor records the prepare compute next to the draw and compares.
+struct MeshIndirectRequest {
+	MeshIndirect::Mode mode      = MeshIndirect::Mode::Off;
+	uint64_t           args_addr = 0;
+	MeshIndirect::Args cpu_args {};
+	uint32_t           index_buffer_size = 0; // m_index_buffer_size, the clamp of the CPU path
+	bool               declined = false; // set by the executor (before anything of the draw is recorded): the caller takes the CPU path
+};
+
 struct IndirectGpuRequest {
 	IndirectGpu::Mode   mode         = IndirectGpu::Mode::Off;
 	uint64_t            args_addr    = 0;
@@ -114,6 +128,7 @@ struct DrawIndexArgs {
 	uint32_t         render_target_slice_offset = 0;
 	IndirectGpuRequest* indirect_gpu            = nullptr; // S404
 	PvIndirectRequest*  pv_indirect             = nullptr; // S408
+	MeshIndirectRequest* mesh_indirect          = nullptr; // S472
 };
 
 struct DrawAutoArgs {
@@ -310,6 +325,7 @@ private:
 	void PvIndirectNotePlan(const PvIndirectDraw& draw, const PvVsStorePlan& cap_plan, const PvVsStorePlan& real_plan,
 	                        uint32_t stride_vec4);
 	[[nodiscard]] PvIndirectRuntime& PvIndirectRt();
+	[[nodiscard]] MeshIndirectRuntime& MeshIndirectRt(); // S472
 	struct PvIndirectEntryState {
 		PvIndirect::Entry entry;
 		uint64_t          addr      = 0;
@@ -385,6 +401,7 @@ private:
 	PvRangeGen::Memo                                     m_pv_range_gen; // S406 (KYTY_PV_RANGE_GEN)
 	std::shared_ptr<PvVsStoreRuntime>                    m_pv_vsstore; // S150, created on the first VS-store draw
 	std::shared_ptr<PvIndirectRuntime>                   m_pvi_rt;     // S408, created on the first prepared draw
+	std::shared_ptr<MeshIndirectRuntime>                 m_mesh_ind_rt; // S472, created on the first mesh indirect draw
 	std::array<PvIndirectEntryState, PvIndirect::kMaxEntries> m_pvi_entries;
 	uint32_t                                             m_pvi_count = 0;
 

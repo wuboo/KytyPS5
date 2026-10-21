@@ -328,6 +328,21 @@ add_custom_command(
 	DEPENDS "${pv_indirect_shader_source}"
 	VERBATIM
 )
+# S472: KYTY_INDIRECT_GPU_MESH prepare shader (groups + draw data of a mesh indirect draw from the guest args).
+set(mesh_indirect_shader_source "${gpu_tiler_shader_dir}/mesh_indirect_prepare.comp")
+set(mesh_indirect_shader_spv "${gpu_tiler_generated_dir}/mesh_indirect_prepare.spv")
+set(mesh_indirect_shader_header "${gpu_tiler_generated_dir}/mesh_indirect_prepare_spv.h")
+add_custom_command(
+	OUTPUT "${mesh_indirect_shader_header}"
+	COMMAND ${CMAKE_COMMAND} -E make_directory "${gpu_tiler_generated_dir}"
+	COMMAND "${KYTY_GLSLANG_VALIDATOR}" -V --target-env vulkan1.2 -Os
+	        -o "${mesh_indirect_shader_spv}" "${mesh_indirect_shader_source}"
+	COMMAND ${CMAKE_COMMAND} -DINPUT=${mesh_indirect_shader_spv} -DOUTPUT=${mesh_indirect_shader_header}
+	        -DSYMBOL=MESH_INDIRECT_PREPARE_SPV -P "${KYTY_SOURCE_DIR}/embed_spirv.cmake"
+	DEPENDS "${mesh_indirect_shader_source}"
+	VERBATIM
+)
+list(APPEND kyty_emulator_src "${mesh_indirect_shader_header}")
 list(APPEND kyty_emulator_src "${pv_indirect_shader_header}")
 list(APPEND kyty_emulator_src "${fault_buffer_shader_header}")
 list(APPEND kyty_emulator_src ${gpu_tiler_shader_headers})
@@ -1497,6 +1512,16 @@ target_compile_definitions(indirect_gpu_mutant_IGNORE_PV_tests PRIVATE KYTY_INDI
 add_executable(indirect_gpu_mutant_DEFAULT_OFF_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/IndirectGpuTests.cpp")
 target_include_directories(indirect_gpu_mutant_DEFAULT_OFF_tests PRIVATE ${inc_headers})
 target_compile_definitions(indirect_gpu_mutant_DEFAULT_OFF_tests PRIVATE KYTY_INDIRECTGPU_MUTANT_DEFAULT_OFF=1)
+# S472: KYTY_INDIRECT_GPU_MESH (plan of a mesh indirect draw from the args; qualification of the mesh host path). Mutants: index count not clamped to
+# INDEX_BUFFER_SIZE, native fetch keeps the args' offsets, group count rounded down, the mode on by default.
+add_executable(mesh_indirect_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/MeshIndirectTests.cpp")
+target_include_directories(mesh_indirect_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS NO_CLAMP NATIVE_OFFSETS GROUPS_FLOOR DEFAULT_ON)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(mesh_indirect_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/MeshIndirectTests.cpp")
+	target_include_directories(mesh_indirect_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(mesh_indirect_mutant_${mutant_lower}_tests PRIVATE KYTY_MESHINDIRECT_MUTANT_${mutant}=1)
+endforeach()
 # S402: KYTY_DCC_KNOWN (ledger + publish) and KYTY_DCC_EAGER (multi-page eager readback).
 add_executable(dcc_known_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/DccKnownTests.cpp")
 target_include_directories(dcc_known_tests PRIVATE ${inc_headers})
@@ -1674,6 +1699,11 @@ if(BUILD_TESTING)
 	add_test(NAME cp_wait_diag COMMAND $<TARGET_FILE:cp_wait_diag_tests>)
 	add_test(NAME cp_wait_diag_mutant_no_cause COMMAND $<TARGET_FILE:cp_wait_diag_mutant_no_cause_tests>)
 	set_tests_properties(cp_wait_diag_mutant_no_cause PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME mesh_indirect COMMAND $<TARGET_FILE:mesh_indirect_tests>)
+	foreach(mutant IN ITEMS no_clamp native_offsets groups_floor default_on)
+		add_test(NAME mesh_indirect_mutant_${mutant} COMMAND $<TARGET_FILE:mesh_indirect_mutant_${mutant}_tests>)
+		set_tests_properties(mesh_indirect_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME indirect_gpu COMMAND $<TARGET_FILE:indirect_gpu_tests>)
 	add_test(NAME indirect_gpu_mutant_IGNORE_PV COMMAND $<TARGET_FILE:indirect_gpu_mutant_IGNORE_PV_tests>)
 	set_tests_properties(indirect_gpu_mutant_IGNORE_PV PROPERTIES WILL_FAIL TRUE)
@@ -2279,7 +2309,7 @@ if(BUILD_TESTING)
 	add_dependencies(kyty_tests pv_layout_fast_tests pv_layout_fast_mutant_drop_attr_tests pv_layout_fast_mutant_clip_ignored_tests pv_layout_fast_mutant_keep_builtin_vars_tests pv_layout_fast_mutant_no_output_filter_tests pv_layout_fast_mutant_no_ambiguity_check_tests pv_layout_fast_mutant_fast_skips_validate_tests)
 	add_dependencies(kyty_tests srt_cf_memo_tests srt_cf_memo_mutant_no_failed_tests srt_cf_memo_mutant_ignores_base_tests srt_cf_memo_mutant_addr_only_tests srt_cf_memo_mutant_ignores_userdata_tests srt_cf_memo_mutant_node_value_ignored_tests
 		srt_cf_memo_walker_mutant_addr_only_tests srt_cf_memo_walker_mutant_ignores_userdata_tests srt_cf_memo_walker_mutant_node_value_ignored_tests)
-	add_dependencies(kyty_tests indirect_gpu_tests indirect_gpu_mutant_IGNORE_PV_tests indirect_gpu_mutant_DEFAULT_OFF_tests sync_census_tests dcc_known_tests eager_pages_tests eager_pages_mutant_one_page_tests)
+	add_dependencies(kyty_tests mesh_indirect_tests mesh_indirect_mutant_no_clamp_tests mesh_indirect_mutant_native_offsets_tests mesh_indirect_mutant_groups_floor_tests mesh_indirect_mutant_default_on_tests indirect_gpu_tests indirect_gpu_mutant_IGNORE_PV_tests indirect_gpu_mutant_DEFAULT_OFF_tests sync_census_tests dcc_known_tests eager_pages_tests eager_pages_mutant_one_page_tests)
 	add_dependencies(kyty_tests rfop_diag_tests rfop_diag_mutant_no_opcode_tests rfop_diag_mutant_no_site_tests
 	                 rfop_diag_mutant_walk_no_grow_tests cp_wait_diag_tests cp_wait_diag_mutant_no_cause_tests)
 	foreach(mutant IN LISTS KYTY_DCC_KNOWN_MUTANTS)

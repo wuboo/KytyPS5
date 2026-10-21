@@ -1215,12 +1215,43 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 			                     mesh.primitives_per_group > 0x1ffu ||
 			                     total_threads > 15u * options.wave_size);
 			const auto u32  = [](uint32_t value) { return IR::U32(IR::Value(value)); };
-			const auto draw = [&](uint32_t index) {
+			const auto push_draw = [&](uint32_t index) {
 				return IR::U32(
 				    entry_ir.Emit(IR::ValueOpcode::MeshDrawParameter, {IR::Value(index)}));
 			};
 			const auto minimum = [&](IR::U32 lhs, IR::U32 rhs) {
 				return IR::U32(entry_ir.Emit(IR::ValueOpcode::UMin32, {lhs, rhs}));
+			};
+			// S472 (KYTY_INDIRECT_GPU_MESH): bit 31 of push dword 3 says the draw parameters are not in the push constants but in the
+			// guest's indirect args (a VkDrawIndexedIndirectCommand at push dwords 1,2). Then push dword 0 is INDEX_BUFFER_SIZE, bit 30 of
+			// dword 3 means native vertex fetch (offsets 0) and dwords 4,5 are the index base (the args' start index is added here).
+			// Same arithmetic as MeshIndirect::Plan (meshIndirect.h). Without the bit every parameter is the push constant itself.
+			const auto args_flag = entry_ir.INotEqual(entry_ir.ShiftRightLogical(push_draw(3), u32(31)), u32(0));
+			const auto native    = entry_ir.INotEqual(entry_ir.BitwiseAnd(entry_ir.ShiftRightLogical(push_draw(3), u32(30)), u32(1)), u32(0));
+			const auto args_index = static_cast<uint32_t>(result.memory_info.size());
+			result.memory_info.push_back({.kind = IR::ResourceKind::Global});
+			const auto args_resource = entry_ir.Emit(IR::ValueOpcode::GetAddressResource,
+			                                         {entry_ir.BitwiseAnd(push_draw(1), u32(~3u)), push_draw(2)});
+			const auto load_arg = [&](uint32_t dword) {
+				return IR::U32(entry_ir.Emit(IR::ValueOpcode::LoadAddressU32, {args_resource, u32(dword * 4u), u32(0), args_flag},
+				                             IR::MemoryFlags {.index = args_index}));
+			};
+			const auto arg_index_count    = load_arg(0);
+			const auto arg_start_index    = load_arg(2);
+			const auto arg_base_vertex    = load_arg(3);
+			const auto arg_start_instance = load_arg(4);
+			const auto element_bytes      = entry_ir.BitwiseAnd(push_draw(3), u32(0xffffu));
+			const auto index_low_sum = entry_ir.IAdd(push_draw(4), entry_ir.IMul(arg_start_index, element_bytes));
+			const auto index_carry   = entry_ir.Select(entry_ir.ULessThan(index_low_sum, push_draw(4)), u32(1), u32(0));
+			const auto draw          = [&](uint32_t index) -> IR::U32 {
+                switch (index) {
+                    case 0: return entry_ir.Select(args_flag, minimum(arg_index_count, push_draw(0)), push_draw(0));
+                    case 1: return entry_ir.Select(args_flag, entry_ir.Select(native, u32(0), arg_base_vertex), push_draw(1));
+                    case 2: return entry_ir.Select(args_flag, entry_ir.Select(native, u32(0), arg_start_instance), push_draw(2));
+                    case 3: return element_bytes;
+                    case 4: return entry_ir.Select(args_flag, index_low_sum, push_draw(4));
+                    default: return entry_ir.Select(args_flag, entry_ir.IAdd(push_draw(5), index_carry), push_draw(5));
+                }
 			};
 			const auto subtract_saturate = [&](IR::U32 lhs, IR::U32 rhs) {
 				return entry_ir.ISub(lhs, minimum(lhs, rhs));
