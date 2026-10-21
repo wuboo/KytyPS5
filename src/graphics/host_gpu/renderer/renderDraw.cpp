@@ -995,13 +995,32 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 			const auto same_res = [](const ShaderStageRuntime& a, const ShaderStageRuntime& b) {
 				if (a.resources == nullptr || b.resources == nullptr) return a.resources == b.resources;
 				if (a.resources->specialization_reads != b.resources->specialization_reads) {
-					static std::atomic<uint32_t> logged {0};
-					if (logged.fetch_add(1) < 8) {
-						std::fprintf(stderr, "[scout] specialization_reads differ: cp %zu ranges, scout %zu ranges\n", a.resources->specialization_reads.size(),
-						             b.resources->specialization_reads.size());
-						std::fflush(stderr);
-					}
 					FrameTiming::Add(FrameTiming::Counter::ScoutNeReadsN);
+					// The same bytes, however the reads were cut into ranges?
+					const auto merged = [](std::vector<std::pair<uint64_t, uint64_t>> ranges) {
+						std::sort(ranges.begin(), ranges.end());
+						std::vector<std::pair<uint64_t, uint64_t>> out;
+						for (const auto& [address, size]: ranges) {
+							if (size == 0) continue;
+							if (!out.empty() && address <= out.back().first + out.back().second) {
+								out.back().second = std::max(out.back().second, address + size - out.back().first);
+							} else {
+								out.emplace_back(address, size);
+							}
+						}
+						return out;
+					};
+					const auto ma = merged(a.resources->specialization_reads);
+					const auto mb = merged(b.resources->specialization_reads);
+					if (ma != mb) {
+						FrameTiming::Add(FrameTiming::Counter::ScoutNeReadsUnionN);
+						static std::atomic<uint32_t> logged {0};
+						if (logged.fetch_add(1) < 8) {
+							std::fprintf(stderr, "[scout] specialization_reads union differs: cp %zu ranges (raw %zu), scout %zu (raw %zu)\n", ma.size(), a.resources->specialization_reads.size(),
+							             mb.size(), b.resources->specialization_reads.size());
+							std::fflush(stderr);
+						}
+					}
 				}
 				return a.resources->flattened_srt == b.resources->flattened_srt && a.resources->buffers == b.resources->buffers &&
 				       a.resources->images == b.resources->images && a.resources->samplers == b.resources->samplers &&
