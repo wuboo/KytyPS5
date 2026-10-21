@@ -20,6 +20,7 @@
 #include <condition_variable>
 #include <cstring>
 #include <memory>
+#include <optional>
 #include <mutex>
 #include <span>
 #include <thread>
@@ -279,10 +280,12 @@ void ComputePrograms(PipelineCache& cache, const HW::Context& ctx, const HW::Sha
 	PipelineCache::ScoutScope::Reset();
 	ScoutTableLog::Log log;
 	ScoutTableLog::Active() = &log;
+	std::optional<FrameTiming::ScopedCounterNs> gfp_timer(std::in_place, FrameTiming::Counter::ScoutWorkerGfpNs);
 	slot.programs           = cache.GetGraphicsPrograms(sh.GetVs(), sh.GetPs(), ctx.GetShaderRegisters(),
 	                                                    ctx, ucfg, mapping, ps_active, slot.vertex_info,
 	                                                    slot.pixel_info, single_sample);
 	ScoutTableLog::Active() = nullptr;
+	gfp_timer.reset();
 	using C = FrameTiming::Counter;
 	if (PipelineCache::ScoutScope::Failed() || !slot.programs.vertex[0] || (ps_active && !slot.programs.pixel) ||
 	    slot.vertex_info[0].stage.resources == nullptr || (ps_active && slot.pixel_info.stage.resources == nullptr)) {
@@ -517,6 +520,7 @@ void WorkerLoop() {
 				if (job.cp != nullptr) ApplySet(*job.cp, header, packet, remaining_dw,
 				                               static_cast<uint32_t>(cursor.commands.size()));
 			} else if (IsDrawOpcode(opcode)) {
+				const FrameTiming::ScopedCounterNs draw_timer(FrameTiming::Counter::ScoutWorkerDrawNs);
 				auto slot = std::make_unique<Slot>();
 				FillSlotRegs(*slot, job.ctx, job.sh, job.ucfg);
 				slot->snap.sh = sh_words;
@@ -619,6 +623,7 @@ TakeKind Take(CommandBuffer& buffer, Prepared& out) {
 		// Wait until the worker has the next draw or has finished. A miss-without-wait lets CP enter
 		// GetGraphicsPrograms and starve the worker on m_get_mutex, so every later draw also misses.
 		std::unique_lock lock(g_mu);
+		const FrameTiming::ScopedCounterNs wait_timer(FrameTiming::Counter::ScoutTakeWaitNs);
 		if (!g_cv.wait_for(lock, std::chrono::milliseconds(kWatchdogMs), [first] {
 			    return g_stop.load() || g_live.done.load(std::memory_order_acquire) ||
 			           (first < g_live.slots.size() && g_live.slots[first] &&
@@ -679,7 +684,11 @@ TakeKind Take(CommandBuffer& buffer, Prepared& out) {
 		FrameTiming::Add(C::ScoutMissDirtyN);
 		return TakeKind::Miss;
 	}
-	if (!ValidateSlot(*slot)) { // S471: what the worker read is not what the CP reads now
+	const bool valid = [&] {
+		const FrameTiming::ScopedCounterNs validate_timer(FrameTiming::Counter::ScoutValidateNs);
+		return ValidateSlot(*slot);
+	}();
+	if (!valid) { // S471: what the worker read is not what the CP reads now
 		FrameTiming::Add(C::ScoutMissN);
 		FrameTiming::Add(C::ScoutMissMemN);
 		return TakeKind::Miss;

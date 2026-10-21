@@ -419,6 +419,8 @@ enum class Counter : uint32_t {
 	// S471: worker calls that could not answer (no entry / permutation / call source, unusable memo, shape) / Take found such a slot / validation of a slot on the
 	// CP: reads replayed, a strict read on a busy page, a read or table that changed, a table the log cannot replay, no memo / shadow: snapshot content differs.
 	ScoutBailEntryN, ScoutBailMemoN, ScoutBailShapeN, ScoutBailTableN, ScoutMissDirtyN, ScoutValReadsN, ScoutValBusyN, ScoutValChangedN, ScoutValTableN, ScoutNeResN, ScoutBailMeshN,
+	// S471 time (ns): CP waiting in Take for the worker / CP validating a slot / worker in GetGraphicsPrograms / worker per draw (slot, regs, GFP, copies).
+	ScoutTakeWaitNs, ScoutValidateNs, ScoutWorkerGfpNs, ScoutWorkerDrawNs,
 	Count,
 };
 
