@@ -6,9 +6,25 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstdlib>
 #include <cstdio>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv {
+
+namespace {
+std::atomic<uint32_t> g_host_fragment_subgroup_size {32};
+}
+
+void SetHostFragmentSubgroupSize(uint32_t size) {
+	g_host_fragment_subgroup_size.store(size, std::memory_order_relaxed);
+}
+
+bool PixelWave32OnWideHost(uint32_t wave_size) {
+	const char* v   = std::getenv("KYTY_FIX_PS_WAVE32_MASK");
+	const bool  fix = v != nullptr && v[0] == '1';
+	return fix && wave_size == 32u && g_host_fragment_subgroup_size.load(std::memory_order_relaxed) >= 64u;
+}
 
 namespace {
 
@@ -243,6 +259,7 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	    workgroup != nullptr && program.wave_size == 64u && workgroup->host_subgroup_size == 32u
 	        ? 2u
 	        : 1u;
+	state.pixel_wave32_wide_host = program.stage == ShaderType::Pixel && PixelWave32OnWideHost(program.wave_size);
 	if (vertex_capture != nullptr) {
 		if (program.stage != ShaderType::Vertex || input_info.vertex == nullptr ||
 		    (vertex_capture->host_subgroup_size != 32 &&

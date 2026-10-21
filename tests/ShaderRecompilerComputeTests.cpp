@@ -1465,6 +1465,7 @@ struct GraphicsCase {
   u32 pixel_custom_interpolation_mask = 0;
   u32 width = 1;
   std::vector<u32> object_ids;
+  u32 wave_size = 64;
 };
 
 struct CompiledShader {
@@ -1954,6 +1955,7 @@ CompiledShader CompileFragmentCase(const GraphicsCase &test) {
 
   ShaderRecompiler::CompileOptions options;
   options.stage = ShaderType::Pixel;
+  options.wave_size = test.wave_size;
   options.maintenance8_enabled = true;
   options.dump_ir = false;
   options.input_info.pixel = &pixel_info;
@@ -48701,6 +48703,39 @@ void CheckPm4CeCompletion(RenderContext &renderer) {
 } // namespace
 } // namespace Libs::Graphics
 
+// S459: a guest wave32 pixel shader on a 64-lane host subgroup reads its exec ballot / first lane from its own half.
+void CheckPixelWave32WideHostMask() {
+  using namespace Libs::Graphics;
+  GraphicsCase test;
+  test.name = "PixelWave32WideHostMask";
+  test.wave_size = 32;
+  // v_readfirstlane_b32 s4, v0 ; v_mov_b32 v2, s4 ; export v2 ; end
+  test.fragment_code = {EncodeVintrp(0x02, 1, 0, 1, 2), EncodeVop1(0x02, 4, Vgpr(1)), EncodeVop1(0x01, 2, 4),
+                        EncodeExp0(0x00, 0xf), EncodeExp1(2, 2, 2, 2)};
+  AppendEnd(&test.fragment_code);
+  const auto count_for = [&](const char *fix, u32 host_subgroup_size) {
+    setenv("KYTY_FIX_PS_WAVE32_MASK", fix, 1);
+    ShaderRecompiler::Spirv::SetHostFragmentSubgroupSize(host_subgroup_size);
+    const auto shader = CompileFragmentCase(test);
+    spvtools::SpirvTools tools(SPV_ENV_VULKAN_1_2);
+    std::string text;
+    Require(test.name, "disassembly", tools.Disassemble(shader.spirv, &text), "cannot disassemble");
+    Require(test.name, "wave32 pixel program", shader.program.wave_size == 32u, "the case is not a wave32 pixel shader");
+    if (const char *dump = std::getenv("KYTY_TEST_DUMP_SPIRV")) { if (FILE *f = std::fopen((std::string(dump) + "." + fix + std::to_string(host_subgroup_size)).c_str(), "w")) { std::fputs(text.c_str(), f); std::fclose(f); } }
+    return std::make_pair(CountText(text, "OpUGreaterThanEqual"), CountText(text, "OpGroupNonUniformBallot"));
+  };
+  const auto off = count_for("0", 64);
+  const auto on32 = count_for("1", 32);
+  const auto on64 = count_for("1", 64);
+  setenv("KYTY_FIX_PS_WAVE32_MASK", "0", 1);
+  ShaderRecompiler::Spirv::SetHostFragmentSubgroupSize(32);
+  Require(test.name, "ballots exist", off.second != 0, "the program has no subgroup ballot");
+  Require(test.name, "switch off keeps the old code", on32.first == off.first,
+          "a 32-lane host (or the switch off) must not change the ballot words");
+  Require(test.name, "own-half ballot on a 64-lane host", on64.first > off.first,
+          "the ballot word of a wave32 pixel shader is not selected by the lane's half");
+}
+
 int main(int argc, char **argv) {
   using namespace Libs::Graphics;
 
@@ -48708,6 +48743,10 @@ int main(int argc, char **argv) {
   EnsureConfigInitialized();
   CheckLeastRecentlyUsedCacheOrdering();
   CheckScalarReadOverlap();
+  if (argc == 2 && std::strcmp(argv[1], "--ps-wave32-mask-only") == 0) {
+    CheckPixelWave32WideHostMask();
+    return 0;
+  }
   if (argc == 2 && std::strcmp(argv[1], "--cvt-pkrtz-only") == 0) {
     VulkanHarness vulkan;
     RunCase(&vulkan, CvtPkrtzF16F32SubnormalRoundsTowardZero());

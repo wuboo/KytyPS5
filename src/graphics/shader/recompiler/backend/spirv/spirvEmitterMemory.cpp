@@ -1570,9 +1570,12 @@ uint32_t EmitAppendConsume(ValueEmitContext& ctx, const IR::Inst& inst) {
 		const auto helper     = EmitHelperInvocation(state);
 		const auto not_helper = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpLogicalNot, TypeBool(state), not_helper, helper);
-		const auto live = state.builder.AllocateId();
+		auto live = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpGroupNonUniformBallot, TypeU32Vector(state, 4), live,
 		                          ConstantU32(state, spv::ScopeSubgroup), not_helper);
+		if (state.pixel_wave32_wide_host) {
+			live = EmitOwnHalfBallot(state, live);
+		}
 		live_ballot = Binary(state, spv::OpBitwiseAnd, TypeU32Vector(state, 4), ballot, live);
 	}
 	const auto first = ctx.FirstLane(live_ballot);

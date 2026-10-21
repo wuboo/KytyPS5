@@ -243,12 +243,47 @@ uint32_t EmitVertexParameterComponentU32(EmitterState& state, const InputBinding
 	return bits;
 }
 
+uint32_t EmitOwnHalfBallot(EmitterState& state, uint32_t ballot) {
+	const auto low     = state.builder.AllocateId();
+	const auto high    = state.builder.AllocateId();
+	const auto in_high = state.builder.AllocateId();
+	const auto word    = state.builder.AllocateId();
+	const auto result  = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), low, ballot, 0);
+	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), high, ballot, 1);
+	state.builder.AddFunction(spv::OpUGreaterThanEqual, TypeBool(state), in_high,
+	                          EmitSubgroupLocalInvocationId(state), ConstantU32(state, 32));
+	state.builder.AddFunction(spv::OpSelect, TypeU32(state), word, in_high, high, low);
+	state.builder.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4), result, word,
+	                          ConstantU32(state, 0), ConstantU32(state, 0), ConstantU32(state, 0));
+	return result;
+}
+
+uint32_t EmitGuestLaneId(EmitterState& state) {
+	const auto lane = EmitSubgroupLocalInvocationId(state);
+	return state.pixel_wave32_wide_host ? Binary(state, spv::OpBitwiseAnd, TypeU32(state), lane, ConstantU32(state, 31))
+	                                    : lane;
+}
+
+uint32_t EmitHostLaneOfGuestLane(EmitterState& state, uint32_t lane) {
+	if (!state.pixel_wave32_wide_host) {
+		return lane;
+	}
+	const auto half = Binary(state, spv::OpBitwiseAnd, TypeU32(state), EmitSubgroupLocalInvocationId(state),
+	                         ConstantU32(state, 32));
+	return Binary(state, spv::OpBitwiseOr, TypeU32(state),
+	              Binary(state, spv::OpBitwiseAnd, TypeU32(state), lane, ConstantU32(state, 31)), half);
+}
+
 uint32_t EmitSubgroupLaneActiveBool(EmitterState& state, uint32_t lane) {
-	const auto active_ballot = state.builder.AllocateId();
+	auto active_ballot = state.builder.AllocateId();
 	state.builder.AddFunction(
 	    spv::OpGroupNonUniformBallot, TypeU32Vector(state, 4), active_ballot,
 	    ConstantU32(state, spv::ScopeSubgroup),
 	    MaskCaptureExecution(state, ConstantBool(state, true), state.lane_half));
+	if (state.pixel_wave32_wide_host) {
+		active_ballot = EmitOwnHalfBallot(state, active_ballot);
+	}
 	return EmitBallotLaneActiveBool(state, active_ballot, lane);
 }
 uint32_t EmitBallotLaneActiveBool(EmitterState& state, uint32_t active_ballot, uint32_t lane) {

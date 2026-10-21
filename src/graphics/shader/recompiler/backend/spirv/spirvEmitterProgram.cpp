@@ -547,7 +547,7 @@ uint32_t ValueEmitContext::Ballot(IR::Value predicate, bool negate) {
 	        value(other_half == nullptr || half == 0 ? Def(predicate) : other_half->Def(predicate)),
 	        0));
 	if (other_half == nullptr) {
-		return low;
+		return state.pixel_wave32_wide_host ? EmitOwnHalfBallot(state, low) : low;
 	}
 	const auto high      = state.builder.AllocateId();
 	const auto low_word  = state.builder.AllocateId();
@@ -585,7 +585,7 @@ uint32_t ValueEmitContext::FirstLane(uint32_t ballot) {
 	                          ConstantU32(state, 0));
 	state.builder.AddFunction(spv::OpSelect, TypeU32(state), result, low_active, low_first,
 	                          EmitAddU32(state, high_first, ConstantU32(state, 32)));
-	return result;
+	return EmitHostLaneOfGuestLane(state, result);
 }
 
 uint32_t ValueEmitContext::Shuffle(const IR::Inst& inst, size_t index, uint32_t lane) {
