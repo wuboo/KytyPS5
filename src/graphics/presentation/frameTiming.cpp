@@ -628,6 +628,8 @@ constexpr const char* kCounterNames[] = {
     "mesh_ind_shadow_eq_n",
     "mesh_ind_shadow_ne_n",
     "mesh_ind_violation_n",
+    "mesh_ind_cpu_n",
+    "mesh_ind_cpu_empty_n",
     "mesh_ind_diag_a_n",
     "mesh_ind_diag_b_n",
     "mesh_ind_diag_c_n",

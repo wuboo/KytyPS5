@@ -1315,6 +1315,10 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		}
 		const bool mesh_shadow = mesh_request.mode == MeshIndirect::Mode::Shadow && i == 0 && draw_count == 1 &&
 		                         ig_cmd_reason == IndirectGpu::Reason::Eligible;
+		if (i == 0 && ig_cmd_reason == IndirectGpu::Reason::Eligible && ig_request.host_reason == IndirectGpu::Reason::Mesh) {
+			FrameTiming::Add(FrameTiming::Counter::MeshIndCpuN);
+			if (index_count == 0 || args->instance_count == 0) FrameTiming::Add(FrameTiming::Counter::MeshIndCpuEmptyN);
+		}
 		if (mesh_shadow) {
 			mesh_request.cpu_args = {args->index_count_per_instance, args->instance_count, args->start_index_location,
 			                         args->base_vertex_location, args->start_instance_location};
