@@ -585,7 +585,6 @@ constexpr const char* kCounterNames[] = {
     "gfp_memo_miss_reads_n",
     "gfp_cf_read_n",
     "gfp_cf_read_ns",
-<<<<<<< HEAD
     "bind_prep_ns",
     "bind_find_ns",
     "bind_bda_ns",
@@ -623,12 +622,10 @@ constexpr const char* kCounterNames[] = {
     "indirect_host_primitive_restart_n",
     "indirect_host_native_fetch_n",
     "indirect_host_cmd_n",
-=======
     "scout_hit_n",
     "scout_miss_n",
     "scout_ne_n",
     "scout_stop_n",
->>>>>>> df9edaff (cp: KYTY_CP_SCOUT lookahead computes GetGraphicsPrograms off the CP thread)
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
