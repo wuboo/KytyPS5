@@ -57,6 +57,8 @@ void Resolve(TextureCache& cache, ImageId cached, ImageId merged);
 class TextureCache {
 public:
 	enum class BindingType : uint8_t { Texture, Storage, RenderTarget, DepthTarget, VideoOut };
+	// S469: bumped by every registration change (TouchRegistrations); a memo of resolved images is valid while it is unchanged.
+	[[nodiscard]] uint64_t RegistrationGeneration() const { return m_registration_generation; }
 
 	struct ImageDesc {
 		ImageInfo     info;

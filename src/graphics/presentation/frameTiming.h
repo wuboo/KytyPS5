@@ -406,6 +406,9 @@ enum class Counter : uint32_t {
 	// copy_depth_to_color, primitive_type, primitive_restart, native_fetch - and those the command itself declined (cmd reason, any).
 	IndirectHostPvStoreN, IndirectHostPvProtoN, IndirectHostMeshN, IndirectHostCopyDepthN, IndirectHostPrimTypeN, IndirectHostPrimRestartN,
 	IndirectHostNativeFetchN, IndirectHostCmdN,
+	// S469 DIAG (KYTY_DIAG_BIND_SAME=1): PrepareBindings calls / calls whose image+sampler+user-data words equal the previous call of the same program /
+	// the same and the TextureCache registration generation unchanged / ns spent in those last calls (the part a per-program memo could skip).
+	BindPrepN, BindSameWordsN, BindSameGenN, BindSameGenNs,
 	Count,
 };
 

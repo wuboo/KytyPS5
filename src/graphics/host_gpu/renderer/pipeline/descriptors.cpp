@@ -1079,12 +1079,67 @@ void RenderExecutor::ResetBindings() {
 	m_bound_images.clear();
 }
 
+namespace {
+
+// S469 DIAG (KYTY_DIAG_CP_PHASES=1): hash of everything PrepareBindings reads from the snapshot for one program.
+template <class Program, class Snapshot>
+uint64_t BindInputsHash(const Program& program, const Snapshot& snapshot) {
+	uint64_t h = 1469598103934665603ull;
+	auto     mix = [&h](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
+	for (const auto& d: snapshot.images) {
+		mix(d.dword_count);
+		for (const auto w: d.dwords) mix(w);
+	}
+	for (const auto& s: program.info.samplers) {
+		const auto& d = snapshot.samplers[s.snapshot_index];
+		mix(d.dword_count);
+		for (const auto w: d.dwords) mix(w);
+	}
+	for (const auto reg: program.info.user_data_registers) mix(snapshot.user_data[reg - program.user_data_base]);
+	return h;
+}
+
+struct BindSameState {
+	uint64_t inputs     = 0;
+	uint64_t generation = 0;
+};
+
+} // namespace
+
 void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
                                      PreparedBindings& prepared) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(!runtime);
 	const auto& program  = *runtime.program;
 	const auto& snapshot = *runtime.resources;
+	// S469 DIAG: shadow of the per-program bind memo (R5): would the images/samplers/user data be the same as at the previous call of this program?
+	const bool bind_diag = CpPhases::Enabled();
+	int64_t    bind_diag_begin = 0;
+	bool       bind_diag_same = false;
+	if (bind_diag) {
+		static thread_local std::unordered_map<const void*, BindSameState> last;
+		auto&      state = last[&program];
+		const auto hash  = BindInputsHash(program, snapshot);
+		const auto gen   = m_context.GetTextureCache().RegistrationGeneration();
+		FrameTiming::Add(FrameTiming::Counter::BindPrepN);
+		if (state.inputs == hash) {
+			FrameTiming::Add(FrameTiming::Counter::BindSameWordsN);
+			if (state.generation == gen) {
+				FrameTiming::Add(FrameTiming::Counter::BindSameGenN);
+				bind_diag_same = true;
+			}
+		}
+		state = {hash, gen};
+		bind_diag_begin = FrameTiming::SteadyNowNs();
+	}
+	struct BindDiagEnd {
+		bool    on;
+		bool    same;
+		int64_t begin;
+		~BindDiagEnd() {
+			if (on && same) FrameTiming::Add(FrameTiming::Counter::BindSameGenNs, FrameTiming::ElapsedNs(begin, FrameTiming::SteadyNowNs()));
+		}
+	} bind_diag_end {bind_diag, bind_diag_same, bind_diag_begin};
 	prepared.runtime = &runtime;
 	prepared.gds = {nullptr, 0, VK_WHOLE_SIZE};
 	prepared.flattened_srt = {};

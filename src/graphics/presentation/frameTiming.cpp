@@ -622,6 +622,10 @@ constexpr const char* kCounterNames[] = {
     "indirect_host_primitive_restart_n",
     "indirect_host_native_fetch_n",
     "indirect_host_cmd_n",
+    "bind_prep_n",
+    "bind_same_words_n",
+    "bind_same_gen_n",
+    "bind_same_gen_ns",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
@@ -1013,6 +1017,16 @@ bool Enabled() {
 
 namespace {
 
+void AppendDiagFile(const char* suffix, const char* text) {
+	const char* fl = std::getenv("KYTY_FRAME_LOG");
+	if (fl == nullptr || fl[0] == 0) return;
+	const std::string path = std::string(fl) + suffix;
+	if (FILE* f = std::fopen(path.c_str(), "ab")) {
+		std::fputs(text, f);
+		std::fclose(f);
+	}
+}
+
 void DumpHistogram(const Histogram& hist, uint64_t from, uint64_t to) {
 	struct Cell {
 		uint32_t site;
@@ -1046,9 +1060,13 @@ void DumpHistogram(const Histogram& hist, uint64_t from, uint64_t to) {
 		} else {
 			std::snprintf(site, sizeof(site), "%s", SiteName(cells[i].site));
 		}
-		LOGF("[cp-sample] flips=%llu-%llu total=%llu site=%s op=%s n=%llu\n", static_cast<unsigned long long>(from),
-		     static_cast<unsigned long long>(to), static_cast<unsigned long long>(hist.Total()), site, op,
-		     static_cast<unsigned long long>(cells[i].n));
+		// Q2 (S469): also to a file next to KYTY_FRAME_LOG (stdout is lost when the bench kills the process); flushed per line.
+		char line[256];
+		std::snprintf(line, sizeof(line), "[cp-sample] flips=%llu-%llu total=%llu site=%s op=%s n=%llu\n", static_cast<unsigned long long>(from),
+		              static_cast<unsigned long long>(to), static_cast<unsigned long long>(hist.Total()), site, op,
+		              static_cast<unsigned long long>(cells[i].n));
+		AppendDiagFile(".cp-sample.txt", line);
+		LOGF("%s", line);
 	}
 }
 
