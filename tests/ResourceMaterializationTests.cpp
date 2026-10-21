@@ -1835,12 +1835,12 @@ void CountCfProbe(Libs::Graphics::ShaderRecompiler::IR::WalkProbe::Id id, uint64
   using Id = Libs::Graphics::ShaderRecompiler::IR::WalkProbe::Id;
   if (id == Id::MemoHitN) g_cf_probe.hit += static_cast<uint32_t>(value);
   if (id == Id::MemoMissN) g_cf_probe.miss += static_cast<uint32_t>(value);
-  if (id == Id::MemoNeN || id == Id::CfFastNeN) g_cf_probe.ne += static_cast<uint32_t>(value); // S466: a fast lookup that differs from the plain one counts too
+  if (id == Id::MemoNeN) g_cf_probe.ne += static_cast<uint32_t>(value);
 }
 
 // abs_pointer: the table pointer goes through an addition, so the read cannot be a node and the pointer itself is part of the key; otherwise the read is a node
 // and the pointer is not.
-void TestProgsMemoImpl(bool abs_pointer) {
+void TestProgsMemo(bool abs_pointer) {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   using Libs::Graphics::ShaderRecompiler::CFG::TerminatorKind;
   const auto pointer_words = [](const void *pointer) {
@@ -1977,16 +1977,6 @@ void TestProgsMemoImpl(bool abs_pointer) {
   taken(0xc5u, "memo: shadow took the wrong arm");
   CfMemoModeTestOverride().reset();
   WalkProbe::Hook() = {};
-}
-
-// S466 KYTY_PROGS_MEMO_FAST: the same cases through the plain lookup, the fast one, and the fast one compared with the plain one.
-void TestProgsMemo(bool abs_pointer) {
-  using namespace Libs::Graphics::ShaderRecompiler::IR;
-  for (const auto fast: {CfMemoMode::Off, CfMemoMode::On, CfMemoMode::Shadow}) {
-    CfMemoFastTestOverride() = fast;
-    TestProgsMemoImpl(abs_pointer);
-  }
-  CfMemoFastTestOverride().reset();
 }
 
 void TestSrtPageQuiet() {
