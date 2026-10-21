@@ -391,6 +391,8 @@ enum class Counter : uint32_t {
 	GfpMemoSkipN, GfpMemoMissColdN, GfpMemoMissInputsN, GfpMemoMissReadsN,
 	// S451 DIAG: guest reads of the control-flow loop (calls, time in the reader).
 	GfpCfReadN, GfpCfReadNs,
+	// S456 DIAG: time of the reachability loop itself (the walks the memo did not serve).
+	GfpCfLoopNs,
 	Count,
 };
 

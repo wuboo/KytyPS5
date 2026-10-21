@@ -2158,6 +2158,8 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 			m_clean_evaluator->ResetUnknowns();
 			m_clean_evaluator->m_reachable_blocks = &visited;
 		}
+		std::optional<WalkProbe::Timer> loop_timer; // S456 DIAG
+		if (gfp_cf) loop_timer.emplace(WalkProbe::Id::CfLoopNs);
 		for (;;) {
 			++cf_iter;
 			reachable.assign(m_program.control_flow.size(), 0u);
@@ -2189,6 +2191,7 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 			ResetUnknowns();
 			if (m_clean_evaluator != nullptr) m_clean_evaluator->ResetUnknowns();
 		}
+		loop_timer.reset();
 		if (cf_rec != nullptr) {
 			t_cf_rec = nullptr;
 			cf_rec->End(visited);

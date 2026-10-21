@@ -1547,7 +1547,7 @@ void WalkProbeAdd(ShaderRecompiler::IR::WalkProbe::Id id, uint64_t value) {
 	using C  = FrameTiming::Counter;
 	static constexpr C map[] = {
 	    C::GfpMatWalkNs, C::GfpWalkTreeNs, C::GfpWalkCfNs, C::GfpWalkSlotsNs,
-	    C::GfpCfWalkN, C::GfpCfIterN, C::GfpCfBlocksN, C::GfpCfCondN, C::GfpCfEvalN, C::GfpCfRflN, C::GfpCfReadN, C::GfpCfReadNs,
+	    C::GfpCfWalkN, C::GfpCfIterN, C::GfpCfBlocksN, C::GfpCfCondN, C::GfpCfEvalN, C::GfpCfRflN, C::GfpCfReadN, C::GfpCfReadNs, C::GfpCfLoopNs,
 	    C::GfpMemoHitN, C::GfpMemoMissN, C::GfpMemoNeN, C::GfpMemoSkipN, C::GfpMemoMissColdN, C::GfpMemoMissInputsN, C::GfpMemoMissReadsN,
 	};
 	static_assert(std::size(map) == static_cast<size_t>(Id::Count), "WalkProbe::Id out of step with the FrameTiming counters");

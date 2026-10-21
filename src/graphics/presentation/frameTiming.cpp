@@ -582,6 +582,7 @@ constexpr const char* kCounterNames[] = {
     "gfp_memo_miss_reads_n",
     "gfp_cf_read_n",
     "gfp_cf_read_ns",
+    "gfp_cf_loop_ns",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
