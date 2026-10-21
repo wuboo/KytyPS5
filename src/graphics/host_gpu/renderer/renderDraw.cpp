@@ -2239,6 +2239,29 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		m_context.GetCommandScheduler().EndRendering();
 		ShaderWriteBarrier(vk_buffer, shader_write_stages);
 	}
+	{ // S459 DIAG: KYTY_DIAG_S459_FLIP=<n> lists every graphics draw (PS, target, blend) in guest flips n..n+2
+		static const long s459_flip = std::getenv("KYTY_DIAG_S459_FLIP") ? std::atol(std::getenv("KYTY_DIAG_S459_FLIP")) : -1;
+		const long        now_flip  = static_cast<long>(FrameTiming::GuestFlips() + 1);
+		if (s459_flip >= 0 && now_flip >= s459_flip && now_flip < s459_flip + 3) {
+			static FILE* s459_file = std::fopen(std::getenv("KYTY_DIAG_S459_FILE") ? std::getenv("KYTY_DIAG_S459_FILE") : "s459-draws.txt", "a");
+			if (s459_file) {
+				const auto& s459_hw = buffer.GetRegisters();
+				std::fprintf(s459_file, "[s459-draw] flip=%ld ps=0x%016" PRIx64 " idx=%u colors=%u", now_flip,
+				             state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0, static_cast<unsigned>(draw.index_count),
+				             static_cast<unsigned>(state.color_count));
+				for (uint32_t i = 0; i < state.color_count; i++) {
+					const auto& c  = state.color_info[i];
+					const auto& bc = s459_hw.GetBlendControl(c.target_slot);
+					std::fprintf(s459_file, " | slot=%u fmt=%d %ux%u map=0x%02x blend=%d c=%u/%u/%u a=%u/%u/%u sep=%d", c.target_slot,
+					             static_cast<int>(c.desc.info.pixel_format), c.Extent().width, c.Extent().height, c.export_mapping.packed,
+					             bc.enable ? 1 : 0, bc.color_srcblend, bc.color_comb_fcn, bc.color_destblend, bc.alpha_srcblend,
+					             bc.alpha_comb_fcn, bc.alpha_destblend, bc.separate_alpha_blend ? 1 : 0);
+				}
+				std::fprintf(s459_file, " depth=%d\n", state.depth_info.image_id ? 1 : 0);
+				std::fflush(s459_file);
+			}
+		}
+	}
 	DiagDumpAfterDraw(m_context, state.ps_active,
 	                  state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0, state.color_info,
 	                  state.color_count, state.depth_info);
