@@ -227,6 +227,17 @@ SystemServiceGetHdrToneMapLuminance(SystemServiceHdrToneMapLuminance* luminance)
 			std::fclose(fp);
 		}
 	}
+	if (const char* m = std::getenv("KYTY_DIAG_S458_LUM")) {
+		const std::string_view mode(m);
+		if (mode == "err") {
+			return SYSTEM_SERVICE_ERROR_PARAMETER;
+		}
+		const float v = (mode == "zero" ? 0.0f : 100.0f);
+		luminance->max_full_frame_tone_map_luminance = v;
+		luminance->max_tone_map_luminance            = v;
+		luminance->min_tone_map_luminance            = 0.0f;
+		return OK;
+	}
 	luminance->max_full_frame_tone_map_luminance = 80.0f;
 	luminance->max_tone_map_luminance            = 1000.0f;
 	luminance->min_tone_map_luminance            = 0.0f;
