@@ -1001,32 +1001,49 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 			const bool ne_res = !same_res(state.vertex_info[0].stage, scout_prep.vertex_info[0].stage) ||
 			                    (state.ps_active && !same_res(state.ps_input_info.stage, scout_prep.pixel_info.stage));
 			if (ne_res) FrameTiming::Add(FrameTiming::Counter::ScoutNeResN);
-			// The whole stage inputs (all but the snapshot pointer) must be the CP's own too: they decide the pipeline and the push data.
-			const auto info_diff = [&](const auto& cp, const auto& scout, const char* name) {
-				auto a = cp;
-				auto b = scout;
-				a.stage.resources = nullptr;
-				b.stage.resources = nullptr;
-				if (std::memcmp(&a, &b, sizeof(a)) == 0) return false;
-				static std::atomic<uint32_t> logged {0};
-				if (logged.fetch_add(1) < 6) {
-					const auto* pa = reinterpret_cast<const unsigned char*>(&a);
-					const auto* pb = reinterpret_cast<const unsigned char*>(&b);
-					std::fprintf(stderr, "[scout] info differs: %s size %zu offsets:", name, sizeof(a));
-					int shown = 0;
-					for (size_t i = 0; i < sizeof(a) && shown < 12; ++i) {
-						if (pa[i] != pb[i]) {
-							std::fprintf(stderr, " %zu(%02x/%02x)", i, pa[i], pb[i]);
-							++shown;
-						}
-					}
-					std::fprintf(stderr, "\n");
-					std::fflush(stderr);
+			// The stage inputs (every field, no padding) must be the CP's own too: they decide the pipeline and the push data.
+			const auto same_vs = [](const ShaderVertexInputInfo& x, const ShaderVertexInputInfo& y) {
+				if (x.stage.program != y.stage.program || x.logical_stage != y.logical_stage || x.resources_num != y.resources_num ||
+				    x.fetch_attrib_reg != y.fetch_attrib_reg || x.fetch_buffer_reg != y.fetch_buffer_reg || x.buffers_num != y.buffers_num ||
+				    x.wave_size != y.wave_size || x.scratch_size_dwords != y.scratch_size_dwords || x.pa_cl_vs_out_cntl != y.pa_cl_vs_out_cntl ||
+				    x.fetch_external != y.fetch_external || x.fetch_embedded != y.fetch_embedded || x.clip_space.enabled != y.clip_space.enabled)
+					return false;
+				for (int i = 0; i < 2; i++) {
+					if (x.clip_space.scale[i] != y.clip_space.scale[i] || x.clip_space.offset[i] != y.clip_space.offset[i] ||
+					    x.clip_space.half_extent[i] != y.clip_space.half_extent[i])
+						return false;
 				}
-				return true;
+				for (int i = 0; i < x.resources_num && i < ShaderVertexInputInfo::RES_MAX; i++) {
+					const auto &rx = x.resources_dst[i], &ry = y.resources_dst[i];
+					if (std::memcmp(x.resources[i].fields, y.resources[i].fields, sizeof(x.resources[i].fields)) != 0 || rx.register_start != ry.register_start ||
+					    rx.registers_num != ry.registers_num || rx.attr_id != ry.attr_id || rx.fetch_index != ry.fetch_index || rx.buffer_index != ry.buffer_index)
+						return false;
+				}
+				for (int i = 0; i < x.buffers_num && i < ShaderVertexInputInfo::RES_MAX; i++) {
+					if (x.buffers[i].addr != y.buffers[i].addr || x.buffers[i].stride != y.buffers[i].stride ||
+					    x.buffers[i].num_records != y.buffers[i].num_records || x.buffers[i].fetch_index != y.buffers[i].fetch_index)
+						return false;
+				}
+				return x.mesh.threads_num[0] == y.mesh.threads_num[0] && x.mesh.threads_num[1] == y.mesh.threads_num[1] && x.mesh.threads_num[2] == y.mesh.threads_num[2] &&
+				       x.mesh.lds_size_dwords == y.mesh.lds_size_dwords && x.mesh.host_subgroup_size == y.mesh.host_subgroup_size && x.mesh.wave_size == y.mesh.wave_size &&
+				       x.mesh.input_primitive == y.mesh.input_primitive && x.mesh.max_vertices == y.mesh.max_vertices && x.mesh.max_primitives == y.mesh.max_primitives &&
+				       x.mesh.provoking_vertex == y.mesh.provoking_vertex && x.mesh.fast_launch == y.mesh.fast_launch && x.mesh.scratch_size_dwords == y.mesh.scratch_size_dwords;
 			};
-			const bool ne_info = info_diff(state.vertex_info[0], scout_prep.vertex_info[0], "vs") ||
-			                     (state.ps_active && info_diff(state.ps_input_info, scout_prep.pixel_info, "ps"));
+			const auto same_ps = [](const ShaderPixelInputInfo& x, const ShaderPixelInputInfo& y) {
+				return std::memcmp(x.interpolator_settings, y.interpolator_settings, sizeof(x.interpolator_settings)) == 0 && x.input_num == y.input_num &&
+				       x.wave_size == y.wave_size && x.ps_system_input_base == y.ps_system_input_base && x.custom_interpolation_mask == y.custom_interpolation_mask &&
+				       x.ps_perspective_center_vgpr == y.ps_perspective_center_vgpr && x.ps_perspective_sample_vgpr == y.ps_perspective_sample_vgpr &&
+				       x.ps_perspective_centroid_vgpr == y.ps_perspective_centroid_vgpr && std::memcmp(x.target_output_mode, y.target_output_mode, sizeof(x.target_output_mode)) == 0 &&
+				       x.target_shader_mask == y.target_shader_mask && std::memcmp(&x.target_export_mapping, &y.target_export_mapping, sizeof(x.target_export_mapping)) == 0 &&
+				       x.target_packed_unorm_mask == y.target_packed_unorm_mask && x.target_round_mode == y.target_round_mode && x.scratch_size_dwords == y.scratch_size_dwords &&
+				       x.ps_pos_x == y.ps_pos_x && x.ps_pos_y == y.ps_pos_y && x.ps_pos_z == y.ps_pos_z && x.ps_pos_w == y.ps_pos_w && x.ps_front_face == y.ps_front_face &&
+				       x.ps_front_face_all_bits == y.ps_front_face_all_bits && x.ps_ancillary == y.ps_ancillary && x.ps_no_perspective == y.ps_no_perspective &&
+				       x.parameter_mode == y.parameter_mode && x.ps_pixel_kill_enable == y.ps_pixel_kill_enable && x.ps_depth_export_enable == y.ps_depth_export_enable &&
+				       x.ps_sample_mask_export_enable == y.ps_sample_mask_export_enable && x.ps_sample_shading == y.ps_sample_shading && x.dual_source_blending == y.dual_source_blending &&
+				       x.object_primitive_id == y.object_primitive_id && x.alpha_blend_source == y.alpha_blend_source && x.ps_early_z == y.ps_early_z &&
+				       x.ps_execute_on_noop == y.ps_execute_on_noop && x.stage.program == y.stage.program && x.ps_single_sample == y.ps_single_sample;
+			};
+			const bool ne_info = !same_vs(state.vertex_info[0], scout_prep.vertex_info[0]) || (state.ps_active && !same_ps(state.ps_input_info, scout_prep.pixel_info));
 			if (ne_info) FrameTiming::Add(FrameTiming::Counter::ScoutNeInfoN);
 			if (ne_vs || ne_ps || ne_res || ne_info) FrameTiming::Add(FrameTiming::Counter::ScoutNeN);
 			if (ne_vs) FrameTiming::Add(FrameTiming::Counter::ScoutNeVsN);
