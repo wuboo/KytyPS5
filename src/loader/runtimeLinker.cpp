@@ -824,6 +824,8 @@ static void GfEmuShadowFinish(const GfEmuShadow& shadow) {
 	}
 }
 
+static bool SignalCensusResolve(uint64_t rip, char* module, size_t module_size, uint64_t* offset);
+
 // S462 DIAG (KYTY_DIAG_S462=1): wider guest context at a fatal fault - module base, code before pc, the call
 // target stub with its GOT slot, return addresses on the stack and the memory behind the registers.
 static void S462HexDump(const char* tag, uint64_t addr, uint64_t size) {
