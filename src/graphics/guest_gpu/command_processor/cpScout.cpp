@@ -336,7 +336,8 @@ void WorkerLoop() {
 				FillSlotRegs(*slot, job.ctx, job.sh, job.ucfg);
 				slot->snap.sh = sh_words;
 				NoteUserDataReads(slot->snap, ReadGuestWord);
-				if (job.cache != nullptr) {
+				static const bool no_gfp = [] { const char* v = std::getenv("KYTY_CP_SCOUT_NOGFP"); return v != nullptr && v[0] == '1'; }(); // S470 DIAG: walk and apply the registers only
+				if (job.cache != nullptr && !no_gfp) {
 					ComputePrograms(*job.cache, job.ctx, job.sh, job.ucfg, *slot);
 				}
 				slot->ready.store(true, std::memory_order_release);
@@ -471,7 +472,9 @@ TakeKind Take(CommandBuffer& buffer, Prepared& out) {
 		}
 		return TakeKind::Miss;
 	}
+	static const bool no_gfp = [] { const char* v = std::getenv("KYTY_CP_SCOUT_NOGFP"); return v != nullptr && v[0] == '1'; }(); // S470 DIAG
 	g_live.cp_draw = first + at + 1;
+	if (no_gfp) return TakeKind::Miss;
 	if (at != 0) FrameTiming::Add(C::ScoutSkipN, at);
 	out.programs    = slot->programs;
 	out.vertex_info = slot->vertex_info;
