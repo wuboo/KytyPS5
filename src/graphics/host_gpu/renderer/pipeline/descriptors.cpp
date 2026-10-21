@@ -1174,11 +1174,12 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 			{ // S458 DIAG: KYTY_DIAG_S458_SRT=<flip> dumps the first 64 dwords of every buffer of PS 2c35.. in flips n..n+5
 				static const long s458_flip = std::getenv("KYTY_DIAG_S458_SRT") ? std::atol(std::getenv("KYTY_DIAG_S458_SRT")) : -1;
 				const long gf = static_cast<long>(FrameTiming::GuestFlips() + 1);
-				if (s458_flip >= 0 && gf >= s458_flip && gf < s458_flip + 6 && program.shader_hash == 0x2c3545445213721eull && size >= 256) {
+				if (s458_flip >= 0 && gf >= s458_flip && gf < s458_flip + 150 && program.shader_hash == 0x2c3545445213721eull && size >= 4) {
+					static int s458_n = 0; if (s458_n++ >= 40) continue;
 					if (FILE* fp = std::fopen(std::getenv("KYTY_DIAG_S458_FILE") ? std::getenv("KYTY_DIAG_S458_FILE") : "s458-srt.txt", "a")) {
 						std::fprintf(fp, "[s458-srt] flip=%ld res=%u addr=0x%" PRIx64 " size=%" PRIu64 "\n", gf, resource, address, size);
 						const auto* d = reinterpret_cast<const uint32_t*>(address);
-						for (int i = 0; i < 64; i++) {
+						for (int i = 0; i < 64 && i * 4 < static_cast<int>(size); i++) {
 							float f; std::memcpy(&f, &d[i], 4);
 							std::fprintf(fp, "  d%02d=%08x %g\n", i, d[i], static_cast<double>(f));
 						}
