@@ -477,6 +477,9 @@ void WorkerLoop() {
 		Libs::LibKernel::Memory::SetScoutRawReadThread(raw != nullptr && raw[0] == '1');
 	}
 #ifdef _WIN32
+	if (const char* mask = std::getenv("KYTY_CP_SCOUT_AFFINITY"); mask != nullptr && mask[0] != '\0') { // S471 DIAG: hex mask of logical CPUs
+		SetThreadAffinityMask(GetCurrentThread(), static_cast<DWORD_PTR>(std::strtoull(mask, nullptr, 16)));
+	}
 	if (const char* prio = std::getenv("KYTY_CP_SCOUT_PRIO"); prio != nullptr && prio[0] != '\0') { // S471 DIAG: -2 idle ... 0 normal ... 2 above normal
 		SetThreadPriority(GetCurrentThread(), std::atoi(prio));
 	}
