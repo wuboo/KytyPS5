@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/shader.h"
+#include "kernel/memory.h"
 
 #include <array>
 #include <atomic>
@@ -69,10 +70,11 @@ std::thread             g_worker;
 std::atomic<bool>       g_stop {false};
 bool                    g_started = false;
 
+// A user-data word that is not a pointer must not fault the worker: the read goes through the guest backing store, which
+// fails for unmapped (and unbacked) addresses instead of faulting. Such addresses are not recorded.
 bool ReadGuestWord(uint64_t address, uint32_t& word) {
 	if (address < 0x40000ull) return false;
-	std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
-	return true;
+	return Libs::LibKernel::Memory::TryReadBacking(address, &word, sizeof(word));
 }
 
 bool PixelSideEffects(const HW::ShaderRegisters& sh_regs) {
