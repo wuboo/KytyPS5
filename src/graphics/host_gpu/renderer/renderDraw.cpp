@@ -1012,9 +1012,16 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 				if (logged.fetch_add(1) < 6) {
 					const auto* pa = reinterpret_cast<const unsigned char*>(&a);
 					const auto* pb = reinterpret_cast<const unsigned char*>(&b);
-					size_t first = 0;
-					while (first < sizeof(a) && pa[first] == pb[first]) ++first;
-					std::printf("[scout] info differs: %s first byte offset %zu of %zu (cp %02x scout %02x)\n", name, first, sizeof(a), pa[first], pb[first]);
+					std::fprintf(stderr, "[scout] info differs: %s size %zu offsets:", name, sizeof(a));
+					int shown = 0;
+					for (size_t i = 0; i < sizeof(a) && shown < 12; ++i) {
+						if (pa[i] != pb[i]) {
+							std::fprintf(stderr, " %zu(%02x/%02x)", i, pa[i], pb[i]);
+							++shown;
+						}
+					}
+					std::fprintf(stderr, "\n");
+					std::fflush(stderr);
 				}
 				return true;
 			};
