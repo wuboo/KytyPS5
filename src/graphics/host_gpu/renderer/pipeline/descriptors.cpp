@@ -27,6 +27,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/minLodView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/bindPrepMemo.h"
 #include "graphics/host_gpu/renderer/pipeline/descAssert.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
@@ -806,14 +807,22 @@ RenderExecutor::FindTextureDescription(const ShaderRecompiler::IR::ImageResource
 	return entry.description;
 }
 
+static void AddMinLodNotes(uint32_t notes) {
+	if (notes & TextureDescription::MinLodFrac) FrameTiming::Add(FrameTiming::Counter::MinLodFrac);
+	if (notes & TextureDescription::MinLodRemapped) FrameTiming::Add(FrameTiming::Counter::MinLodRemapped);
+	if (notes & TextureDescription::MinLodResinfo) FrameTiming::Add(FrameTiming::Counter::MinLodResinfo);
+	if (notes & TextureDescription::MinLodDropped) FrameTiming::Add(FrameTiming::Counter::MinLodDropped);
+}
+
 static thread_local uint64_t g_s457_shader = 0; // S457 DIAG
 static thread_local int g_s457_stage = -1;
 
 TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
                                               const ShaderRecompiler::IR::DescriptorValue& value,
                                               uint64_t ps_hash, uint32_t slot,
-                                              const NullDesc::Hint* null_hint) {
+                                              const NullDesc::Hint* null_hint, TexResolveNote* note) {
 	auto& texture_cache = m_context.GetTextureCache();
+	if (note != nullptr) *note = {};
 	// force_tex depends on the shader and slot, so it stays outside of the description memo.
 	if (TextureBinding forced; ForcedTextureBinding(texture_cache, resource, ps_hash, slot, nullptr, forced)) {
 		return forced;
@@ -874,12 +883,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		NullDesc::NoteStandin(shader, slot, addr, reason);
 		return {null_id, nullptr, std::move(null_desc)};
 	}
-	if (const auto notes = described.minlod_notes; notes != 0) {
-		if (notes & TextureDescription::MinLodFrac) FrameTiming::Add(FrameTiming::Counter::MinLodFrac);
-		if (notes & TextureDescription::MinLodRemapped) FrameTiming::Add(FrameTiming::Counter::MinLodRemapped);
-		if (notes & TextureDescription::MinLodResinfo) FrameTiming::Add(FrameTiming::Counter::MinLodResinfo);
-		if (notes & TextureDescription::MinLodDropped) FrameTiming::Add(FrameTiming::Counter::MinLodDropped);
-	}
+	if (const auto notes = described.minlod_notes; notes != 0) AddMinLodNotes(notes);
 	const auto& descriptor          = described.descriptor;
 	const auto  address             = descriptor.Base40();
 	const auto  format              = descriptor.Format();
@@ -891,6 +895,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 	const auto  type                = TextureType(descriptor);
 	const auto  tile                = descriptor.TileMode();
 	const auto  max_mip             = resource.r128 ? last_level : descriptor.MaxMip();
+	bool        desc_untouched      = false; // S469: FindImage left `desc` as the description made it
 	auto        id                  = [&] {
 		KYTY_CP_SITE(BindResolveFindImage); // S430
 		if (memo_mode == TexMemo::Mode::Off) {
@@ -904,6 +909,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 		                 : verdict == TexMemo::Verdict::Stale    ? FrameTiming::Counter::TexMemoInvalidateN
 		                                                         : FrameTiming::Counter::TexMemoMissN);
 		if (verdict == TexMemo::Verdict::Hit && memo_mode == TexMemo::Mode::On) {
+			desc_untouched = true;
 			return memo->id;
 		}
 		TextureCache::FindImageInfo info;
@@ -920,6 +926,7 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 				}
 			}
 		}
+		desc_untouched = !info.view_adjusted && desc.view_info == pristine_view;
 		if (TexMemo::CanStore(info) && full) {
 			*memo = {full, info.generation, true};
 		} else {
@@ -1020,6 +1027,16 @@ TextureBinding RenderExecutor::ResolveTexture(const ShaderRecompiler::IR::ImageR
 			DiagDump::AddTexRequest({id, info});
 		}
 	}
+	if (note != nullptr && memo_mode == TexMemo::Mode::On && desc_untouched && memo != nullptr && memo->valid &&
+	    !(diag_once || diag_all || diag_dump || diag_watch)) {
+		note->eligible     = true;
+		note->memo         = *memo;
+		note->address      = address;
+		note->format       = static_cast<uint32_t>(format);
+		note->width        = width;
+		note->height       = height;
+		note->minlod_notes = described.minlod_notes;
+	}
 	return {id, nullptr, std::move(desc)};
 }
 
@@ -1081,22 +1098,51 @@ void RenderExecutor::ResetBindings() {
 
 namespace {
 
-// S469 DIAG (KYTY_DIAG_CP_PHASES=1): hash of everything PrepareBindings reads from the snapshot for one program.
+// S469 (KYTY_BIND_PREP_MEMO): what PrepareBindings left for one program, replayed while its inputs are the same (see bindPrepMemo.h).
+struct BindPrepItem {
+	TextureBinding          binding; // as PrepareBindings left it (mip_views empty)
+	TexMemo::Entry<ImageId> memo;    // the texture cache's remembered image of this slot (the replay asks it)
+	bool                    storage = false;
+	uint64_t                ps_hash = 0;
+	uint32_t                slot = 0, format = 0, width = 0, height = 0, minlod_notes = 0;
+	uint64_t                address = 0;
+};
+
+struct BindPrepEntry {
+	std::vector<BindPrepItem> images;
+	std::vector<vk::Sampler>  samplers;
+	std::vector<uint32_t>     shader_data;
+};
+
+BindPrepMemo::Table<BindPrepEntry>& BindPrepTable() {
+	static thread_local BindPrepMemo::Table<BindPrepEntry> table;
+	return table;
+}
+
+// Everything PrepareBindings reads for one program: the shader's own resource fields the resolve depends on, the T#/S# words, the user-data words.
 template <class Program, class Snapshot>
 uint64_t BindInputsHash(const Program& program, const Snapshot& snapshot) {
-	uint64_t h = 1469598103934665603ull;
-	auto     mix = [&h](uint64_t v) { h = (h ^ v) * 1099511628211ull; };
-	for (const auto& d: snapshot.images) {
-		mix(d.dword_count);
-		for (const auto w: d.dwords) mix(w);
+	BindPrepMemo::InputsHash h;
+	h.Program(program.shader_hash, static_cast<uint32_t>(program.stage), static_cast<uint32_t>(program.info.images.size()),
+	          static_cast<uint32_t>(program.info.samplers.size()), program.bindings.ShaderDataDwords());
+	for (uint32_t i = 0; i < program.info.images.size(); i++) {
+		const auto& r = program.info.images[i];
+		const auto& d = snapshot.images[i];
+		h.ImageResource(static_cast<uint64_t>(r.resource_class) | static_cast<uint64_t>(r.numeric_class) << 8 | static_cast<uint64_t>(r.dimension) << 16 |
+		                    static_cast<uint64_t>(r.mip_mode) << 24 | static_cast<uint64_t>(r.mip_count) << 32,
+		                static_cast<uint64_t>(r.read) | static_cast<uint64_t>(r.written) << 1 | static_cast<uint64_t>(r.atomic) << 2 |
+		                    static_cast<uint64_t>(r.atomic64) << 3 | static_cast<uint64_t>(r.depth_compare) << 4 | static_cast<uint64_t>(r.cube) << 5 |
+		                    static_cast<uint64_t>(r.r128) << 6 | static_cast<uint64_t>(r.queries_size) << 7 | static_cast<uint64_t>(d.dword_count) << 16);
+		h.Image(d.dwords.data(), static_cast<uint32_t>(d.dwords.size()));
 	}
 	for (const auto& s: program.info.samplers) {
 		const auto& d = snapshot.samplers[s.snapshot_index];
-		mix(d.dword_count);
-		for (const auto w: d.dwords) mix(w);
+		h.Sampler(d.dwords.data(), static_cast<uint32_t>(d.dwords.size()),
+		          static_cast<uint32_t>(s.depth_compare) | static_cast<uint32_t>(s.force_point_filtering) << 1 | static_cast<uint32_t>(s.integer_border) << 2);
 	}
-	for (const auto reg: program.info.user_data_registers) mix(snapshot.user_data[reg - program.user_data_base]);
-	return h;
+	uint32_t index = 0;
+	for (const auto reg: program.info.user_data_registers) h.UserData(index++, snapshot.user_data[reg - program.user_data_base]);
+	return h.Digest();
 }
 
 struct BindSameState {
@@ -1112,24 +1158,32 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	EXIT_IF(!runtime);
 	const auto& program  = *runtime.program;
 	const auto& snapshot = *runtime.resources;
-	// S469 DIAG: shadow of the per-program bind memo (R5): would the images/samplers/user data be the same as at the previous call of this program?
+	auto&       texture_cache = m_context.GetTextureCache();
+	const auto  memo_mode = BindPrepMemo::EnvMode();
+	static const bool memo_logged = [] {
+		LOGF("[bind-prep-memo] mode=%s\n", BindPrepMemo::ModeName(BindPrepMemo::EnvMode()));
+		return true;
+	}();
+	(void)memo_logged;
+	// S469 DIAG (KYTY_DIAG_CP_PHASES=1): shadow counters of the memo - would the inputs be the same as at the previous call of this program?
 	const bool bind_diag = CpPhases::Enabled();
+	uint64_t   inputs = 0;
+	if (bind_diag || memo_mode != BindPrepMemo::Mode::Off) inputs = BindInputsHash(program, snapshot);
 	int64_t    bind_diag_begin = 0;
 	bool       bind_diag_same = false;
 	if (bind_diag) {
 		static thread_local std::unordered_map<const void*, BindSameState> last;
 		auto&      state = last[&program];
-		const auto hash  = BindInputsHash(program, snapshot);
-		const auto gen   = m_context.GetTextureCache().RegistrationGeneration();
+		const auto gen   = texture_cache.RegistrationGeneration();
 		FrameTiming::Add(FrameTiming::Counter::BindPrepN);
-		if (state.inputs == hash) {
+		if (state.inputs == inputs) {
 			FrameTiming::Add(FrameTiming::Counter::BindSameWordsN);
 			if (state.generation == gen) {
 				FrameTiming::Add(FrameTiming::Counter::BindSameGenN);
 				bind_diag_same = true;
 			}
 		}
-		state = {hash, gen};
+		state = {inputs, gen};
 		bind_diag_begin = FrameTiming::SteadyNowNs();
 	}
 	struct BindDiagEnd {
@@ -1140,14 +1194,49 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 			if (on && same) FrameTiming::Add(FrameTiming::Counter::BindSameGenNs, FrameTiming::ElapsedNs(begin, FrameTiming::SteadyNowNs()));
 		}
 	} bind_diag_end {bind_diag, bind_diag_same, bind_diag_begin};
+
+	const uint64_t control_gen = memo_mode != BindPrepMemo::Mode::Off ? Common::ControlFile::Current().gen : 0;
+	BindPrepEntry* entry       = memo_mode != BindPrepMemo::Mode::Off ? BindPrepTable().Find(&program, inputs, control_gen) : nullptr;
+	// Every remembered image must still be the one the texture cache would hand out (commit: also touches it and runs MaterializeColorClear).
+	const auto images_hit = [&](const BindPrepEntry& e, bool commit) {
+		for (const auto& item: e.images) {
+			if (texture_cache.ReuseImage(item.memo, item.binding.desc, item.binding.desc.view_info.base_layer, commit) != TexMemo::Verdict::Hit) return false;
+			const auto& image = texture_cache.GetImage(item.memo.id);
+			const auto  live  = static_cast<bool>(image.depth_id) ? image.depth_id : item.memo.id;
+			if (!(live == item.binding.image_id)) return false;
+		}
+		return true;
+	};
+
 	prepared.runtime = &runtime;
 	prepared.gds = {nullptr, 0, VK_WHOLE_SIZE};
 	prepared.flattened_srt = {};
 	prepared.shader_data_buffer = {};
 	prepared.shared_memory = {};
 	prepared.images.resize(program.info.images.size());
+	if (entry != nullptr && memo_mode == BindPrepMemo::Mode::On && images_hit(*entry, true)) {
+		for (uint32_t i = 0; i < entry->images.size(); i++) {
+			const auto& item = entry->images[i];
+			DiagDump::NoteSampledTex(item.ps_hash, item.slot, item.address, item.format, item.width, item.height);
+			AddMinLodNotes(item.minlod_notes);
+			FrameTiming::Add(FrameTiming::Counter::TexMemoHitN);
+			BindImage(item.binding.image_id, item.storage);
+			prepared.images[i] = item.binding;
+		}
+		prepared.samplers    = entry->samplers;
+		prepared.shader_data = entry->shader_data;
+		if (program.bindings.descriptor_counts[static_cast<size_t>(BindingKind::Gds)] != 0) {
+			prepared.gds.buffer = m_context.GetBufferCache().GetGdsBuffer()->Handle();
+		}
+		FrameTiming::Add(FrameTiming::Counter::BindPrepMemoHitN);
+		return;
+	}
+	const bool predicted = entry != nullptr && memo_mode == BindPrepMemo::Mode::Shadow && images_hit(*entry, false);
+	if (memo_mode != BindPrepMemo::Mode::Off) FrameTiming::Add(entry == nullptr ? FrameTiming::Counter::BindPrepMemoMissN : FrameTiming::Counter::BindPrepMemoStaleN);
 	prepared.samplers.clear();
 	prepared.shader_data.clear();
+	static thread_local std::vector<TexResolveNote> notes;
+	if (memo_mode != BindPrepMemo::Mode::Off) notes.assign(program.info.images.size(), TexResolveNote {});
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
 		KYTY_CP_SITE(BindResolveTexture);
 		NullDesc::Hint null_hint {};
@@ -1158,7 +1247,8 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 		null_hint.shader = program.shader_hash;
 		g_s457_shader = program.shader_hash; g_s457_stage = static_cast<int>(program.stage); // S457 DIAG
 		auto binding = ResolveTexture(program.info.images[i], snapshot.images[i],
-		                              program.stage == ShaderType::Pixel ? program.shader_hash : 0, i, &null_hint);
+		                              program.stage == ShaderType::Pixel ? program.shader_hash : 0, i, &null_hint,
+		                              memo_mode != BindPrepMemo::Mode::Off ? &notes[i] : nullptr);
 		BindImage(binding.image_id, binding.desc.type == TextureCache::BindingType::Storage);
 		binding.mip_views.swap(prepared.images[i].mip_views);
 		binding.mip_views.clear();
@@ -1180,6 +1270,53 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	if (program.bindings.descriptor_counts[static_cast<size_t>(BindingKind::Gds)] != 0) {
 		prepared.gds.buffer = m_context.GetBufferCache().GetGdsBuffer()->Handle();
 	}
+	if (memo_mode == BindPrepMemo::Mode::Off) return;
+	if (predicted) {
+		// Shadow: the replay would have returned the stored entry; it must equal what the full path just made.
+		bool same = entry->images.size() == prepared.images.size() && entry->samplers == prepared.samplers && entry->shader_data == prepared.shader_data;
+		for (uint32_t i = 0; same && i < entry->images.size(); i++) {
+			const auto& a = entry->images[i].binding;
+			const auto& b = prepared.images[i];
+			same = a.image_id == b.image_id && a.image_view == b.image_view && a.layout == b.layout && a.desc.type == b.desc.type &&
+			       a.desc.view_info == b.desc.view_info && a.desc.info.data.address == b.desc.info.data.address &&
+			       a.desc.info.data.size == b.desc.info.data.size && (entry->images[i].storage == (b.desc.type == TextureCache::BindingType::Storage));
+		}
+		FrameTiming::Add(FrameTiming::Counter::BindPrepMemoPredictedN);
+		if (!same) {
+			FrameTiming::Add(FrameTiming::Counter::BindPrepMemoNeN);
+			static std::atomic<uint32_t> logged {0};
+			if (logged.fetch_add(1) < 16) {
+				LOGF("[bind-prep-memo-ne] shader=0x%llx images=%zu samplers=%zu\n", static_cast<unsigned long long>(program.shader_hash),
+				     prepared.images.size(), prepared.samplers.size());
+			}
+		}
+	}
+	bool eligible = true;
+	for (const auto& note: notes) eligible &= note.eligible;
+	if (!eligible) {
+		BindPrepTable().Erase(&program);
+		FrameTiming::Add(FrameTiming::Counter::BindPrepMemoUncacheableN);
+		return;
+	}
+	BindPrepEntry stored;
+	stored.images.resize(prepared.images.size());
+	for (uint32_t i = 0; i < prepared.images.size(); i++) {
+		auto& item        = stored.images[i];
+		item.binding      = prepared.images[i];
+		item.memo         = notes[i].memo;
+		item.storage      = prepared.images[i].desc.type == TextureCache::BindingType::Storage;
+		item.ps_hash      = program.stage == ShaderType::Pixel ? program.shader_hash : 0;
+		item.slot         = i;
+		item.address      = notes[i].address;
+		item.format       = notes[i].format;
+		item.width        = notes[i].width;
+		item.height       = notes[i].height;
+		item.minlod_notes = notes[i].minlod_notes;
+	}
+	stored.samplers    = prepared.samplers;
+	stored.shader_data = prepared.shader_data;
+	BindPrepTable().Store(&program, inputs, control_gen, std::move(stored));
+	FrameTiming::Add(FrameTiming::Counter::BindPrepMemoStoreN);
 }
 
 void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {

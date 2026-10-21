@@ -265,7 +265,8 @@ private:
 	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource& resource,
 	                                            const ShaderRecompiler::IR::DescriptorValue& value,
 	                                            uint64_t ps_hash = 0, uint32_t slot = 0,
-	                                            const NullDesc::Hint* null_hint = nullptr);
+	                                            const NullDesc::Hint* null_hint = nullptr,
+	                                            TexResolveNote* note = nullptr);
 	void                         PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
 	                                                     std::span<RenderColorInfo>         colors);
 

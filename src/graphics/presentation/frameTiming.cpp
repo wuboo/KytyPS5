@@ -626,6 +626,13 @@ constexpr const char* kCounterNames[] = {
     "bind_same_words_n",
     "bind_same_gen_n",
     "bind_same_gen_ns",
+    "bind_prep_memo_hit_n",
+    "bind_prep_memo_miss_n",
+    "bind_prep_memo_stale_n",
+    "bind_prep_memo_predicted_n",
+    "bind_prep_memo_ne_n",
+    "bind_prep_memo_uncacheable_n",
+    "bind_prep_memo_store_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

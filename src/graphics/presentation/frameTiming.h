@@ -409,6 +409,9 @@ enum class Counter : uint32_t {
 	// S469 DIAG (KYTY_DIAG_BIND_SAME=1): PrepareBindings calls / calls whose image+sampler+user-data words equal the previous call of the same program /
 	// the same and the TextureCache registration generation unchanged / ns spent in those last calls (the part a per-program memo could skip).
 	BindPrepN, BindSameWordsN, BindSameGenN, BindSameGenNs,
+	// S469 (KYTY_BIND_PREP_MEMO): calls replayed / calls with no entry for the program or other inputs / entry found but an image was stale / shadow: replay predicted /
+	// shadow: prediction differed from the full path / full results not stored (an image not memoizable) / full results stored.
+	BindPrepMemoHitN, BindPrepMemoMissN, BindPrepMemoStaleN, BindPrepMemoPredictedN, BindPrepMemoNeN, BindPrepMemoUncacheableN, BindPrepMemoStoreN,
 	Count,
 };
 

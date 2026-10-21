@@ -26,6 +26,15 @@ struct TextureBinding {
 	std::vector<vk::ImageView> mip_views;
 };
 
+// S469: what ResolveTexture says about a result for the per-program bind memo (KYTY_BIND_PREP_MEMO). eligible: the image came out of the texture cache's own
+// memo (KYTY_TEX_RESOLVE_MEMO=1) with the description untouched, and nothing per-call (force_tex, diag dumps) was involved; `memo` is that entry.
+struct TexResolveNote {
+	bool                    eligible = false;
+	TexMemo::Entry<ImageId> memo;
+	uint64_t                address = 0;
+	uint32_t                format = 0, width = 0, height = 0, minlod_notes = 0;
+};
+
 // The part of a texture binding decided by its resource and descriptor alone.
 struct TextureDescription {
 	TextureCache::ImageDesc desc;
