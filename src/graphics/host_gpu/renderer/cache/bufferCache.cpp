@@ -706,13 +706,19 @@ void BufferCache::LogSyncReadback(SyncCensus::Site site, uint64_t vaddr, uint64_
 		std::snprintf(eager_text, sizeof(eager_text), " etick=%" PRIu64 " elag=%" PRIu64 " edone=%d ewait_us=%" PRIu64,
 		              probe.eager_tick, probe.eager_lag, probe.eager_already_done ? 1 : 0, probe.eager_wait_ns / 1000);
 	}
-	LOGF("[sync] flip=%" PRIu64 " site=%s addr=0x%016" PRIx64 " size=0x%" PRIx64 " wait_us=%" PRIu64
+	const auto sync_line = ::fmt::sprintf("[sync] flip=%" PRIu64 " site=%s addr=0x%016" PRIx64 " size=0x%" PRIx64 " wait_us=%" PRIu64
 	     " dl=%d lag=%" PRIu64 " done=%d eager=%d cmds_since_submit=%" PRIu64 " backlog=%" PRIu64 " cmds_since_writer=%" PRIu64
 	     " tid=%u gpu_thread=%d queue_us=%" PRIu64 " lambda_us=%" PRIu64 "%s%s%s\n",
 	     flip, SyncCensus::SiteName(site), vaddr, size, wait_ns / 1000, probe.downloaded ? 1 : 0,
 	     SyncCensus::Lag(probe.current, probe.writer), probe.done ? 1 : 0, eager ? 1 : 0, commands, probe.backlog,
 	     probe.cmds_since_writer, probe.thread_id, probe.gpu_thread ? 1 : 0, probe.queue_ns / 1000, probe.lambda_ns / 1000, reader,
 	     stale, eager_text);
+	if (slow_landing) {
+		std::fputs(sync_line.c_str(), stdout); // S486 DIAG: the bench runs with --printf-direction Silent, LOGF writes nothing
+		std::fflush(stdout);
+	} else {
+		LOGF("%s", sync_line);
+	}
 }
 
 namespace {
