@@ -84,11 +84,11 @@ struct Policy {
 	uint32_t                          run = 0;
 	uint64_t                          runs = 0, draws = 0;
 	std::array<uint64_t, kBuckets>    by_run {}, by_draw {}; // runs / draws that sit in a run of that length
-	std::array<uint64_t, 256 + 16>    ends {};               // what ended the run: opcode (NOP: 256 + r)
+	std::array<uint64_t, 256 + 64>    ends {};               // what ended the run: opcode (NOP: 256 + r)
 };
 
 struct State {
-	std::array<uint64_t, 256 + 16> op_n {}, op_dw {}; // opcode (NOP: 256 + r)
+	std::array<uint64_t, 256 + 64> op_n {}, op_dw {}; // opcode (NOP: 256 + r)
 	std::array<uint64_t, static_cast<size_t>(Cls::Count)> cls_n {};
 	Policy                          pol[kPolicies];
 	uint64_t                        packets = 0;
@@ -223,7 +223,7 @@ inline void EndRun(Policy& p, uint32_t end_key) {
 // One packet about to be handled.
 inline void Packet(uint32_t opcode, uint32_t r, uint32_t dw) {
 	auto&      s   = S();
-	const auto key = opcode == Pm4::IT_NOP ? 256u + (r & 15u) : (opcode & 255u);
+	const auto key = opcode == Pm4::IT_NOP ? 256u + (r & 63u) : (opcode & 255u);
 	s.packets++;
 	s.op_n[key]++;
 	s.op_dw[key] += dw;
