@@ -20,6 +20,10 @@
 #include <cstdlib>
 #include <mutex>
 #include <unordered_set>
+#if defined(_WIN32)
+extern "C" unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long, unsigned long, void**, unsigned long*);
+extern "C" void* __stdcall GetModuleHandleW(const wchar_t*);
+#endif
 
 #include <pthread.h>
 
@@ -270,6 +274,20 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 				if (RfOp::CurrentStackBounds(&stack_lo, &stack_hi)) {
 					rf_event.bt_text = RfOp::FormatBacktrace(frames, RfOp::WalkFrames(ctx, stack_lo, stack_hi, frames));
 				}
+#if defined(_WIN32)
+				if (slow_landing) { // S486 DIAG: image-relative return addresses (map file: kyty_emulator_clang_lld_link.map)
+					void* bt[24];
+					const auto n    = RtlCaptureStackBackTrace(0, 24, bt, nullptr);
+					const auto base = reinterpret_cast<uint64_t>(GetModuleHandleW(nullptr));
+					std::string text;
+					char        one[32];
+					for (unsigned short i = 0; i < n; i++) {
+						std::snprintf(one, sizeof(one), "%s%llx", i == 0 ? "" : "|", static_cast<unsigned long long>(reinterpret_cast<uint64_t>(bt[i]) - base));
+						text += one;
+					}
+					rf_event.bt_text = text;
+				}
+#endif
 				if (slow_landing) {
 					std::printf("%s\n", RfOp::FormatLine(rf_event).c_str());
 					std::fflush(stdout);
