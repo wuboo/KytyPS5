@@ -7,10 +7,13 @@
 // printed with LOGF at the flips listed in the variable (default 6300,6800,6990; "1" = the default) and the counters are reset after each report,
 // so a report is the window between two boundaries.
 //
-// Policies (a run ends at a packet that the policy treats as a drain; its length counts the draws since the previous drain):
-//   F  plan stage 1, signals in the FIFO: drains = dispatch, cpu write, predicate, other
-//   W  F + WAIT_REG_MEM                    (the virtual-write map fails)
-//   S  W + signals (RELEASE_MEM/EOP/EOS/FLIP are executed at parse time)
+// Policies (a run ends at a packet that the policy treats as a drain; its length counts the draws since the previous drain). Signals (RELEASE_MEM/EOP/EOS/
+// FLIP) and barriers (EVENT_WRITE, ACQUIRE_MEM, PFP_SYNC_ME, SURFACE_SYNC, MEM_SEMAPHORE) are ordered ops of the FIFO unless the policy says otherwise:
+//   A  plan stage 1: drains = dispatch, cpu write (WRITE_DATA/DMA/COPY_DATA), predicate, other (unknown opcodes)
+//   B  stage 2 (dispatch in the FIFO): drains = cpu write, predicate, other
+//   C  everything ordered in the FIFO, cpu writes wait for reads only: drains = predicate, other
+//   D  A + WAIT_REG_MEM                    (the virtual-write map fails every time)
+//   E  D + signals + barriers              (executed at parse time: policy "parse")
 
 #include <array>
 #include <cstdint>
@@ -24,10 +27,10 @@
 
 namespace Libs::Graphics::Pm4Hist {
 
-enum class Cls : uint32_t { Draw, Dispatch, Reg, Marker, Signal, CpuWrite, Wait, Pred, Struct, Other, Count };
+enum class Cls : uint32_t { Draw, Dispatch, Reg, Marker, Signal, Barrier, CpuWrite, Wait, Pred, Struct, Other, Count };
 
 inline const char* ClsName(Cls c) {
-	static const char* const n[] = {"draw", "dispatch", "reg", "marker", "signal", "cpuwrite", "wait", "pred", "struct", "other"};
+	static const char* const n[] = {"draw", "dispatch", "reg", "marker", "signal", "barrier", "cpuwrite", "wait", "pred", "struct", "other"};
 	return n[static_cast<uint32_t>(c)];
 }
 
@@ -44,6 +47,7 @@ inline Cls Classify(uint32_t opcode, uint32_t r) {
 		case IT_INDEX_TYPE: case IT_INDEX_BASE: case IT_INDEX_BUFFER_SIZE: case IT_SET_BASE: case IT_CLEAR_STATE: case IT_CONTEXT_CONTROL:
 			return Cls::Reg;
 		case IT_RELEASE_MEM: case IT_EVENT_WRITE_EOP: case IT_EVENT_WRITE_EOS: return Cls::Signal;
+		case IT_EVENT_WRITE: case IT_ACQUIRE_MEM: case IT_PFP_SYNC_ME: case IT_SURFACE_SYNC: case IT_MEM_SEMAPHORE: return Cls::Barrier;
 		case IT_WRITE_DATA: case IT_DMA_DATA: case IT_COPY_DATA: case IT_CP_DMA: case IT_WRITE_CONST_RAM: case IT_DUMP_CONST_RAM:
 			return Cls::CpuWrite;
 		case IT_WAIT_REG_MEM: case IT_WAIT_REG_MEM_64: return Cls::Wait;
@@ -60,6 +64,7 @@ inline Cls Classify(uint32_t opcode, uint32_t r) {
 	}
 }
 
+constexpr uint32_t kPolicies = 5;
 constexpr uint32_t kBuckets = 10; // run length: 0, 1, 2, 3-4, 5-8, 9-16, 17-32, 33-64, 65-128, >128
 inline uint32_t Bucket(uint32_t n) {
 	if (n <= 2) return n;
@@ -85,7 +90,7 @@ struct Policy {
 struct State {
 	std::array<uint64_t, 256 + 16> op_n {}, op_dw {}; // opcode (NOP: 256 + r)
 	std::array<uint64_t, static_cast<size_t>(Cls::Count)> cls_n {};
-	Policy                          pol[3];
+	Policy                          pol[kPolicies];
 	uint64_t                        packets = 0;
 	uint64_t                        wait_eval = 0, wait_sat = 0, wait_retry = 0, wait_distinct = 0, wait_first_sat = 0;
 	uint64_t                        wait_dst_same_call = 0, wait_dst_other_call = 0, wait_dst_none = 0;
@@ -164,8 +169,8 @@ void Dump(State& s, uint64_t flip, Log log) {
 		}
 		log(b);
 	}
-	static const char* const pn[] = {"F(fifo signals)", "W(F+wait)", "S(W+signals)"};
-	for (int p = 0; p < 3; p++) {
+	static const char* const pn[] = {"A(stage1)", "B(+dispatch)", "C(all ordered)", "D(A+wait)", "E(parse signals)"};
+	for (int p = 0; p < static_cast<int>(kPolicies); p++) {
 		auto& pl = s.pol[p];
 		// median by run and by draw
 		auto median = [&](const std::array<uint64_t, kBuckets>& h, uint64_t total) {
@@ -181,14 +186,14 @@ void Dump(State& s, uint64_t flip, Log log) {
 		              pl.runs ? static_cast<double>(pl.draws) / static_cast<double>(pl.runs) : 0.0, BucketName(median(pl.by_run, pl.runs)),
 		              BucketName(median(pl.by_draw, pl.draws)));
 		log(b);
-		std::string line = "[pm4-hist] policy " + std::string(1, "FWS"[p]) + " run-length buckets (runs|draws):";
+		std::string line = "[pm4-hist] policy " + std::string(1, "ABCDE"[p]) + " run-length buckets (runs|draws):";
 		for (uint32_t k = 0; k < kBuckets; k++) {
 			std::snprintf(b, sizeof(b), " %s=%llu|%llu", BucketName(k), static_cast<unsigned long long>(pl.by_run[k]),
 			              static_cast<unsigned long long>(pl.by_draw[k]));
 			line += b;
 		}
 		log((line + "\n").c_str());
-		line = "[pm4-hist] policy " + std::string(1, "FWS"[p]) + " ends by opcode (n/flip):";
+		line = "[pm4-hist] policy " + std::string(1, "ABCDE"[p]) + " ends by opcode (n/flip):";
 		for (size_t i = 0; i < pl.ends.size(); i++) {
 			if (pl.ends[i] == 0) continue;
 			if (i < 256) std::snprintf(b, sizeof(b), " 0x%02zx=%.2f", i, static_cast<double>(pl.ends[i]) / fl);
@@ -228,12 +233,17 @@ inline void Packet(uint32_t opcode, uint32_t r, uint32_t dw) {
 		for (auto& p : s.pol) p.run++;
 		return;
 	}
-	const bool d_f = cls == Cls::Dispatch || cls == Cls::CpuWrite || cls == Cls::Pred || cls == Cls::Other;
-	const bool d_w = d_f || cls == Cls::Wait;
-	const bool d_s = d_w || cls == Cls::Signal;
-	if (d_f) EndRun(s.pol[0], key);
-	if (d_w) EndRun(s.pol[1], key);
-	if (d_s) EndRun(s.pol[2], key);
+	const bool oth = cls == Cls::Other || cls == Cls::Pred;
+	const bool d_a = oth || cls == Cls::Dispatch || cls == Cls::CpuWrite;
+	const bool d_b = oth || cls == Cls::CpuWrite;
+	const bool d_c = oth;
+	const bool d_d = d_a || cls == Cls::Wait;
+	const bool d_e = d_d || cls == Cls::Signal || cls == Cls::Barrier;
+	if (d_a) EndRun(s.pol[0], key);
+	if (d_b) EndRun(s.pol[1], key);
+	if (d_c) EndRun(s.pol[2], key);
+	if (d_d) EndRun(s.pol[3], key);
+	if (d_e) EndRun(s.pol[4], key);
 }
 
 // A WAIT_REG_MEM was evaluated (addr = the host address of the watched dword/qword).
