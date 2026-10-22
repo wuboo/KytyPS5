@@ -666,6 +666,25 @@ foreach(mutant IN ITEMS skip_memo_check no_fail_pos order_swap ignore_clean shad
 	target_compile_definitions(srt_slot_batch_mutant_${mutant}_tests PRIVATE KYTY_SRTBATCH_MUTANT_${mutant_upper}=1)
 endforeach()
 
+# S486: KYTY_SRT_PROT_AVOID (srtProtAvoid.h). Mutants: ALWAYS_AVOID, NEVER_PROTECTED, NOTE_WHEN_AVOIDING, NO_SCOPE_CHECK, SHARE_PROGRAMS, NO_CAP.
+set(SRT_PROT_AVOID_TEST_SOURCES
+	"${KYTY_TESTS_DIR}/SrtProtAvoidTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
+)
+add_executable(srt_prot_avoid_tests EXCLUDE_FROM_ALL ${SRT_PROT_AVOID_TEST_SOURCES})
+target_link_libraries(srt_prot_avoid_tests fmt::fmt xbyak::xbyak common)
+target_include_directories(srt_prot_avoid_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS always_avoid never_protected note_when_avoiding no_scope_check share_programs no_cap)
+	string(TOUPPER ${mutant} mutant_upper)
+	add_executable(srt_prot_avoid_mutant_${mutant}_tests EXCLUDE_FROM_ALL ${SRT_PROT_AVOID_TEST_SOURCES})
+	target_link_libraries(srt_prot_avoid_mutant_${mutant}_tests fmt::fmt xbyak::xbyak common)
+	target_include_directories(srt_prot_avoid_mutant_${mutant}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(srt_prot_avoid_mutant_${mutant}_tests PRIVATE KYTY_SRTPA_MUTANT_${mutant_upper}=1)
+endforeach()
+
 add_executable(guest_driver_memory_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GuestDriverMemoryTests.cpp"
 )
@@ -1889,6 +1908,11 @@ if(BUILD_TESTING)
 	add_test(NAME srt_tree_reject_mutant_all_one_row COMMAND $<TARGET_FILE:srt_tree_reject_mutant_all_one_row_tests>)
 	set_tests_properties(srt_tree_reject_mutant_all_one_row PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME srt_slot_batch COMMAND $<TARGET_FILE:srt_slot_batch_tests>)
+	add_test(NAME srt_prot_avoid COMMAND $<TARGET_FILE:srt_prot_avoid_tests>)
+	foreach(mutant IN ITEMS always_avoid never_protected note_when_avoiding no_scope_check share_programs no_cap)
+		add_test(NAME srt_prot_avoid_mutant_${mutant} COMMAND $<TARGET_FILE:srt_prot_avoid_mutant_${mutant}_tests>)
+		set_tests_properties(srt_prot_avoid_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	foreach(mutant IN ITEMS skip_memo_check no_fail_pos order_swap ignore_clean shadow_real_memo all_blocks)
 		add_test(NAME srt_slot_batch_mutant_${mutant} COMMAND $<TARGET_FILE:srt_slot_batch_mutant_${mutant}_tests>)
 		set_tests_properties(srt_slot_batch_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)

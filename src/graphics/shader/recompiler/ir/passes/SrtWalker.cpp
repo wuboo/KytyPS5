@@ -2,6 +2,7 @@
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
 #include "graphics/shader/recompiler/ir/passes/srtJitCover.h"
 #include "graphics/shader/recompiler/ir/passes/srtSlotBatch.h"
+#include "graphics/shader/recompiler/ir/passes/srtProtAvoid.h"
 #include "graphics/shader/recompiler/ir/passes/srtTreeReject.h"
 #include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
 #include "graphics/presentation/cpPcSampler.h"
@@ -38,6 +39,26 @@ namespace {
 // ordinary read below it comes from a null table pointer. The walker reaches such reads when it
 // follows both sides of a branch it cannot decide, so read zero there instead of faulting the host.
 constexpr uint64_t GUEST_MEMORY_MIN = 0x40000;
+
+// S486 (KYTY_SRT_PROT_AVOID): an ordinary load of a walk that avoids the faults of its hot pages. The strict reader gives the bytes from the backing when they are
+// current (it drains for GPU-dirty / in-flight ones, as the fault of a raw load would); when it cannot answer the raw load is the old behaviour. shadow: the strict
+// read first, then the raw load (whose fault drains as before), the two must be equal, the raw bytes are the result.
+void AvoidFaultRead(const SrtRuntime& runtime, uint64_t address, std::span<uint32_t> values) {
+	const bool ok = runtime.read_specialization_memory(runtime.userdata, address, values);
+	if (SrtProtAvoid::Current() == SrtProtAvoid::Mode::Shadow) {
+		std::vector<uint32_t> raw(values.size());
+		std::memcpy(raw.data(), reinterpret_cast<const void*>(address), values.size_bytes());
+		if (ok && std::memcmp(raw.data(), values.data(), values.size_bytes()) != 0) SrtProtAvoid::Note(SrtProtAvoid::Cell::ShadowNe);
+		std::memcpy(values.data(), raw.data(), values.size_bytes());
+		return;
+	}
+	if (ok) {
+		SrtProtAvoid::Note(SrtProtAvoid::Cell::ReadBacking);
+		return;
+	}
+	SrtProtAvoid::Note(SrtProtAvoid::Cell::ReadFallback);
+	std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
+}
 
 // S451 (KYTY_PROGS_MEMO): the memo that records the reachability loop in progress on this thread, or null.
 thread_local SrtCfMemo* t_cf_rec = nullptr;
@@ -83,6 +104,9 @@ bool SrtReadCapture::ReadOrdinary(void* userdata, uint64_t address, std::span<ui
 		std::ranges::fill(values, 0u);
 		NullDesc::NoteSrtRead(address, values, false);
 		return true;
+	} else if (SrtProtAvoid::Avoiding() && capture.m_source.read_specialization_memory != nullptr) {
+		AvoidFaultRead(capture.m_source, address, values);
+		NullDesc::NoteSrtRead(address, values, false);
 	} else {
 		std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
 		NullDesc::NoteSrtRead(address, values, false);
@@ -1302,7 +1326,11 @@ bool SrtWalker::EvaluateRawRead(const Inst& inst, uint64_t& result) {
 	} else {
 		if (vector) return false;
 		if (address >= GUEST_MEMORY_MIN) {
-			std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
+			if (SrtProtAvoid::Avoiding() && m_runtime.read_specialization_memory != nullptr) {
+				AvoidFaultRead(m_runtime, address, {&word, 1}); // S486
+			} else {
+				std::memcpy(&word, reinterpret_cast<const void*>(address), sizeof(word));
+			}
 		} else {
 			NullDesc::NoteUnresolved(address);
 		}
@@ -1812,8 +1840,14 @@ static void DumpCondition(const ResourcePlan& program, Value value, std::string&
 bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	const auto NoteTreeReject = [&](SrtTreeReject::Reason reason, const std::string& detail) { NoteTreeRejectFor(m_program.shader_hash, reason, detail); };
 	if (!m_program.srt_plan_complete) return false;
+	// S486 (KYTY_SRT_PROT_AVOID): a page this program's walk faulted on is protected now: no compiled loads, the ordinary reads go through the strict reader.
+	const bool prot_avoid = SrtProtAvoid::Decide(m_program.shader_hash);
+	if (prot_avoid) SrtProtAvoid::Note(SrtProtAvoid::Cell::WalkAvoided);
+	const SrtProtAvoid::WalkScope prot_avoid_scope(m_program.shader_hash, prot_avoid);
 	// nojit keeps the interpreted memcpy walk so a bad compiled walker can be separated from the read itself.
-	if (m_program.srt_code && m_runtime.read_memory == nullptr && SrtReader::UseCompiledWalker()) {
+	if (prot_avoid) {
+		NoteTreeReject(SrtTreeReject::Reason::NojitEnv, "prot_avoid");
+	} else if (m_program.srt_code && m_runtime.read_memory == nullptr && SrtReader::UseCompiledWalker()) {
 		flat.resize(m_program.srt_reads.size());
 		m_program.scratch().active_sources.clear();
 		m_context.values.resize(m_program.evaluation_value_count);
@@ -1842,7 +1876,7 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	const bool pc_diag = CpSampler::Pc::WalkActive().load(std::memory_order_relaxed); // S439 DIAG
 	// Compiled slots read mapped memory directly, as the ordinary reader of a capture does.
 	auto*      captured = SrtReadCapture::DirectRanges(m_runtime);
-	const bool compiled = m_program.srt_read_code && m_active_mask.IsEmpty() &&
+	const bool compiled = !prot_avoid && m_program.srt_read_code && m_active_mask.IsEmpty() &&
 	                      (m_runtime.read_memory == nullptr || captured != nullptr);
 	if (compiled) m_context.values.resize(m_program.evaluation_value_count);
 	const auto cover = SrtJitCover::Current(); // S442

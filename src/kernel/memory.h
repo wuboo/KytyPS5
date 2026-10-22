@@ -157,6 +157,8 @@ void                   SetWorkerReadLog(std::vector<uint64_t>* log);
 // True when the GPU thread still has unflushed bytes for this range (S419, KYTY_CP_READ_BACKING != 0: or a GPU->host copy of it is not published yet).
 // Safe off that thread: returns false.
 bool                   QueryShaderGpuDirty(uint64_t vaddr, uint64_t size);
+// S486 (KYTY_SRT_PROT_AVOID): is the 4 KiB page protected for GPU-written bytes right now (a raw load of any byte of it faults)? false off the GPU thread.
+bool                   QueryPageGpuProtected(uint64_t page);
 // S419 (KYTY_CP_READ_BACKING=0|1|shadow): the CP thread reads `size` bytes of a guest table into `dst`. 0: the plain read through the guest address.
 // 1: a range that is neither GPU-dirty nor in flight is copied from the backing (no fault, no drain); anything else is read as in 0.
 // shadow: both reads, compared; `dst` holds the guest read. Counters cp_read_backing_*; `site` selects the per-site columns.

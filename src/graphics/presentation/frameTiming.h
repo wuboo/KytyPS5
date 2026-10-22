@@ -423,6 +423,9 @@ enum class Counter : uint32_t {
 	// executing an item; jobs done / bailed (the worker could not answer) / computed by the recorder instead; shadow compares (n, not equal); results dropped because a page
 	// the worker read became GPU-dirty; draws that used a worker result.
 	PipeEnqN, PipeDrawN, PipeDispatchN, PipeOrderedN, PipeDrainClsN, PipeDrainWaitN, PipeDrainEndN, PipeFullN, PipeWaitVirtN, PipeLenMismatchN, PipeSnapshotNs, PipeStallNs, PipeJobN, PipeJobBailN, PipeFallbackN, PipeWorkerNs, PipeShadowN, PipeShadowNeN, PipeJoinDirtyN, PipeUsedN, PipeExecNs, PipeQueueNs, PipeWalkWaitNs, PipeWalkNs, PipeJobPsNs, PipeJobVsNs, PipeMemoHitN, PipeMemoMissN, PipeMemoHitNs, PipeMemoMissNs, PipeJoinPubN,
+	// S486 (KYTY_SRT_PROT_AVOID): walks that skipped the compiled loads / ordinary loads served by the strict reader / ones it could not answer (raw load) / shadow reads that differ /
+	// (program, page) pairs learned from faults
+	SrtPaWalkN, SrtPaReadN, SrtPaFallbackN, SrtPaShadowNeN, SrtPaFaultNoteN,
 	Count,
 };
 

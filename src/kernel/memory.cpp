@@ -958,6 +958,13 @@ bool QueryShaderGpuDirty(uint64_t vaddr, uint64_t size) {
 	       buffers.HasInflightDownloadBytes(vaddr, size);
 }
 
+bool QueryPageGpuProtected(uint64_t page) {
+	if (g_gpu_resources == nullptr || !IsGpuAddressRange(page, 4096) || !Graphics::GuestGpu::IsGpuThread()) {
+		return false;
+	}
+	return GetGpuResources().GetBufferCache().IsRegionGpuModified(page, 4096);
+}
+
 bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {
 	if (g_gpu_resources != nullptr && IsGpuAddressRange(vaddr, size)) {
 		if (!Graphics::GuestGpu::IsGpuThread()) {
