@@ -652,9 +652,22 @@ void ScoutFail(uint32_t reason) {
 	if (scout.fail == 0) scout.fail = reason;
 }
 
+// S477 D5 (KYTY_SCOUT_PAGECACHE=1): the worker's backing reads go through its per-thread page cache.
+bool ScoutPageCache() {
+	static const bool on = [] {
+		const char* text = std::getenv("KYTY_SCOUT_PAGECACHE");
+		return text != nullptr && text[0] == '1' && text[1] == '\0';
+	}();
+	return on;
+}
+
+bool ScoutReadBacking(uint64_t address, void* data, uint64_t size) {
+	return ScoutPageCache() ? Libs::LibKernel::Memory::TryReadBackingWorker(address, data, size) : Libs::LibKernel::Memory::TryReadBacking(address, data, size);
+}
+
 bool ScoutReadStrict(void*, uint64_t address, std::span<uint32_t> values) {
 	if (values.empty()) return false;
-	return Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes());
+	return ScoutReadBacking(address, values.data(), values.size_bytes());
 }
 
 // The ordinary reads of the compiled walker: zeros below guest memory, the bytes otherwise (a failed read fails the walk, which fails the call).
@@ -663,7 +676,7 @@ bool ScoutReadOrdinary(void*, uint64_t address, std::span<uint32_t> values) {
 		std::ranges::fill(values, 0u);
 		return true;
 	}
-	return Libs::LibKernel::Memory::TryReadBacking(address, values.data(), values.size_bytes());
+	return ScoutReadBacking(address, values.data(), values.size_bytes());
 }
 
 // A snapshot the CP can check: its walk recorded every read, none of them failed.

@@ -369,6 +369,16 @@ void ComputePrograms(PipelineCache& cache, const HW::Context& ctx, const HW::Sha
 	ScoutTableLog::Active() = nullptr;
 	gfp_timer.reset();
 	using C = FrameTiming::Counter;
+	{ // S477 D5: the worker's page-cache counters (zero unless KYTY_SCOUT_PAGECACHE=1)
+		uint64_t pc[4];
+		Libs::LibKernel::Memory::TakeWorkerPcStats(pc);
+		if (pc[0] != 0) {
+			FrameTiming::Add(C::ScoutPcReadsN, pc[0]);
+			FrameTiming::Add(C::ScoutPcHitN, pc[1]);
+			FrameTiming::Add(C::ScoutPcResolveN, pc[2]);
+			FrameTiming::Add(C::ScoutPcFallbackN, pc[3]);
+		}
+	}
 	if (PipelineCache::ScoutScope::Failed() || !slot.programs.vertex[0] || (ps_active && !slot.programs.pixel) ||
 	    slot.vertex_info[0].stage.resources == nullptr || (ps_active && slot.pixel_info.stage.resources == nullptr)) {
 		slot.dirty = true;

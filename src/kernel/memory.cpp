@@ -22,6 +22,7 @@
 #include <array>
 #include <atomic>
 #include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdlib>
 #include <cstring>
@@ -987,6 +988,65 @@ struct QuietHooks: SpecFastHooks<Buffers> {
 };
 } // namespace
 
+// S477 D5 (KYTY_SCOUT_PAGECACHE=1): the scout worker's read of the backing through a per-thread page cache: one TryResolveBackingPage (a shared lock and a map walk)
+// per 4 KiB page and map sequence instead of one per read. Same bytes as TryReadBacking; a piece the page path cannot answer (a page not covered by one mapping)
+// falls back to TryReadBacking. Counters are the thread's own; TakeWorkerPcStats moves them out.
+namespace {
+struct WorkerPc {
+	struct Entry {
+		uint64_t       page = ~uint64_t {0};
+		const uint8_t* host = nullptr;
+		uint64_t       seq  = 0;
+	};
+	std::array<Entry, 256> entries {};
+	uint64_t               stats[4] = {};
+};
+thread_local WorkerPc t_worker_pc;
+} // namespace
+
+bool TryReadBackingWorker(uint64_t vaddr, void* data, uint64_t size) {
+	if (size == 0 || data == nullptr || g_guest_address_space == nullptr || UINT64_MAX - vaddr < size) return false;
+	auto&          pc  = t_worker_pc;
+	auto*          out = static_cast<uint8_t*>(data);
+	const uint64_t end = vaddr + size;
+	pc.stats[0]++;
+	for (uint64_t cur = vaddr; cur < end;) {
+		const uint64_t page = cur & ~uint64_t {4095};
+		const uint64_t n    = std::min(end, page + 4096) - cur;
+		auto&          e    = pc.entries[(page >> 12) & 255];
+		const uint8_t* host = nullptr;
+		const uint64_t seq  = g_guest_address_space->MapSeq();
+		if (e.page == page && e.seq == seq && (seq & 1u) == 0) {
+			host = e.host;
+			pc.stats[1]++;
+		} else {
+			uint64_t resolved_seq = 0;
+			if (g_guest_address_space->TryResolveBackingPage(page, &host, &resolved_seq)) {
+				e = {page, host, resolved_seq};
+				pc.stats[2]++;
+			} else {
+				host = nullptr;
+			}
+		}
+		if (host != nullptr) {
+			std::memcpy(out + (cur - vaddr), host + (cur - page), n);
+		} else {
+			pc.stats[3]++;
+			if (!TryReadBacking(cur, out + (cur - vaddr), n)) return false;
+		}
+		cur += n;
+	}
+	return true;
+}
+
+void TakeWorkerPcStats(uint64_t out[4]) {
+	auto& pc = t_worker_pc;
+	for (int i = 0; i < 4; i++) {
+		out[i]       = pc.stats[i];
+		pc.stats[i] = 0;
+	}
+}
+
 bool TryReadQuiet(uint64_t vaddr, void* data, uint64_t size) {
 	if (size == 0) return false;
 	if (g_gpu_resources == nullptr || g_guest_address_space == nullptr || !IsGpuAddressRange(vaddr, size)) {
@@ -1253,6 +1313,15 @@ void Initialize() {
 	g_flexible_memory_size_frozen = true;
 	VirtualMemory::Init();
 	g_guest_address_space = std::make_unique<GuestAddressSpace>(PhysicalMemory::TotalSize());
+	if (const char* diag = std::getenv("KYTY_DIAG_BACKING_LOCK"); diag != nullptr && diag[0] == '1' && diag[1] == '\0') { // S477 D4 DIAG
+		g_backing_lock_hook = [](uint32_t kind, uint64_t ns) {
+			using C = Graphics::FrameTiming::Counter;
+			const auto base = kind == 0 ? C::BackingWLockN : kind == 1 ? C::BackingRLockN : C::BackingPLockN;
+			Graphics::FrameTiming::Add(base);
+			Graphics::FrameTiming::Add(static_cast<C>(static_cast<uint32_t>(base) + 1), ns);
+			Graphics::FrameTiming::Max(static_cast<C>(static_cast<uint32_t>(base) + 2), ns);
+		};
+	}
 	g_physical_memory     = std::make_unique<PhysicalMemory>();
 	g_flexible_memory     = std::make_unique<FlexibleMemory>();
 	g_pooled_memory       = std::make_unique<PooledMemory>();

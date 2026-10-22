@@ -329,7 +329,8 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	                           vk::PipelineStageFlagBits::eHost,
 	                       {}, 0, nullptr, 1, &after, 0, nullptr);
 	// S418: from the BeginDownloadCopy above until the backing is written the range is in flight (no longer GPU-modified, not yet current in the backing).
-	auto publish = [this, mapped, offset, total_size, buffer_address,
+	const int64_t recorded_ns = FrameTiming::SteadyNowNs(); // S477 D4 DIAG: publish lag = copy recorded -> backing written
+	auto publish = [this, mapped, offset, total_size, buffer_address, recorded_ns,
 	                copies = std::move(copies), owner = std::move(temporary)] {
 		(owner ? *owner : m_download_buffer).Invalidate(offset, total_size);
 		for (const auto& copy: copies) {
@@ -337,6 +338,10 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			                                      mapped + (copy.dstOffset - offset), copy.size);
 			m_inflight_download_ranges.Remove(buffer_address + copy.srcOffset, copy.size);
 		}
+		const uint64_t lag = FrameTiming::ElapsedNs(recorded_ns, FrameTiming::SteadyNowNs());
+		FrameTiming::Add(FrameTiming::Counter::PublishN);
+		FrameTiming::Add(FrameTiming::Counter::PublishLagNs, lag);
+		FrameTiming::Max(FrameTiming::Counter::PublishLagMaxNs, lag);
 	};
 	if constexpr (async) {
 		m_scheduler.DeferPriorityOperation(std::move(publish));

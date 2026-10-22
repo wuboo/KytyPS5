@@ -421,6 +421,13 @@ enum class Counter : uint32_t {
 	ScoutBailEntryN, ScoutBailMemoN, ScoutBailShapeN, ScoutBailTableN, ScoutMissDirtyN, ScoutValReadsN, ScoutValBusyN, ScoutValChangedN, ScoutValTableN, ScoutNeResN, ScoutBailMeshN,
 	// S471 time (ns): CP waiting in Take for the worker / CP validating a slot / worker in GetGraphicsPrograms / worker per draw (slot, regs, GFP, copies).
 	ScoutTakeWaitNs, ScoutValidateNs, ScoutWorkerGfpNs, ScoutWorkerDrawNs, ScoutCpLockWaitNs, ScoutNeInfoN, ScoutNeReadsN, ScoutNeReadsUnionN,
+	// S477 D4 (KYTY_DIAG_BACKING_LOCK=1): contended acquisitions of the backing mutex (count, wait ns, longest wait; w = exclusive in TryWriteBacking, r = shared in
+	// TryReadBacking, p = shared in TryResolveBackingPage) and the publish of a readback (copy recorded -> backing written: count, total ns, longest).
+	BackingWLockN, BackingWLockWaitNs, BackingWLockMaxNs, BackingRLockN, BackingRLockWaitNs, BackingRLockMaxNs, BackingPLockN, BackingPLockWaitNs, BackingPLockMaxNs,
+	PublishN, PublishLagNs, PublishLagMaxNs,
+	// S477 D5 (KYTY_SCOUT_PAGECACHE=1): reads of the scout worker through its page cache: reads, served from a cached page, pages resolved (one shared lock each),
+	// pieces that fell back to TryReadBacking.
+	ScoutPcReadsN, ScoutPcHitN, ScoutPcResolveN, ScoutPcFallbackN,
 	Count,
 };
 

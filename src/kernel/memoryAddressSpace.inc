@@ -56,6 +56,30 @@ static void CopySparseRange(const Regions& regions, uint64_t vaddr, void* data, 
 	}
 }
 
+// S477 D4 (KYTY_DIAG_BACKING_LOCK=1): a lock acquisition of the backing mutex that had to wait reports its wait here (kind 0 = exclusive in TryWriteBacking,
+// 1 = shared in TryReadBacking, 2 = shared in TryResolveBackingPage). Null hook (default) = a plain lock.
+inline void (*g_backing_lock_hook)(uint32_t kind, uint64_t wait_ns) = nullptr;
+
+inline void BackingLockExclusive(std::unique_lock<std::shared_mutex>& lock) {
+	if (g_backing_lock_hook == nullptr || lock.try_lock()) {
+		if (!lock.owns_lock()) lock.lock();
+		return;
+	}
+	const auto t0 = std::chrono::steady_clock::now();
+	lock.lock();
+	g_backing_lock_hook(0, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()));
+}
+
+inline void BackingLockShared(std::shared_lock<std::shared_mutex>& lock, uint32_t kind) {
+	if (g_backing_lock_hook == nullptr || lock.try_lock()) {
+		if (!lock.owns_lock()) lock.lock();
+		return;
+	}
+	const auto t0 = std::chrono::steady_clock::now();
+	lock.lock();
+	g_backing_lock_hook(kind, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - t0).count()));
+}
+
 class GuestBackingStore {
 public:
 	enum class FailureReason {
@@ -199,7 +223,8 @@ public:
 			return false;
 		}
 
-		std::lock_guard lock(m_mutex);
+		std::unique_lock<std::shared_mutex> lock(m_mutex, std::defer_lock);
+		BackingLockExclusive(lock);
 		const auto      end   = vaddr + size;
 		auto            first = m_maps.upper_bound(vaddr);
 		if (first == m_maps.begin()) {
@@ -239,7 +264,8 @@ public:
 		if (!IsAvailable() || host == nullptr || seq == nullptr || UINT64_MAX - page < 4096) {
 			return false;
 		}
-		std::shared_lock lock(m_mutex);
+		std::shared_lock<std::shared_mutex> lock(m_mutex, std::defer_lock);
+		BackingLockShared(lock, 2);
 		auto             it = m_maps.upper_bound(page);
 		if (it == m_maps.begin()) {
 			return false;
@@ -260,7 +286,8 @@ public:
 			return false;
 		}
 
-		std::shared_lock lock(m_mutex);
+		std::shared_lock<std::shared_mutex> lock(m_mutex, std::defer_lock);
+		BackingLockShared(lock, 1);
 #if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
 		if (g_test_backing_read != nullptr) {
 			g_test_backing_read(vaddr, size);
