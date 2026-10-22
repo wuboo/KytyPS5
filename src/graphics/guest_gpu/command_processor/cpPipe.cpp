@@ -49,6 +49,14 @@ size_t EnvWorkers() {
 	return workers;
 }
 
+bool EnvShard() {
+	static const bool shard = [] {
+		const char* text = std::getenv("KYTY_CP_PIPE_SHARD");
+		return text != nullptr && text[0] == '1';
+	}();
+	return shard;
+}
+
 size_t EnvDepth() {
 	static const size_t depth = [] {
 		const char* text = std::getenv("KYTY_CP_PIPE_DEPTH");
@@ -77,7 +85,8 @@ inline void CpuRelax() {
 #endif
 }
 
-// The pool of threads that run GfpJobs. A job is a pointer into a FIFO item; the worker never touches the CP.
+// The pool of threads that run GfpJobs. A job is a pointer into a FIFO item; the worker never touches the CP. One queue for all workers, or (shard) one per worker with the
+// job routed by its shader: the same worker then sees the consecutive draws of a shader, which is what its private memo of the walk needs.
 class Workers {
 public:
 	static Workers& Instance() {
@@ -85,58 +94,70 @@ public:
 		return *pool;
 	}
 
-	void Start(size_t count) {
+	void Start(size_t count, bool shard) {
 		const std::lock_guard lock(m_start_mutex);
 		if (m_started) return;
 		m_started = true;
+		m_shard   = shard;
+		m_count   = count;
+		m_queues  = std::vector<Queue>(shard ? count : 1);
 		for (size_t i = 0; i < count; i++) {
 			m_threads.emplace_back([this, i] { Run(i); });
 			m_threads.back().detach();
 		}
 	}
 
-	void Submit(GfpJob* job) {
+	void Submit(GfpJob* job, uint64_t shard_key) {
+		Queue& queue = m_queues[m_shard ? static_cast<size_t>(shard_key % m_count) : 0];
 		{
-			const std::lock_guard lock(m_mutex);
-			m_queue.push_back(job);
-			m_size.fetch_add(1, std::memory_order_release);
+			const std::lock_guard lock(queue.mutex);
+			queue.jobs.push_back(job);
+			queue.size.fetch_add(1, std::memory_order_release);
 		}
-		if (m_sleepers.load(std::memory_order_acquire) != 0) m_cv.notify_one();
+		if (queue.sleepers.load(std::memory_order_acquire) != 0) queue.cv.notify_one();
 	}
 
 private:
-	GfpJob* Pop() {
-		const std::lock_guard lock(m_mutex);
-		if (m_queue.empty()) return nullptr;
-		GfpJob* job = m_queue.front();
-		m_queue.pop_front();
-		m_size.fetch_sub(1, std::memory_order_release);
+	struct Queue {
+		std::mutex              mutex;
+		std::condition_variable cv;
+		std::deque<GfpJob*>     jobs;
+		std::atomic<size_t>     size {0};
+		std::atomic<int>        sleepers {0};
+	};
+
+	static GfpJob* Pop(Queue& queue) {
+		const std::lock_guard lock(queue.mutex);
+		if (queue.jobs.empty()) return nullptr;
+		GfpJob* job = queue.jobs.front();
+		queue.jobs.pop_front();
+		queue.size.fetch_sub(1, std::memory_order_release);
 		return job;
 	}
 
 	void Run(size_t index) {
-		(void)index;
 		FrameTiming::SetThreadMute(true);
+		Queue& queue = m_queues[m_shard ? index : 0];
 		for (;;) {
 			GfpJob* job = nullptr;
 			// Spin first: the CP submits a job every few microseconds while a stream is parsed; a sleeping worker costs the CP a wake-up call each time.
 			const auto spin_end = std::chrono::steady_clock::now() + std::chrono::microseconds(100);
 			for (uint32_t i = 0; job == nullptr; i++) {
-				if (m_size.load(std::memory_order_acquire) != 0) {
-					job = Pop();
+				if (queue.size.load(std::memory_order_acquire) != 0) {
+					job = Pop(queue);
 					if (job != nullptr) break;
 				}
 				CpuRelax();
 				if ((i & 63u) == 63u && std::chrono::steady_clock::now() >= spin_end) break;
 			}
 			if (job == nullptr) {
-				std::unique_lock lock(m_mutex);
-				m_sleepers.fetch_add(1, std::memory_order_release);
-				m_cv.wait(lock, [this] { return !m_queue.empty(); });
-				m_sleepers.fetch_sub(1, std::memory_order_release);
-				job = m_queue.front();
-				m_queue.pop_front();
-				m_size.fetch_sub(1, std::memory_order_release);
+				std::unique_lock lock(queue.mutex);
+				queue.sleepers.fetch_add(1, std::memory_order_release);
+				queue.cv.wait(lock, [&queue] { return !queue.jobs.empty(); });
+				queue.sleepers.fetch_sub(1, std::memory_order_release);
+				job = queue.jobs.front();
+				queue.jobs.pop_front();
+				queue.size.fetch_sub(1, std::memory_order_release);
 			}
 			FrameTiming::AddAlways(FrameTiming::Counter::PipeQueueNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - job->submit_ns));
 			RunGfpJob(*job);
@@ -145,13 +166,11 @@ private:
 		}
 	}
 
-	std::mutex              m_start_mutex;
-	bool                    m_started = false;
-	std::mutex              m_mutex;
-	std::condition_variable m_cv;
-	std::deque<GfpJob*>     m_queue;
-	std::atomic<size_t>     m_size {0};
-	std::atomic<int>        m_sleepers {0};
+	std::mutex               m_start_mutex;
+	bool                     m_started = false;
+	bool                     m_shard   = false;
+	size_t                   m_count   = 0;
+	std::vector<Queue>       m_queues;
 	std::vector<std::thread> m_threads;
 };
 
@@ -229,8 +248,8 @@ CommandProcessor::~CommandProcessor() = default;
 void CommandProcessor::PipeInit() {
 	if (m_pipe != nullptr || IsAsyncComputeQueue() || EnvMode() == CpPipe::Mode::Off) return;
 	m_pipe = std::make_unique<PipeState>(EnvDepth());
-	if (EnvWorkers() != 0) CpPipe::Workers::Instance().Start(EnvWorkers());
-	LOGF("[cp-pipe] on: mode=%s depth=%zu workers=%zu\n", EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", m_pipe->depth, EnvWorkers());
+	if (EnvWorkers() != 0) CpPipe::Workers::Instance().Start(EnvWorkers(), EnvShard());
+	LOGF("[cp-pipe] on: mode=%s depth=%zu workers=%zu shard=%d\n", EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", m_pipe->depth, EnvWorkers(), EnvShard() ? 1 : 0);
 }
 
 void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const uint32_t* packet, uint32_t packet_dw) {
@@ -266,7 +285,7 @@ void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const u
 		it.job.ucfg      = &it.job.ucfg_copy;
 		it.job.submit_ns = FrameTiming::SteadyNowNs();
 		it.job.state.store(CpPipe::GfpJob::Queued, std::memory_order_relaxed);
-		CpPipe::Workers::Instance().Submit(&it.job);
+		CpPipe::Workers::Instance().Submit(&it.job, it.sh.GetPs().ps_regs.data_addr != 0 ? it.sh.GetPs().ps_regs.data_addr : it.sh.GetVs().es_regs.data_addr);
 	}
 	const uint64_t seq = p.ring.Commit();
 	FrameTiming::Add(C::PipeEnqN);

@@ -1471,6 +1471,9 @@ struct PipelineCache::ProgramCache {
 					FrameTiming::AddAlways(FrameTiming::Counter::PipeWalkWaitNs, static_cast<uint64_t>(walk_begin - wait_begin));
 					FrameTiming::AddAlways(FrameTiming::Counter::PipeWalkNs, static_cast<uint64_t>(walk_end - walk_begin));
 					FrameTiming::AddAlways(stage == ShaderType::Pixel ? FrameTiming::Counter::PipeJobPsNs : FrameTiming::Counter::PipeJobVsNs, static_cast<uint64_t>(walk_end - walk_begin));
+					const bool memo_hit = priv.resources.srt_outcome == ShaderRecompiler::IR::SrtMemoOutcome::Hit;
+					FrameTiming::AddAlways(memo_hit ? FrameTiming::Counter::PipeMemoHitN : FrameTiming::Counter::PipeMemoMissN);
+					FrameTiming::AddAlways(memo_hit ? FrameTiming::Counter::PipeMemoHitNs : FrameTiming::Counter::PipeMemoMissNs, static_cast<uint64_t>(walk_end - walk_begin));
 				}
 				if (permutation == nullptr) {
 					WorkerFail(1); // no permutation for this specialization yet (a failed walk already said why)
