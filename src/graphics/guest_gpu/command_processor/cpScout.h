@@ -192,6 +192,21 @@ inline WalkResult Walk(std::span<const uint32_t> commands, ReadGuest read = null
 	return result;
 }
 
+// S478: the worker applies the SET_* packets of its lookahead buffer through the CP's own handlers, with the register files redirected to its copies. A handler that
+// writes a member of the CommandProcessor itself (index type / base / buffer size, instance count, indirect bases) must not do it from the worker: the CP would draw with
+// the values of a draw that is still ahead. KYTY_SCOUT_RACE_FIX=0 brings the old behaviour back. Mutant (WILL_FAIL): KYTY_CPSCOUT_MUTANT_RACE_WRITES.
+template <typename T>
+inline bool WriteCpMember(T& member, T value, bool on_scout_worker, bool race_fix) {
+#ifndef KYTY_CPSCOUT_MUTANT_RACE_WRITES
+	if (on_scout_worker && race_fix) return false;
+#else
+	(void)on_scout_worker;
+	(void)race_fix;
+#endif
+	member = value;
+	return true;
+}
+
 inline bool Matches(const DrawSnap& snap, ReadGuest read) {
 #ifdef KYTY_CPSCOUT_MUTANT_SKIP_VALIDATE
 	(void)snap;
