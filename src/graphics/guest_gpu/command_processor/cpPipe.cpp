@@ -137,6 +137,7 @@ private:
 
 	void Run(size_t index) {
 		FrameTiming::SetThreadMute(true);
+		ShaderRecompiler::IR::SetScratchPerThread(true); // the walks of a plan that the CP (or another worker) walks too
 		Queue& queue = m_queues[m_shard ? index : 0];
 		for (;;) {
 			GfpJob* job = nullptr;

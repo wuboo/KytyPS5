@@ -565,8 +565,8 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 	const auto& sources = indirect.sources;
 	const auto* selector = indirect.selector ? &*indirect.selector : nullptr;
 	auto* selector_keys = selector != nullptr
-	    ? &program.selector_keys[program.selector_groups[source_index]] : nullptr;
-	auto& keys = selector_keys != nullptr ? selector_keys->values : program.material_keys;
+	    ? &program.scratch().selector_keys[program.selector_groups[source_index]] : nullptr;
+	auto& keys = selector_keys != nullptr ? selector_keys->values : program.scratch().material_keys;
 	const auto children_begin = descriptors.size();
 	const auto root_resource = specializations[resource_index];
 	const auto intern_candidate = [&](const DescriptorValue& candidate, uint32_t& ordinal) {
@@ -1387,11 +1387,11 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 		if (!descriptor || !descriptor->selector) continue;
 		const auto& a = *descriptor;
 		uint32_t group = 0;
-		for (; group < plan.selector_keys.size(); ++group) {
-			const auto& b = *program.descriptor_sources[plan.selector_keys[group].source].indirect_descriptor;
+		for (; group < plan.scratch().selector_keys.size(); ++group) {
+			const auto& b = *program.descriptor_sources[plan.scratch().selector_keys[group].source].indirect_descriptor;
 			if (EquivalentSelectorDomain(program, a, b)) break;
 		}
-		if (group == plan.selector_keys.size()) plan.selector_keys.push_back({.source = source});
+		if (group == plan.scratch().selector_keys.size()) plan.scratch().selector_keys.push_back({.source = source});
 		plan.selector_groups[source] = group;
 	}
 	plan.srt_reads.reserve(program.srt_reads.size());
@@ -1646,7 +1646,7 @@ namespace {
 
 bool MaterializeResourcesWalk(const ResourcePlan& program, const SrtRuntime& runtime,
                               ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
-	for (auto& keys: program.selector_keys) keys.resolved = false;
+	for (auto& keys: program.scratch().selector_keys) keys.resolved = false;
 	if (!program.resource_tracking_complete ||
 	    ((program.requires_specialization_memory || !program.source_reads.empty()) &&
 	     runtime.read_specialization_memory == nullptr)) {
@@ -1678,7 +1678,7 @@ bool MaterializeResourcesWalk(const ResourcePlan& program, const SrtRuntime& run
 		    program.srt_plan_complete, program.srt_reads.size(), runtime.user_data.size()));
 	}
 	KYTY_CP_SITE(ShMaterializeRest); // S406: everything after the walk (descriptor evaluation, specialization, snapshot)
-	const auto active = std::span<const uint8_t>(program.active_sources);
+	const auto active = std::span<const uint8_t>(program.scratch().active_sources);
 	std::array<uint32_t, 3> workgroup_counts {};
 	if (runtime.indirect_args_address != 0u) {
 		SpecShadow::PurposeScope purpose(SpecShadow::Purpose::Wg); // S406

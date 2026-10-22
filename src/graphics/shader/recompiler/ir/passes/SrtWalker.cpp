@@ -718,7 +718,7 @@ void CompileSrtBatch(ResourcePlan& program, const std::vector<const Inst*>& slot
 	code.readyRE();
 	EXIT_IF(Xbyak::GetError() != 0);
 	if (CpSampler::Pc::Enabled()) CpSampler::Pc::RegisterJit(code.getCode(), code.getSize(), CpSampler::Pc::JitKind::Slots, program.shader_hash); // S439 DIAG
-	if (program.srt_read_addresses.size() < max_addresses) program.srt_read_addresses.resize(max_addresses);
+	if (program.scratch().srt_read_addresses.size() < max_addresses) program.scratch().srt_read_addresses.resize(max_addresses);
 }
 
 // Compiles the SRT slots of plans the whole-plan walker rejects (block conditions, captured
@@ -798,7 +798,7 @@ void CompileSrtReads(ResourcePlan& program) {
 	code.readyRE();
 	EXIT_IF(Xbyak::GetError() != 0);
 	if (CpSampler::Pc::Enabled()) CpSampler::Pc::RegisterJit(code.getCode(), code.getSize(), CpSampler::Pc::JitKind::Slots, program.shader_hash); // S439 DIAG
-	program.srt_read_addresses.resize(routines.size());
+	program.scratch().srt_read_addresses.resize(routines.size());
 	if (SrtSlotBatch::Current() != SrtSlotBatch::Mode::Off) CompileSrtBatch(program, slots);
 }
 
@@ -965,7 +965,7 @@ SrtWalker::SrtWalker(SrtWalker& parent, Value active_mask, bool clean,
 
 SrtWalker::~SrtWalker() {
 	if (m_session != this) return;
-	for (auto& context: m_program.evaluation_contexts)
+	for (auto& context: m_program.scratch().evaluation_contexts)
 		if (context.session == this) context.session = nullptr;
 }
 
@@ -980,12 +980,12 @@ bool SrtWalker::Evaluate(Value value, uint32_t& result) {
 
 ResourcePlan::EvaluationContext& SrtWalker::AcquireContext() {
 	ResourcePlan::EvaluationContext* unused = nullptr;
-	for (auto& context: m_program.evaluation_contexts) {
+	for (auto& context: m_program.scratch().evaluation_contexts) {
 		if (context.session == m_session && context.active_mask == m_active_mask &&
 		    context.read_policy == m_read_policy) return context;
 		if (context.session == nullptr && unused == nullptr) unused = &context;
 	}
-	auto& context = unused != nullptr ? *unused : m_program.evaluation_contexts.emplace_back();
+	auto& context = unused != nullptr ? *unused : m_program.scratch().evaluation_contexts.emplace_back();
 	context.session = m_session;
 	context.active_mask = m_active_mask;
 	context.read_policy = m_read_policy;
@@ -994,7 +994,7 @@ ResourcePlan::EvaluationContext& SrtWalker::AcquireContext() {
 }
 
 void SrtWalker::ResetUnknowns() {
-	for (auto& context: m_program.evaluation_contexts) {
+	for (auto& context: m_program.scratch().evaluation_contexts) {
 		if (context.session != m_session) continue;
 		for (auto& entry: context.values)
 			if (entry.generation == (context.generation | 2u)) entry.generation = 0;
@@ -1757,13 +1757,13 @@ bool SrtWalker::RefreshFlatBuffer(std::vector<uint32_t>& flat) {
 	if (mode == SrtJitCover::Mode::On) {
 		SrtJitCover::Note(SrtJitCover::Cell::NoReads);
 		flat = std::move(planned);
-		m_program.active_sources.clear();
+		m_program.scratch().active_sources.clear();
 		return true;
 	}
 	// shadow: the walk is the result; the plan's answer must equal it bit for bit.
 	const bool walked = RefreshFlatBufferWalk(flat);
 	SrtJitCover::Note(SrtJitCover::Cell::NoReads);
-	if (!walked || flat != planned || !m_program.active_sources.empty()) {
+	if (!walked || flat != planned || !m_program.scratch().active_sources.empty()) {
 		SrtJitCover::Note(SrtJitCover::Cell::Ne);
 		if (SrtJitCover::ShouldLogNe()) {
 			char line[160];
@@ -1815,7 +1815,7 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	// nojit keeps the interpreted memcpy walk so a bad compiled walker can be separated from the read itself.
 	if (m_program.srt_code && m_runtime.read_memory == nullptr && SrtReader::UseCompiledWalker()) {
 		flat.resize(m_program.srt_reads.size());
-		m_program.active_sources.clear();
+		m_program.scratch().active_sources.clear();
 		m_context.values.resize(m_program.evaluation_value_count);
 		using Walker = bool KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*,
 		    ResourcePlan::EvaluationContext::Entry*, uint64_t, size_t);
@@ -1866,13 +1866,13 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 				// shadow: scratch memo and flat buffer, nothing captured; the interpreter below is the result.
 				cover_memo.assign(m_program.evaluation_value_count, {});
 				cover_flat.assign(flat.size(), 0u);
-				auto* const addresses = m_program.srt_read_addresses.data();
+				auto* const addresses = m_program.scratch().srt_read_addresses.data();
 				auto*       cursor    = addresses;
 				cover_compared = reinterpret_cast<Read>(m_program.srt_read_code->getCode<uint8_t*>() + m_program.srt_read_entries[slot])(
 				    m_runtime.user_data.data(), cover_flat.data(), cover_memo.data(), m_context.generation, m_runtime.user_data.size(), &cursor);
 				if (cover_compared) cover_word = cover_flat[m_program.srt_reads[slot].flat_offset];
 			} else {
-				auto* const       addresses = m_program.srt_read_addresses.data();
+				auto* const       addresses = m_program.scratch().srt_read_addresses.data();
 				auto*             cursor    = addresses;
 				const bool ok = reinterpret_cast<Read>(m_program.srt_read_code->getCode<uint8_t*>() +
 				                                       m_program.srt_read_entries[slot])(
@@ -1971,7 +1971,7 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	};
 	// KYTY_SRT_SLOT_BATCH=1: one entry for the run. A slot that fails goes to the interpreter (no second try of its JIT), the rest of the run through the per-slot entries.
 	const auto refresh_run = [&](const ResourceBlock& block, const ResourcePlan::SrtBatchRun& run) {
-		auto* const addresses = m_program.srt_read_addresses.data();
+		auto* const addresses = m_program.scratch().srt_read_addresses.data();
 		uint64_t*   cursor    = nullptr;
 		const auto  result    = enter_batch(run, m_context.values.data(), flat.data(), addresses, cursor);
 		if (pc_diag) { // S439 DIAG
@@ -1999,7 +1999,7 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 		auto* const memo = batch_memo.data();
 #endif
 		batch_flat.assign(flat.size(), 0u);
-		batch_addresses.assign(m_program.srt_read_addresses.size(), 0u);
+		batch_addresses.assign(m_program.scratch().srt_read_addresses.size(), 0u);
 		uint64_t*  cursor = nullptr;
 		const auto result = enter_batch(run, memo, batch_flat.data(), batch_addresses.data(), cursor);
 		const uint32_t done = result == 0u ? run.count : result - 1u;
@@ -2063,7 +2063,7 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 		}
 		return true;
 	};
-	auto& active = m_program.active_sources;
+	auto& active = m_program.scratch().active_sources;
 	if (m_program.control_flow.empty()) {
 		active.clear();
 		flat.resize(m_program.srt_reads.size());
@@ -2105,9 +2105,9 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 	uint64_t       cf_iter = 0, cf_cond = 0;
 	if (gfp_cf) cf_timer.emplace(WalkProbe::Id::WalkCfNs);
 	t_cf_timing = gfp_cf && WalkProbe::Hook().now_ns != nullptr;
-	auto& visited = m_program.visited_blocks;
-	auto& reachable = m_program.reachable_blocks;
-	auto& pending = m_program.pending_blocks;
+	auto& visited = m_program.scratch().visited_blocks;
+	auto& reachable = m_program.scratch().reachable_blocks;
+	auto& pending = m_program.scratch().pending_blocks;
 	// S451 (KYTY_PROGS_MEMO): the loop is a function of the user data words and shader base it reads and of the guest words it reads (srtCfMemo.h).
 	// The replay goes through the runtime's own readers, so a capturing runtime (SrtReadCapture) records the replayed reads as the loop's would have been.
 	// Not for plans with retained call-source reads (the plan is edited in place), under the NullDesc diag, or for a nested active mask.
@@ -2120,7 +2120,7 @@ bool SrtWalker::RefreshFlatBufferWalk(std::vector<uint32_t>& flat) {
 			cf_mode = CfMemoMode::Off;
 		}
 	}
-	auto&                cf_set  = m_program.cf_memo;
+	auto&                cf_set  = m_program.scratch().cf_memo;
 	const SrtCfMemo*     cf_way  = nullptr;
 	SrtCfMemo*           cf_rec  = nullptr;
 	std::vector<uint8_t> cf_expect;

@@ -71,10 +71,10 @@ void TestNoReads() {
 			runtime.user_data = words;
 			SrtWalker walker(plan, runtime);
 			std::vector<uint32_t> flat {1u, 2u, 3u};
-			plan.active_sources.assign(3, 1u);
+			plan.scratch().active_sources.assign(3, 1u);
 			Check(walker.RefreshFlatBuffer(flat), "no-reads refresh failed");
 			Check(flat.empty(), "no-reads refresh produced a flat buffer (it must not depend on user data)");
-			Check(plan.active_sources.empty(), "no-reads refresh left descriptor sources switched on or off");
+			Check(plan.scratch().active_sources.empty(), "no-reads refresh left descriptor sources switched on or off");
 		}
 		const auto cells = Cells();
 		if (mode == Cover::Mode::Off) {

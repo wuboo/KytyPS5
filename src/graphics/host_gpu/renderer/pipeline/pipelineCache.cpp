@@ -842,7 +842,7 @@ struct PipelineCache::ProgramCache {
 		}
 
 		// S479: a pipeline worker passes its private snapshot / specialization (`priv`) and never writes the entry's own; it also never exits: a walk that fails, or
-		// whose reads were not recorded, makes the call fail (nullptr, WorkerFail). The caller holds walk_mutex (the plan's scratch is shared with the CP).
+		// whose reads were not recorded, makes the call fail (nullptr, WorkerFail). The plan's scratch is per thread on a worker (ResourcePlan::scratch).
 		template <bool HasCalls>
 		Permutation* FindPermutation(const ShaderRecompiler::IR::SrtRuntime& runtime,
 		                             uint32_t push_data_cursor, WorkerPrivate* priv = nullptr) {
@@ -890,7 +890,7 @@ struct PipelineCache::ProgramCache {
 				fresh.ok             = true;
 				fresh.snapshot       = resources;
 				fresh.specialization = specialization;
-				fresh.active         = resource_plan.active_sources;
+				fresh.active         = resource_plan.scratch().active_sources;
 				// Would the stale / the superset specialization have picked the same permutation?
 				const auto same_permutation = [&](const SpecShadow::Outcome& other) {
 					bool same = other.ok && other.specialization == specialization;
@@ -922,7 +922,7 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
 		std::deque<Permutation>                     permutations; // S479: stable addresses: a draw's stage input points at a permutation's program
-		std::mutex                                  walk_mutex;   // S479: whoever walks the plan (the CP or a worker) holds it: the plan has scratch
+
 		MatMemo::Shadow                             m_matmemo;          // S406
 		uint64_t                                    m_matmemo_plan_mask = 0;
 		bool                                        m_matmemo_mask_valid = false;
@@ -1456,19 +1456,15 @@ struct PipelineCache::ProgramCache {
 			if (cached.call_source) {
 				{
 					KYTY_CP_SITE(ShRefreshCallSource);
-					const std::lock_guard walk(cached.walk_mutex);
 					source_changed = cached.RefreshCallSource(runtime);
 					if (!source_changed) permutation = cached.FindPermutation<true>(runtime, push_data_cursor);
 				}
 			} else if (worker) {
 				auto& priv = Worker().priv[&cached];
 				{
-					const int64_t wait_begin = FrameTiming::SteadyNowNs();
-					const std::lock_guard walk(cached.walk_mutex);
 					const int64_t walk_begin = FrameTiming::SteadyNowNs();
 					permutation = cached.FindPermutation<false>(runtime, push_data_cursor, &priv);
 					const int64_t walk_end = FrameTiming::SteadyNowNs();
-					FrameTiming::AddAlways(FrameTiming::Counter::PipeWalkWaitNs, static_cast<uint64_t>(walk_begin - wait_begin));
 					FrameTiming::AddAlways(FrameTiming::Counter::PipeWalkNs, static_cast<uint64_t>(walk_end - walk_begin));
 					FrameTiming::AddAlways(stage == ShaderType::Pixel ? FrameTiming::Counter::PipeJobPsNs : FrameTiming::Counter::PipeJobVsNs, static_cast<uint64_t>(walk_end - walk_begin));
 					const bool memo_hit = priv.resources.srt_outcome == ShaderRecompiler::IR::SrtMemoOutcome::Hit;
@@ -1483,10 +1479,7 @@ struct PipelineCache::ProgramCache {
 				permutation->program.bindings.AdvancePushData(push_data_cursor);
 				return permutation->handle;
 			} else {
-				{
-					const std::lock_guard walk(cached.walk_mutex);
-					permutation = cached.FindPermutation<false>(runtime, push_data_cursor);
-				}
+				permutation = cached.FindPermutation<false>(runtime, push_data_cursor);
 				NoteSrtMemo(cached.resources, read_context, params.hash, stage);
 				if (RdHazard::Enabled()) RdHazard::NoteStage(stage == ShaderType::Compute ? 2u : stage == ShaderType::Pixel ? 1u : 0u, cached.resources.srt_memo); // S477 D2 DIAG
 			}
@@ -1615,12 +1608,11 @@ struct PipelineCache::ProgramCache {
 		if (entry == programs.end()) {
 			auto retained = source.call ? std::make_unique<ShaderRecompiler::ShaderSource>(std::move(source)) : nullptr;
 			std::optional<FrameTiming::ScopedCounterNs> plan_timer(std::in_place, FrameTiming::Counter::ShaderResourcePlanNs);
-			std::unique_lock<std::mutex> new_entry_walk;
 			auto new_plan = use_prewarm ? std::move(prewarmed->plan) : ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+			new_plan.IndexEvaluation(); // S479: from now on a walk of this plan only reads the instructions' indices (a worker may walk it at the same time as the CP)
 			{
 				const std::unique_lock exclusive(structure_mutex);
 				entry = programs.try_emplace(lookup_key, std::move(new_plan), std::move(retained)).first;
-				new_entry_walk = std::unique_lock<std::mutex>(entry->second.walk_mutex); // a worker that finds the entry waits until it is materialized
 			}
 			plan_timer.reset();
 			if (entry->second.call_source) read_context.mode = runtime.fast_mode = ShaderRecompiler::IR::SrtFastMode::Off;
@@ -1631,7 +1623,6 @@ struct PipelineCache::ProgramCache {
 				    entry->second.resource_plan, runtime, entry->second.resources,
 				    entry->second.specialization));
 			}
-			new_entry_walk.unlock();
 			NoteSrtMemo(entry->second.resources, read_context, params.hash, stage);
 			if (RdHazard::Enabled()) RdHazard::NoteStage(stage == ShaderType::Compute ? 2u : stage == ShaderType::Pixel ? 1u : 0u, entry->second.resources.srt_memo); // S477 D2 DIAG
 			if (prewarm_record) {

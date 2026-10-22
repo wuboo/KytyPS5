@@ -250,7 +250,7 @@ Walk Run(Shape shape, Batch::Mode mode, std::span<const uint32_t> user_data, boo
 		SrtWalker walker(plan, observed, &clean);
 		walk.ok = walker.RefreshFlatBuffer(walk.flat);
 	}
-	for (const auto& context: plan.evaluation_contexts) {
+	for (const auto& context: plan.scratch().evaluation_contexts) {
 		walk.memo.insert(walk.memo.end(), context.values.begin(), context.values.end());
 		walk.memo.push_back({context.generation, context.generation});
 	}

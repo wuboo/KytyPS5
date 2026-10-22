@@ -693,7 +693,6 @@ struct ResourcePlan {
 	std::unique_ptr<Xbyak::CodeGenerator> srt_read_code;
 	std::vector<uint32_t>                 srt_read_entries;
 	std::vector<uint8_t>                  srt_read_cb; // S442: the compiled slot reads a constant buffer (KYTY_SRT_JIT_COVER)
-	mutable std::vector<uint64_t>         srt_read_addresses;
 	// S445 (KYTY_SRT_SLOT_BATCH): per control-flow block, the runs of compiled slots (consecutive entries of block.srt_reads) that one batch entry fills.
 	// `first` indexes block.srt_reads, `entry` is the code offset in srt_batch_code (UINT32_MAX: a run of one, left to the per-slot entry), `cb` counts the
 	// constant-buffer slots of the run. The runs of a block are ordered by `first`.
@@ -702,17 +701,32 @@ struct ResourcePlan {
 	};
 	std::unique_ptr<Xbyak::CodeGenerator> srt_batch_code;
 	std::vector<std::vector<SrtBatchRun>> srt_block_runs;
-	// GPU-thread scratch for nested clean/EXEC memos, activity and material keys.
-	mutable std::deque<EvaluationContext> evaluation_contexts;
-	mutable uint32_t                       evaluation_value_count = 0;
-	mutable std::vector<uint8_t>            active_sources;
-	mutable std::vector<uint8_t>            visited_blocks;
-	mutable SrtCfMemoSet                    cf_memo; // S451 (KYTY_PROGS_MEMO): the answers of the recent reachability loops of this plan
-	mutable std::vector<uint8_t>            reachable_blocks;
-	mutable std::vector<uint32_t>           pending_blocks;
-	mutable std::vector<uint32_t>           material_keys;
-	mutable std::vector<SelectorKeys>       selector_keys;
+	// Scratch of the walks: nested clean/EXEC memos, activity, material keys, the answers of the recent reachability loops (S451, KYTY_PROGS_MEMO). The CP thread uses
+	// own_scratch. S479 (KYTY_CP_PIPE): a pipeline worker walks the same plan at the same time, so every thread that is marked as one (SetScratchPerThread) gets a scratch
+	// of its own (scratch()); `selector_keys` starts with the sources of own_scratch's. evaluation_value_count is fixed once IndexEvaluation() has run (a walk only reads it).
+	struct Scratch {
+		std::vector<uint64_t>         srt_read_addresses;
+		std::deque<EvaluationContext> evaluation_contexts;
+		std::vector<uint8_t>          active_sources;
+		std::vector<uint8_t>          visited_blocks;
+		SrtCfMemoSet                  cf_memo;
+		std::vector<uint8_t>          reachable_blocks;
+		std::vector<uint32_t>         pending_blocks;
+		std::vector<uint32_t>         material_keys;
+		std::vector<SelectorKeys>     selector_keys;
+	};
+	mutable Scratch   own_scratch;
+	mutable uint32_t  evaluation_value_count = 0;
+	uint64_t          scratch_key            = NextScratchKey();
+
+	[[nodiscard]] Scratch& scratch() const;
+	// Gives every instruction of value_storage its evaluation index now, so that no walk ever assigns one (the index is a lazy write into a shared instruction).
+	void IndexEvaluation();
+	static uint64_t NextScratchKey();
 };
+
+// True on a thread whose walks must not share the plan's own scratch.
+void SetScratchPerThread(bool on);
 
 struct Program: ResourcePlan {
 	Program() = default;

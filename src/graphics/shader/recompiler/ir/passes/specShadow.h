@@ -126,7 +126,7 @@ struct Outcome {
 	bool                   ok = false; // MaterializeResources returned true
 	ResourceSnapshot       snapshot;
 	ResourceSpecialization specialization;
-	std::vector<uint8_t>   active; // plan.active_sources after the run (empty: no control flow)
+	std::vector<uint8_t>   active; // plan.scratch().active_sources after the run (empty: no control flow)
 };
 
 // Runs MaterializeResources into the scratch outcome; the plan's own scratch (active_sources, selector_keys, ...) is recomputed
@@ -135,7 +135,7 @@ inline void Materialize(const ResourcePlan& plan, const SrtRuntime& runtime, Out
 	ShadowRunningRef() = true;
 	out.ok             = MaterializeResources(plan, runtime, out.snapshot, out.specialization);
 	ShadowRunningRef() = false;
-	out.active         = plan.active_sources;
+	out.active         = plan.scratch().active_sources;
 }
 
 enum class Part : uint8_t { None, Failed, Specialization, Active, Flat, Buffers, Images, Samplers, UniformFill };
