@@ -26,6 +26,7 @@
 #include "graphics/presentation/cpSampler.h"
 #include "graphics/shader/recompiler/ir/passes/srtJitCover.h"
 #include "graphics/shader/recompiler/ir/passes/srtSlotBatch.h"
+#include "graphics/shader/recompiler/ir/passes/srtProtAvoid.h"
 #include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
 #include "kernel/specPageCache.h"
 #include "graphics/presentation/frameTiming.h"
@@ -428,6 +429,21 @@ void DrainSrtSlotBatch() {
 	FrameTiming::Add(C::SrtBatchMismatchN, cells[static_cast<size_t>(Cell::Mismatch)]);
 }
 
+// S486: KYTY_SRT_PROT_AVOID cells; the hook tells the walker which pages are protected (installed once, the walker lives below the kernel layer).
+void DrainSrtProtAvoid() {
+	namespace Pa = ShaderRecompiler::IR::SrtProtAvoid;
+	using C      = FrameTiming::Counter;
+	if (Pa::Current() == Pa::Mode::Off) return;
+	static const bool hook = (Pa::ProtectedHook().store(&Libs::LibKernel::Memory::QueryPageGpuProtected, std::memory_order_release), true);
+	(void)hook;
+	const auto cells = Pa::Drain();
+	FrameTiming::Add(C::SrtPaWalkN, cells[static_cast<size_t>(Pa::Cell::WalkAvoided)]);
+	FrameTiming::Add(C::SrtPaReadN, cells[static_cast<size_t>(Pa::Cell::ReadBacking)]);
+	FrameTiming::Add(C::SrtPaFallbackN, cells[static_cast<size_t>(Pa::Cell::ReadFallback)]);
+	FrameTiming::Add(C::SrtPaShadowNeN, cells[static_cast<size_t>(Pa::Cell::ShadowNe)]);
+	FrameTiming::Add(C::SrtPaFaultNoteN, cells[static_cast<size_t>(Pa::Cell::FaultNoted)]);
+}
+
 // S446: KYTY_GPU_LABELS counters (the label calls themselves are in gpuLabels.h, which has no FrameTiming).
 void DrainGpuLabels() {
 	if (GpuLabel::Mode() == 0) return;
@@ -596,6 +612,7 @@ void NoteSrtMemo(const ShaderRecompiler::IR::ResourceSnapshot& snapshot, const S
 	DrainSrtWalkPaths();
 	DrainSrtJitCover();
 	DrainSrtSlotBatch();
+	DrainSrtProtAvoid();
 	DrainGpuLabels();
 	if (Libs::LibKernel::Memory::SpecFastEnvMode() != Libs::LibKernel::Memory::SpecFastMode::Off) FlushSpecFastCounts(); // S437: nothing to flush when off
 	if (context.mode == ShaderRecompiler::IR::SrtFastMode::Off) {
