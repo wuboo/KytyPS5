@@ -156,6 +156,8 @@ bool                   TryReadQuiet(uint64_t vaddr, void* data, uint64_t size);
 // pieces that fell back, of the calling thread since the last call.
 bool                   TryReadBackingWorker(uint64_t vaddr, void* data, uint64_t size);
 void                   TakeWorkerPcStats(uint64_t out[4]);
+// S478 DIAG (KYTY_SCOUT_PRIVCOPY=1): a new scout job; the private page copies of the worker are taken again.
+void                   WorkerPcNewJob();
 // True when the GPU thread still has unflushed bytes for this range (S419, KYTY_CP_READ_BACKING != 0: or a GPU->host copy of it is not published yet).
 // Safe off that thread: returns false.
 bool                   QueryShaderGpuDirty(uint64_t vaddr, uint64_t size);

@@ -67,7 +67,10 @@ struct State {
 	// S478: per pass shape / per long submit shape, the clock probe, the part of a submit that is no render pass
 	std::map<std::string, Agg>    pass_agg, long_agg;
 	uint64_t                      rem_ns = 0, rem_n = 0;
-	std::vector<uint32_t>         probe_ns;
+	std::vector<uint32_t>         probe_ns, mem_ns;
+	uint32_t                      mem_mb = 0, mem_every = 16, mem_ctr = 0; // KYTY_GPU_PROBE_MEM_MB / _EVERY: a fill of mem_mb MiB timed at the start of every mem_every-th buffer
+	VkBuffer                      mem_buffer = nullptr;
+	VmaAllocation                 mem_alloc = nullptr;
 	uint64_t                      probe_sum = 0;
 	uint32_t                      probe_iters = 0, probe_every = 2, probe_ctr = 0;
 	bool                          probe_ok = false;
@@ -91,6 +94,8 @@ void InitEnv(State& s) {
 	const char* v = std::getenv("KYTY_GPU_TIMESTAMPS");
 	s.on          = v != nullptr && v[0] == '1' && v[1] == '\0';
 	if (const char* p = std::getenv("KYTY_GPU_PROBE"); p != nullptr && p[0] != '\0') s.probe_iters = static_cast<uint32_t>(std::strtoul(p, nullptr, 10));
+	if (const char* p = std::getenv("KYTY_GPU_PROBE_MEM_MB"); p != nullptr && p[0] != '\0') s.mem_mb = static_cast<uint32_t>(std::strtoul(p, nullptr, 10));
+	if (const char* p = std::getenv("KYTY_GPU_PROBE_MEM_EVERY"); p != nullptr && p[0] != '\0') s.mem_every = std::max(1u, static_cast<uint32_t>(std::strtoul(p, nullptr, 10)));
 	if (const char* p = std::getenv("KYTY_GPU_FILL"); p != nullptr && p[0] != '\0') s.fill_iters = static_cast<uint32_t>(std::strtoul(p, nullptr, 10));
 	if (const char* p = std::getenv("KYTY_GPU_FILL_PAUSE_US"); p != nullptr && p[0] != '\0') s.fill_pause_us = static_cast<uint32_t>(std::strtoul(p, nullptr, 10));
 	if (const char* p = std::getenv("KYTY_GPU_PROBE_EVERY"); p != nullptr && p[0] != '\0') s.probe_every = std::max(1u, static_cast<uint32_t>(std::strtoul(p, nullptr, 10)));
@@ -134,6 +139,12 @@ void CreateProbe(State& s, GraphicContext& graphics) {
 	VmaAllocationCreateInfo alloc {};
 	alloc.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
 	if (vmaCreateBuffer(graphics.allocator, reinterpret_cast<const VkBufferCreateInfo*>(&buffer), &alloc, &s.probe_buffer, &s.probe_alloc, nullptr) != VK_SUCCESS) return;
+	if (s.mem_mb != 0) {
+		vk::BufferCreateInfo big {};
+		big.size  = static_cast<uint64_t>(s.mem_mb) << 20;
+		big.usage = vk::BufferUsageFlagBits::eTransferDst;
+		if (vmaCreateBuffer(graphics.allocator, reinterpret_cast<const VkBufferCreateInfo*>(&big), &alloc, &s.mem_buffer, &s.mem_alloc, nullptr) != VK_SUCCESS) s.mem_mb = 0;
+	}
 	s.probe_ok = true;
 	DiagPrintf("[gpu-ts] clock probe on: %u iterations, every %u-th buffer\n", s.probe_iters, s.probe_every);
 }
@@ -158,7 +169,7 @@ void EnsurePool(State& s, GraphicContext& graphics) {
 		s.broken = true;
 		return;
 	}
-	if (s.probe_iters != 0 || s.fill_iters != 0) CreateProbe(s, graphics);
+	if (s.probe_iters != 0 || s.fill_iters != 0 || s.mem_mb != 0) CreateProbe(s, graphics);
 	s.ready = true;
 	DiagPrintf("[gpu-ts] enabled: period=%.3f ns valid_bits=%u slots=%u\n", s.period, bits, kSlots);
 }
@@ -273,11 +284,18 @@ void Detail(State& s, GraphicContext& graphics, const Pending& p, uint64_t sum_n
 		uint64_t   d[2] = {};
 		if (graphics.device.getQueryPoolResults(s.pool, base + 2, 2, sizeof(d), d, sizeof(uint64_t), vk::QueryResultFlagBits::e64) == vk::Result::eSuccess) {
 			const uint64_t a = d[0] & s.mask, b = d[1] & s.mask;
-			if (b >= a) {
+			if (b >= a && static_cast<double>(b - a) * s.period < 5e6) {
 				probe_ns = static_cast<uint64_t>(static_cast<double>(b - a) * s.period);
 				if (s.probe_ns.size() < 200000) s.probe_ns.push_back(static_cast<uint32_t>(probe_ns));
 				s.probe_sum += probe_ns;
 			}
+		}
+	}
+	if (p.stats.mem_probed) {
+		uint64_t d[2] = {};
+		if (graphics.device.getQueryPoolResults(s.pool, base + kMemQuery, 2, sizeof(d), d, sizeof(uint64_t), vk::QueryResultFlagBits::e64) == vk::Result::eSuccess) {
+			const uint64_t a = d[0] & s.mask, b = d[1] & s.mask;
+			if (b > a && static_cast<double>(b - a) * s.period < 5e7 && s.mem_ns.size() < 100000) s.mem_ns.push_back(static_cast<uint32_t>(static_cast<double>(b - a) * s.period));
 		}
 	}
 	const uint32_t np = std::min(p.stats.npass, kMaxPass);
@@ -340,12 +358,21 @@ void DumpDetail(State& s, double fl) {
 	              static_cast<double>(s.rem_ns) / fl / 1e6);
 	DiagPrintf("%s\n", line);
 	s.rem_ns = s.rem_n = 0;
+	if (!s.mem_ns.empty()) {
+		std::sort(s.mem_ns.begin(), s.mem_ns.end());
+		const auto q = [&](double f) { return static_cast<double>(s.mem_ns[static_cast<size_t>(f * static_cast<double>(s.mem_ns.size() - 1))]) / 1e3; };
+		std::snprintf(line, sizeof(line), "[gpu-ts-mem] fill %u MiB n=%zu us: min=%.1f p10=%.1f p50=%.1f p90=%.1f max=%.1f  (p50 = %.1f GB/s)", s.mem_mb, s.mem_ns.size(), q(0), q(0.1),
+		              q(0.5), q(0.9), q(1.0), static_cast<double>(s.mem_mb) * 1.048576e-3 / (q(0.5) * 1e-6) / 1e3);
+		DiagPrintf("%s\n", line);
+		s.mem_ns.clear();
+	}
 	if (!s.probe_ns.empty()) {
 		std::sort(s.probe_ns.begin(), s.probe_ns.end());
 		const auto q = [&](double f) { return static_cast<double>(s.probe_ns[static_cast<size_t>(f * static_cast<double>(s.probe_ns.size() - 1))]) / 1e3; };
 		std::snprintf(line, sizeof(line), "[gpu-ts-probe] n=%zu n/flip=%.2f ms/flip=%.3f us: min=%.1f p10=%.1f p50=%.1f p90=%.1f max=%.1f mean=%.1f", s.probe_ns.size(),
 		              static_cast<double>(s.probe_ns.size()) / fl, static_cast<double>(s.probe_sum) / fl / 1e6, q(0), q(0.1), q(0.5), q(0.9), q(1.0),
 		              static_cast<double>(s.probe_sum) / static_cast<double>(s.probe_ns.size()) / 1e3);
+		(void)0;
 		DiagPrintf("%s\n", line);
 		s.probe_ns.clear();
 		s.probe_sum = 0;
@@ -401,6 +428,22 @@ int32_t OnBegin(GraphicContext& graphics, vk::CommandBuffer buffer, BufStats& st
 		buffer.pipelineBarrier2(dependency);
 		buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, s.pool, base + 3);
 		stats.probed = true;
+	}
+	if (s.probe_ok && s.mem_mb != 0 && s.mem_buffer != nullptr && (s.mem_ctr++ % s.mem_every) == 0) { // S478: DRAM write speed (memory clock), a fill of mem_mb MiB
+		buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, s.pool, base + kMemQuery);
+		vk::MemoryBarrier2 barrier {};
+		barrier.srcStageMask = vk::PipelineStageFlagBits2::eAllCommands;
+		barrier.dstStageMask = vk::PipelineStageFlagBits2::eAllTransfer;
+		vk::DependencyInfo dependency {};
+		dependency.memoryBarrierCount = 1;
+		dependency.pMemoryBarriers    = &barrier;
+		buffer.pipelineBarrier2(dependency);
+		buffer.fillBuffer(vk::Buffer(s.mem_buffer), 0, VK_WHOLE_SIZE, 0x01010101u);
+		barrier.srcStageMask = vk::PipelineStageFlagBits2::eAllTransfer;
+		barrier.dstStageMask = vk::PipelineStageFlagBits2::eAllCommands;
+		buffer.pipelineBarrier2(dependency);
+		buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, s.pool, base + kMemQuery + 1);
+		stats.mem_probed = true;
 	}
 	return slot;
 }

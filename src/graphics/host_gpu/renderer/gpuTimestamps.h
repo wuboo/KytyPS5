@@ -27,7 +27,8 @@ constexpr uint32_t kSlots = 256;
 // (a BOTTOM_OF_PIPE timestamp before BeginRendering and after EndRendering, 2 queries per pass, at most kMaxPass passes) and of the clock probe.
 // Queries of a slot: 0/1 = start/end of the buffer, 2/3 = clock probe, 4+2i / 5+2i = pass i.
 constexpr uint32_t kMaxPass        = 24;
-constexpr uint32_t kQueriesPerSlot = 4 + 2 * kMaxPass;
+constexpr uint32_t kMemQuery       = 4 + 2 * kMaxPass; // memory probe (a fill of a big buffer), 2 queries
+constexpr uint32_t kQueriesPerSlot = 6 + 2 * kMaxPass;
 
 struct PassRec {
 	uint16_t w = 0, h = 0;
@@ -37,7 +38,7 @@ struct PassRec {
 
 struct BufStats {
 	uint32_t draws = 0, disp = 0, npass = 0;
-	bool     probed = false, pass_open = false;
+	bool     probed = false, mem_probed = false, pass_open = false;
 	PassRec  pass[kMaxPass] {};
 };
 

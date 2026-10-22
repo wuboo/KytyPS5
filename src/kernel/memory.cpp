@@ -998,11 +998,19 @@ struct WorkerPc {
 		uint64_t       page = ~uint64_t {0};
 		const uint8_t* host = nullptr;
 		uint64_t       seq  = 0;
+		uint64_t       gen  = 0;               // S478 DIAG (KYTY_SCOUT_PRIVCOPY=1): job generation of `copy`
+		std::unique_ptr<uint8_t[]> copy;       // a private copy of the page, taken once per job
 	};
 	std::array<Entry, 256> entries {};
 	uint64_t               stats[4] = {};
+	uint64_t               gen = 1;
 };
 thread_local WorkerPc t_worker_pc;
+
+bool PrivCopy() {
+	static const bool v = [] { const char* e = std::getenv("KYTY_SCOUT_PRIVCOPY"); return e != nullptr && e[0] == '1'; }();
+	return v;
+}
 } // namespace
 
 bool TryReadBackingWorker(uint64_t vaddr, void* data, uint64_t size) {
@@ -1017,7 +1025,25 @@ bool TryReadBackingWorker(uint64_t vaddr, void* data, uint64_t size) {
 		auto&          e    = pc.entries[(page >> 12) & 255];
 		const uint8_t* host = nullptr;
 		const uint64_t seq  = g_guest_address_space->MapSeq();
-		if (e.page == page && e.seq == seq && (seq & 1u) == 0) {
+		if (PrivCopy()) { // S478 DIAG: the guest page is read once per job (one 4 KiB copy), every read of the worker then comes from the copy
+			if (e.page == page && e.seq == seq && e.gen == pc.gen && (seq & 1u) == 0 && e.copy) {
+				host = e.copy.get();
+				pc.stats[1]++;
+			} else {
+				uint64_t       resolved_seq = 0;
+				const uint8_t* src          = nullptr;
+				if (g_guest_address_space->TryResolveBackingPage(page, &src, &resolved_seq)) {
+					if (!e.copy) e.copy = std::make_unique<uint8_t[]>(4096);
+					std::memcpy(e.copy.get(), src, 4096);
+					e.page = page;
+					e.host = src;
+					e.seq  = resolved_seq;
+					e.gen  = pc.gen;
+					host   = e.copy.get();
+					pc.stats[2]++;
+				}
+			}
+		} else if (e.page == page && e.seq == seq && (seq & 1u) == 0) {
 			host = e.host;
 			pc.stats[1]++;
 		} else {
@@ -1038,6 +1064,10 @@ bool TryReadBackingWorker(uint64_t vaddr, void* data, uint64_t size) {
 		cur += n;
 	}
 	return true;
+}
+
+void WorkerPcNewJob() {
+	t_worker_pc.gen++;
 }
 
 void TakeWorkerPcStats(uint64_t out[4]) {

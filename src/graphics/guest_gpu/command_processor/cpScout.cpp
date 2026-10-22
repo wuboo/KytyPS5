@@ -17,6 +17,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <deque>
 #include <condition_variable>
 #include <cstring>
 #include <memory>
@@ -266,8 +267,15 @@ void Dead(const char* where) {
 
 // A user-data word that is not a pointer must not fault the worker: the read goes through the guest backing store, which
 // fails for unmapped (and unbacked) addresses instead of faulting. Such addresses are not recorded.
+static bool PrivCopy() { // S478 DIAG (KYTY_SCOUT_PRIVCOPY=1): the worker reads guest memory only through one private copy per page and job
+	static const bool v = [] { const char* e = std::getenv("KYTY_SCOUT_PRIVCOPY"); return e != nullptr && e[0] == '1'; }();
+	return v;
+}
+static thread_local bool t_is_worker = false;
+
 bool ReadGuestWord(uint64_t address, uint32_t& word) {
 	if (address < 0x40000ull) return false;
+	if (t_is_worker && PrivCopy()) return Libs::LibKernel::Memory::TryReadBackingWorker(address, &word, sizeof(word));
 	return Libs::LibKernel::Memory::TryReadBacking(address, &word, sizeof(word));
 }
 
@@ -482,6 +490,7 @@ void ApplySet(CommandProcessor& cp, uint32_t header, const uint32_t* packet, uin
 }
 
 void WorkerLoop() {
+	t_is_worker = true;
 	{
 		const char* raw = std::getenv("KYTY_CP_SCOUT_RAW");
 		Libs::LibKernel::Memory::SetScoutRawReadThread(raw != nullptr && raw[0] == '1');
@@ -510,6 +519,13 @@ void WorkerLoop() {
 			job.marker   = g_job.marker;
 			g_job.pending.store(false);
 			g_job.cp = nullptr;
+		}
+		Libs::LibKernel::Memory::WorkerPcNewJob();
+		std::vector<uint32_t> priv_commands; // S478 DIAG: private copies of the PM4 buffer and of the indirect buffers it calls
+		std::deque<std::vector<uint32_t>> priv_ibs;
+		if (PrivCopy()) {
+			priv_commands.assign(job.commands.begin(), job.commands.end());
+			job.commands = std::span<const uint32_t>(priv_commands);
 		}
 		CommandProcessor::ScoutRegs tls;
 		tls.ctx    = &job.ctx;
@@ -571,6 +587,10 @@ void WorkerLoop() {
 				auto*          ib =
 				    reinterpret_cast<const uint32_t*>(packet[1] | (static_cast<uint64_t>(packet[2]) << 32u));
 				cursor.offset += packet_dw;
+				if (num_dw != 0 && ib != nullptr && PrivCopy()) {
+					priv_ibs.emplace_back(ib, ib + num_dw);
+					ib = priv_ibs.back().data();
+				}
 				if (num_dw != 0 && ib != nullptr) {
 					const bool chain = (control & (1u << 20u)) != 0;
 					if (chain) cursor = {{ib, num_dw}, 0};
