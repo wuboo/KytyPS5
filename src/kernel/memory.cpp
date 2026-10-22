@@ -31,6 +31,7 @@
 #include <memory>
 #include <mutex>
 #include <shared_mutex>
+#include <thread>
 #include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
@@ -1313,6 +1314,31 @@ void Initialize() {
 	g_flexible_memory_size_frozen = true;
 	VirtualMemory::Init();
 	g_guest_address_space = std::make_unique<GuestAddressSpace>(PhysicalMemory::TotalSize());
+	if (const char* burn = std::getenv("KYTY_DIAG_BURN"); burn != nullptr && burn[0] != '\0') { // S477 D6 DIAG: CPU load without any emulator work
+		// "alu:N" = N threads of pure ALU spin, "mem:N" = N threads reading random cache lines of a 256 MiB private array (cache + DRAM traffic), "duty:N" = like mem
+		// at ~50% duty cycle (1 ms on, 1 ms off). Threads never exit; the process is killed by the benchmark.
+		const bool mem   = std::strncmp(burn, "mem:", 4) == 0 || std::strncmp(burn, "duty:", 5) == 0;
+		const bool duty  = std::strncmp(burn, "duty:", 5) == 0;
+		const auto count = static_cast<int>(std::strtol(std::strchr(burn, ':') != nullptr ? std::strchr(burn, ':') + 1 : "1", nullptr, 10));
+		for (int i = 0; i < count; i++) {
+			std::thread([mem, duty, i] {
+				std::vector<uint64_t> big;
+				if (mem) big.assign((256ull << 20) / 8, 1);
+				uint64_t x = 88172645463325252ull + static_cast<uint64_t>(i), sink = 0;
+				for (;;) {
+					const auto t0 = std::chrono::steady_clock::now();
+					do {
+						for (int k = 0; k < 4096; k++) {
+							x ^= x << 13; x ^= x >> 7; x ^= x << 17;
+							if (mem) sink += big[(x >> 3) % big.size()];
+						}
+					} while (!duty || std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(1));
+					if (duty) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+					if (sink == 42) std::putchar('.');
+				}
+			}).detach();
+		}
+	}
 	if (const char* diag = std::getenv("KYTY_DIAG_BACKING_LOCK"); diag != nullptr && diag[0] == '1' && diag[1] == '\0') { // S477 D4 DIAG
 		g_backing_lock_hook = [](uint32_t kind, uint64_t ns) {
 			using C = Graphics::FrameTiming::Counter;
