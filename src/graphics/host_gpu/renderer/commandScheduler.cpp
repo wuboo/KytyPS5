@@ -5,6 +5,7 @@
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/eagerSubmit.h"
+#include "graphics/host_gpu/renderer/gpuTimestamps.h"
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -515,6 +516,8 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	job.debug_arg4      = m_command.m_debug_arg4;
 	job.first_seg       = first_after_drain;
 	job.t_first_rec     = t_first_rec; // S410
+	const int32_t ts_slot = m_command.m_ts_slot; // S477 D3 DIAG
+	m_command.m_ts_slot   = -1;
 	job.reason          = m_next_reason;
 	m_next_reason       = GpuDone::SubmitReason::Other;
 	job.queued_ns       = first_after_drain ? FrameTiming::SteadyNowNs() : 0; // S328 (the async path overwrites it with the same clock)
@@ -543,6 +546,10 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::QueueSubmits);
 	FrameTiming::OnQueueSubmit();
+	if (GpuTs::Enabled()) { // S477 D3 DIAG
+		GpuTs::OnSubmit(ts_slot, tick);
+		GpuTs::Poll(m_graphics, m_master);
+	}
 	if (SyncCensus::Enabled()) {
 		SyncCensus::CommandsAtSubmit().store(FrameTiming::Get(FrameTiming::Counter::Draws) +
 		                                         FrameTiming::Get(FrameTiming::Counter::Dispatches),

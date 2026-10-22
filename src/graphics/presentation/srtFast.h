@@ -9,7 +9,14 @@
 namespace Libs::Graphics::SrtFast {
 
 inline ShaderRecompiler::IR::SrtFastMode Mode() {
-	static const auto mode = ShaderRecompiler::IR::ParseSrtFastMode(std::getenv("KYTY_SRT_FAST"));
+	static const auto mode = [] {
+		// S477 D2 (KYTY_DIAG_RDHAZARD): the oracle copies the memo of every walk, so the walk must record it (shadow = walk anyway, same result)
+		const char* hazard = std::getenv("KYTY_DIAG_RDHAZARD");
+		if (std::getenv("KYTY_SRT_FAST") == nullptr && hazard != nullptr && hazard[0] != '\0' && !(hazard[0] == '0' && hazard[1] == '\0')) {
+			return ShaderRecompiler::IR::SrtFastMode::Shadow;
+		}
+		return ShaderRecompiler::IR::ParseSrtFastMode(std::getenv("KYTY_SRT_FAST"));
+	}();
 	return mode;
 }
 

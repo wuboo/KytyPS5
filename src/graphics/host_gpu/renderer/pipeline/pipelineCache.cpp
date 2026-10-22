@@ -28,6 +28,7 @@
 #include "kernel/specPageCache.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/presentation/srtFast.h"
+#include "graphics/host_gpu/renderer/pipeline/rdHazard.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/ir/passes/specCond.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
@@ -1376,6 +1377,7 @@ struct PipelineCache::ProgramCache {
 			} else {
 				permutation = cached.FindPermutation<false>(runtime, push_data_cursor);
 				NoteSrtMemo(cached.resources, read_context, params.hash, stage);
+				if (RdHazard::Enabled()) RdHazard::NoteStage(stage == ShaderType::Compute ? 2u : stage == ShaderType::Pixel ? 1u : 0u, cached.resources.srt_memo); // S477 D2 DIAG
 			}
 			gfp_find_timer.reset();
 			if (permutation != nullptr) {
@@ -1510,6 +1512,7 @@ struct PipelineCache::ProgramCache {
 				    entry->second.specialization));
 			}
 			NoteSrtMemo(entry->second.resources, read_context, params.hash, stage);
+			if (RdHazard::Enabled()) RdHazard::NoteStage(stage == ShaderType::Compute ? 2u : stage == ShaderType::Pixel ? 1u : 0u, entry->second.resources.srt_memo); // S477 D2 DIAG
 			if (prewarm_record) {
 				if (entry->second.call_source) {
 					FrameTiming::Add(FrameTiming::Counter::PrewarmSkipN); // its translation depends on guest memory

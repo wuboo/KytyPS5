@@ -416,6 +416,8 @@ enum class Counter : uint32_t {
 	// worker spent reading (worker time, not CP time).
 	ProgDiskAdoptNs, ProgDiskReadNs, ProgDiskPvImportNs,
 	ProgDiskPrefetchHitN, ProgDiskPrefetchMissN, ProgDiskPrefetchFilesN, ProgDiskPrefetchBytes, ProgDiskPrefetchReadNs,
+	// S477 D3 (KYTY_GPU_TIMESTAMPS=1): real GPU time of the submits from timestamp queries (gpuTimestamps.h)
+	GpuTsBusyNs, GpuTsIdleNs, GpuTsN, GpuTsSumNs, GpuTsOverlapN, GpuTsSkipN,
 	Count,
 };
 

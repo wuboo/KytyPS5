@@ -1081,6 +1081,10 @@ private:
 	ComputeShaderInfo m_cs;
 };
 
+// S477: R13 (CP pipeline) copies these three per draw as the register snapshot of a task (S475 §3); 4044 bytes on clang/arm64 (Context 2672, Shader 1224,
+// UserConfig 148). The plan budgets 8 KB so a copy stays below 1 us; growing past it needs a new look at the per-draw cost.
+static_assert(sizeof(Context) + sizeof(Shader) + sizeof(UserConfig) <= 8192, "R13 per-draw register snapshot grew past 8 KB");
+
 } // namespace Libs::Graphics::HW
 
 #endif /* EMULATOR_INCLUDE_EMULATOR_GRAPHICS_HARDWARECONTEXT_H_ */

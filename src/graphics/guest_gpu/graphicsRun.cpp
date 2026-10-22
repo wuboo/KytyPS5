@@ -15,6 +15,8 @@
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
+#include "graphics/guest_gpu/pm4Hist.h"
+#include "graphics/host_gpu/renderer/pipeline/rdHazard.h"
 #include "graphics/host_gpu/renderer/gpuKeepWarm.h"
 #include "graphics/host_gpu/gpuLabels.h"
 #include "graphics/host_gpu/renderer/indirectGpu.h"
@@ -349,7 +351,9 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 	}
 
 	(void)poll;
-	if (!TestWaitRegMemValue(*addr, ref, mask, func)) {
+	const bool wait_satisfied = TestWaitRegMemValue(*addr, ref, mask, func);
+	if (Pm4Hist::Enabled()) Pm4Hist::Wait(reinterpret_cast<uintptr_t>(addr), wait_satisfied); // S477 D1 DIAG
+	if (!wait_satisfied) {
 		SuspendPm4();
 	}
 }
@@ -754,6 +758,11 @@ void CommandProcessor::SuspendPm4() {
 
 void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	CpPhases::Scope parse_phase(CpPhases::Phase::Parse); // S323: handler bodies are Phase::Handler, children subtract
+	if (Pm4Hist::Enabled()) { // S477 D1 DIAG
+		Pm4Hist::BeginCall();
+		Pm4Hist::MaybeDump(FrameTiming::GuestFlips(), [](const char* l) { LOGF("%s", l); });
+	}
+	if (RdHazard::Enabled()) RdHazard::MaybeDump(FrameTiming::GuestFlips()); // S477 D2 DIAG
 	while (!execution.m_buffer_stack.empty()) {
 		if (g_gpu_state != nullptr) {
 			CpPhases::Scope phase(CpPhases::Phase::Cmds);
@@ -853,6 +862,8 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		}
 
 		if (CpPhases::Enabled()) FrameTiming::Add(FrameTiming::Counter::Pm4Packets);
+		if (RdHazard::Enabled() && Pm4Hist::Classify(opcode, opcode == Pm4::IT_NOP ? KYTY_PM4_R(packet_header) : 0u) == Pm4Hist::Cls::Draw) RdHazard::OnDraw(); // S477 D2 DIAG
+		if (Pm4Hist::Enabled()) Pm4Hist::Packet(opcode, opcode == Pm4::IT_NOP ? KYTY_PM4_R(packet_header) : 0u, KYTY_PM4_LEN(packet_header) + 1u); // S477 D1 DIAG
 		uint32_t packet_dw;
 		{
 			CpPhases::Scope handler_phase(CpPhases::Phase::Handler);
@@ -885,6 +896,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			// flush again before giving up the command buffer across a suspend/resume boundary
 			// that may span an arbitrary amount of real time.
 			m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
+			if (RdHazard::Enabled()) RdHazard::AtCallEnd(); // S477 D2 DIAG
 			return;
 		}
 		cursor.offset_dw += packet_dw;
@@ -903,6 +915,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	// pending batch until the next Process() call, but that may run on a different command buffer
 	// entirely, so it must not still be pending here.
 	m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
+	if (RdHazard::Enabled()) RdHazard::AtCallEnd(); // S477 D2 DIAG
 }
 
 void CommandProcessor::SetIndexType(uint32_t index_type_and_size) {
@@ -1449,6 +1462,8 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 
 	EXIT_NOT_IMPLEMENTED(cache_policy != 0x00000000);
 	EXIT_NOT_IMPLEMENTED(event_write_dest != 0x00000000);
+	if (Pm4Hist::Enabled() && dst_gpu_addr != nullptr) Pm4Hist::ReleaseDst(reinterpret_cast<uintptr_t>(dst_gpu_addr)); // S477 D1 DIAG
+	if (RdHazard::Enabled()) RdHazard::AtSignal(); // S477 D2 DIAG
 
 	bool with_interrupt = false;
 	switch (interrupt_selector) {

@@ -644,6 +644,12 @@ constexpr const char* kCounterNames[] = {
     "prog_disk_prefetch_files_n",
     "prog_disk_prefetch_bytes",
     "prog_disk_prefetch_read_ns",
+    "gpu_ts_busy_ns",
+    "gpu_ts_idle_ns",
+    "gpu_ts_n",
+    "gpu_ts_sum_ns",
+    "gpu_ts_overlap_n",
+    "gpu_ts_skip_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
