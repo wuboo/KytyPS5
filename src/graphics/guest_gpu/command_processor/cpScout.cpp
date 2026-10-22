@@ -273,6 +273,13 @@ static bool PrivCopy() { // S478 DIAG (KYTY_SCOUT_PRIVCOPY=1): the worker reads 
 }
 static thread_local bool t_is_worker = false;
 
+// S478 DIAG (KYTY_SCOUT_LEVEL): how much the worker does with a job (with KYTY_SCOUT_NOWAIT=1): 0 nothing, 1 copies the PM4 buffer, 2 walks it (registers only), 3 + reads the
+// guest words the user data points at, 4 (default) + GetGraphicsPrograms.
+static int Level() {
+	static const int v = [] { const char* e = std::getenv("KYTY_SCOUT_LEVEL"); return e != nullptr && e[0] != '\0' ? std::atoi(e) : 4; }();
+	return v;
+}
+
 bool ReadGuestWord(uint64_t address, uint32_t& word) {
 	if (address < 0x40000ull) return false;
 	if (t_is_worker && PrivCopy()) return Libs::LibKernel::Memory::TryReadBackingWorker(address, &word, sizeof(word));
@@ -523,7 +530,7 @@ void WorkerLoop() {
 		Libs::LibKernel::Memory::WorkerPcNewJob();
 		std::vector<uint32_t> priv_commands; // S478 DIAG: private copies of the PM4 buffer and of the indirect buffers it calls
 		std::deque<std::vector<uint32_t>> priv_ibs;
-		if (PrivCopy()) {
+		if (PrivCopy() || Level() == 1) {
 			priv_commands.assign(job.commands.begin(), job.commands.end());
 			job.commands = std::span<const uint32_t>(priv_commands);
 		}
@@ -544,6 +551,7 @@ void WorkerLoop() {
 		std::vector<Cursor> stack;
 		stack.push_back({job.commands, 0});
 		bool stopped = false;
+		if (Level() <= 1) stack.clear();
 
 		auto apply_sh_words = [&](uint32_t offset, uint32_t value) {
 			if (offset < kShNum) sh_words[offset] = value;
@@ -644,9 +652,9 @@ void WorkerLoop() {
 				auto slot = std::make_unique<Slot>();
 				FillSlotRegs(*slot, job.ctx, job.sh, job.ucfg);
 				slot->snap.sh = sh_words;
-				NoteUserDataReads(slot->snap, ReadGuestWord);
+				if (Level() >= 3) NoteUserDataReads(slot->snap, ReadGuestWord);
 				static const bool no_gfp = [] { const char* v = std::getenv("KYTY_CP_SCOUT_NOGFP"); return v != nullptr && v[0] == '1'; }(); // S470 DIAG: walk and apply the registers only
-				if (job.cache != nullptr && !no_gfp) {
+				if (job.cache != nullptr && !no_gfp && Level() >= 4) {
 					g_dbg_phase.store(2, std::memory_order_relaxed);
 					g_dbg_draws.store(static_cast<uint32_t>(g_live.slots.size()), std::memory_order_relaxed);
 					ComputePrograms(*job.cache, job.ctx, job.sh, job.ucfg, *slot);
