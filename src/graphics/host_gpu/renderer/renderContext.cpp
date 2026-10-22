@@ -20,10 +20,6 @@
 #include <cstdlib>
 #include <mutex>
 #include <unordered_set>
-#if defined(_WIN32)
-extern "C" unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long, unsigned long, void**, unsigned long*);
-extern "C" void* __stdcall GetModuleHandleW(const wchar_t*);
-#endif
 
 #include <pthread.h>
 
