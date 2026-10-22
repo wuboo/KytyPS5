@@ -970,6 +970,7 @@ void CpPipe::RunGfpJob(CpPipe::GfpJob& job) {
 	std::array<Prospero::ColorComponentMapping, RENDER_COLOR_ATTACHMENTS_MAX> target_export_mapping {};
 	FillExportMapping(ctx, color_output_mask, target_export_mapping);
 	const bool single_sample = render_sample_count(ctx.GetAaConfig().msaa_num_samples) == 1u;
+	job.write_seq   = Libs::LibKernel::Memory::BackingWriteSeq(); // before the first read
 	job.vertex_info = {};
 	job.pixel_info  = {};
 	job.tables.reads.clear();

@@ -44,6 +44,7 @@ struct GfpJob {
 	std::vector<uint64_t>                  pages; // 4 KiB pages of guest memory the worker read, sorted and unique
 	int64_t                                worker_ns = 0;
 	int64_t                                submit_ns = 0;
+	uint64_t                               write_seq = 0; // the log of backing writes when the worker started
 	uint64_t                               shard_key = 0;
 };
 

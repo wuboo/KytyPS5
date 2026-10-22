@@ -150,6 +150,9 @@ bool                   SpecPageQuietCached(uint64_t vaddr, uint64_t size);
 // S479 (KYTY_CP_PIPE): TryReadBacking for the pipeline workers, through a per-thread page cache (same bytes). SetWorkerReadLog: the pages the calling thread reads
 // are appended to *log (nullptr: not logged).
 bool                   TryReadBackingWorker(uint64_t vaddr, void* data, uint64_t size);
+// S479: the sequence number of the log of backing writes, and: did a write that ended after `seq0` (or has not ended) touch one of the 4 KiB pages? (true also when the log cannot tell)
+uint64_t               BackingWriteSeq();
+bool                   BackingWrittenSince(uint64_t seq0, const uint64_t* pages, size_t count);
 void                   SetWorkerReadLog(std::vector<uint64_t>* log);
 // True when the GPU thread still has unflushed bytes for this range (S419, KYTY_CP_READ_BACKING != 0: or a GPU->host copy of it is not published yet).
 // Safe off that thread: returns false.

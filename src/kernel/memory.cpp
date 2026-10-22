@@ -1,3 +1,4 @@
+#include "kernel/backingWriteLog.h"
 #include "kernel/memory.h"
 
 #include "common/assert.h"
@@ -863,9 +864,24 @@ static uint64_t FindGuestFreeRange(uint64_t search_addr, uint64_t size, uint64_t
 	return addr;
 }
 
+namespace {
+BackingWriteLog g_backing_writes; // S479 (KYTY_CP_PIPE), backingWriteLog.h
+} // namespace
+
+uint64_t BackingWriteSeq() {
+	return g_backing_writes.Seq();
+}
+
+bool BackingWrittenSince(uint64_t seq0, const uint64_t* pages, size_t count) {
+	return g_backing_writes.WrittenSince(seq0, pages, count);
+}
+
 bool TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size) {
-	return g_guest_address_space != nullptr &&
-	       g_guest_address_space->TryWriteBacking(vaddr, data, size);
+	if (g_guest_address_space == nullptr) return false;
+	const auto token  = g_backing_writes.Begin(vaddr, size);
+	const bool result = g_guest_address_space->TryWriteBacking(vaddr, data, size);
+	g_backing_writes.End(token);
+	return result;
 }
 
 bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {

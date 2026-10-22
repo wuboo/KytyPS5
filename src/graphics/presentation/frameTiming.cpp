@@ -680,6 +680,7 @@ constexpr const char* kCounterNames[] = {
     "pipe_memo_miss_n",
     "pipe_memo_hit_ns",
     "pipe_memo_miss_ns",
+    "pipe_join_pub_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

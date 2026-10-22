@@ -215,6 +215,11 @@ bool JoinJob(GfpJob& job) {
 			return false;
 		}
 	}
+	// A write into the backing after the worker started (the publish of a download, an upload) that touched a page it read: the bytes it saw may be older than the draw's.
+	if (!job.pages.empty() && Libs::LibKernel::Memory::BackingWrittenSince(job.write_seq, job.pages.data(), job.pages.size())) {
+		FrameTiming::Add(C::PipeJoinPubN);
+		return false;
+	}
 	return true;
 }
 
