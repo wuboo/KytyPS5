@@ -1,6 +1,8 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 
 #include "graphics/host_gpu/renderer/pipeline/matMemoShadow.h"
+#include <mutex>
+#include <shared_mutex>
 #include "graphics/host_gpu/renderer/syncCensus.h"
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -27,6 +29,7 @@
 #include "graphics/shader/recompiler/ir/passes/srtWalkPaths.h"
 #include "kernel/specPageCache.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/shader/scoutTableLog.h"
 #include "graphics/presentation/srtFast.h"
 #include "graphics/host_gpu/renderer/pipeline/rdHazard.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
@@ -50,6 +53,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <deque>
 #include <cstdio>
 #include <cstring>
 #if defined(__APPLE__)
@@ -623,6 +627,53 @@ bool ReadBackingForShader(void*, uint64_t address, void* data, uint64_t size, bo
 	return Libs::LibKernel::Memory::TryReadBufferBacking(address, data, size);
 }
 
+// S479 (KYTY_CP_PIPE): a pipeline worker's state on its thread. A private snapshot / specialization per shader entry (the entry's own belong to the CP), the reason a
+// call could not be answered, and the readers: the guest's backing, never the guest's own addresses, never a drain.
+struct WorkerPrivate {
+	ShaderRecompiler::IR::ResourceSnapshot       resources;
+	ShaderRecompiler::IR::ResourceSpecialization specialization;
+};
+
+struct WorkerState {
+	bool                                           active = false;
+	uint32_t                                       fail   = 0;
+	std::unordered_map<const void*, WorkerPrivate> priv;
+};
+
+WorkerState& Worker() {
+	static thread_local WorkerState state;
+	return state;
+}
+
+bool WorkerActive() {
+	return Worker().active;
+}
+
+void WorkerFail(uint32_t reason) {
+	auto& worker = Worker();
+	if (worker.fail == 0) worker.fail = reason;
+}
+
+bool WorkerReadStrict(void*, uint64_t address, std::span<uint32_t> values) {
+	if (values.empty()) return false;
+	return Libs::LibKernel::Memory::TryReadBackingWorker(address, values.data(), values.size_bytes());
+}
+
+// The ordinary reads of the compiled walker: zeros below guest memory, the bytes otherwise (a failed read fails the walk, which fails the call).
+bool WorkerReadOrdinary(void*, uint64_t address, std::span<uint32_t> values) {
+	if (address < SrtReader::kGuestMemoryMin) {
+		std::ranges::fill(values, 0u);
+		return true;
+	}
+	return Libs::LibKernel::Memory::TryReadBackingWorker(address, values.data(), values.size_bytes());
+}
+
+// A snapshot the CP can use: its walk recorded every read, none of them failed.
+bool WorkerMemoUsable(const ShaderRecompiler::IR::ResourceSnapshot& snapshot) {
+	if (!snapshot.srt_memo.valid) return false;
+	return std::ranges::all_of(snapshot.srt_memo.reads, [](const auto& read) { return read.ok; });
+}
+
 // checked mode: a miss is zeros, never a failed read. MaterializeResources EXIT_IF's on false.
 bool ReadShaderGuestMemoryOrZero(void*, uint64_t address, std::span<uint32_t> values) {
 	return SrtReader::ReadOrZero(address, values, ReadBackingForShader, nullptr);
@@ -747,7 +798,6 @@ struct PipelineCache::ProgramCache {
 		SourceEntry(ShaderRecompiler::IR::ResourcePlan plan,
 		            std::unique_ptr<ShaderRecompiler::ShaderSource> call_source)
 		    : call_source(std::move(call_source)), resource_plan(std::move(plan)) {
-			permutations.reserve(8);
 		}
 
 		std::span<const uint32_t> FunctionCode() const {
@@ -791,15 +841,26 @@ struct PipelineCache::ProgramCache {
 			NoteMatMemoResult(resource_plan.shader_hash, stage_index, result);
 		}
 
+		// S479: a pipeline worker passes its private snapshot / specialization (`priv`) and never writes the entry's own; it also never exits: a walk that fails, or
+		// whose reads were not recorded, makes the call fail (nullptr, WorkerFail). The caller holds walk_mutex (the plan's scratch is shared with the CP).
 		template <bool HasCalls>
 		Permutation* FindPermutation(const ShaderRecompiler::IR::SrtRuntime& runtime,
-		                             uint32_t push_data_cursor) {
+		                             uint32_t push_data_cursor, WorkerPrivate* priv = nullptr) {
+			auto& resources      = priv != nullptr ? priv->resources : this->resources;
+			auto& specialization = priv != nullptr ? priv->specialization : this->specialization;
 			SpecShadowRun shadow;
-			if (SyncCensus::Enabled()) RunSpecShadowBefore(resource_plan, runtime, shadow); // S406: before the real reads drain
+			if (priv == nullptr && SyncCensus::Enabled()) RunSpecShadowBefore(resource_plan, runtime, shadow); // S406: before the real reads drain
 			std::optional<GfpTimer> gfp_mat_timer; // S451 (graphics only; compute shares this function)
 			if (resource_plan.stage != ShaderType::Compute) gfp_mat_timer.emplace(FrameTiming::Counter::GfpMatTotalNs);
-			EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-			    resource_plan, runtime, resources, specialization));
+			const bool materialized = ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources, specialization);
+			if (priv != nullptr) {
+				if (!materialized || !WorkerMemoUsable(resources)) {
+					WorkerFail(2);
+					return nullptr;
+				}
+			} else {
+				EXIT_IF(!materialized);
+			}
 			gfp_mat_timer.reset();
 			KYTY_CP_SITE(ShPermSearch);
 			std::optional<GfpTimer> gfp_search_timer;
@@ -823,7 +884,7 @@ struct PipelineCache::ProgramCache {
 				break;
 			}
 			gfp_search_timer.reset();
-			if (MatMemoEnabled()) NoteMatMemo(runtime, push_data_cursor, found_index);
+			if (priv == nullptr && MatMemoEnabled()) NoteMatMemo(runtime, push_data_cursor, found_index);
 			if (shadow.active) {
 				SpecShadow::Outcome fresh;
 				fresh.ok             = true;
@@ -860,7 +921,8 @@ struct PipelineCache::ProgramCache {
 		ShaderRecompiler::IR::ResourcePlan           resource_plan;
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
-		std::vector<Permutation>                    permutations;
+		std::deque<Permutation>                     permutations; // S479: stable addresses: a draw's stage input points at a permutation's program
+		std::mutex                                  walk_mutex;   // S479: whoever walks the plan (the CP or a worker) holds it: the plan has scratch
 		MatMemo::Shadow                             m_matmemo;          // S406
 		uint64_t                                    m_matmemo_plan_mask = 0;
 		bool                                        m_matmemo_mask_valid = false;
@@ -1250,12 +1312,15 @@ struct PipelineCache::ProgramCache {
 			const FrameTiming::ScopedCounterNs pv_timer(FrameTiming::Counter::ProgDiskPvImportNs); // S476
 			ImportPerVertexVariants(handle.id, record.pv, record.spirv);
 		}
-		source.permutations.push_back({
-		    .function_code  = {},
-		    .specialization = source.specialization,
-		    .program        = std::move(record.info),
-		    .handle         = handle,
-		});
+		{
+			const std::unique_lock exclusive(structure_mutex); // S479: a worker may be scanning the permutations
+			source.permutations.push_back({
+			    .function_code  = {},
+			    .specialization = source.specialization,
+			    .program        = std::move(record.info),
+			    .handle         = handle,
+			});
+		}
 		FrameTiming::Add(FrameTiming::Counter::ProgDiskHitN);
 		NoteUsedFile(request.path);
 		ReportDiskWriter(); // S476: the prefetch counters (a warm run never compiles, so DiskAfterCompile does not report)
@@ -1317,12 +1382,19 @@ struct PipelineCache::ProgramCache {
 			if (GfpDetail()) FrameTiming::Add(FrameTiming::Counter::GfpGetN);
 			gfp_get_timer.emplace(std::is_same_v<InputInfo, ShaderPixelInputInfo> ? FrameTiming::Counter::GfpPsGetNs : FrameTiming::Counter::GfpVsGetNs);
 		}
-		InitDisk();
+		// S479: a pipeline worker answers only from what the CP has already translated. Its key is its own (lookup_key is the CP's scratch) and the table of programs is
+		// held shared for the whole call, so the CP's insertions (exclusive) never run under it.
+		const bool worker = WorkerActive();
+		static thread_local ProgramKey worker_key;
+		ProgramKey& lookup_key = worker ? worker_key : this->lookup_key;
+		if (!worker) InitDisk();
 		const auto user_data = std::span(params.user_data).first(params.user_data_count);
 		lookup_key.stage           = stage;
 		lookup_key.hash            = params.hash;
 		lookup_key.user_data_count = params.user_data_count;
 		lookup_key.code_size       = static_cast<uint32_t>(params.code.size());
+		std::shared_lock<std::shared_mutex> structure(structure_mutex, std::defer_lock);
+		if (worker) structure.lock();
 		std::optional<CpSampler::SiteScope> static_key_site;
 		if (CpSampler::Active().load(std::memory_order_relaxed)) static_key_site.emplace(CpSampler::SiteId(CpSampler::Site::ShStaticKeyFind));
 		std::optional<GfpTimer> gfp_key_timer;
@@ -1335,6 +1407,12 @@ struct PipelineCache::ProgramCache {
 		auto                                         entry = programs.find(lookup_key);
 		gfp_key_timer.reset();
 		static_key_site.reset();
+		if constexpr (graphics_stage) {
+			if (worker && (entry == programs.end() || entry->second.call_source)) {
+				WorkerFail(1);
+				return {};
+			}
+		}
 		// S404: the reader is named for the whole lookup (hit, call-source refresh, compile), not only the compile.
 		const SyncCensus::ReaderScope reader_tag(
 		    params.hash, SyncStageName(stage),
@@ -1357,6 +1435,13 @@ struct PipelineCache::ProgramCache {
 		// CleanRuntime. That replaces read_memory with read_specialization_memory, so call-target
 		// fetches stay on ReadShaderGuestMemory and are not zero-filled here.
 		SrtReader::Apply(runtime, ReadShaderGuestMemoryOrZero);
+		if (worker) {
+			// The walk records every read (SrtMemo) through readers that never drain and never touch the guest's addresses; the interpreter walks (read_memory set).
+			read_context.mode                  = ShaderRecompiler::IR::SrtFastMode::On;
+			runtime.fast_mode                  = ShaderRecompiler::IR::SrtFastMode::On;
+			runtime.read_specialization_memory = WorkerReadStrict;
+			runtime.read_memory                = WorkerReadOrdinary;
+		}
 		if constexpr (std::is_same_v<InputInfo, ShaderComputeInputInfo>) {
 			runtime.workgroup_counts = input_info.workgroup_counts;
 			runtime.indirect_args_address = input_info.indirect_args_address;
@@ -1371,11 +1456,28 @@ struct PipelineCache::ProgramCache {
 			if (cached.call_source) {
 				{
 					KYTY_CP_SITE(ShRefreshCallSource);
+					const std::lock_guard walk(cached.walk_mutex);
 					source_changed = cached.RefreshCallSource(runtime);
+					if (!source_changed) permutation = cached.FindPermutation<true>(runtime, push_data_cursor);
 				}
-				if (!source_changed) permutation = cached.FindPermutation<true>(runtime, push_data_cursor);
+			} else if (worker) {
+				auto& priv = Worker().priv[&cached];
+				{
+					const std::lock_guard walk(cached.walk_mutex);
+					permutation = cached.FindPermutation<false>(runtime, push_data_cursor, &priv);
+				}
+				if (permutation == nullptr) {
+					WorkerFail(1); // no permutation for this specialization yet (a failed walk already said why)
+					return {};
+				}
+				input_info.stage = {.program = &permutation->program, .resources = &priv.resources};
+				permutation->program.bindings.AdvancePushData(push_data_cursor);
+				return permutation->handle;
 			} else {
-				permutation = cached.FindPermutation<false>(runtime, push_data_cursor);
+				{
+					const std::lock_guard walk(cached.walk_mutex);
+					permutation = cached.FindPermutation<false>(runtime, push_data_cursor);
+				}
 				NoteSrtMemo(cached.resources, read_context, params.hash, stage);
 				if (RdHazard::Enabled()) RdHazard::NoteStage(stage == ShaderType::Compute ? 2u : stage == ShaderType::Pixel ? 1u : 0u, cached.resources.srt_memo); // S477 D2 DIAG
 			}
@@ -1389,6 +1491,10 @@ struct PipelineCache::ProgramCache {
 			}
 		}
 
+		if (worker) { // a call-source branch above does not fall through for a worker
+			WorkerFail(1);
+			return {};
+		}
 		ShaderStageInputInfo stage_input {};
 		if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
 			stage_input.vertex = &input_info;
@@ -1500,8 +1606,13 @@ struct PipelineCache::ProgramCache {
 		if (entry == programs.end()) {
 			auto retained = source.call ? std::make_unique<ShaderRecompiler::ShaderSource>(std::move(source)) : nullptr;
 			std::optional<FrameTiming::ScopedCounterNs> plan_timer(std::in_place, FrameTiming::Counter::ShaderResourcePlanNs);
-			entry = programs.try_emplace(lookup_key,
-			    use_prewarm ? std::move(prewarmed->plan) : ShaderRecompiler::IR::ExtractResourcePlan(translated.program), std::move(retained)).first;
+			std::unique_lock<std::mutex> new_entry_walk;
+			auto new_plan = use_prewarm ? std::move(prewarmed->plan) : ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
+			{
+				const std::unique_lock exclusive(structure_mutex);
+				entry = programs.try_emplace(lookup_key, std::move(new_plan), std::move(retained)).first;
+				new_entry_walk = std::unique_lock<std::mutex>(entry->second.walk_mutex); // a worker that finds the entry waits until it is materialized
+			}
 			plan_timer.reset();
 			if (entry->second.call_source) read_context.mode = runtime.fast_mode = ShaderRecompiler::IR::SrtFastMode::Off;
 			read_context.pass = {};
@@ -1511,6 +1622,7 @@ struct PipelineCache::ProgramCache {
 				    entry->second.resource_plan, runtime, entry->second.resources,
 				    entry->second.specialization));
 			}
+			new_entry_walk.unlock();
 			NoteSrtMemo(entry->second.resources, read_context, params.hash, stage);
 			if (RdHazard::Enabled()) RdHazard::NoteStage(stage == ShaderType::Compute ? 2u : stage == ShaderType::Pixel ? 1u : 0u, entry->second.resources.srt_memo); // S477 D2 DIAG
 			if (prewarm_record) {
@@ -1545,9 +1657,13 @@ struct PipelineCache::ProgramCache {
 		const uint32_t        push_start = push_data_cursor;
 		std::vector<uint32_t> disk_spirv;
 		const bool            prewarm_shadow = prewarmed != nullptr && !use_prewarm && !entry->second.call_source;
-		entry->second.permutations.push_back(CompilePermutation(
+		auto compiled = CompilePermutation(
 		    stage_name, options, std::move(translated), entry->second.specialization, push_data_cursor,
-		    entry->second.FunctionCode(), (disk_request || prewarm_shadow) ? &disk_spirv : nullptr));
+		    entry->second.FunctionCode(), (disk_request || prewarm_shadow) ? &disk_spirv : nullptr);
+		{
+			const std::unique_lock exclusive(structure_mutex); // S479: a worker may be scanning the permutations
+			entry->second.permutations.push_back(std::move(compiled));
+		}
 		const auto& permutation = entry->second.permutations.back();
 		if (prewarm_shadow) PrewarmShadowCompare(*prewarmed, entry->second, options, push_start, own_ir, disk_spirv, params.hash);
 		if (disk_request) DiskAfterCompile(*disk_request, permutation, std::move(disk_spirv), push_start);
@@ -1595,6 +1711,7 @@ struct PipelineCache::ProgramCache {
 	}
 
 	std::unordered_map<ProgramKey, SourceEntry, ProgramKeyHash> programs;
+	std::shared_mutex                                           structure_mutex; // S479: the table of programs and the permutations: a worker holds it shared, the CP exclusive to add
 	ProgramKey                                                  lookup_key;
 	GraphicContext&                                             graphics;
 	uint64_t                                                    next_shader_id = 0;
@@ -1808,6 +1925,26 @@ void PipelineCache::Save() {
 	                                           .count()));
 }
 
+PipelineCache::OffThreadScope::OffThreadScope() {
+	Worker().active = true;
+}
+
+PipelineCache::OffThreadScope::~OffThreadScope() {
+	Worker().active = false;
+}
+
+void PipelineCache::OffThreadScope::Reset() {
+	Worker().fail = 0;
+}
+
+bool PipelineCache::OffThreadScope::Failed() {
+	return Worker().fail != 0;
+}
+
+uint32_t PipelineCache::OffThreadScope::FailReason() {
+	return Worker().fail;
+}
+
 PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     const HW::VertexShaderInfo& vertex_regs, const HW::PixelShaderInfo& pixel_regs,
     const HW::ShaderRegisters& sh, const HW::Context& context, const HW::UserConfig& user_config,
@@ -1816,6 +1953,11 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
     bool single_sample) {
 	const FrameTiming::ScopedCounterNs cost_timer(FrameTiming::Counter::GetGraphicsProgramsNs); // S433 (S441)
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
+	const bool worker      = WorkerActive();
+	if (worker && (tess_active || context.HasObjectPrimitiveIdOutput())) { // S479: shapes the worker leaves to the CP
+		WorkerFail(3);
+		return {};
+	}
 	std::array<ShaderParams, 3> vertex_params;
 	{
 		const GfpTimer prep_timer(FrameTiming::Counter::GfpVsPrepNs); // S451
@@ -1826,6 +1968,10 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		}
 	}
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
+	if (worker && ScoutTableLog::Active() != nullptr && ScoutTableLog::Active()->unsafe) { // a table the CP would reject (or one the log cannot replay)
+		WorkerFail(5);
+		return {};
+	}
 	const bool object_primitive_id = context.HasObjectPrimitiveIdOutput();
 	if (object_primitive_id) {
 		// CxObjectIdMode: register source plus a 32-bit pipelined primitive-ID addition.
@@ -1860,6 +2006,10 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 		    host_threads > limits.maxMeshWorkGroupSize[0] ||
 		    mesh.max_vertices > limits.maxMeshOutputVertices ||
 		    mesh.max_primitives > limits.maxMeshOutputPrimitives) {
+			if (worker) { // the CP exits on this only for a draw it executes
+				WorkerFail(4);
+				return {};
+			}
 			EXIT("mesh shader exceeds host limits: threads=%u vertices=%u primitives=%u LDS=%u\n",
 			     host_threads, mesh.max_vertices, mesh.max_primitives, mesh.lds_size_dwords);
 		}
@@ -1905,6 +2055,10 @@ PipelineCache::GraphicsPrograms PipelineCache::GetGraphicsPrograms(
 			if (blend || (mapping.ApplyMask(target_mask) & 7u) != 7u ||
 			    (mapping.ApplyMask(shader_mask) & 7u) != 7u ||
 			    pixel_info.target_output_mode[export_index] != 9u) {
+				if (worker) { // the CP exits on this only for a draw it executes
+					WorkerFail(3);
+					return {};
+				}
 				EXIT("unsupported packed UNorm render-target export: slot=%u export=%u mode=%u "
 				     "target_mask=0x%x shader_mask=0x%x mapping=0x%02x blend=%u\n",
 				     slot, export_index, pixel_info.target_output_mode[export_index], target_mask,

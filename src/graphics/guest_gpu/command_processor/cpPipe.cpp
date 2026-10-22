@@ -11,14 +11,24 @@
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/cpPipe.h"
+#include "graphics/guest_gpu/command_processor/cpPipeJob.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
+#include "kernel/memory.h"
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
+#if defined(_MSC_VER) || defined(__x86_64__)
+#include <immintrin.h>
+#endif
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
@@ -28,9 +38,15 @@ namespace Libs::Graphics {
 
 namespace {
 
-CpPipe::Mode EnvMode() {
-	static const CpPipe::Mode mode = CpPipe::ParseMode(std::getenv("KYTY_CP_PIPE"));
-	return mode;
+using CpPipe::EnvMode;
+
+size_t EnvWorkers() {
+	static const size_t workers = [] {
+		const char* text  = std::getenv("KYTY_CP_PIPE_WORKERS");
+		const long  value = text != nullptr ? std::strtol(text, nullptr, 10) : 3;
+		return static_cast<size_t>(value < 0 ? 0 : (value > 8 ? 8 : value));
+	}();
+	return workers;
 }
 
 size_t EnvDepth() {
@@ -43,6 +59,140 @@ size_t EnvDepth() {
 }
 
 } // namespace
+
+namespace CpPipe {
+
+GfpJob*& CurrentJob() {
+	static thread_local GfpJob* job = nullptr;
+	return job;
+}
+
+namespace {
+
+inline void CpuRelax() {
+#if defined(_MSC_VER) || defined(__x86_64__)
+	_mm_pause();
+#else
+	std::this_thread::yield();
+#endif
+}
+
+// The pool of threads that run GfpJobs. A job is a pointer into a FIFO item; the worker never touches the CP.
+class Workers {
+public:
+	static Workers& Instance() {
+		static Workers* pool = new Workers; // never destroyed: the process ends with threads parked
+		return *pool;
+	}
+
+	void Start(size_t count) {
+		const std::lock_guard lock(m_start_mutex);
+		if (m_started) return;
+		m_started = true;
+		for (size_t i = 0; i < count; i++) {
+			m_threads.emplace_back([this, i] { Run(i); });
+			m_threads.back().detach();
+		}
+	}
+
+	void Submit(GfpJob* job) {
+		{
+			const std::lock_guard lock(m_mutex);
+			m_queue.push_back(job);
+			m_size.fetch_add(1, std::memory_order_release);
+		}
+		if (m_sleepers.load(std::memory_order_acquire) != 0) m_cv.notify_one();
+	}
+
+private:
+	GfpJob* Pop() {
+		const std::lock_guard lock(m_mutex);
+		if (m_queue.empty()) return nullptr;
+		GfpJob* job = m_queue.front();
+		m_queue.pop_front();
+		m_size.fetch_sub(1, std::memory_order_release);
+		return job;
+	}
+
+	void Run(size_t index) {
+		(void)index;
+		FrameTiming::SetThreadMute(true);
+		for (;;) {
+			GfpJob* job = nullptr;
+			// Spin first: the CP submits a job every few microseconds while a stream is parsed; a sleeping worker costs the CP a wake-up call each time.
+			const auto spin_end = std::chrono::steady_clock::now() + std::chrono::microseconds(100);
+			for (uint32_t i = 0; job == nullptr; i++) {
+				if (m_size.load(std::memory_order_acquire) != 0) {
+					job = Pop();
+					if (job != nullptr) break;
+				}
+				CpuRelax();
+				if ((i & 63u) == 63u && std::chrono::steady_clock::now() >= spin_end) break;
+			}
+			if (job == nullptr) {
+				std::unique_lock lock(m_mutex);
+				m_sleepers.fetch_add(1, std::memory_order_release);
+				m_cv.wait(lock, [this] { return !m_queue.empty(); });
+				m_sleepers.fetch_sub(1, std::memory_order_release);
+				job = m_queue.front();
+				m_queue.pop_front();
+				m_size.fetch_sub(1, std::memory_order_release);
+			}
+			RunGfpJob(*job);
+			FrameTiming::AddAlways(FrameTiming::Counter::PipeWorkerNs, static_cast<uint64_t>(job->worker_ns));
+			job->state.store(GfpJob::Done, std::memory_order_release);
+		}
+	}
+
+	std::mutex              m_start_mutex;
+	bool                    m_started = false;
+	std::mutex              m_mutex;
+	std::condition_variable m_cv;
+	std::deque<GfpJob*>     m_queue;
+	std::atomic<size_t>     m_size {0};
+	std::atomic<int>        m_sleepers {0};
+	std::vector<std::thread> m_threads;
+};
+
+void WaitDone(GfpJob& job) {
+	if (job.state.load(std::memory_order_acquire) == GfpJob::Done) return;
+	const int64_t t0 = FrameTiming::SteadyNowNs();
+	for (uint32_t i = 0; job.state.load(std::memory_order_acquire) != GfpJob::Done; i++) {
+		CpuRelax();
+		if ((i & 255u) == 255u) {
+			std::this_thread::yield();
+			if (FrameTiming::SteadyNowNs() - t0 > 2'000'000'000ll) {
+				static std::atomic<uint32_t> logged {0};
+				if (logged.fetch_add(1) < 4) LOGF("[cp-pipe] stall: a worker has not finished a job for 2 s\n");
+				i = 0;
+			}
+		}
+	}
+	FrameTiming::Add(FrameTiming::Counter::PipeStallNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
+}
+
+} // namespace
+
+bool JoinJob(GfpJob& job) {
+	using C = FrameTiming::Counter;
+	if (job.state.load(std::memory_order_acquire) == GfpJob::Idle) return false;
+	WaitDone(job);
+	FrameTiming::Add(C::PipeJobN);
+	if (!job.answered) {
+		FrameTiming::Add(C::PipeJobBailN);
+		return false;
+	}
+	// A page the worker read that holds GPU-written bytes the backing does not have yet (or an unpublished download of them): the CP computes the programs itself, which drains.
+	for (const uint64_t page: job.pages) {
+		if (Libs::LibKernel::Memory::QueryShaderGpuDirty(page, 4096)) {
+			FrameTiming::Add(C::PipeJoinDirtyN);
+			return false;
+		}
+	}
+	return true;
+}
+
+} // namespace CpPipe
 
 // One deferred packet. Draws and dispatches carry the state they were parsed with.
 struct PipeItem {
@@ -58,6 +208,7 @@ struct PipeItem {
 	uint64_t              index_base_addr      = 0;
 	uint64_t              draw_indirect_base   = 0;
 	uint64_t              dispatch_indirect_base = 0;
+	CpPipe::GfpJob        job; // a graphics draw: the worker's GetGraphicsPrograms on this item's snapshot
 };
 
 struct CommandProcessor::PipeState {
@@ -77,7 +228,8 @@ CommandProcessor::~CommandProcessor() = default;
 void CommandProcessor::PipeInit() {
 	if (m_pipe != nullptr || IsAsyncComputeQueue() || EnvMode() == CpPipe::Mode::Off) return;
 	m_pipe = std::make_unique<PipeState>(EnvDepth());
-	LOGF("[cp-pipe] on: mode=%s depth=%zu\n", EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", m_pipe->depth);
+	if (EnvWorkers() != 0) CpPipe::Workers::Instance().Start(EnvWorkers());
+	LOGF("[cp-pipe] on: mode=%s depth=%zu workers=%zu\n", EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", m_pipe->depth, EnvWorkers());
 }
 
 void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const uint32_t* packet, uint32_t packet_dw) {
@@ -102,6 +254,17 @@ void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const u
 		it.index_base_addr        = m_index_base_addr;
 		it.draw_indirect_base     = m_draw_indirect_args_base_addr;
 		it.dispatch_indirect_base = m_dispatch_indirect_args_base_addr;
+	}
+	if (cls == CpPipe::OpClass::Draw && CpPipe::IsGraphicsDraw(opcode) && EnvWorkers() != 0) {
+		it.job.cache     = &m_renderer.GetPipelineCache();
+		it.job.ctx_copy  = it.ctx;
+		it.job.sh_copy   = it.sh;
+		it.job.ucfg_copy = it.ucfg;
+		it.job.ctx       = &it.job.ctx_copy;
+		it.job.sh        = &it.job.sh_copy;
+		it.job.ucfg      = &it.job.ucfg_copy;
+		it.job.state.store(CpPipe::GfpJob::Queued, std::memory_order_relaxed);
+		CpPipe::Workers::Instance().Submit(&it.job);
 	}
 	const uint64_t seq = p.ring.Commit();
 	FrameTiming::Add(C::PipeEnqN);
@@ -179,6 +342,7 @@ void CommandProcessor::PipeExecuteFront() {
 		std::swap(m_dispatch_indirect_args_base_addr, it.dispatch_indirect_base);
 	}
 	{
+		if (it.job.state.load(std::memory_order_relaxed) != CpPipe::GfpJob::Idle) CpPipe::CurrentJob() = &it.job;
 		CpPhases::Scope handler_phase(CpPhases::Phase::Handler);
 		if (CpPhases::Enabled()) {
 			handler_phase.SetSub(it.cls == CpPipe::OpClass::Draw ? C::HdlDrawNs : (it.cls == CpPipe::OpClass::Dispatch ? C::HdlDispNs : C::HdlOtherNs),
@@ -193,6 +357,11 @@ void CommandProcessor::PipeExecuteFront() {
 				LOGF("[cp-pipe] handler of opcode 0x%x consumed %u dwords of a %u dword packet\n", it.opcode, consumed, packet_dw);
 			}
 		}
+	}
+	CpPipe::CurrentJob() = nullptr;
+	if (it.job.state.load(std::memory_order_relaxed) != CpPipe::GfpJob::Idle) { // the draw never asked for its programs (it was skipped before): the worker may still read the snapshot
+		CpPipe::WaitDone(it.job);
+		it.job.state.store(CpPipe::GfpJob::Idle, std::memory_order_relaxed);
 	}
 	if (state_item) {
 		std::swap(m_index_type_and_size, it.index_type_and_size);
@@ -244,6 +413,10 @@ void CommandProcessor::PipeDrain(unsigned reason, uint32_t key) {
 	DumpDrainHistogram();
 	while (!m_pipe->ring.Empty()) PipeExecuteFront();
 	m_pipe->pending.Clear();
+}
+
+bool CommandProcessor::PipeOverlaps(uint64_t address, uint64_t size) const {
+	return m_pipe != nullptr && m_pipe->pending.Overlaps(address, size);
 }
 
 bool CommandProcessor::PipeWaitVirtual(uint64_t address, uint64_t size, uint32_t func, uint64_t ref, uint64_t mask, bool* satisfied) {

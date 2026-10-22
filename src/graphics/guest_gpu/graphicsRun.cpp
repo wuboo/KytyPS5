@@ -862,6 +862,10 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 				execution.m_made_progress = true;
 				continue;
 			}
+			if (pipe_cls == CpPipe::OpClass::Inline && CpPipe::ReadsIndirectTable(opcode) && pipe_dw >= 5u) {
+				uint64_t table = 0, table_size = 0;
+				if (CpPipe::IndirectTableRange(packet + 1, &table, &table_size) && PipeOverlaps(table, table_size)) PipeDrain(0, opcode);
+			}
 			if (pipe_cls == CpPipe::OpClass::Drain) {
 				PipeDrain(0, opcode == Pm4::IT_NOP ? 256u + KYTY_PM4_R(packet_header) : opcode);
 			} else {

@@ -873,6 +873,59 @@ bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 	       g_guest_address_space->TryReadBacking(vaddr, data, size);
 }
 
+// S479 (KYTY_CP_PIPE): the pipeline workers read the guest's backing through a per-thread page cache: one TryResolveBackingPage (a shared lock and a map walk) per 4 KiB
+// page and map sequence instead of one per read (S477 D5: 99.7 % hits). Same bytes as TryReadBacking; a piece the page path cannot answer falls back to it. A worker
+// never touches the guest's own addresses (a protected page faults into the fault handler, which waits for the GPU thread: S471 deadlock). The pages read since
+// SetWorkerReadLog are appended to the log, so the CP can ask whether any of them has become GPU-dirty before it uses what the worker computed.
+namespace {
+struct WorkerPc {
+	struct Entry {
+		uint64_t       page = ~uint64_t {0};
+		const uint8_t* host = nullptr;
+		uint64_t       seq  = 0;
+	};
+	std::array<Entry, 256>  entries {};
+	std::vector<uint64_t>*  log = nullptr;
+};
+thread_local WorkerPc t_worker_pc;
+} // namespace
+
+void SetWorkerReadLog(std::vector<uint64_t>* log) {
+	t_worker_pc.log = log;
+}
+
+bool TryReadBackingWorker(uint64_t vaddr, void* data, uint64_t size) {
+	if (size == 0 || data == nullptr || g_guest_address_space == nullptr || UINT64_MAX - vaddr < size) return false;
+	auto&          pc  = t_worker_pc;
+	auto*          out = static_cast<uint8_t*>(data);
+	const uint64_t end = vaddr + size;
+	for (uint64_t cur = vaddr; cur < end;) {
+		const uint64_t page = cur & ~uint64_t {4095};
+		const uint64_t n    = std::min(end, page + 4096) - cur;
+		auto&          e    = pc.entries[(page >> 12) & 255];
+		const uint8_t* host = nullptr;
+		const uint64_t seq  = g_guest_address_space->MapSeq();
+		if (e.page == page && e.seq == seq && (seq & 1u) == 0) {
+			host = e.host;
+		} else {
+			uint64_t resolved_seq = 0;
+			if (g_guest_address_space->TryResolveBackingPage(page, &host, &resolved_seq)) {
+				e = {page, host, resolved_seq};
+			} else {
+				host = nullptr;
+			}
+		}
+		if (pc.log != nullptr && (pc.log->empty() || pc.log->back() != page)) pc.log->push_back(page);
+		if (host != nullptr) {
+			std::memcpy(out + (cur - vaddr), host + (cur - page), n);
+		} else if (!TryReadBacking(cur, out + (cur - vaddr), n)) {
+			return false;
+		}
+		cur += n;
+	}
+	return true;
+}
+
 bool QueryShaderGpuDirty(uint64_t vaddr, uint64_t size) {
 	if (size == 0 || g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
 		return false;

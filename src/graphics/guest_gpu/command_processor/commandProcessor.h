@@ -167,6 +167,7 @@ private:
 	void PipeInit();
 	void PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const uint32_t* packet, uint32_t packet_dw);
 	void PipeExecuteFront();
+	bool PipeOverlaps(uint64_t address, uint64_t size) const;
 	bool PipeWaitVirtual(uint64_t address, uint64_t size, uint32_t func, uint64_t ref, uint64_t mask, bool* satisfied);
 	[[nodiscard]] HW::Shader&     ExecSh() { return m_exec_sh != nullptr ? *m_exec_sh : m_sh_ctx; }
 	[[nodiscard]] HW::UserConfig& ExecUcfg() { return m_exec_ucfg != nullptr ? *m_exec_ucfg : m_ucfg; }

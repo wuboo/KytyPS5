@@ -40,6 +40,8 @@ void ClassifyTests() {
 	Check(Classify(Pm4::IT_NOP, Pm4::R_ZERO, 0x68750777u, 3) == OpClass::Ordered, "marker flip is ordered");
 	Check(Classify(Pm4::IT_NOP, Pm4::R_ZERO, 0, 2) == OpClass::Inline, "plain NOP is inline");
 	// everything the table does not know drains
+	Check(Classify(Pm4::IT_SET_SH_REG_INDIRECT, 0, 0, 5) == OpClass::Inline && ReadsIndirectTable(Pm4::IT_SET_SH_REG_INDIRECT), "indirect register sets run at parse, after a table check");
+	Check(Classify(Pm4::IT_SET_CONTEXT_REG_INDIRECT, 0, 0, 5) == OpClass::Inline && !ReadsIndirectTable(Pm4::IT_SET_CONTEXT_REG), "only the indirect sets read a table");
 	Check(Classify(Pm4::IT_COND_EXEC, 0, 0, 5) == OpClass::Drain, "COND_EXEC drains");
 	Check(Classify(Pm4::IT_SET_PREDICATION, 0, 0, 5) == OpClass::Drain, "SET_PREDICATION drains");
 	Check(Classify(Pm4::IT_DRAW_INDIRECT, 0, 0, 5) == OpClass::Drain, "DRAW_INDIRECT drains");
@@ -79,6 +81,20 @@ void PendingWritesTests() {
 	pending.Retire(1);
 	pending.Retire(3);
 	Check(pending.Size() == 0, "all retired");
+}
+
+void IndirectTableTests() {
+	uint32_t payload[4] = {0x1003u, 0x7u, 0, 0x8004u};
+	uint64_t address = 0, size = 0;
+	Check(IndirectTableRange(payload, &address, &size) && address == 0x7'0000'1000ull && size == 4u * 8u, "indirect table range");
+	payload[3] = 0;
+	Check(!IndirectTableRange(payload, &address, &size), "an empty table has no range");
+	PendingWrites pending;
+	pending.Note(0x7'0000'1010ull, 4, false, 0, 1);
+	payload[3] = 4;
+	IndirectTableRange(payload, &address, &size);
+	Check(pending.Overlaps(address, size), "a pending write inside the table is an overlap");
+	Check(!pending.Overlaps(0x7'0000'1020ull, 8), "a table behind the write is not");
 }
 
 void SignalDecodeTests() {
@@ -156,6 +172,7 @@ int main() {
 	WaitTests();
 	PendingWritesTests();
 	SignalDecodeTests();
+	IndirectTableTests();
 	RingTests();
 	WorkerGateTests();
 	std::puts("CpPipeTests: ok");

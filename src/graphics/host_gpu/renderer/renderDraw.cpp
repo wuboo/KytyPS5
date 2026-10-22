@@ -11,6 +11,8 @@
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
+#include "graphics/guest_gpu/command_processor/cpPipe.h"
+#include "graphics/guest_gpu/command_processor/cpPipeJob.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -941,6 +943,143 @@ static bool ResolvePrimitiveRestart(const CommandBuffer&         buffer,
 	return false;
 }
 
+static void FillExportMapping(const HW::Context& ctx, uint32_t color_output_mask,
+                              std::array<Prospero::ColorComponentMapping, RENDER_COLOR_ATTACHMENTS_MAX>& target_export_mapping) {
+	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
+		const auto& rt = ctx.GetRenderTarget(slot);
+		if ((color_output_mask & (1u << slot)) != 0 && rt.base.addr != 0) {
+			target_export_mapping[slot] =
+			    TextureGetRenderTargetFormat(rt.info.format, rt.info.channel_type,
+			                                 rt.info.channel_order)
+			        .export_mapping;
+		}
+	}
+}
+
+// S479 (KYTY_CP_PIPE): the worker's GetGraphicsPrograms for a deferred draw, on the registers snapshotted with it. RefreshShaders below decodes the same registers the same
+// way (no render target is resolved yet when it runs, so the sample count comes from the AA config only).
+void CpPipe::RunGfpJob(CpPipe::GfpJob& job) {
+	const int64_t t0 = FrameTiming::SteadyNowNs();
+	CpPipe::WorkerScope       worker_flag;
+	PipelineCache::OffThreadScope scope;
+	PipelineCache::OffThreadScope::Reset();
+	const auto& ctx = *job.ctx;
+	const auto& sh  = *job.sh;
+	const auto  color_output_mask = DrawColorOutputMask(ctx);
+	job.ps_active = sh.GetPs().ps_regs.data_addr != 0 && (color_output_mask != 0 || PixelShaderHasDepthOrCoverageSideEffects(ctx.GetShaderRegisters()));
+	std::array<Prospero::ColorComponentMapping, RENDER_COLOR_ATTACHMENTS_MAX> target_export_mapping {};
+	FillExportMapping(ctx, color_output_mask, target_export_mapping);
+	const bool single_sample = render_sample_count(ctx.GetAaConfig().msaa_num_samples) == 1u;
+	job.vertex_info = {};
+	job.pixel_info  = {};
+	job.tables.reads.clear();
+	job.tables.words.clear();
+	job.tables.unsafe = false;
+	job.pages.clear();
+	ScoutTableLog::Active() = &job.tables;
+	Libs::LibKernel::Memory::SetWorkerReadLog(&job.pages);
+	job.programs = job.cache->GetGraphicsPrograms(sh.GetVs(), sh.GetPs(), ctx.GetShaderRegisters(), ctx, *job.ucfg, target_export_mapping, job.ps_active, job.vertex_info,
+	                                              job.pixel_info, single_sample);
+	Libs::LibKernel::Memory::SetWorkerReadLog(nullptr);
+	ScoutTableLog::Active() = nullptr;
+	job.fail     = PipelineCache::OffThreadScope::FailReason();
+	job.answered = !PipelineCache::OffThreadScope::Failed() && job.programs.vertex[0] && (!job.ps_active || job.programs.pixel) && job.vertex_info[0].stage.resources != nullptr &&
+	               (!job.ps_active || job.pixel_info.stage.resources != nullptr) && !job.tables.unsafe;
+	if (job.answered) {
+		// The stage inputs point at the worker's private snapshots, which its next call overwrites: the job keeps copies.
+		job.vs_res                          = *job.vertex_info[0].stage.resources;
+		job.vertex_info[0].stage.resources = &job.vs_res;
+		if (job.ps_active) {
+			job.ps_res                       = *job.pixel_info.stage.resources;
+			job.pixel_info.stage.resources = &job.ps_res;
+		}
+		std::sort(job.pages.begin(), job.pages.end());
+		job.pages.erase(std::unique(job.pages.begin(), job.pages.end()), job.pages.end());
+	}
+	job.worker_ns = FrameTiming::SteadyNowNs() - t0;
+}
+
+// S479 shadow: the result the CP computed (state) against the worker's (job), field by field of everything the draw is built from.
+static void CompareWithJob(const DrawRenderState& state, const CpPipe::GfpJob& job) {
+	using C = FrameTiming::Counter;
+	FrameTiming::Add(C::PipeShadowN);
+	const bool ne_vs = state.programs.vertex[0].id != job.programs.vertex[0].id;
+	const bool ne_ps = state.programs.pixel.id != job.programs.pixel.id;
+	const auto same_res = [](const ShaderStageRuntime& a, const ShaderStageRuntime& b) {
+		if (a.resources == nullptr || b.resources == nullptr) return a.resources == b.resources;
+		if (a.resources->specialization_reads != b.resources->specialization_reads) {
+			// The same bytes, however the reads were cut into ranges?
+			const auto merged = [](std::vector<std::pair<uint64_t, uint64_t>> ranges) {
+				std::sort(ranges.begin(), ranges.end());
+				std::vector<std::pair<uint64_t, uint64_t>> out;
+				for (const auto& [address, size]: ranges) {
+					if (size == 0) continue;
+					if (!out.empty() && address <= out.back().first + out.back().second) {
+						out.back().second = std::max(out.back().second, address + size - out.back().first);
+					} else {
+						out.emplace_back(address, size);
+					}
+				}
+				return out;
+			};
+			if (merged(a.resources->specialization_reads) != merged(b.resources->specialization_reads)) return false;
+		}
+		return a.resources->flattened_srt == b.resources->flattened_srt && a.resources->buffers == b.resources->buffers && a.resources->images == b.resources->images &&
+		       a.resources->samplers == b.resources->samplers && a.resources->uniform_fill == b.resources->uniform_fill;
+	};
+	const bool ne_res = !same_res(state.vertex_info[0].stage, job.vertex_info[0].stage) || (state.ps_active && !same_res(state.ps_input_info.stage, job.pixel_info.stage));
+	// The stage inputs (every field, no padding) decide the pipeline and the push data.
+	const auto same_vs = [](const ShaderVertexInputInfo& x, const ShaderVertexInputInfo& y) {
+		if (x.stage.program != y.stage.program || x.logical_stage != y.logical_stage || x.resources_num != y.resources_num || x.fetch_attrib_reg != y.fetch_attrib_reg ||
+		    x.fetch_buffer_reg != y.fetch_buffer_reg || x.buffers_num != y.buffers_num || x.wave_size != y.wave_size || x.scratch_size_dwords != y.scratch_size_dwords ||
+		    x.pa_cl_vs_out_cntl != y.pa_cl_vs_out_cntl || x.fetch_external != y.fetch_external || x.fetch_embedded != y.fetch_embedded ||
+		    x.clip_space.enabled != y.clip_space.enabled)
+			return false;
+		for (int i = 0; i < 2; i++) {
+			if (x.clip_space.scale[i] != y.clip_space.scale[i] || x.clip_space.offset[i] != y.clip_space.offset[i] || x.clip_space.half_extent[i] != y.clip_space.half_extent[i])
+				return false;
+		}
+		for (int i = 0; i < x.resources_num && i < ShaderVertexInputInfo::RES_MAX; i++) {
+			const auto &rx = x.resources_dst[i], &ry = y.resources_dst[i];
+			if (std::memcmp(x.resources[i].fields, y.resources[i].fields, sizeof(x.resources[i].fields)) != 0 || rx.register_start != ry.register_start ||
+			    rx.registers_num != ry.registers_num || rx.attr_id != ry.attr_id || rx.fetch_index != ry.fetch_index || rx.buffer_index != ry.buffer_index)
+				return false;
+		}
+		for (int i = 0; i < x.buffers_num && i < ShaderVertexInputInfo::RES_MAX; i++) {
+			if (x.buffers[i].addr != y.buffers[i].addr || x.buffers[i].stride != y.buffers[i].stride || x.buffers[i].num_records != y.buffers[i].num_records ||
+			    x.buffers[i].fetch_index != y.buffers[i].fetch_index)
+				return false;
+		}
+		return x.mesh.threads_num[0] == y.mesh.threads_num[0] && x.mesh.threads_num[1] == y.mesh.threads_num[1] && x.mesh.threads_num[2] == y.mesh.threads_num[2] &&
+		       x.mesh.lds_size_dwords == y.mesh.lds_size_dwords && x.mesh.host_subgroup_size == y.mesh.host_subgroup_size && x.mesh.wave_size == y.mesh.wave_size &&
+		       x.mesh.input_primitive == y.mesh.input_primitive && x.mesh.max_vertices == y.mesh.max_vertices && x.mesh.max_primitives == y.mesh.max_primitives &&
+		       x.mesh.provoking_vertex == y.mesh.provoking_vertex && x.mesh.fast_launch == y.mesh.fast_launch && x.mesh.scratch_size_dwords == y.mesh.scratch_size_dwords;
+	};
+	const auto same_ps = [](const ShaderPixelInputInfo& x, const ShaderPixelInputInfo& y) {
+		return std::memcmp(x.interpolator_settings, y.interpolator_settings, sizeof(x.interpolator_settings)) == 0 && x.input_num == y.input_num && x.wave_size == y.wave_size &&
+		       x.ps_system_input_base == y.ps_system_input_base && x.custom_interpolation_mask == y.custom_interpolation_mask &&
+		       x.ps_perspective_center_vgpr == y.ps_perspective_center_vgpr && x.ps_perspective_sample_vgpr == y.ps_perspective_sample_vgpr &&
+		       x.ps_perspective_centroid_vgpr == y.ps_perspective_centroid_vgpr && std::memcmp(x.target_output_mode, y.target_output_mode, sizeof(x.target_output_mode)) == 0 &&
+		       x.target_shader_mask == y.target_shader_mask && std::memcmp(&x.target_export_mapping, &y.target_export_mapping, sizeof(x.target_export_mapping)) == 0 &&
+		       x.target_packed_unorm_mask == y.target_packed_unorm_mask && x.target_round_mode == y.target_round_mode && x.scratch_size_dwords == y.scratch_size_dwords &&
+		       x.ps_pos_x == y.ps_pos_x && x.ps_pos_y == y.ps_pos_y && x.ps_pos_z == y.ps_pos_z && x.ps_pos_w == y.ps_pos_w && x.ps_front_face == y.ps_front_face &&
+		       x.ps_front_face_all_bits == y.ps_front_face_all_bits && x.ps_ancillary == y.ps_ancillary && x.ps_no_perspective == y.ps_no_perspective &&
+		       x.parameter_mode == y.parameter_mode && x.ps_pixel_kill_enable == y.ps_pixel_kill_enable && x.ps_depth_export_enable == y.ps_depth_export_enable &&
+		       x.ps_sample_mask_export_enable == y.ps_sample_mask_export_enable && x.ps_sample_shading == y.ps_sample_shading && x.dual_source_blending == y.dual_source_blending &&
+		       x.object_primitive_id == y.object_primitive_id && x.alpha_blend_source == y.alpha_blend_source && x.ps_early_z == y.ps_early_z &&
+		       x.ps_execute_on_noop == y.ps_execute_on_noop && x.stage.program == y.stage.program && x.ps_single_sample == y.ps_single_sample;
+	};
+	const bool ne_info = !same_vs(state.vertex_info[0], job.vertex_info[0]) || (state.ps_active && !same_ps(state.ps_input_info, job.pixel_info));
+	if (ne_vs || ne_ps || ne_res || ne_info) {
+		FrameTiming::Add(C::PipeShadowNeN);
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1) < 16) {
+			std::fprintf(stderr, "[cp-pipe] shadow ne: vs=%d ps=%d res=%d info=%d\n", ne_vs, ne_ps, ne_res, ne_info);
+			std::fflush(stderr);
+		}
+	}
+}
+
 static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
                            uint32_t color_output_mask, DrawRenderState& state) {
 	auto& ctx    = buffer.GetRegisters();
@@ -954,15 +1093,7 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 	state.ps_input_info = {};
 	std::array<Prospero::ColorComponentMapping, RENDER_COLOR_ATTACHMENTS_MAX>
 	    target_export_mapping {};
-	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
-		const auto& rt = ctx.GetRenderTarget(slot);
-		if ((color_output_mask & (1u << slot)) != 0 && rt.base.addr != 0) {
-			target_export_mapping[slot] =
-			    TextureGetRenderTargetFormat(rt.info.format, rt.info.channel_type,
-			                                 rt.info.channel_order)
-			        .export_mapping;
-		}
-	}
+	FillExportMapping(ctx, color_output_mask, target_export_mapping);
 	// Centroid equals center only when every active attachment has one sample.
 	bool single_sample = true;
 	for (uint32_t i = 0; i < state.color_count; ++i) {
@@ -977,10 +1108,22 @@ static void RefreshShaders(CommandBuffer& buffer, const DrawCallInfo& draw,
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "GetGraphicsPrograms");
 	}
-	state.programs = pipeline_cache.GetGraphicsPrograms(
-	    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
-	    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info,
-	    single_sample);
+	// S479 (KYTY_CP_PIPE): the programs of a deferred draw were computed by a worker on the registers the draw was parsed with.
+	CpPipe::GfpJob* const job      = CpPipe::CurrentJob();
+	const bool            job_used = job != nullptr && CpPipe::JoinJob(*job) && job->ps_active == state.ps_active && state.color_count == 0 && !state.depth_info.image_id;
+	if (job_used && CpPipe::EnvMode() == CpPipe::Mode::On) {
+		state.programs         = job->programs;
+		state.vertex_info[0]   = job->vertex_info[0];
+		state.ps_input_info    = job->pixel_info;
+		FrameTiming::Add(FrameTiming::Counter::PipeUsedN);
+	} else {
+		if (job != nullptr && !job_used) FrameTiming::Add(FrameTiming::Counter::PipeFallbackN);
+		state.programs = pipeline_cache.GetGraphicsPrograms(
+		    vertex_shader_info, pixel_shader_info, shader_regs, ctx, buffer.GetUserConfig(),
+		    target_export_mapping, state.ps_active, state.vertex_info, state.ps_input_info,
+		    single_sample);
+		if (job_used) CompareWithJob(state, *job);
+	}
 	if (!state.programs.vertex[0]) {
 		// PrepareDrawRenderState() checks this right after calling us and skips the draw; bail out
 		// here too since state.ps_input_info was left unpopulated and is not safe to dereference.

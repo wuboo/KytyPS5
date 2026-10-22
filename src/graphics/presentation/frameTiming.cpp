@@ -1006,7 +1006,20 @@ void OnQueueSubmit() {
 	g_submits.fetch_add(1, std::memory_order_relaxed);
 }
 
+namespace {
+thread_local bool t_thread_mute = false; // S479: a pipeline worker's timers would add its time to the CP's columns
+}
+
+void SetThreadMute(bool mute) {
+	t_thread_mute = mute;
+}
+
 void Add(Counter counter, uint64_t value) {
+	if (t_thread_mute) return;
+	g_counters[static_cast<size_t>(counter)].fetch_add(value, std::memory_order_relaxed);
+}
+
+void AddAlways(Counter counter, uint64_t value) {
 	g_counters[static_cast<size_t>(counter)].fetch_add(value, std::memory_order_relaxed);
 }
 

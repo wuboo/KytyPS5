@@ -130,6 +130,20 @@ public:
 		[[nodiscard]] uint32_t VertexStageCount() const { return vertex[1] ? 3u : 1u; }
 	};
 
+	// S479 (KYTY_CP_PIPE): while one of these lives on a thread, GetGraphicsPrograms on that thread is a pipeline worker's: it keeps a private snapshot / specialization
+	// per shader (the shared ones are never written), reads the guest's backing without draining the GPU and without touching the guest's addresses, never compiles or
+	// adds an entry (Failed() is set instead), and leaves the snapshot it used behind in the returned stage input; the caller copies it before the next call. Reset()
+	// before each call.
+	class OffThreadScope {
+	public:
+		OffThreadScope();
+		~OffThreadScope();
+		KYTY_CLASS_NO_COPY(OffThreadScope);
+		static void Reset();
+		[[nodiscard]] static bool Failed();
+		[[nodiscard]] static uint32_t FailReason(); // 0 none, 1 no entry / permutation / call source, 2 memo unusable, 3 shape (tess, object id, packed unorm), 4 mesh limits, 5 vertex table the CP would reject
+	};
+
 	GraphicsPrograms
 	GetGraphicsPrograms(const HW::VertexShaderInfo& vertex_regs,
 	                    const HW::PixelShaderInfo& pixel_regs, const HW::ShaderRegisters& sh,

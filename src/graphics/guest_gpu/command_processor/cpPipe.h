@@ -7,7 +7,7 @@
 //
 // Mutants (WILL_FAIL, tests/CpPipeTests.cpp): KYTY_CPPIPE_MUTANT_SIGNAL_AT_PARSE (signals run at parse), KYTY_CPPIPE_MUTANT_VIRTUAL_WAIT_IGNORES_MASK,
 // KYTY_CPPIPE_MUTANT_DRAIN_SKIPS_UNKNOWN (an unknown opcode runs inline without a drain), KYTY_CPPIPE_MUTANT_WORKER_WRITES_CP (the CP-state gate lets a worker
-// through), KYTY_CPPIPE_MUTANT_RETIRE_ALL (retiring one FIFO item forgets every pending write).
+// through), KYTY_CPPIPE_MUTANT_RETIRE_ALL (retiring one FIFO item forgets every pending write), KYTY_CPPIPE_MUTANT_OVERLAP_IGNORED (a table read ignores the pending writes).
 
 #include "graphics/guest_gpu/pm4.h"
 
@@ -27,6 +27,12 @@ inline Mode ParseMode(const char* text) {
 	if (std::strcmp(text, "1") == 0) return Mode::On;
 	if (std::strcmp(text, "shadow") == 0) return Mode::Shadow;
 	return Mode::Off;
+}
+
+// KYTY_CP_PIPE (read once). Off: the old path, byte for byte.
+inline Mode EnvMode() {
+	static const Mode mode = ParseMode(std::getenv("KYTY_CP_PIPE"));
+	return mode;
 }
 
 // What the front does with a packet.
@@ -56,6 +62,9 @@ inline OpClass Classify(uint32_t opcode, uint32_t r, uint32_t payload0, uint32_t
 		case IT_SET_SH_REG:
 		case IT_SET_UCONFIG_REG:
 		case IT_SET_UCONFIG_REG_INDEX:
+		case IT_SET_SH_REG_INDIRECT:
+		case IT_SET_UCONFIG_REG_INDIRECT:
+		case IT_SET_CONTEXT_REG_INDIRECT: // they read a table of (offset, value) pairs from guest memory: ReadsIndirectTable tells the front where
 		case IT_PFP_SYNC_ME:
 		case IT_ACQUIRE_MEM:
 		case IT_INCREMENT_CE_COUNTER:
@@ -114,6 +123,18 @@ inline OpClass Classify(uint32_t opcode, uint32_t r, uint32_t payload0, uint32_t
 #else
 	return OpClass::Drain;
 #endif
+}
+
+// The packets that set registers from a table in guest memory. The front reads the table at parse time, so a write still waiting in the FIFO must not touch it.
+inline bool ReadsIndirectTable(uint32_t opcode) {
+	return opcode == Pm4::IT_SET_SH_REG_INDIRECT || opcode == Pm4::IT_SET_UCONFIG_REG_INDIRECT || opcode == Pm4::IT_SET_CONTEXT_REG_INDIRECT;
+}
+
+// payload: [0] = address low (dword aligned), [1] = address high, [3] & 0x3fff = number of (offset, value) pairs.
+inline bool IndirectTableRange(const uint32_t* payload, uint64_t* address, uint64_t* size) {
+	*address = (static_cast<uint64_t>(payload[0]) & 0xfffffffcu) | (static_cast<uint64_t>(payload[1]) << 32u);
+	*size    = static_cast<uint64_t>(payload[3] & 0x3fffu) * 8u;
+	return *size != 0;
 }
 
 // A draw that goes to a worker (the rest of the Draw class runs through the FIFO without a job).
@@ -183,6 +204,18 @@ public:
 			return Verdict::Unknown;
 		}
 		return Verdict::NoPending;
+	}
+
+	// True when some write in the FIFO touches the range.
+	[[nodiscard]] bool Overlaps(uint64_t address, uint64_t size) const {
+#ifdef KYTY_CPPIPE_MUTANT_OVERLAP_IGNORED
+		(void)address;
+		(void)size;
+		return false;
+#else
+		uint64_t unused = 0;
+		return Resolve(address, size, &unused) != Verdict::NoPending;
+#endif
 	}
 
 	// The FIFO item `seq` has run: its writes are in guest memory now.

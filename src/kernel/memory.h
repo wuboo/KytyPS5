@@ -147,6 +147,10 @@ bool                   TryReadBufferBackingPass(uint64_t vaddr, void* data, uint
 // is remembered as quiet (the answer "not GPU-dirty" without a query).
 bool                   TryReadBufferBackingFast(uint64_t vaddr, void* data, uint64_t size, bool* hit);
 bool                   SpecPageQuietCached(uint64_t vaddr, uint64_t size);
+// S479 (KYTY_CP_PIPE): TryReadBacking for the pipeline workers, through a per-thread page cache (same bytes). SetWorkerReadLog: the pages the calling thread reads
+// are appended to *log (nullptr: not logged).
+bool                   TryReadBackingWorker(uint64_t vaddr, void* data, uint64_t size);
+void                   SetWorkerReadLog(std::vector<uint64_t>* log);
 // True when the GPU thread still has unflushed bytes for this range (S419, KYTY_CP_READ_BACKING != 0: or a GPU->host copy of it is not published yet).
 // Safe off that thread: returns false.
 bool                   QueryShaderGpuDirty(uint64_t vaddr, uint64_t size);

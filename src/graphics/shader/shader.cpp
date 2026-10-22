@@ -16,6 +16,7 @@
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "graphics/shader/shaderCost.h"
+#include "graphics/shader/scoutTableLog.h"
 #include "graphics/shader/shaderPrewarm.h"
 #include "graphics/shader/shaderPrewarm.h"
 #include "graphics/shader/shaderVertexMetadata.h"
@@ -113,7 +114,14 @@ static ShaderParams GetShaderParams(uint64_t shader_addr, uint64_t hash,
 	return params;
 }
 
-static void ShaderDetectBuffers(ShaderVertexInputInfo& info) {
+// S471: on the scout worker (a table log is active) a table the CP would reject is not fatal: the call fails and the CP computes the draw.
+static bool ScoutBail(bool condition) {
+	if (!condition || ScoutTableLog::Active() == nullptr) return false;
+	ScoutTableLog::NoteUnsafe();
+	return true;
+}
+
+static bool ShaderDetectBuffers(ShaderVertexInputInfo& info) {
 	KYTY_PROFILER_FUNCTION();
 
 	info.buffers_num = 0;
@@ -136,6 +144,7 @@ static void ShaderDetectBuffers(ShaderVertexInputInfo& info) {
 				uint64_t offset2 = b.addr - base;
 
 				if (offset1 < stride && offset2 < stride) {
+					if (ScoutBail(b.num_records != r.NumRecords())) return false;
 					EXIT_NOT_IMPLEMENTED(b.num_records != r.NumRecords());
 					b.addr = base;
 					break;
@@ -144,6 +153,7 @@ static void ShaderDetectBuffers(ShaderVertexInputInfo& info) {
 		}
 
 		if (bi == info.buffers_num) {
+			if (ScoutBail(info.buffers_num >= ShaderVertexInputInfo::RES_MAX)) return false;
 			EXIT_NOT_IMPLEMENTED(info.buffers_num >= ShaderVertexInputInfo::RES_MAX);
 			info.buffers[bi] = {.addr = r.Base48(),
 			                    .stride = r.Stride(),
@@ -153,13 +163,15 @@ static void ShaderDetectBuffers(ShaderVertexInputInfo& info) {
 		}
 		destination.buffer_index = bi;
 	}
+	return true;
 }
 
-static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
+static bool ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
                                        std::span<const ShaderSemantic> input_semantics,
                                        const uint32_t* attrib, const uint32_t* buffer) {
 	KYTY_PROFILER_FUNCTION();
 
+	if (ScoutBail(attrib == nullptr || buffer == nullptr)) return false;
 	EXIT_IF(attrib == nullptr || buffer == nullptr);
 
 	const bool debug_dump = Config::GraphicsDebugDumpEnabled();
@@ -167,6 +179,7 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 	for (uint32_t i = 0; i < input_semantics.size(); i++) {
 		const auto& in = input_semantics[i];
 
+		if (ScoutBail(in.static_vb_index == 1 || in.static_attribute == 1)) return false;
 		EXIT_NOT_IMPLEMENTED(in.static_vb_index == 1 || in.static_attribute == 1);
 
 		uint32_t reg  = in.hardware_mapping;
@@ -183,10 +196,12 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 		uint32_t offset      = (attrib[in.semantic] >> 14u) & 0xfffu;
 		uint32_t fetch_index = (attrib[in.semantic] >> 26u) & 0x1u;
 
+		if (ScoutBail(index >= ShaderVertexInputInfo::RES_MAX)) return false;
 		EXIT_NOT_IMPLEMENTED(index >= ShaderVertexInputInfo::RES_MAX);
 
 		const auto* sharp = &buffer[index * 4];
 
+		if (ScoutBail(info.resources_num >= ShaderVertexInputInfo::RES_MAX)) return false;
 		EXIT_NOT_IMPLEMENTED(info.resources_num >= ShaderVertexInputInfo::RES_MAX);
 
 		auto& r           = info.resources[info.resources_num];
@@ -199,7 +214,9 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 		r.fields[1]       = sharp[1];
 		r.fields[2]       = sharp[2];
 		r.fields[3]       = sharp[3];
+		if (ScoutBail(r.AddTid())) return false;
 		EXIT_NOT_IMPLEMENTED(r.AddTid());
+		if (ScoutBail(r.SwizzleEnabled())) return false;
 		EXIT_NOT_IMPLEMENTED(r.SwizzleEnabled());
 		if (format != Prospero::VertexAttribFormat::kInvalid) {
 			const auto                   format_raw    = static_cast<uint32_t>(format);
@@ -218,6 +235,7 @@ static void ShaderApplyAttribSemantics(ShaderVertexInputInfo& info,
 
 		info.resources_num++;
 	}
+	return true;
 }
 
 static uint32_t ShaderCalcPsSystemInputBase(const HW::ShaderRegisters& regs) {
@@ -316,6 +334,10 @@ static bool ShaderGetStaticVertexInputInfo(uint64_t shader_addr, const HW::UserS
 		    (static_cast<uint64_t>(user_sgpr.value[metadata.vertex_buffer_reg + 1]) << 32u));
 
 		if (attrib == nullptr || buffer == nullptr) {
+			if (ScoutTableLog::Active() != nullptr) { // S471: not fatal on the scout worker
+				ScoutTableLog::NoteUnsafe();
+				return true;
+			}
 			LOGF("ShaderGetVertexInputInfo(): null vertex table pointer shader=0x%016" PRIx64 "\n",
 			     shader_addr);
 			return false;
@@ -323,6 +345,31 @@ static bool ShaderGetStaticVertexInputInfo(uint64_t shader_addr, const HW::UserS
 		// S419 (KYTY_CP_READ_BACKING): the two tables are read through CpGuestRead (the backing when the bytes are current, no fault); 0 keeps the pointers.
 		std::array<uint32_t, 256>                           attrib_copy;
 		std::array<uint32_t, ShaderVertexInputInfo::RES_MAX * 4> buffer_copy;
+		if (ScoutTableLog::Active() != nullptr) {
+			// S471: the scout worker reads the tables from the backing only. CpGuestRead falls back to the guest pointer, and a raw read of a GPU-tracked page
+			// faults into the fault handler, which waits for the GPU thread while this thread holds the program-cache lock that thread wants (deadlock, S471 sh6).
+			// The CP reads the tables again before it uses the result (cpScoutValidate.h).
+			uint32_t attrib_dwords = 0;
+			for (const auto& in: metadata.input_semantics) attrib_dwords = std::max<uint32_t>(attrib_dwords, in.semantic + 1u);
+			uint32_t buffer_dwords = 0;
+			bool     ok            = attrib_dwords != 0 && attrib_dwords <= attrib_copy.size() &&
+			           LibKernel::Memory::TryReadBackingWorker(reinterpret_cast<uint64_t>(attrib), attrib_copy.data(), attrib_dwords * sizeof(uint32_t));
+			if (ok) {
+				ScoutTableLog::Note(reinterpret_cast<uint64_t>(attrib), attrib_dwords, static_cast<uint32_t>(CpReadBacking::Site::VertexAttribTable), attrib_copy.data());
+				for (const auto& in: metadata.input_semantics) {
+					const uint32_t index = attrib_copy[in.semantic] & 0x1fu;
+					if (index < ShaderVertexInputInfo::RES_MAX) buffer_dwords = std::max(buffer_dwords, (index + 1u) * 4u);
+				}
+				ok = buffer_dwords != 0 && LibKernel::Memory::TryReadBackingWorker(reinterpret_cast<uint64_t>(buffer), buffer_copy.data(), buffer_dwords * sizeof(uint32_t));
+			}
+			if (!ok) {
+				ScoutTableLog::NoteUnsafe();
+				return true; // the caller sees the flag
+			}
+			ScoutTableLog::Note(reinterpret_cast<uint64_t>(buffer), buffer_dwords, static_cast<uint32_t>(CpReadBacking::Site::VertexBufferTable), buffer_copy.data());
+			if (!ShaderApplyAttribSemantics(info, metadata.input_semantics, attrib_copy.data(), buffer_copy.data()) || !ShaderDetectBuffers(info)) return true;
+			return true;
+		}
 		if (CpReadBacking::EnvMode() != CpReadBacking::Mode::Off) {
 			uint32_t attrib_dwords = 0;
 			for (const auto& in: metadata.input_semantics) {
@@ -331,6 +378,7 @@ static bool ShaderGetStaticVertexInputInfo(uint64_t shader_addr, const HW::UserS
 			if (attrib_dwords != 0) {
 				LibKernel::Memory::CpGuestRead(CpReadBacking::Site::VertexAttribTable, reinterpret_cast<uint64_t>(attrib),
 				                               attrib_copy.data(), attrib_dwords * sizeof(uint32_t));
+				ScoutTableLog::Note(reinterpret_cast<uint64_t>(attrib), attrib_dwords, static_cast<uint32_t>(CpReadBacking::Site::VertexAttribTable), attrib_copy.data()); // S471
 				uint32_t buffer_dwords = 0;
 				for (const auto& in: metadata.input_semantics) {
 					const uint32_t index = attrib_copy[in.semantic] & 0x1fu;
@@ -339,13 +387,16 @@ static bool ShaderGetStaticVertexInputInfo(uint64_t shader_addr, const HW::UserS
 				if (buffer_dwords != 0) {
 					LibKernel::Memory::CpGuestRead(CpReadBacking::Site::VertexBufferTable, reinterpret_cast<uint64_t>(buffer),
 					                               buffer_copy.data(), buffer_dwords * sizeof(uint32_t));
+					ScoutTableLog::Note(reinterpret_cast<uint64_t>(buffer), buffer_dwords, static_cast<uint32_t>(CpReadBacking::Site::VertexBufferTable), buffer_copy.data()); // S471
 					attrib = attrib_copy.data();
 					buffer = buffer_copy.data();
 				}
 			}
 		}
-		ShaderApplyAttribSemantics(info, metadata.input_semantics, attrib, buffer);
-		ShaderDetectBuffers(info);
+		// S471: tables read straight from the guest pointers (or only partly copied) cannot be replayed by the CP.
+		if (!metadata.input_semantics.empty() && (attrib != attrib_copy.data() || buffer != buffer_copy.data())) ScoutTableLog::NoteUnsafe();
+		(void)ShaderApplyAttribSemantics(info, metadata.input_semantics, attrib, buffer);
+		(void)ShaderDetectBuffers(info);
 	}
 	return true;
 }
@@ -569,6 +620,10 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 	if (!merged && !native_ngg) {
 		if (!ShaderGetStaticVertexInputInfo(regs.es_regs.data_addr, regs.gs_user_sgpr,
 		                                    regs.gs_regs.rsrc2.user_sgpr, sh, data, info)) {
+			if (ScoutTableLog::Active() != nullptr) { // S471: the scout worker leaves it to the CP
+				ScoutTableLog::NoteUnsafe();
+				return params;
+			}
 			EXIT("failed to prepare vertex shader program\n");
 		}
 		info.wave_size = (context.GetShaderStages() & 0x00400000u) != 0 ? 32u : 64u;
