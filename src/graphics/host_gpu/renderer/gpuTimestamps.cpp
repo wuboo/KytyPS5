@@ -30,6 +30,7 @@ void DiagPrintf(const char* fmt, A... args) {
 struct Pending {
 	int32_t  slot;
 	uint64_t tick;
+	uint8_t  reason;
 };
 
 struct State {
@@ -48,6 +49,7 @@ struct State {
 	std::vector<uint64_t>         bounds;
 	size_t                        next_bound = 0;
 	uint32_t                      poll_tick = 0, raw_logged = 0;
+	std::array<uint64_t, 12>      reason_n {}, reason_ns {}, long_n {}, long_ns {}; // by GpuDone::SubmitReason (S477 D3b): all submits / submits over 3 ms
 };
 
 State& S() {
@@ -106,6 +108,18 @@ void Dump(State& s, uint64_t flip) {
 		                     static_cast<double>(s.hist_ns[i]) / fl / 1e6);
 	}
 	DiagPrintf("%s\n", line);
+	static const char* const rn[] = {"Drain", "LazyMax", "Lazy1ms", "LazyIdle", "Eager", "EagerPass", "EagerMid", "Eager3Mid", "Eager3Flush", "LowWater", "Flip", "Other"};
+	int rl = std::snprintf(line, sizeof(line), "[gpu-ts] by submit reason (all n/flip|ms/flip ; over 3 ms n/flip|ms/flip):");
+	for (size_t i = 0; i < 12 && rl > 0 && static_cast<size_t>(rl) < sizeof(line); i++) {
+		if (s.reason_n[i] == 0) continue;
+		rl += std::snprintf(line + rl, sizeof(line) - static_cast<size_t>(rl), " %s=%.2f|%.2f;%.2f|%.2f", rn[i], static_cast<double>(s.reason_n[i]) / fl,
+		                    static_cast<double>(s.reason_ns[i]) / fl / 1e6, static_cast<double>(s.long_n[i]) / fl, static_cast<double>(s.long_ns[i]) / fl / 1e6);
+	}
+	DiagPrintf("%s\n", line);
+	s.reason_n.fill(0);
+	s.reason_ns.fill(0);
+	s.long_n.fill(0);
+	s.long_ns.fill(0);
 	s.hist_n.fill(0);
 	s.hist_ns.fill(0);
 	s.window_n = s.window_busy = s.window_idle = 0;
@@ -144,13 +158,13 @@ void OnEnd(GraphicContext&, vk::CommandBuffer buffer, int32_t slot) {
 	buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, s.pool, static_cast<uint32_t>(slot) * 2 + 1);
 }
 
-void OnSubmit(int32_t slot, uint64_t tick) {
+void OnSubmit(int32_t slot, uint64_t tick, uint8_t reason) {
 	if (slot < 0) return;
 	auto&           s = S();
 	std::lock_guard lock(s.mutex);
 	auto            it = s.pending.end();
 	while (it != s.pending.begin() && (it - 1)->tick > tick) --it;
-	s.pending.insert(it, Pending {slot, tick});
+	s.pending.insert(it, Pending {slot, tick, reason});
 }
 
 void Poll(GraphicContext& graphics, MasterSemaphore& master) {
@@ -193,6 +207,15 @@ void Poll(GraphicContext& graphics, MasterSemaphore& master) {
 		const auto b = Bucket(s.acc.sum_ns - before_sum);
 		s.hist_n[b]++;
 		s.hist_ns[b] += busy;
+		{
+			const size_t r = p.reason < 12 ? p.reason : 11;
+			s.reason_n[r]++;
+			s.reason_ns[r] += busy;
+			if (s.acc.sum_ns - before_sum > 3000000) {
+				s.long_n[r]++;
+				s.long_ns[r] += busy;
+			}
+		}
 		s.window_n++;
 		s.window_busy += s.acc.busy_ns - before_busy;
 		s.window_idle += s.acc.idle_ns - before_idle;

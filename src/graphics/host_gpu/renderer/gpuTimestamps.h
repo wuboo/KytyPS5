@@ -59,7 +59,7 @@ inline uint32_t Bucket(uint64_t ns) {
 // Called while the buffer is being recorded; Begin returns the slot (or -1: disabled / ring full).
 [[nodiscard]] int32_t OnBegin(GraphicContext& graphics, vk::CommandBuffer buffer);
 void                  OnEnd(GraphicContext& graphics, vk::CommandBuffer buffer, int32_t slot);
-void                  OnSubmit(int32_t slot, uint64_t tick);
+void                  OnSubmit(int32_t slot, uint64_t tick, uint8_t reason = 11);
 void                  Poll(GraphicContext& graphics, MasterSemaphore& master);
 
 } // namespace GpuTs

@@ -547,7 +547,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::QueueSubmits);
 	FrameTiming::OnQueueSubmit();
 	if (GpuTs::Enabled()) { // S477 D3 DIAG
-		GpuTs::OnSubmit(ts_slot, tick);
+		GpuTs::OnSubmit(ts_slot, tick, static_cast<uint8_t>(job.reason));
 		GpuTs::Poll(m_graphics, m_master);
 	}
 	if (SyncCensus::Enabled()) {
