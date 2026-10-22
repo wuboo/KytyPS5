@@ -119,7 +119,12 @@ uint32_t GetAmdPatchKinds() {
 }
 
 uint32_t GetVblankFrequency() {
-	return std::clamp(g_config->vblank_frequency, 30u, 360u);
+	// KYTY_VBLANK_HZ overrides --vblank-frequency, so a .bat that only sets environment variables can switch it.
+	static const uint32_t env_hz = [] {
+		const char* e = std::getenv("KYTY_VBLANK_HZ");
+		return (e != nullptr) ? static_cast<uint32_t>(std::strtoul(e, nullptr, 10)) : 0u;
+	}();
+	return std::clamp(env_hz != 0 ? env_hz : g_config->vblank_frequency, 30u, 360u);
 }
 
 uint32_t GetConsoleLanguage() {
