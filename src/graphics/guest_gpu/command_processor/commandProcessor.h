@@ -148,7 +148,7 @@ public:
 
 	// S479 (KYTY_CP_PIPE, cpPipe.cpp): the FIFO between the front (the PM4 parser) and the recorder (the handlers that draw and signal). Both run on the CP thread.
 	[[nodiscard]] bool PipeOn() const { return m_pipe != nullptr; }
-	void               PipeDrain(unsigned reason); // runs every item in the FIFO; reason: FrameTiming counter column offset (0 cls, 1 wait, 2 end)
+	void               PipeDrain(unsigned reason, uint32_t key); // runs every item in the FIFO; reason: 0 an opcode that must see the draws done, 1 wait, 2 end of stream; key: what for (diag histogram)
 	void             ProcessIndirectBuffer(std::span<const uint32_t> commands, bool chain);
 
 	void SetFlip(const FlipInfo& flip) { m_flip = flip; }

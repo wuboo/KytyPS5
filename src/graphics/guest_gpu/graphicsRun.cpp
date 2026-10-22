@@ -772,7 +772,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	while (!execution.m_buffer_stack.empty()) {
 		if (g_gpu_state != nullptr) {
 			// S479: a command from a guest thread (a fault readback, an unmap) must see every draw parsed before it, as it did when draws ran where they were parsed.
-			if (m_pipe != nullptr && g_gpu_state->m_pending_commands.load(std::memory_order_acquire) != 0) PipeDrain(0);
+			if (m_pipe != nullptr && g_gpu_state->m_pending_commands.load(std::memory_order_acquire) != 0) PipeDrain(0, 0x1f0);
 			CpPhases::Scope phase(CpPhases::Phase::Cmds);
 			g_gpu_state->ProcessCommands();
 		}
@@ -863,7 +863,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 				continue;
 			}
 			if (pipe_cls == CpPipe::OpClass::Drain) {
-				PipeDrain(0);
+				PipeDrain(0, opcode == Pm4::IT_NOP ? 256u + KYTY_PM4_R(packet_header) : opcode);
 			} else {
 				pipe_front = true;
 			}
@@ -923,7 +923,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			// not a batchable draw opcode, or it *is* one and decided for itself whether to defer);
 			// flush again before giving up the command buffer across a suspend/resume boundary
 			// that may span an arbitrary amount of real time.
-			PipeDrain(2); // S479
+			PipeDrain(2, 0x1f2); // S479
 			m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
 			if (RdHazard::Enabled()) RdHazard::AtCallEnd(); // S477 D2 DIAG
 			return;
@@ -940,7 +940,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			execution.m_next_buffer = {};
 		}
 	}
-	PipeDrain(2); // S479
+	PipeDrain(2, 0x1f2); // S479
 	// End of this PM4 stream (buffer stack drained without a suspend): nothing can observe a
 	// pending batch until the next Process() call, but that may run on a different command buffer
 	// entirely, so it must not still be pending here.

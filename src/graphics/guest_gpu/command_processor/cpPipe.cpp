@@ -7,6 +7,7 @@
 // CommandProcessor::Process is exactly what the old code left.
 
 #include "common/assert.h"
+#include "common/diagOut.h"
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/cpPipe.h"
@@ -210,10 +211,37 @@ void CommandProcessor::PipeExecuteFront() {
 	FrameTiming::Add(C::PipeExecNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
 }
 
-void CommandProcessor::PipeDrain(unsigned reason) {
+namespace {
+
+// KYTY_CP_PIPE diag: what cut the windows. Key = opcode (NOP: 256 + R), 0x1f0 = guest command, 0x1f1 = wait, 0x1f2 = end of stream; dumped every 500 flips to the diag file.
+std::atomic<uint64_t> g_drain_by_key[512];
+std::atomic<uint64_t> g_drain_items;
+std::atomic<uint64_t> g_dump_flip {0};
+
+void DumpDrainHistogram() {
+	const uint64_t flips = FrameTiming::GuestFlips();
+	uint64_t last = g_dump_flip.load(std::memory_order_relaxed);
+	if (flips < last + 500u || !g_dump_flip.compare_exchange_strong(last, flips)) return;
+	char line[160];
+	std::snprintf(line, sizeof(line), "[pipe-drain] flip=%" PRIu64 " since=%" PRIu64 " items=%" PRIu64 "\n", flips, last, g_drain_items.exchange(0));
+	Common::DiagOut::Write(line);
+	for (uint32_t key = 0; key < 512; key++) {
+		const uint64_t n = g_drain_by_key[key].exchange(0);
+		if (n == 0) continue;
+		std::snprintf(line, sizeof(line), "[pipe-drain]   key=0x%x n=%" PRIu64 " per_flip=%.2f\n", key, n, static_cast<double>(n) / static_cast<double>(flips - last));
+		Common::DiagOut::Write(line);
+	}
+}
+
+} // namespace
+
+void CommandProcessor::PipeDrain(unsigned reason, uint32_t key) {
 	using C = FrameTiming::Counter;
 	if (m_pipe == nullptr || m_pipe->executing || m_pipe->ring.Empty()) return;
 	FrameTiming::Add(reason == 0 ? C::PipeDrainClsN : (reason == 1 ? C::PipeDrainWaitN : C::PipeDrainEndN));
+	g_drain_by_key[key & 511u].fetch_add(1, std::memory_order_relaxed);
+	g_drain_items.fetch_add(m_pipe->ring.Size(), std::memory_order_relaxed);
+	DumpDrainHistogram();
 	while (!m_pipe->ring.Empty()) PipeExecuteFront();
 	m_pipe->pending.Clear();
 }
@@ -233,7 +261,7 @@ bool CommandProcessor::PipeWaitVirtual(uint64_t address, uint64_t size, uint32_t
 			break;
 		case CpPipe::PendingWrites::Verdict::Unknown: break;
 	}
-	PipeDrain(1);
+	PipeDrain(1, 0x1f1);
 	return false;
 }
 
