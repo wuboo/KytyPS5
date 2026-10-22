@@ -260,14 +260,22 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 				FrameTiming::Add(FrameTiming::Counter::RfOpDrawIndexIndirectWaitNs, wait_ns);
 			}
 			static std::atomic<uint64_t> logged {0};
-			if (RfOp::ShouldLog(logged.fetch_add(1, std::memory_order_relaxed), rf_event.flip)) {
+			// S486 DIAG: slow (>= 2 ms) faults of the landing phase always logged, to stdout (the bench runs with --printf-direction Silent).
+			static std::atomic<uint64_t> slow_logged {0};
+			const bool slow_landing = rf_event.wait_us >= 2000 && rf_event.flip >= 4400 && rf_event.flip <= 5300 && slow_logged.fetch_add(1, std::memory_order_relaxed) < 400;
+			if (slow_landing || RfOp::ShouldLog(logged.fetch_add(1, std::memory_order_relaxed), rf_event.flip)) {
 				const auto& ctx = RfOp::FaultCtxRef();
 				rf_event.pc_text = RfOp::ResolvePc(ctx.pc);
 				uint64_t stack_lo = 0, stack_hi = 0, frames[RfOp::kMaxFrames];
 				if (RfOp::CurrentStackBounds(&stack_lo, &stack_hi)) {
 					rf_event.bt_text = RfOp::FormatBacktrace(frames, RfOp::WalkFrames(ctx, stack_lo, stack_hi, frames));
 				}
-				LOGF("%s\n", RfOp::FormatLine(rf_event).c_str());
+				if (slow_landing) {
+					std::printf("%s\n", RfOp::FormatLine(rf_event).c_str());
+					std::fflush(stdout);
+				} else {
+					LOGF("%s\n", RfOp::FormatLine(rf_event).c_str());
+				}
 			}
 		}
 		if (!downloaded && access != PageFaultAccess::Execute) {
