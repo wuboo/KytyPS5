@@ -1301,7 +1301,7 @@ endforeach()
 add_executable(present_rect_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PresentRectTests.cpp")
 target_include_directories(present_rect_tests PRIVATE ${inc_headers})
 # S482 mutants (each must be caught, WILL_FAIL): flag ignored (always keep aspect); axes swapped.
-foreach(mutant IN ITEMS IGNORE_FLAG SWAP_AXES)
+foreach(mutant IN ITEMS IGNORE_FLAG SWAP_AXES KEY_CONSTANT)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(present_rect_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PresentRectTests.cpp")
 	target_include_directories(present_rect_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
@@ -1965,7 +1965,7 @@ if(BUILD_TESTING)
 			lod_stats_mutant_real_as_full lod_stats_mutant_no_slot lod_stats_mutant_unset_zero
 			cp_counters_mutant_native_swap cp_counters_mutant_no_clamp cp_counters_mutant_flag_any cp_counters_mutant_skip_ignored
 			frame_dump_flips_mutant_keep_zero frame_dump_flips_mutant_off_by_one
-			present_rect_mutant_ignore_flag present_rect_mutant_swap_axes
+			present_rect_mutant_ignore_flag present_rect_mutant_swap_axes present_rect_mutant_key_constant
 			depth_ro_union_mutant_ignore_dirty depth_ro_union_mutant_allow_general
 			desc_dyn_mutant_offset_in_key desc_dyn_mutant_no_gen desc_dyn_mutant_shadow_ignores_range
 			desc_assert_mutant_sample_never desc_assert_mutant_off_runs desc_assert_mutant_on_samples
@@ -2275,6 +2275,7 @@ if(BUILD_TESTING)
 		present_rect_tests
 		present_rect_mutant_ignore_flag_tests
 		present_rect_mutant_swap_axes_tests
+		present_rect_mutant_key_constant_tests
 		signal_census_tests
 		signal_census_mutant_sig_swap_tests
 		signal_census_mutant_main_always_tests

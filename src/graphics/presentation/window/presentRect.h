@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <cstdlib>
+#include <initializer_list>
 
 namespace Libs::Graphics {
 
@@ -52,6 +53,20 @@ inline PresentRect FitPresentRect(uint32_t src_w, uint32_t src_h, uint32_t dst_w
 		r.x = (static_cast<int32_t>(dst_w) - r.w) / 2;
 	}
 	return r;
+}
+
+// S484: identity of "bars cleared for this rectangle in this swapchain extent" (never 0, so 0 can mean "contents unknown").
+inline uint64_t PresentRectKey(const PresentRect& r, uint32_t dst_w, uint32_t dst_h) {
+	uint64_t k = 1469598103934665603ull;
+	for (const uint64_t v : {static_cast<uint64_t>(static_cast<uint32_t>(r.x)), static_cast<uint64_t>(static_cast<uint32_t>(r.y)),
+	                         static_cast<uint64_t>(static_cast<uint32_t>(r.w)), static_cast<uint64_t>(static_cast<uint32_t>(r.h)),
+	                         static_cast<uint64_t>(dst_w), static_cast<uint64_t>(dst_h)}) {
+		k = (k ^ v) * 1099511628211ull;
+	}
+#if defined(KYTY_PRESENTRECT_MUTANT_KEY_CONSTANT)
+	k = 1;
+#endif
+	return k == 0 ? 1 : k;
 }
 
 } // namespace Libs::Graphics

@@ -312,6 +312,8 @@ private:
 	std::vector<vk::ImageView>     m_image_views;
 	std::vector<vk::Semaphore>     m_image_acquired;
 	std::vector<uint64_t>          m_image_acquired_ticks;
+	// S484: per swapchain image, the key of the rectangle the black bars were last cleared for (0 = contents unknown / not cleared).
+	std::vector<uint64_t>          m_bars_key;
 	std::vector<vk::Semaphore>     m_render_complete;
 	std::unique_ptr<SystemOverlay> m_system_overlay;
 	vk::DescriptorSetLayout        m_overlay_descriptors = nullptr;
@@ -514,6 +516,7 @@ void Swapchain::Create() {
 	semaphore_info.sType = vk::StructureType::eSemaphoreCreateInfo;
 	m_image_acquired.resize(m_images.size());
 	m_image_acquired_ticks.assign(m_images.size(), 0);
+	m_bars_key.assign(m_images.size(), 0);
 	m_render_complete.resize(m_images.size());
 	for (size_t i = 0; i < m_images.size(); i++) {
 		RequireVulkanSuccess(
@@ -583,6 +586,7 @@ void Swapchain::Destroy() {
 	m_image_views.clear();
 	m_image_acquired.clear();
 	m_image_acquired_ticks.clear();
+	m_bars_key.clear();
 	m_render_complete.clear();
 }
 
@@ -788,10 +792,25 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 		                       vk::AccessFlagBits2::eShaderRead);
 	}
 
+	// S484 KYTY_KEEP_ASPECT=1: the bars are black from an earlier clear of this very image for the same rectangle, so the image keeps its
+	// contents (PRESENT_SRC -> TRANSFER_DST) and neither the per-frame full-image clear nor its barrier is recorded. Frames that draw an
+	// overlay write into the bars, so they invalidate the key.
+	static const bool keep_aspect = KeepAspectEnabled(std::getenv("KYTY_KEEP_ASPECT"));
+	PresentRect       fit {0, 0, static_cast<int32_t>(m_extent.width), static_cast<int32_t>(m_extent.height)};
+	if (source != nullptr) {
+		fit = FitPresentRect(source->image.extent.width, source->image.extent.height, m_extent.width, m_extent.height, keep_aspect);
+	}
+	const bool     has_bars  = fit.w != static_cast<int32_t>(m_extent.width) || fit.h != static_cast<int32_t>(m_extent.height);
+	const uint64_t bars_key  = has_bars ? PresentRectKey(fit, m_extent.width, m_extent.height) : 0;
+	const bool     bars_kept = has_bars && m_image_index < m_bars_key.size() && m_bars_key[m_image_index] == bars_key;
+	if (m_image_index < m_bars_key.size()) {
+		m_bars_key[m_image_index] = (has_bars && !draw_attachment) ? bars_key : 0;
+	}
+
 	vk::ImageMemoryBarrier to_transfer {};
 	to_transfer.sType                           = vk::StructureType::eImageMemoryBarrier;
 	to_transfer.dstAccessMask                   = vk::AccessFlagBits::eTransferWrite;
-	to_transfer.oldLayout                       = vk::ImageLayout::eUndefined;
+	to_transfer.oldLayout                       = bars_kept ? vk::ImageLayout::ePresentSrcKHR : vk::ImageLayout::eUndefined;
 	to_transfer.newLayout                       = vk::ImageLayout::eTransferDstOptimal;
 	to_transfer.srcQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
 	to_transfer.dstQueueFamilyIndex             = VK_QUEUE_FAMILY_IGNORED;
@@ -819,10 +838,8 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 		region.dstSubresource.mipLevel       = 0;
 		region.dstSubresource.baseArrayLayer = 0;
 		region.dstSubresource.layerCount     = 1;
-		// S482 KYTY_KEEP_ASPECT=1: centred rectangle of the source aspect; the rest of the swapchain image is cleared to black first.
-		static const bool keep_aspect = KeepAspectEnabled(std::getenv("KYTY_KEEP_ASPECT"));
-		const auto        fit = FitPresentRect(source->image.extent.width, source->image.extent.height, m_extent.width, m_extent.height, keep_aspect);
-		if (fit.w != static_cast<int32_t>(m_extent.width) || fit.h != static_cast<int32_t>(m_extent.height)) {
+		// S482 KYTY_KEEP_ASPECT=1: centred rectangle of the source aspect; the bars are cleared to black once per image and rectangle (S484).
+		if (has_bars && !bars_kept) {
 			const vk::ClearColorValue black {};
 			vk_command.clearColorImage(m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal, &black, 1,
 			                           &to_transfer.subresourceRange);
