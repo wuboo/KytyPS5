@@ -132,6 +132,24 @@ void SignalDecodeTests() {
 	Check(DecodeDmaData(d).address == 0x5000 && DecodeDmaData(d).size == 0x100, "DMA_DATA range");
 }
 
+void GateTests() {
+	Check(ParseSignalPolicy(nullptr) == SignalPolicy::Parse && ParseSignalPolicy("writes") == SignalPolicy::Writes && ParseSignalPolicy("fifo") == SignalPolicy::Fifo &&
+	          ParseSignalPolicy("x") == SignalPolicy::Parse,
+	      "signal policy parse");
+	GateTracker gate;
+	Check(gate.GateFor(SignalPolicy::Fifo, 1) == 0, "nothing pending: no gate");
+	gate.NoteItem(OpClass::Ordered, Pm4::IT_EVENT_WRITE, 3);      // a barrier
+	gate.NoteItem(OpClass::Draw, Pm4::IT_DRAW_INDEX_2, 4);        // a draw is no gate
+	Check(gate.GateFor(SignalPolicy::Parse, 1) == 0, "parse: never a gate");
+	Check(gate.GateFor(SignalPolicy::Writes, 1) == 0, "writes: a barrier is not a gate");
+	Check(gate.GateFor(SignalPolicy::Fifo, 1) == 3, "fifo: the barrier is the gate");
+	gate.NoteItem(OpClass::Ordered, Pm4::IT_WRITE_DATA, 5);
+	Check(gate.GateFor(SignalPolicy::Writes, 1) == 5 && gate.GateFor(SignalPolicy::Fifo, 1) == 5, "a CPU write gates writes and fifo");
+	Check(gate.GateFor(SignalPolicy::Writes, 6) == 0, "a gate that has run is gone");
+	gate.NoteItem(OpClass::Dispatch, Pm4::IT_DISPATCH_DIRECT, 7);
+	Check(gate.GateFor(SignalPolicy::Writes, 6) == 7, "a dispatch gates writes");
+}
+
 void RingTests() {
 	Ring ring(4);
 	Check(ring.Empty() && !ring.Full(), "ring: starts empty");
@@ -173,6 +191,7 @@ int main() {
 	PendingWritesTests();
 	SignalDecodeTests();
 	IndirectTableTests();
+	GateTests();
 	RingTests();
 	WorkerGateTests();
 	std::puts("CpPipeTests: ok");

@@ -49,6 +49,11 @@ size_t EnvWorkers() {
 	return workers;
 }
 
+CpPipe::SignalPolicy EnvSignals() {
+	static const CpPipe::SignalPolicy policy = CpPipe::ParseSignalPolicy(std::getenv("KYTY_CP_PIPE_SIGNALS"));
+	return policy;
+}
+
 bool EnvShard() {
 	static const bool shard = [] {
 		const char* text = std::getenv("KYTY_CP_PIPE_SHARD");
@@ -239,8 +244,22 @@ struct CommandProcessor::PipeState {
 	size_t                depth;
 	std::vector<PipeItem> items;
 	CpPipe::PendingWrites pending;
-	bool                  executing = false; // an item runs: the pipeline is transparent for the handlers it calls
+	CpPipe::GateTracker   gates;
+	struct Held {
+		CpPipe::GfpJob* job;
+		uint64_t        gate; // the FIFO item that has to run before the job may start
+	};
+	std::deque<Held> held;      // jobs waiting for a gate, oldest first (their gates only grow)
+	bool             executing = false; // an item runs: the pipeline is transparent for the handlers it calls
 };
+
+namespace {
+void SubmitJob(CpPipe::GfpJob* job) {
+	job->submit_ns = FrameTiming::SteadyNowNs();
+	job->state.store(CpPipe::GfpJob::Queued, std::memory_order_relaxed);
+	CpPipe::Workers::Instance().Submit(job, job->shard_key);
+}
+} // namespace
 
 CommandProcessor::CommandProcessor(RenderContext& renderer, int interrupt_event_id) : m_renderer(renderer), m_interrupt_event_id(interrupt_event_id) {}
 
@@ -250,7 +269,7 @@ void CommandProcessor::PipeInit() {
 	if (m_pipe != nullptr || IsAsyncComputeQueue() || EnvMode() == CpPipe::Mode::Off) return;
 	m_pipe = std::make_unique<PipeState>(EnvDepth());
 	if (EnvWorkers() != 0) CpPipe::Workers::Instance().Start(EnvWorkers(), EnvShard());
-	LOGF("[cp-pipe] on: mode=%s depth=%zu workers=%zu shard=%d\n", EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", m_pipe->depth, EnvWorkers(), EnvShard() ? 1 : 0);
+	LOGF("[cp-pipe] on: mode=%s depth=%zu workers=%zu shard=%d signals=%d\n", EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", m_pipe->depth, EnvWorkers(), EnvShard() ? 1 : 0, static_cast<int>(EnvSignals()));
 }
 
 void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const uint32_t* packet, uint32_t packet_dw) {
@@ -284,11 +303,17 @@ void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const u
 		it.job.ctx       = &it.job.ctx_copy;
 		it.job.sh        = &it.job.sh_copy;
 		it.job.ucfg      = &it.job.ucfg_copy;
-		it.job.submit_ns = FrameTiming::SteadyNowNs();
-		it.job.state.store(CpPipe::GfpJob::Queued, std::memory_order_relaxed);
-		CpPipe::Workers::Instance().Submit(&it.job, it.sh.GetPs().ps_regs.data_addr != 0 ? it.sh.GetPs().ps_regs.data_addr : it.sh.GetVs().es_regs.data_addr);
+		it.job.shard_key = it.sh.GetPs().ps_regs.data_addr != 0 ? it.sh.GetPs().ps_regs.data_addr : it.sh.GetVs().es_regs.data_addr;
+		const uint64_t gate = p.gates.GateFor(EnvSignals(), p.ring.FrontSeq());
+		if (gate != 0) {
+			it.job.state.store(CpPipe::GfpJob::Held, std::memory_order_relaxed);
+			p.held.push_back({&it.job, gate});
+		} else {
+			SubmitJob(&it.job);
+		}
 	}
 	const uint64_t seq = p.ring.Commit();
+	p.gates.NoteItem(cls, opcode, seq);
 	FrameTiming::Add(C::PipeEnqN);
 	FrameTiming::Add(cls == CpPipe::OpClass::Draw ? C::PipeDrawN : (cls == CpPipe::OpClass::Dispatch ? C::PipeDispatchN : C::PipeOrderedN));
 
@@ -364,6 +389,15 @@ void CommandProcessor::PipeExecuteFront() {
 		std::swap(m_dispatch_indirect_args_base_addr, it.dispatch_indirect_base);
 	}
 	{
+		if (it.job.state.load(std::memory_order_relaxed) == CpPipe::GfpJob::Held) { // not released yet (cannot happen: the gate is older): never wait for a job nobody runs
+			for (auto held = p.held.begin(); held != p.held.end(); ++held) {
+				if (held->job == &it.job) {
+					p.held.erase(held);
+					break;
+				}
+			}
+			SubmitJob(&it.job);
+		}
 		if (it.job.state.load(std::memory_order_relaxed) != CpPipe::GfpJob::Idle) CpPipe::CurrentJob() = &it.job;
 		CpPhases::Scope handler_phase(CpPhases::Phase::Handler);
 		if (CpPhases::Enabled()) {
@@ -399,6 +433,10 @@ void CommandProcessor::PipeExecuteFront() {
 	p.pending.Retire(seq);
 	p.ring.Pop();
 	p.executing = false;
+	while (!p.held.empty() && p.held.front().gate < p.ring.FrontSeq()) { // the gate has run: the job may read what it needs
+		SubmitJob(p.held.front().job);
+		p.held.pop_front();
+	}
 	FrameTiming::Add(C::PipeExecNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
 }
 

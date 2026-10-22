@@ -7,7 +7,7 @@
 //
 // Mutants (WILL_FAIL, tests/CpPipeTests.cpp): KYTY_CPPIPE_MUTANT_SIGNAL_AT_PARSE (signals run at parse), KYTY_CPPIPE_MUTANT_VIRTUAL_WAIT_IGNORES_MASK,
 // KYTY_CPPIPE_MUTANT_DRAIN_SKIPS_UNKNOWN (an unknown opcode runs inline without a drain), KYTY_CPPIPE_MUTANT_WORKER_WRITES_CP (the CP-state gate lets a worker
-// through), KYTY_CPPIPE_MUTANT_RETIRE_ALL (retiring one FIFO item forgets every pending write), KYTY_CPPIPE_MUTANT_OVERLAP_IGNORED (a table read ignores the pending writes).
+// through), KYTY_CPPIPE_MUTANT_RETIRE_ALL (retiring one FIFO item forgets every pending write), KYTY_CPPIPE_MUTANT_OVERLAP_IGNORED (a table read ignores the pending writes), KYTY_CPPIPE_MUTANT_GATE_IGNORED (a job starts before the writes it must not read ahead of).
 
 #include "graphics/guest_gpu/pm4.h"
 
@@ -381,6 +381,44 @@ inline WriteRange DecodeDmaData(const uint32_t* payload) {
 inline WriteRange DecodeCopyData(const uint32_t* payload) {
 	return {payload[3] | (static_cast<uint64_t>(payload[4]) << 32u), ((payload[0] >> 16u) & 0x1u) != 0 ? 8u : 4u};
 }
+
+
+// KYTY_CP_PIPE_SIGNALS: how far a worker may read ahead of the writes still waiting in the FIFO. parse (default): as far as it likes (S477 D2: the bytes a draw reads
+// did not change between the parse and the end of the call, 65 million reads). writes: a draw's job starts only after the CPU writes and dispatches before it have run.
+// fifo: only after every ordered item before it (signals, barriers, flips included).
+enum class SignalPolicy : uint8_t { Parse, Writes, Fifo };
+
+inline SignalPolicy ParseSignalPolicy(const char* text) {
+	if (text == nullptr) return SignalPolicy::Parse;
+	if (std::strcmp(text, "writes") == 0) return SignalPolicy::Writes;
+	if (std::strcmp(text, "fifo") == 0) return SignalPolicy::Fifo;
+	return SignalPolicy::Parse;
+}
+
+// The newest FIFO item a later job must wait for, per policy. Item sequence numbers come from Ring::Commit.
+class GateTracker {
+public:
+	void NoteItem(OpClass cls, uint32_t opcode, uint64_t seq) {
+		if (cls == OpClass::Dispatch || opcode == Pm4::IT_WRITE_DATA || opcode == Pm4::IT_DMA_DATA || opcode == Pm4::IT_COPY_DATA) m_writes = seq;
+		if (cls == OpClass::Dispatch || cls == OpClass::Ordered) m_all = seq;
+	}
+
+	// 0: the job may start now. Otherwise the sequence number of the item that has to run first (it is still in the FIFO: seq >= front_seq).
+	[[nodiscard]] uint64_t GateFor(SignalPolicy policy, uint64_t front_seq) const {
+#ifdef KYTY_CPPIPE_MUTANT_GATE_IGNORED
+		(void)policy;
+		(void)front_seq;
+		return 0;
+#else
+		const uint64_t gate = policy == SignalPolicy::Fifo ? m_all : (policy == SignalPolicy::Writes ? m_writes : 0u);
+		return gate >= front_seq ? gate : 0u;
+#endif
+	}
+
+private:
+	uint64_t m_writes = 0;
+	uint64_t m_all    = 0;
+};
 
 } // namespace Libs::Graphics::CpPipe
 

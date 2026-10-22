@@ -18,7 +18,7 @@
 namespace Libs::Graphics::CpPipe {
 
 struct GfpJob {
-	enum : uint8_t { Idle, Queued, Done };
+	enum : uint8_t { Idle, Queued, Done, Held }; // Held: parsed, not handed to a worker yet (KYTY_CP_PIPE_SIGNALS)
 
 	std::atomic<uint8_t> state {Idle};
 
@@ -44,6 +44,7 @@ struct GfpJob {
 	std::vector<uint64_t>                  pages; // 4 KiB pages of guest memory the worker read, sorted and unique
 	int64_t                                worker_ns = 0;
 	int64_t                                submit_ns = 0;
+	uint64_t                               shard_key = 0;
 };
 
 // The worker's body (renderDraw.cpp: it needs the draw's own register decoding).
