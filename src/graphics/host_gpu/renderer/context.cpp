@@ -48,7 +48,7 @@ void CommandBuffer::Begin() {
 	m_recorded       = false;
 	m_t_first_rec    = 0;
 	m_reopen_if_same = false;
-	m_ts_slot        = GpuTs::OnBegin(m_graphics, buffer); // S477 D3 DIAG
+	m_ts_slot        = GpuTs::OnBegin(m_graphics, buffer, m_ts_stats); // S477 D3 DIAG
 }
 
 void CommandBuffer::End() const {
@@ -64,6 +64,8 @@ void CommandBuffer::End() const {
 void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0, uint32_t arg1,
                                  uint32_t arg2, uint32_t arg3, uint64_t arg4) {
 	m_debug_op        = op;
+	if (op == static_cast<uint32_t>(CommandBufferDebugOp::DispatchDirect) || op == static_cast<uint32_t>(CommandBufferDebugOp::DispatchIndirect)) m_ts_stats.disp++; // S478 DIAG
+	else m_ts_stats.draws++;
 	m_debug_submit_id = submit_id;
 	m_debug_arg0      = arg0;
 	m_debug_arg1      = arg1;
@@ -132,6 +134,12 @@ void CommandBuffer::BeginRendering(const RenderState& wanted) const {
 	rendering.pColorAttachments    = colors.data();
 	rendering.pDepthAttachment     = depth_stencil.has_depth ? &depth : nullptr;
 	rendering.pStencilAttachment   = depth_stencil.has_stencil ? &stencil : nullptr;
+	if (m_ts_slot >= 0) { // S478 DIAG
+		const auto& ds = state.depth_stencil_attachment;
+		bool        clear = ds.depth_clear || ds.stencil_clear;
+		for (uint32_t i = 0; i < state.num_color_attachments; i++) clear = clear || state.color_attachments[i].is_clear;
+		GpuTs::OnPassBegin(Handle(), m_ts_slot, m_ts_stats, state.width, state.height, state.num_color_attachments, (ds.has_depth ? 1u : 0u) | (clear ? 2u : 0u));
+	}
 	{
 		static std::atomic<uint32_t> pass_id {0};
 		GpuLabel::With(
@@ -148,6 +156,7 @@ void CommandBuffer::EndRendering() const {
 	}
 	m_strip_clears = false; // S328: a closed pass ends the reopen
 	Handle().endRendering();
+	if (m_ts_slot >= 0) GpuTs::OnPassEnd(Handle(), m_ts_slot, m_ts_stats); // S478 DIAG
 	if (m_note_pass_end) {
 		m_note_pass_end = false;
 		m_pass_end_ns   = FrameTiming::SteadyNowNs();

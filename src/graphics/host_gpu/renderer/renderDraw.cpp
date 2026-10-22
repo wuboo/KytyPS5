@@ -2388,6 +2388,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 	auto* const igpu = args.indirect_gpu; // S404: KYTY_INDIRECT_GPU request (placeholder counts with mode On)
 	const bool  igpu_on = igpu != nullptr && igpu->mode == IndirectGpu::Mode::On;
 	FrameTiming::Add(FrameTiming::Counter::Draws);
+	GpuTs::CpDelay(); // S478 DIAG (KYTY_DIAG_CP_DELAY_NS)
 	{
 		KYTY_CP_SITE(DrawEagerSplit);
 		m_context.GetCommandScheduler().MaybeEagerSplit();
@@ -2570,6 +2571,7 @@ void RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 void RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const DrawAutoArgs& args) {
 	KYTY_PROFILER_FUNCTION();
 	FrameTiming::Add(FrameTiming::Counter::Draws);
+	GpuTs::CpDelay(); // S478 DIAG (KYTY_DIAG_CP_DELAY_NS)
 	{
 		KYTY_CP_SITE(DrawEagerSplit);
 		m_context.GetCommandScheduler().MaybeEagerSplit();

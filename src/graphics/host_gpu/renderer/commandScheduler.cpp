@@ -517,6 +517,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	job.first_seg       = first_after_drain;
 	job.t_first_rec     = t_first_rec; // S410
 	const int32_t ts_slot = m_command.m_ts_slot; // S477 D3 DIAG
+	const GpuTs::BufStats ts_stats = m_command.m_ts_stats; // S478 DIAG
 	m_command.m_ts_slot   = -1;
 	job.reason          = m_next_reason;
 	m_next_reason       = GpuDone::SubmitReason::Other;
@@ -547,7 +548,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::QueueSubmits);
 	FrameTiming::OnQueueSubmit();
 	if (GpuTs::Enabled()) { // S477 D3 DIAG
-		GpuTs::OnSubmit(ts_slot, tick, static_cast<uint8_t>(job.reason));
+		GpuTs::OnSubmit(ts_slot, tick, static_cast<uint8_t>(job.reason), ts_stats, job.debug_op);
 		GpuTs::Poll(m_graphics, m_master);
 	}
 	if (SyncCensus::Enabled()) {

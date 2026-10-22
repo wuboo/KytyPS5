@@ -671,8 +671,16 @@ void EnsureWorker() {
 
 } // namespace
 
+// S478 DIAG (KYTY_SCOUT_NOWAIT=1): the worker walks and computes as in ON, but CP neither waits for it nor uses its answers (Take = miss at once; Begin skips a buffer while
+// the worker is still on the previous one): the worker's activity without the coupling to CP.
+static bool NoWait() {
+	static const bool v = [] { const char* e = std::getenv("KYTY_SCOUT_NOWAIT"); return e != nullptr && e[0] == '1'; }();
+	return v;
+}
+
 void Begin(CommandProcessor& cp, PipelineCache& cache, std::span<const uint32_t> commands) {
 	if (Current() == Mode::Off || g_dead.load()) return;
+	if (NoWait() && g_started && !g_live.done.load(std::memory_order_acquire)) return;
 	FrameTiming::Add(FrameTiming::Counter::ScoutBeginN);
 	g_dbg_tick.fetch_add(1, std::memory_order_relaxed);
 	EnsureWorker();
@@ -714,6 +722,7 @@ TakeKind Take(CommandBuffer& buffer, Prepared& out) {
 	if (Current() == Mode::Off || g_dead.load()) return TakeKind::Miss;
 	using C = FrameTiming::Counter;
 	FrameTiming::Add(C::ScoutTakeN);
+	if (NoWait()) return TakeKind::Miss; // S478 DIAG
 	constexpr uint32_t kWindow = 8;
 	Slot*              cand[kWindow] {};
 	uint32_t           n       = 0;

@@ -23,6 +23,24 @@ namespace GpuTs {
 
 constexpr uint32_t kSlots = 256;
 
+// S478 DIAG (same switch KYTY_GPU_TIMESTAMPS=1): what a command buffer holds (draws, dispatches, render passes with their size) and the GPU time of every pass
+// (a BOTTOM_OF_PIPE timestamp before BeginRendering and after EndRendering, 2 queries per pass, at most kMaxPass passes) and of the clock probe.
+// Queries of a slot: 0/1 = start/end of the buffer, 2/3 = clock probe, 4+2i / 5+2i = pass i.
+constexpr uint32_t kMaxPass        = 24;
+constexpr uint32_t kQueriesPerSlot = 4 + 2 * kMaxPass;
+
+struct PassRec {
+	uint16_t w = 0, h = 0;
+	uint8_t  ncol = 0, flags = 0; // flags: 1 = depth, 2 = a clear
+	uint32_t draw0 = 0;           // draws of the buffer before this pass
+};
+
+struct BufStats {
+	uint32_t draws = 0, disp = 0, npass = 0;
+	bool     probed = false, pass_open = false;
+	PassRec  pass[kMaxPass] {};
+};
+
 struct Acc {
 	uint64_t prev_end = 0;
 	bool     have     = false;
@@ -57,10 +75,14 @@ inline uint32_t Bucket(uint64_t ns) {
 
 [[nodiscard]] bool Enabled();
 // Called while the buffer is being recorded; Begin returns the slot (or -1: disabled / ring full).
-[[nodiscard]] int32_t OnBegin(GraphicContext& graphics, vk::CommandBuffer buffer);
+[[nodiscard]] int32_t OnBegin(GraphicContext& graphics, vk::CommandBuffer buffer, BufStats& stats);
 void                  OnEnd(GraphicContext& graphics, vk::CommandBuffer buffer, int32_t slot);
-void                  OnSubmit(int32_t slot, uint64_t tick, uint8_t reason = 11);
+void                  OnPassBegin(vk::CommandBuffer buffer, int32_t slot, BufStats& stats, uint32_t w, uint32_t h, uint32_t ncol, uint32_t flags);
+void                  OnPassEnd(vk::CommandBuffer buffer, int32_t slot, BufStats& stats);
+void                  OnSubmit(int32_t slot, uint64_t tick, uint8_t reason, const BufStats& stats, uint32_t debug_op);
 void                  Poll(GraphicContext& graphics, MasterSemaphore& master);
+// S478 DIAG, H-ZEGAR (b): KYTY_DIAG_CP_DELAY_NS=N busy-waits N ns on the calling thread per call (one per guest draw): the CP rhythm of the scout without the scout.
+void                  CpDelay();
 
 } // namespace GpuTs
 } // namespace Libs::Graphics

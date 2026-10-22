@@ -4,6 +4,7 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "graphics/host_gpu/renderer/gpuTimestamps.h"
 #include "graphics/host_gpu/renderer/perVertexTransform.h"
 #include "graphics/host_gpu/renderer/pvIndirect.h"
 #include "graphics/host_gpu/renderer/pvRangeGen.h"
@@ -213,6 +214,7 @@ private:
 	mutable int64_t     m_t_first_rec   = 0;      // S410 (KYTY_DIAG_STARVE=1): steady clock at the first command recorded into this buffer
 	mutable int64_t     m_pass_end_ns   = 0;
 	mutable int32_t     m_ts_slot       = -1;     // S477 D3 (KYTY_GPU_TIMESTAMPS): query slot of this buffer's start/end timestamps
+	mutable GpuTs::BufStats m_ts_stats;           // S478 DIAG: draws / dispatches / passes recorded into this buffer
 	// Set by Handle(): something (possibly) recorded since Begin(). Over-reporting is harmless.
 	mutable bool        m_recorded    = false;
 	HW::Context*        m_registers   = nullptr;
