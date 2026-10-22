@@ -133,8 +133,8 @@ void SignalDecodeTests() {
 }
 
 void GateTests() {
-	Check(ParseSignalPolicy(nullptr) == SignalPolicy::Parse && ParseSignalPolicy("writes") == SignalPolicy::Writes && ParseSignalPolicy("fifo") == SignalPolicy::Fifo &&
-	          ParseSignalPolicy("x") == SignalPolicy::Parse,
+	Check(ParseSignalPolicy(nullptr) == SignalPolicy::Fifo && ParseSignalPolicy("writes") == SignalPolicy::Writes && ParseSignalPolicy("fifo") == SignalPolicy::Fifo &&
+	          ParseSignalPolicy("parse") == SignalPolicy::Parse && ParseSignalPolicy("x") == SignalPolicy::Fifo,
 	      "signal policy parse");
 	GateTracker gate;
 	Check(gate.GateFor(SignalPolicy::Fifo, 1) == 0, "nothing pending: no gate");

@@ -383,16 +383,17 @@ inline WriteRange DecodeCopyData(const uint32_t* payload) {
 }
 
 
-// KYTY_CP_PIPE_SIGNALS: how far a worker may read ahead of the writes still waiting in the FIFO. parse (default): as far as it likes (S477 D2: the bytes a draw reads
-// did not change between the parse and the end of the call, 65 million reads). writes: a draw's job starts only after the CPU writes and dispatches before it have run.
-// fifo: only after every ordered item before it (signals, barriers, flips included).
+// KYTY_CP_PIPE_SIGNALS: how far a worker may read ahead of the writes still waiting in the FIFO. fifo (default): a draw's job starts only after every ordered item before
+// it (CPU writes, dispatches, signals, barriers, flips) has run, which is the order the guest memory saw before the pipeline existed; it costs about 0.5 ms/flip (S479).
+// writes: after the CPU writes and dispatches before it. parse: as far as it likes (S477 D2: the bytes a draw reads did not change between the parse and the end of the
+// call in 65 million reads; shadow compare: no difference in 2.4 million draws).
 enum class SignalPolicy : uint8_t { Parse, Writes, Fifo };
 
 inline SignalPolicy ParseSignalPolicy(const char* text) {
-	if (text == nullptr) return SignalPolicy::Parse;
+	if (text == nullptr) return SignalPolicy::Fifo;
+	if (std::strcmp(text, "parse") == 0) return SignalPolicy::Parse;
 	if (std::strcmp(text, "writes") == 0) return SignalPolicy::Writes;
-	if (std::strcmp(text, "fifo") == 0) return SignalPolicy::Fifo;
-	return SignalPolicy::Parse;
+	return SignalPolicy::Fifo;
 }
 
 // The newest FIFO item a later job must wait for, per policy. Item sequence numbers come from Ring::Commit.
