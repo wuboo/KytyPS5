@@ -44,6 +44,7 @@ int main() {
 		const auto      running = log.Begin(0x10000, 64);
 		const auto      seq0    = log.Seq();
 		Check(log.WrittenSince(seq0, page_a, 1), "a write in progress when the reader started");
+		Check(log.WrittenSince(log.Seq(), page_a, 1), "the write is still running at the query: no event since the start, yet a danger (lock-free path)");
 		log.End(running);
 		Check(log.WrittenSince(seq0, page_a, 1), "the write that was in progress ended after the reader started");
 	}
