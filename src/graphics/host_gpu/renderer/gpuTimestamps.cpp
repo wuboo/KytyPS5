@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "common/assert.h"
+#include "common/diagOut.h"
 #include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
@@ -18,6 +19,13 @@
 namespace Libs::Graphics::GpuTs {
 
 namespace {
+
+template <typename... A>
+void DiagPrintf(const char* fmt, A... args) {
+	char line[700];
+	std::snprintf(line, sizeof(line), fmt, args...);
+	Common::DiagOut::Write(line);
+}
 
 struct Pending {
 	int32_t  slot;
@@ -39,7 +47,7 @@ struct State {
 	uint64_t                      window_begin = 0;
 	std::vector<uint64_t>         bounds;
 	size_t                        next_bound = 0;
-	uint32_t                      poll_tick = 0;
+	uint32_t                      poll_tick = 0, raw_logged = 0;
 };
 
 State& S() {
@@ -67,7 +75,7 @@ void EnsurePool(State& s, GraphicContext& graphics) {
 	const auto family = graphics.physical_device.getQueueFamilyProperties();
 	const uint32_t bits = graphics.queue_family < family.size() ? family[graphics.queue_family].timestampValidBits : 0;
 	if (bits == 0) {
-		LOGF("[gpu-ts] queue family has no timestamp support: disabled\n");
+		DiagPrintf("[gpu-ts] queue family has no timestamp support: disabled\n");
 		s.broken = true;
 		return;
 	}
@@ -78,12 +86,12 @@ void EnsurePool(State& s, GraphicContext& graphics) {
 	info.queryCount = kSlots * 2;
 	auto result     = graphics.device.createQueryPool(&info, nullptr, &s.pool);
 	if (result != vk::Result::eSuccess) {
-		LOGF("[gpu-ts] createQueryPool failed: disabled\n");
+		DiagPrintf("[gpu-ts] createQueryPool failed: disabled\n");
 		s.broken = true;
 		return;
 	}
 	s.ready = true;
-	LOGF("[gpu-ts] enabled: period=%.3f ns valid_bits=%u slots=%u\n", s.period, bits, kSlots);
+	DiagPrintf("[gpu-ts] enabled: period=%.3f ns valid_bits=%u slots=%u\n", s.period, bits, kSlots);
 }
 
 void Dump(State& s, uint64_t flip) {
@@ -97,7 +105,7 @@ void Dump(State& s, uint64_t flip) {
 		len += std::snprintf(line + len, sizeof(line) - static_cast<size_t>(len), " %s=%.2f|%.3f", names[i], static_cast<double>(s.hist_n[i]) / fl,
 		                     static_cast<double>(s.hist_ns[i]) / fl / 1e6);
 	}
-	LOGF("%s\n", line);
+	DiagPrintf("%s\n", line);
 	s.hist_n.fill(0);
 	s.hist_ns.fill(0);
 	s.window_n = s.window_busy = s.window_idle = 0;
@@ -162,6 +170,18 @@ void Poll(GraphicContext& graphics, MasterSemaphore& master) {
 		s.busy[static_cast<size_t>(p.slot)] = false;
 		if (result != vk::Result::eSuccess) continue;
 		const auto     start = data[0] & s.mask, end = data[1] & s.mask;
+		if (s.raw_logged < 60 || end < start || (end - start) * s.period > 1e9) { // anomalies and the first pairs, raw
+			if (s.raw_logged < 400) {
+				s.raw_logged++;
+				DiagPrintf("[gpu-ts] raw slot=%d tick=%llu start=%llu end=%llu dur_us=%.1f gap_to_prev_end_us=%.1f\n", p.slot, static_cast<unsigned long long>(p.tick),
+				           static_cast<unsigned long long>(start), static_cast<unsigned long long>(end), static_cast<double>(end - start) * s.period / 1e3,
+				           s.acc.have ? (static_cast<double>(start) - static_cast<double>(s.acc.prev_end)) * s.period / 1e3 : 0.0);
+			}
+		}
+		if (end < start || static_cast<double>(end - start) * s.period > 2e9) { // a pair that cannot be a submit: counted, not accumulated
+			FrameTiming::Add(FrameTiming::Counter::GpuTsSkipN);
+			continue;
+		}
 		const auto     before_busy = s.acc.busy_ns, before_idle = s.acc.idle_ns, before_sum = s.acc.sum_ns, before_ov = s.acc.overlap_n;
 		const uint64_t busy = Accumulate(s.acc, start, end, s.period);
 		using C = FrameTiming::Counter;

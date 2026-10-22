@@ -5,6 +5,7 @@
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
+#include "common/diagOut.h"
 #include "common/emulatorConfig.h"
 #include "common/memEvents.h"
 #include "common/logging/log.h"
@@ -760,7 +761,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	CpPhases::Scope parse_phase(CpPhases::Phase::Parse); // S323: handler bodies are Phase::Handler, children subtract
 	if (Pm4Hist::Enabled()) { // S477 D1 DIAG
 		Pm4Hist::BeginCall();
-		Pm4Hist::MaybeDump(FrameTiming::GuestFlips(), [](const char* l) { LOGF("%s", l); });
+		Pm4Hist::MaybeDump(FrameTiming::GuestFlips(), [](const char* l) { Common::DiagOut::Write(l); });
 	}
 	if (RdHazard::Enabled()) RdHazard::MaybeDump(FrameTiming::GuestFlips()); // S477 D2 DIAG
 	while (!execution.m_buffer_stack.empty()) {

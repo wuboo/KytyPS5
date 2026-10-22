@@ -22,6 +22,7 @@
 #include <cstring>
 #include <vector>
 
+#include "common/diagOut.h"
 #include "common/logging/log.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ir/SrtMemo.h"
@@ -31,6 +32,13 @@
 namespace Libs::Graphics::RdHazard {
 
 enum Point : uint32_t { T0, K, SIG, END, kPoints };
+template <typename... A>
+inline void DiagPrintf(const char* fmt, A... args) {
+	char line[700];
+	std::snprintf(line, sizeof(line), fmt, args...);
+	Common::DiagOut::Write(line);
+}
+
 inline const char* PointName(uint32_t p) {
 	static const char* const n[] = {"t0", "k32", "sig", "end"};
 	return n[p];
@@ -129,7 +137,7 @@ inline void CheckRec(State& s, Rec& r, Point point) {
 				s.logged++;
 				uint32_t i = 0;
 				while (i < read.count && out[i] == expect[i]) i++;
-				LOGF("[rd-hazard] ne point=%s stage=%u draw=%llu addr=0x%llx dw=%u/%u cp=%08x now=%08x\n", PointName(point), r.stage,
+				DiagPrintf("[rd-hazard] ne point=%s stage=%u draw=%llu addr=0x%llx dw=%u/%u cp=%08x now=%08x\n", PointName(point), r.stage,
 				     static_cast<unsigned long long>(r.draw), static_cast<unsigned long long>(read.address), i, read.count, expect[i], out[i]);
 			}
 		}
@@ -184,12 +192,12 @@ inline void MaybeDump(uint64_t flip) {
 	if (s.next_bound >= s.bounds.size() || flip < s.bounds[s.next_bound]) return;
 	s.next_bound++;
 	const double fl = static_cast<double>(flip > s.window_begin ? flip - s.window_begin : 1);
-	LOGF("[rd-hazard] window flips %llu-%llu stage_walks vs=%.1f ps=%.1f cs=%.1f per flip, no_memo=%.2f per flip\n", static_cast<unsigned long long>(s.window_begin),
+	DiagPrintf("[rd-hazard] window flips %llu-%llu stage_walks vs=%.1f ps=%.1f cs=%.1f per flip, no_memo=%.2f per flip\n", static_cast<unsigned long long>(s.window_begin),
 	     static_cast<unsigned long long>(flip), static_cast<double>(s.stage_n[0]) / fl, static_cast<double>(s.stage_n[1]) / fl, static_cast<double>(s.stage_n[2]) / fl,
 	     static_cast<double>(s.nomemo) / fl);
 	for (uint32_t p = 0; p < kPoints; p++) {
 		const auto& c = s.c[p];
-		LOGF("[rd-hazard] point=%-4s recs=%llu reads=%llu failed=%llu dirty_reads=%llu busy_reads=%llu NE_READS=%llu recs_ne=%llu recs_dirty=%llu recs_busy=%llu (ne recs %.4f%%)\n",
+		DiagPrintf("[rd-hazard] point=%-4s recs=%llu reads=%llu failed=%llu dirty_reads=%llu busy_reads=%llu NE_READS=%llu recs_ne=%llu recs_dirty=%llu recs_busy=%llu (ne recs %.4f%%)\n",
 		     PointName(p), static_cast<unsigned long long>(c.recs), static_cast<unsigned long long>(c.reads), static_cast<unsigned long long>(c.failed_reads),
 		     static_cast<unsigned long long>(c.dirty_reads), static_cast<unsigned long long>(c.busy_reads), static_cast<unsigned long long>(c.ne_reads),
 		     static_cast<unsigned long long>(c.recs_ne), static_cast<unsigned long long>(c.recs_dirty), static_cast<unsigned long long>(c.recs_busy),
