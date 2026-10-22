@@ -43,6 +43,7 @@ struct GfpJob {
 	ScoutTableLog::Log                     tables;
 	std::vector<uint64_t>                  pages; // 4 KiB pages of guest memory the worker read, sorted and unique
 	int64_t                                worker_ns = 0;
+	int64_t                                submit_ns = 0;
 };
 
 // The worker's body (renderDraw.cpp: it needs the draw's own register decoding).

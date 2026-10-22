@@ -1463,8 +1463,14 @@ struct PipelineCache::ProgramCache {
 			} else if (worker) {
 				auto& priv = Worker().priv[&cached];
 				{
+					const int64_t wait_begin = FrameTiming::SteadyNowNs();
 					const std::lock_guard walk(cached.walk_mutex);
+					const int64_t walk_begin = FrameTiming::SteadyNowNs();
 					permutation = cached.FindPermutation<false>(runtime, push_data_cursor, &priv);
+					const int64_t walk_end = FrameTiming::SteadyNowNs();
+					FrameTiming::AddAlways(FrameTiming::Counter::PipeWalkWaitNs, static_cast<uint64_t>(walk_begin - wait_begin));
+					FrameTiming::AddAlways(FrameTiming::Counter::PipeWalkNs, static_cast<uint64_t>(walk_end - walk_begin));
+					FrameTiming::AddAlways(stage == ShaderType::Pixel ? FrameTiming::Counter::PipeJobPsNs : FrameTiming::Counter::PipeJobVsNs, static_cast<uint64_t>(walk_end - walk_begin));
 				}
 				if (permutation == nullptr) {
 					WorkerFail(1); // no permutation for this specialization yet (a failed walk already said why)

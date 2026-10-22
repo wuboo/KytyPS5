@@ -422,7 +422,7 @@ enum class Counter : uint32_t {
 	// FIFO full; waits answered from the pending writes; handler length mismatches; ns of the snapshot copy / the recorder waiting for a worker / the worker running /
 	// executing an item; jobs done / bailed (the worker could not answer) / computed by the recorder instead; shadow compares (n, not equal); results dropped because a page
 	// the worker read became GPU-dirty; draws that used a worker result.
-	PipeEnqN, PipeDrawN, PipeDispatchN, PipeOrderedN, PipeDrainClsN, PipeDrainWaitN, PipeDrainEndN, PipeFullN, PipeWaitVirtN, PipeLenMismatchN, PipeSnapshotNs, PipeStallNs, PipeJobN, PipeJobBailN, PipeFallbackN, PipeWorkerNs, PipeShadowN, PipeShadowNeN, PipeJoinDirtyN, PipeUsedN, PipeExecNs,
+	PipeEnqN, PipeDrawN, PipeDispatchN, PipeOrderedN, PipeDrainClsN, PipeDrainWaitN, PipeDrainEndN, PipeFullN, PipeWaitVirtN, PipeLenMismatchN, PipeSnapshotNs, PipeStallNs, PipeJobN, PipeJobBailN, PipeFallbackN, PipeWorkerNs, PipeShadowN, PipeShadowNeN, PipeJoinDirtyN, PipeUsedN, PipeExecNs, PipeQueueNs, PipeWalkWaitNs, PipeWalkNs, PipeJobPsNs, PipeJobVsNs,
 	Count,
 };
 

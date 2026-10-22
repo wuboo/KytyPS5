@@ -138,6 +138,7 @@ private:
 				m_queue.pop_front();
 				m_size.fetch_sub(1, std::memory_order_release);
 			}
+			FrameTiming::AddAlways(FrameTiming::Counter::PipeQueueNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - job->submit_ns));
 			RunGfpJob(*job);
 			FrameTiming::AddAlways(FrameTiming::Counter::PipeWorkerNs, static_cast<uint64_t>(job->worker_ns));
 			job->state.store(GfpJob::Done, std::memory_order_release);
@@ -263,6 +264,7 @@ void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const u
 		it.job.ctx       = &it.job.ctx_copy;
 		it.job.sh        = &it.job.sh_copy;
 		it.job.ucfg      = &it.job.ucfg_copy;
+		it.job.submit_ns = FrameTiming::SteadyNowNs();
 		it.job.state.store(CpPipe::GfpJob::Queued, std::memory_order_relaxed);
 		CpPipe::Workers::Instance().Submit(&it.job);
 	}
