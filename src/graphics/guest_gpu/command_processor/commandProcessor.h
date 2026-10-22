@@ -2,12 +2,14 @@
 #define GRAPHICS_GUEST_GPU_COMMAND_PROCESSOR_COMMAND_PROCESSOR_H
 
 #include "common/assert.h"
+#include "graphics/guest_gpu/command_processor/cpPipe.h"
 #include "graphics/guest_gpu/command_processor/eopCoalesce.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 
 #include <cstdint>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -58,9 +60,8 @@ public:
 		int64_t flip_arg  = 0;
 	};
 
-	CommandProcessor(RenderContext& renderer, int interrupt_event_id)
-	    : m_renderer(renderer), m_interrupt_event_id(interrupt_event_id) {}
-	~CommandProcessor() = default;
+	CommandProcessor(RenderContext& renderer, int interrupt_event_id); // cpPipe.cpp (m_pipe holds a type that is complete there)
+	~CommandProcessor();
 
 	KYTY_CLASS_NO_COPY(CommandProcessor);
 
@@ -144,6 +145,10 @@ public:
 	[[nodiscard]] bool ShouldSkipPredicatedPackets() const { return m_predicate_skip; }
 
 	Pm4ProcessResult Process(Pm4Execution& execution, std::span<const uint32_t> commands);
+
+	// S479 (KYTY_CP_PIPE, cpPipe.cpp): the FIFO between the front (the PM4 parser) and the recorder (the handlers that draw and signal). Both run on the CP thread.
+	[[nodiscard]] bool PipeOn() const { return m_pipe != nullptr; }
+	void               PipeDrain(unsigned reason); // runs every item in the FIFO; reason: FrameTiming counter column offset (0 cls, 1 wait, 2 end)
 	void             ProcessIndirectBuffer(std::span<const uint32_t> commands, bool chain);
 
 	void SetFlip(const FlipInfo& flip) { m_flip = flip; }
@@ -159,6 +164,12 @@ private:
 	                      void* dst_gpu_addr, T value, uint32_t interrupt_selector,
 	                      uint32_t interrupt_context_id);
 	void ProcessPm4(Pm4Execution& execution);
+	void PipeInit();
+	void PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const uint32_t* packet, uint32_t packet_dw);
+	void PipeExecuteFront();
+	bool PipeWaitVirtual(uint64_t address, uint64_t size, uint32_t func, uint64_t ref, uint64_t mask, bool* satisfied);
+	[[nodiscard]] HW::Shader&     ExecSh() { return m_exec_sh != nullptr ? *m_exec_sh : m_sh_ctx; }
+	[[nodiscard]] HW::UserConfig& ExecUcfg() { return m_exec_ucfg != nullptr ? *m_exec_ucfg : m_ucfg; }
 	void SuspendPm4();
 	CommandScheduler&   GetScheduler() const { return m_renderer.GetCommandScheduler(); }
 	CommandBuffer&      CurrentBuffer() { return GetScheduler().Current(); }
@@ -190,6 +201,11 @@ private:
 	uint64_t  m_submit_id                   = 0;
 	uint64_t  m_synthetic_occlusion_counter = 0;
 	bool      m_predicate_skip              = false;
+
+	struct PipeState;
+	std::unique_ptr<PipeState> m_pipe;
+	HW::Shader*                m_exec_sh   = nullptr; // S479: the snapshot of the deferred draw / dispatch being executed
+	HW::UserConfig*            m_exec_ucfg = nullptr;
 };
 
 } // namespace Libs::Graphics

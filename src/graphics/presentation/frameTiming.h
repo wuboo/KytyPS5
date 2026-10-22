@@ -418,6 +418,11 @@ enum class Counter : uint32_t {
 	ProgDiskPrefetchHitN, ProgDiskPrefetchMissN, ProgDiskPrefetchFilesN, ProgDiskPrefetchBytes, ProgDiskPrefetchReadNs,
 	// S477 D3 (KYTY_GPU_TIMESTAMPS=1): real GPU time of the submits from timestamp queries (gpuTimestamps.h)
 	GpuTsBusyNs, GpuTsIdleNs, GpuTsN, GpuTsSumNs, GpuTsOverlapN, GpuTsSkipN,
+	// S479 (KYTY_CP_PIPE): items put in the FIFO / draws / dispatches / ordered packets; drains by an unclassified opcode / by a wait / at the end of the stream; the
+	// FIFO full; waits answered from the pending writes; handler length mismatches; ns of the snapshot copy / the recorder waiting for a worker / the worker running /
+	// executing an item; jobs done / bailed (the worker could not answer) / computed by the recorder instead; shadow compares (n, not equal); results dropped because a page
+	// the worker read became GPU-dirty; draws that used a worker result.
+	PipeEnqN, PipeDrawN, PipeDispatchN, PipeOrderedN, PipeDrainClsN, PipeDrainWaitN, PipeDrainEndN, PipeFullN, PipeWaitVirtN, PipeLenMismatchN, PipeSnapshotNs, PipeStallNs, PipeJobN, PipeJobBailN, PipeFallbackN, PipeWorkerNs, PipeShadowN, PipeShadowNeN, PipeJoinDirtyN, PipeUsedN, PipeExecNs,
 	Count,
 };
 

@@ -117,7 +117,7 @@ void SignalDecodeTests() {
 }
 
 void RingTests() {
-	Ring<4> ring;
+	Ring ring(4);
 	Check(ring.Empty() && !ring.Full(), "ring: starts empty");
 	for (int i = 0; i < 4; i++) {
 		const size_t slot = ring.Reserve();

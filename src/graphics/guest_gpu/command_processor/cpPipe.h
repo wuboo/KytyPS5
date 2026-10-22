@@ -206,18 +206,18 @@ private:
 	std::vector<PendingWrite> m_writes;
 };
 
-// The ring of FIFO slots: indices only. `seq` grows with every push, so a slot's sequence number is stable while it is in the ring.
-template <size_t K>
+// The ring of FIFO slots: indices only. `seq` grows with every Commit, so a slot's sequence number is stable while it is in the ring.
 class Ring {
 public:
-	static constexpr size_t Capacity = K;
+	explicit Ring(size_t capacity) : m_capacity(capacity) {}
 
+	[[nodiscard]] size_t Capacity() const { return m_capacity; }
 	[[nodiscard]] bool   Empty() const { return m_count == 0; }
-	[[nodiscard]] bool   Full() const { return m_count == K; }
+	[[nodiscard]] bool   Full() const { return m_count >= m_capacity; }
 	[[nodiscard]] size_t Size() const { return m_count; }
 
 	// The slot to fill; call Commit() after it is filled (the slot is not visible to Front() before).
-	[[nodiscard]] size_t Reserve() const { return (m_head + m_count) % K; }
+	[[nodiscard]] size_t Reserve() const { return (m_head + m_count) % m_capacity; }
 	uint64_t             Commit() {
         ++m_count;
         return m_next_seq++;
@@ -225,13 +225,14 @@ public:
 	[[nodiscard]] size_t   Front() const { return m_head; }
 	[[nodiscard]] uint64_t FrontSeq() const { return m_next_seq - m_count; }
 	void                   Pop() {
-        m_head = (m_head + 1) % K;
+        m_head = (m_head + 1) % m_capacity;
         --m_count;
 	}
 	// i-th pending slot from the front (0 = oldest).
-	[[nodiscard]] size_t At(size_t i) const { return (m_head + i) % K; }
+	[[nodiscard]] size_t At(size_t i) const { return (m_head + i) % m_capacity; }
 
 private:
+	size_t   m_capacity;
 	size_t   m_head     = 0;
 	size_t   m_count    = 0;
 	uint64_t m_next_seq = 1;

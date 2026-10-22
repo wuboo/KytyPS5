@@ -28,6 +28,8 @@ public:
 	KYTY_CLASS_NO_COPY(CommandScheduler);
 
 	void           Begin(HW::Context& registers, HW::UserConfig& user_config, HW::Shader& shaders);
+	// S479 (KYTY_CP_PIPE): the recorder points the open buffer at the registers snapshotted with a deferred draw, then back at the CP's own.
+	void           Rebind(HW::Context& registers, HW::UserConfig& user_config, HW::Shader& shaders) { m_command.Bind(registers, user_config, shaders); }
 	void           BeginRendering(const RenderState& state);
 	void           EndRendering();
 	void           Flush();

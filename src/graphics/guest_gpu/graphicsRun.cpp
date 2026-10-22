@@ -352,6 +352,10 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 	}
 
 	(void)poll;
+	if (m_pipe != nullptr) { // S479: the writes still in the FIFO are what the memory will hold when the wait is reached
+		bool virtual_satisfied = false;
+		if (PipeWaitVirtual(reinterpret_cast<uint64_t>(addr), sizeof(T), func, ref, mask, &virtual_satisfied) && virtual_satisfied) return;
+	}
 	const bool wait_satisfied = TestWaitRegMemValue(*addr, ref, mask, func);
 	if (Pm4Hist::Enabled()) Pm4Hist::Wait(reinterpret_cast<uintptr_t>(addr), wait_satisfied); // S477 D1 DIAG
 	if (!wait_satisfied) {
@@ -740,6 +744,7 @@ Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
 		Pm4Execution*     previous_execution;
 	} execution_scope(*this, execution);
 
+	if (m_pipe == nullptr) PipeInit(); // S479 (KYTY_CP_PIPE)
 	ProcessPm4(execution);
 	return execution.m_buffer_stack.empty() ? Pm4ProcessResult::Complete
 	                                        : Pm4ProcessResult::Blocked;
@@ -766,6 +771,8 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	if (RdHazard::Enabled()) RdHazard::MaybeDump(FrameTiming::GuestFlips()); // S477 D2 DIAG
 	while (!execution.m_buffer_stack.empty()) {
 		if (g_gpu_state != nullptr) {
+			// S479: a command from a guest thread (a fault readback, an unmap) must see every draw parsed before it, as it did when draws ran where they were parsed.
+			if (m_pipe != nullptr && g_gpu_state->m_pending_commands.load(std::memory_order_acquire) != 0) PipeDrain(0);
 			CpPhases::Scope phase(CpPhases::Phase::Cmds);
 			g_gpu_state->ProcessCommands();
 		}
@@ -842,6 +849,26 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			     total_dw - remaining_dw, packet_header);
 		}
 
+		// S479 (KYTY_CP_PIPE): draws, dispatches, signals and CPU writes wait in the FIFO; the rest runs here as before, after a drain when it is not known to be harmless.
+		bool pipe_front = false; // a packet the front runs itself (register write / wait): no prototype batch flush needed first
+		if (m_pipe != nullptr) {
+			const auto pipe_dw  = KYTY_PM4_LEN(packet_header);
+			const auto pipe_cls = CpPipe::Classify(opcode, opcode == Pm4::IT_NOP ? KYTY_PM4_R(packet_header) : 0u, pipe_dw >= 2u ? packet[1] : 0u, pipe_dw);
+			if (pipe_cls == CpPipe::OpClass::Draw || pipe_cls == CpPipe::OpClass::Dispatch || pipe_cls == CpPipe::OpClass::Ordered) {
+				EXIT_NOT_IMPLEMENTED(pipe_dw == 0 || pipe_dw > remaining_dw);
+				if (CpPhases::Enabled()) FrameTiming::Add(FrameTiming::Counter::Pm4Packets);
+				PipeEnqueue(pipe_cls, opcode, packet, pipe_dw);
+				cursor.offset_dw += pipe_dw;
+				execution.m_made_progress = true;
+				continue;
+			}
+			if (pipe_cls == CpPipe::OpClass::Drain) {
+				PipeDrain(0);
+			} else {
+				pipe_front = true;
+			}
+		}
+
 		// Register writes only change state for later draws: a pending prototype batch has already
 		// captured everything it will read (bindings, pipeline, and a copy of the registers for its
 		// dynamic state) when each of its draws was issued, so they need not flush it. Astro Bot
@@ -850,7 +877,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		const bool register_write = opcode == Pm4::IT_SET_SH_REG || opcode == Pm4::IT_SET_CONTEXT_REG ||
 		                            opcode == Pm4::IT_SET_CONTEXT_REG_INDIRECT ||
 		                            opcode == Pm4::IT_NUM_INSTANCES;
-		if (opcode != Pm4::IT_DRAW_INDEX_2 && opcode != Pm4::IT_DISPATCH_DRAW_PREAMBLE &&
+		if (!pipe_front && opcode != Pm4::IT_DRAW_INDEX_2 && opcode != Pm4::IT_DISPATCH_DRAW_PREAMBLE &&
 		    opcode != Pm4::IT_DRAW_INDEX_AUTO && !register_write) {
 			// Every op other than a (possibly per-vertex-prototype) draw must see this op's
 			// effects fully applied first: flush any prototype draws whose replay was deferred for
@@ -896,6 +923,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			// not a batchable draw opcode, or it *is* one and decided for itself whether to defer);
 			// flush again before giving up the command buffer across a suspend/resume boundary
 			// that may span an arbitrary amount of real time.
+			PipeDrain(2); // S479
 			m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
 			if (RdHazard::Enabled()) RdHazard::AtCallEnd(); // S477 D2 DIAG
 			return;
@@ -912,6 +940,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			execution.m_next_buffer = {};
 		}
 	}
+	PipeDrain(2); // S479
 	// End of this PM4 stream (buffer stack drained without a suspend): nothing can observe a
 	// pending batch until the next Process() call, but that may run on a different command buffer
 	// entirely, so it must not still be pending here.
@@ -1375,7 +1404,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
                                       uint32_t thread_group_z, uint32_t mode) {
-	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
+	ExecSh().SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 
 	uint32_t frame_num = 0;
 
@@ -1384,8 +1413,8 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 		if (GraphicsRunDebugDumpEnabled()) {
 			static std::atomic<uint32_t> log_count {0};
 			if (log_count.fetch_add(1, std::memory_order_relaxed) < 1024) {
-				const auto& cs = m_sh_ctx.GetCs().cs_regs;
-				const auto& oa = m_ucfg.GetGdsOaCounter(m_ucfg.GetGdsOaState().GetIndex());
+				const auto& cs = ExecSh().GetCs().cs_regs;
+				const auto& oa = ExecUcfg().GetGdsOaCounter(ExecUcfg().GetGdsOaState().GetIndex());
 				LOGF("QueuePoint DispatchDirect: frame=%u submit=%" PRIu64
 				     " groups=%ux%ux%u local=%ux%ux%u mode=0x%08" PRIx32 " wave=%u cs=0x%016" PRIx64
 				     " oa_index=%u oa_enabled=%s oa_addr=0x%04" PRIx32 " oa_space=0x%08" PRIx32
@@ -1393,7 +1422,7 @@ void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_g
 				     frame_num, m_submit_id, thread_group_x, thread_group_y, thread_group_z,
 				     std::max(cs.num_thread_x, 1u), std::max(cs.num_thread_y, 1u),
 				     std::max(cs.num_thread_z, 1u), mode, static_cast<uint32_t>(cs.wave_size),
-				     cs.data_addr, m_ucfg.GetGdsOaState().GetIndex(),
+				     cs.data_addr, ExecUcfg().GetGdsOaState().GetIndex(),
 				     oa.IsCounterEnabled() ? "true" : "false", oa.GetAddressBytes(),
 				     oa.GetSpaceAvailable());
 			}
@@ -1411,7 +1440,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 		DispatchDirect(args->x, args->y, args->z, mode);
 		return;
 	}
-	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
+	ExecSh().SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 	m_renderer.GetRenderExecutor().DispatchIndirect(m_submit_id, CurrentBuffer(), args_addr, mode,
 	                                                IsAsyncComputeQueue());
 }
