@@ -272,14 +272,21 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 				}
 #if defined(_WIN32)
 				if (slow_landing) { // S486 DIAG: image-relative return addresses (map file: kyty_emulator_clang_lld_link.map)
-					void* bt[24];
-					const auto n    = RtlCaptureStackBackTrace(0, 24, bt, nullptr);
 					const auto base = reinterpret_cast<uint64_t>(GetModuleHandleW(nullptr));
 					std::string text;
-					char        one[32];
-					for (unsigned short i = 0; i < n; i++) {
-						std::snprintf(one, sizeof(one), "%s%llx", i == 0 ? "" : "|", static_cast<unsigned long long>(reinterpret_cast<uint64_t>(bt[i]) - base));
-						text += one;
+					char        one[40];
+					std::snprintf(one, sizeof(one), "pc=%llx", static_cast<unsigned long long>(ctx.pc - base));
+					text += one;
+					// no unwinder: the stack words that point into the image's .text (0x1000..0x1410000) are the return addresses and some stale values
+					const auto* sp = reinterpret_cast<const uint64_t*>(ctx.rsp);
+					uint32_t    found = 0;
+					for (uint32_t w = 0; w < 512 && found < 16; w++) {
+						const uint64_t v = sp[w];
+						if (v >= base + 0x1000 && v < base + 0x1410000) {
+							std::snprintf(one, sizeof(one), "|%llx", static_cast<unsigned long long>(v - base));
+							text += one;
+							found++;
+						}
 					}
 					rf_event.bt_text = text;
 				}
