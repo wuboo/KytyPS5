@@ -2323,6 +2323,36 @@ if(BUILD_TESTING)
 	endforeach()
 endif()
 
+# S476: the real process environment in the program disk cache fingerprint and the KYTY_PROGRAM_DISK_PREFETCH read-ahead (src/graphics/shader/programDiskCache.cpp),
+# portable (the S434 tests below build on macOS x86_64 only). Mutants (WILL_FAIL): PROCESS_ENV_NULL, PREFETCH_UNUSED, PREFETCH_KEEPS_BYTES, PREFETCH_UNBOUNDED.
+foreach(mutant IN ITEMS "" PROCESS_ENV_NULL PREFETCH_UNUSED PREFETCH_KEEPS_BYTES PREFETCH_UNBOUNDED)
+	if(mutant STREQUAL "")
+		set(pdpf_target program_disk_prefetch_tests)
+		set(pdpf_test program_disk_prefetch)
+	else()
+		string(TOLOWER ${mutant} mutant_lower)
+		set(pdpf_target program_disk_prefetch_mutant_${mutant_lower}_tests)
+		set(pdpf_test program_disk_prefetch_mutant_${mutant_lower})
+	endif()
+	add_executable(${pdpf_target} EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/ProgramDiskPrefetchTests.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/programDiskCache.cpp"
+	)
+	target_link_libraries(${pdpf_target} xxhash)
+	target_include_directories(${pdpf_target} PRIVATE ${inc_headers})
+	if(NOT mutant STREQUAL "")
+		target_compile_definitions(${pdpf_target} PRIVATE KYTY_PROGDISK_MUTANT_${mutant}=1)
+	endif()
+	if(BUILD_TESTING)
+		add_test(NAME ${pdpf_test} COMMAND $<TARGET_FILE:${pdpf_target}>)
+		set_tests_properties(${pdpf_test} PROPERTIES TIMEOUT 60)
+		if(NOT mutant STREQUAL "")
+			set_tests_properties(${pdpf_test} PROPERTIES WILL_FAIL TRUE)
+		endif()
+		add_dependencies(kyty_tests ${pdpf_target})
+	endif()
+endforeach()
+
 # S429: KYTY_EOP_COALESCE tracker (pure CPU). Mutants (WILL_FAIL): COALESCE_ACROSS_TICKS, DROP_CONTEXT.
 add_executable(eop_coalesce_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/EopCoalesceTests.cpp")
 target_include_directories(eop_coalesce_tests PRIVATE ${inc_headers})

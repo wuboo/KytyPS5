@@ -411,6 +411,11 @@ enum class Counter : uint32_t {
 	MeshIndGpuN, MeshIndRingFullN, MeshIndShadowN, MeshIndShadowEqN, MeshIndShadowNeN, MeshIndViolationN,
 	MeshIndCpuN, MeshIndCpuEmptyN, // S472: mesh candidates that took the CPU read of the args (mode 0 / shadow), and those whose args drew nothing (index or instance count 0)
 	MeshIndDiagAN, MeshIndDiagBN, MeshIndDiagCN, MeshIndDiagDN, MeshIndDiagEN, MeshIndDiagFN, // S472 DIAG
+	// S476: where a warm GetGraphicsPrograms spends its time. DiskAdopt (all of it) / the file read inside prog_disk_load_ns (the rest is decode) / the import of the
+	// per-vertex variants. KYTY_PROGRAM_DISK_PREFETCH=1: Loads answered from the read-ahead store / Loads that found nothing there / files, bytes and time the
+	// worker spent reading (worker time, not CP time).
+	ProgDiskAdoptNs, ProgDiskReadNs, ProgDiskPvImportNs,
+	ProgDiskPrefetchHitN, ProgDiskPrefetchMissN, ProgDiskPrefetchFilesN, ProgDiskPrefetchBytes, ProgDiskPrefetchReadNs,
 	Count,
 };
 

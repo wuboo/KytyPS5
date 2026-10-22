@@ -636,6 +636,14 @@ constexpr const char* kCounterNames[] = {
     "mesh_ind_diag_d_n",
     "mesh_ind_diag_e_n",
     "mesh_ind_diag_f_n",
+    "prog_disk_adopt_ns",
+    "prog_disk_read_ns",
+    "prog_disk_pv_import_ns",
+    "prog_disk_prefetch_hit_n",
+    "prog_disk_prefetch_miss_n",
+    "prog_disk_prefetch_files_n",
+    "prog_disk_prefetch_bytes",
+    "prog_disk_prefetch_read_ns",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

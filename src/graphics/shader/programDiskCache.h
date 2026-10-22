@@ -16,7 +16,8 @@
 // rejected. Writes are atomic (tmp + rename) and run on a worker thread. The bytes of the guest code are never stored, only their hash.
 //
 // Mutants (tests/ProgramDiskCacheTests.cpp, KYTY_PROGDISK_MUTANT_*): KEY_IGNORES_ENV, KEY_IGNORES_SIGNATURE, KEY_DROPS_STATIC_STATE,
-// ACCEPTS_CORRUPT, ACCEPT_TRUNCATED, NO_RENAME, WRITE_ON_CALLER.
+// ACCEPTS_CORRUPT, ACCEPT_TRUNCATED, NO_RENAME, WRITE_ON_CALLER. S476 (tests/ProgramDiskPrefetchTests.cpp): PROCESS_ENV_NULL, PREFETCH_UNUSED,
+// PREFETCH_KEEPS_BYTES, PREFETCH_UNBOUNDED.
 
 #include <cstdint>
 #include <filesystem>
@@ -66,6 +67,10 @@ private:
 [[nodiscard]] Key HashBytes(std::span<const uint32_t> words);
 
 // ---- fingerprint ------------------------------------------------------------------------------------------------------------------------
+
+// S476: the environment of this process as a null-terminated environ, the one MakeFingerprint must read (on Windows it used to be nullptr, so no KYTY_*
+// variable was in the key there).
+[[nodiscard]] const char* const* ProcessEnvironment();
 
 [[nodiscard]] bool IsNonCodegenEnv(std::string_view name);
 // "NAME=VALUE" of every KYTY_* entry of `env` (a null-terminated environ) that is not in kNonCodegenKytyEnv, sorted.
@@ -133,6 +138,42 @@ struct ProgramIdentity {
                                                        bool* rejected = nullptr);
 // Synchronous atomic write: tmp file in the same directory, then rename.
 [[nodiscard]] bool Save(const std::filesystem::path& path, std::span<const uint8_t> file_bytes);
+
+// S476 (KYTY_PROGRAM_DISK_PREFETCH=0|1, default 0): a worker thread reads the files of <dir>/prog_v1 into memory ahead of the first lookup, so the CP thread
+// finds the bytes instead of opening the file (the 35-200 ms frames of a warm run were prog_disk_load_ns). It reads nothing from the guest: it knows no
+// key, only file names. Load() takes the bytes from the installed Prefetch when it has them and reads the file otherwise (never waits for the worker).
+// The bytes still go through the same checks (checksum, both keys, size), so a stale or damaged file is refused as before. Memory: bytes read and not
+// yet taken stay under max_bytes (the worker stops reading at the limit).
+class Prefetch {
+public:
+	Prefetch(std::filesystem::path dir, uint64_t max_bytes);
+	~Prefetch();
+	Prefetch(const Prefetch&)            = delete;
+	Prefetch& operator=(const Prefetch&) = delete;
+
+	// The bytes of `path` when the worker has read them (and removes them from the store), nullopt otherwise.
+	[[nodiscard]] std::optional<std::vector<uint8_t>> Take(const std::filesystem::path& path);
+	void WaitDone(); // the worker has seen every file (or hit the limit); for tests
+
+	struct Stats {
+		uint64_t files   = 0; // files read by the worker
+		uint64_t bytes   = 0; // bytes read by the worker
+		uint64_t read_ns = 0; // time the worker spent reading
+		uint64_t hit     = 0; // Take answered from the store
+		uint64_t miss    = 0; // Take found nothing (not read yet, not listed, or already taken)
+	};
+	[[nodiscard]] Stats GetStats() const;
+
+private:
+	struct State;
+	State* m_state;
+};
+
+[[nodiscard]] bool PrefetchEnvEnabled(); // KYTY_PROGRAM_DISK_PREFETCH=1
+// Process-wide read-ahead used by Load(); nullptr = none. The caller keeps the object alive until it has been reset to nullptr.
+void SetPrefetch(Prefetch* prefetch);
+// Nanoseconds the last Load() of the calling thread spent getting the bytes (file read or store lookup), before the checks.
+[[nodiscard]] uint64_t LastLoadReadNs();
 
 // One worker thread that writes files (CP only hands the buffer over). Flush() waits for everything queued; the destructor flushes.
 class AsyncWriter {

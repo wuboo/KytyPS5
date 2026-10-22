@@ -938,6 +938,8 @@ struct PipelineCache::ProgramCache {
 		ProgramDisk::Key                          fingerprint;
 		std::filesystem::path                     dir;
 		std::unique_ptr<ProgramDisk::AsyncWriter> writer;
+		std::unique_ptr<ProgramDisk::Prefetch>    prefetch;          // S476 (KYTY_PROGRAM_DISK_PREFETCH=1)
+		ProgramDisk::Prefetch::Stats              reported_prefetch;
 		uint64_t                                  reported_written = 0;
 		uint64_t                                  reported_failed  = 0;
 		uint64_t                                  reported_bytes   = 0;
@@ -953,11 +955,8 @@ struct PipelineCache::ProgramCache {
 #ifndef KYTY_RECOMPILER_SIGNATURE
 #define KYTY_RECOMPILER_SIGNATURE "unknown"
 #endif
-#if defined(__APPLE__)
-		const char* const* environment = *_NSGetEnviron();
-#else
-		const char* const* environment = nullptr;
-#endif
+		// S476: the real environment on every platform (it was nullptr off macOS, so no KYTY_* switch was in the key there).
+		const char* const* environment = ProgramDisk::ProcessEnvironment();
 		ProgramDisk::FingerprintInputs inputs;
 		inputs.recompiler_signature          = KYTY_RECOMPILER_SIGNATURE;
 		inputs.environment                   = environment;
@@ -989,6 +988,10 @@ struct PipelineCache::ProgramCache {
 		if (mode != ProgramDisk::Mode::Off) {
 			disk.writer = std::make_unique<ProgramDisk::AsyncWriter>();
 			disk.mode   = mode;
+			if (mode == ProgramDisk::Mode::On && ProgramDisk::PrefetchEnvEnabled()) {
+				disk.prefetch = std::make_unique<ProgramDisk::Prefetch>(disk.dir / "prog_v1", 256ull << 20);
+				ProgramDisk::SetPrefetch(disk.prefetch.get());
+			}
 			LOGF("[progdisk] mode=%s dir=%s %s\n", mode == ProgramDisk::Mode::Verify ? "verify" : "on", dir_text.c_str(), fingerprint.description.c_str());
 		}
 		if (prewarm_mode != ShaderPrewarm::Mode::Off) InitPrewarm(prewarm_mode, dir_text);
@@ -1148,6 +1151,17 @@ struct PipelineCache::ProgramCache {
 
 	// The writer runs on its own thread: its totals reach the per-flip columns as the difference since the last look.
 	void ReportDiskWriter() {
+		if (disk.prefetch) {
+			using C         = FrameTiming::Counter;
+			const auto now  = disk.prefetch->GetStats();
+			auto&      was  = disk.reported_prefetch;
+			FrameTiming::Add(C::ProgDiskPrefetchHitN, now.hit - was.hit);
+			FrameTiming::Add(C::ProgDiskPrefetchMissN, now.miss - was.miss);
+			FrameTiming::Add(C::ProgDiskPrefetchFilesN, now.files - was.files);
+			FrameTiming::Add(C::ProgDiskPrefetchBytes, now.bytes - was.bytes);
+			FrameTiming::Add(C::ProgDiskPrefetchReadNs, now.read_ns - was.read_ns);
+			was = now;
+		}
 		if (!disk.writer) return;
 		const auto written = disk.writer->Written();
 		const auto failed  = disk.writer->Failed() + disk.writer->Dropped();
@@ -1178,12 +1192,14 @@ struct PipelineCache::ProgramCache {
 	// mode 1: the permutation answered from its file, or nullptr (no file, refused). verify never adopts (it compiles and compares afterwards).
 	Permutation* DiskAdopt(SourceEntry& source, const ProgramDisk::Request& request, uint32_t push_data_start_dword) {
 		if (disk.mode != ProgramDisk::Mode::On) return nullptr;
+		const FrameTiming::ScopedCounterNs adopt_timer(FrameTiming::Counter::ProgDiskAdoptNs); // S476
 		ProgramDisk::PermutationRecord record;
 		ProgramDisk::Found             found;
 		{
 			FrameTiming::ScopedCounterNs load_timer(FrameTiming::Counter::ProgDiskLoadNs);
 			found = ProgramDisk::Find(request, source.specialization, push_data_start_dword, &record);
 		}
+		FrameTiming::Add(FrameTiming::Counter::ProgDiskReadNs, ProgramDisk::LastLoadReadNs());
 		if (found != ProgramDisk::Found::Hit) {
 			if (found == ProgramDisk::Found::Rejected) FrameTiming::Add(FrameTiming::Counter::ProgDiskRejectN);
 			FrameTiming::Add(FrameTiming::Counter::ProgDiskMissN);
@@ -1196,7 +1212,10 @@ struct PipelineCache::ProgramCache {
 		}
 		EXIT_IF(module == nullptr);
 		const ShaderProgram handle {.id = ++next_shader_id, .module = module};
-		ImportPerVertexVariants(handle.id, record.pv, record.spirv);
+		{
+			const FrameTiming::ScopedCounterNs pv_timer(FrameTiming::Counter::ProgDiskPvImportNs); // S476
+			ImportPerVertexVariants(handle.id, record.pv, record.spirv);
+		}
 		source.permutations.push_back({
 		    .function_code  = {},
 		    .specialization = source.specialization,
@@ -1516,6 +1535,8 @@ struct PipelineCache::ProgramCache {
 		lookup_key.static_state.reserve(MaxStaticKeyWords);
 	}
 	~ProgramCache() {
+		ProgramDisk::SetPrefetch(nullptr);
+		disk.prefetch.reset();
 		if (prewarm.box) {
 			ShaderPrewarm::SetMappedHook({}); // the hook refers to this object
 			ReportPrewarm();

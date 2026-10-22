@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
@@ -11,7 +12,14 @@
 #include <deque>
 #include <fstream>
 #include <mutex>
+#include <unordered_map>
 #include <xxhash.h>
+
+#if defined(__APPLE__)
+#include <crt_externs.h>
+#elif !defined(_WIN32)
+extern char** environ;
+#endif
 
 namespace Libs::Graphics::ProgramDisk {
 
@@ -84,6 +92,18 @@ Key HashBytes(std::span<const uint32_t> words) {
 }
 
 // ---- fingerprint ------------------------------------------------------------------------------------------------------------------------
+
+const char* const* ProcessEnvironment() {
+#ifdef KYTY_PROGDISK_MUTANT_PROCESS_ENV_NULL
+	return nullptr;
+#elif defined(__APPLE__)
+	return *_NSGetEnviron();
+#elif defined(_WIN32)
+	return _environ;
+#else
+	return environ;
+#endif
+}
 
 bool IsNonCodegenEnv(std::string_view name) {
 	return std::ranges::find(Common::kNonCodegenKytyEnv, name) != std::end(Common::kNonCodegenKytyEnv);
@@ -213,24 +233,152 @@ std::filesystem::path FilePath(const std::filesystem::path& dir, uint32_t stage,
 	return dir / "prog_v1" / name;
 }
 
-std::optional<std::vector<uint8_t>> Load(const std::filesystem::path& path, const Key& program, const Key& permutation, bool* rejected) {
-	if (rejected != nullptr) *rejected = false;
+namespace {
+std::atomic<Prefetch*> s_prefetch {nullptr};
+thread_local uint64_t  t_last_read_ns = 0;
+
+std::optional<std::vector<uint8_t>> ReadWholeFile(const std::filesystem::path& path) {
 	std::ifstream file(path, std::ios::binary | std::ios::ate);
 	if (!file) return std::nullopt;
 	const auto size = file.tellg();
-	if (size <= 0) {
-		if (rejected != nullptr) *rejected = true;
-		return std::nullopt;
-	}
+	if (size <= 0) return std::vector<uint8_t> {};
 	std::vector<uint8_t> data(static_cast<size_t>(size));
 	file.seekg(0);
 	if (!file.read(reinterpret_cast<char*>(data.data()), size)) return std::nullopt;
+	return data;
+}
+} // namespace
+
+uint64_t LastLoadReadNs() {
+	return t_last_read_ns;
+}
+
+void SetPrefetch(Prefetch* prefetch) {
+	s_prefetch.store(prefetch, std::memory_order_release);
+}
+
+std::optional<std::vector<uint8_t>> Load(const std::filesystem::path& path, const Key& program, const Key& permutation, bool* rejected) {
+	if (rejected != nullptr) *rejected = false;
+	std::optional<std::vector<uint8_t>> data;
+	const auto                          read_begin = std::chrono::steady_clock::now();
+#ifndef KYTY_PROGDISK_MUTANT_PREFETCH_UNUSED
+	if (auto* prefetch = s_prefetch.load(std::memory_order_acquire)) data = prefetch->Take(path);
+#endif
+	if (!data) data = ReadWholeFile(path);
+	t_last_read_ns = static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - read_begin).count());
+	if (!data) return std::nullopt;
+	if (data->empty()) {
+		if (rejected != nullptr) *rejected = true;
+		return std::nullopt;
+	}
 	std::vector<uint8_t> payload;
-	if (!DeserializeFile(data, program, permutation, &payload)) {
+	if (!DeserializeFile(*data, program, permutation, &payload)) {
 		if (rejected != nullptr) *rejected = true;
 		return std::nullopt;
 	}
 	return payload;
+}
+
+// ---- prefetch ----------------------------------------------------------------------------------------------------------------------------
+
+bool PrefetchEnvEnabled() {
+	static const bool enabled = [] {
+		const char* text = std::getenv("KYTY_PROGRAM_DISK_PREFETCH");
+		return text != nullptr && std::strcmp(text, "1") == 0;
+	}();
+	return enabled;
+}
+
+struct Prefetch::State {
+	std::mutex                                                mutex;
+	std::condition_variable                                   wake;
+	std::unordered_map<std::string, std::vector<uint8_t>>     store;
+	uint64_t                                                  resident = 0;
+	uint64_t                                                  max_bytes = 0;
+	bool                                                      stop = false;
+	bool                                                      done = false;
+	std::atomic<uint64_t>                                     files {0};
+	std::atomic<uint64_t>                                     bytes {0};
+	std::atomic<uint64_t>                                     read_ns {0};
+	std::atomic<uint64_t>                                     hit {0};
+	std::atomic<uint64_t>                                     miss {0};
+	std::thread                                               worker;
+};
+
+Prefetch::Prefetch(std::filesystem::path dir, uint64_t max_bytes): m_state(new State) {
+	State* state     = m_state;
+	state->max_bytes = max_bytes;
+	state->worker    = std::thread([state, dir = std::move(dir)] {
+		std::vector<std::filesystem::path> paths;
+		{
+			std::error_code error;
+			for (std::filesystem::directory_iterator it(dir, error), end; !error && it != end; it.increment(error)) {
+				if (it->path().extension() == ".kpp") paths.push_back(it->path());
+			}
+		}
+		for (const auto& path: paths) {
+			const auto key = path.generic_string();
+			{
+				std::unique_lock lock(state->mutex);
+				if (state->stop) break;
+				std::error_code error;
+				const auto      size = std::filesystem::file_size(path, error);
+				if (error) continue;
+#ifndef KYTY_PROGDISK_MUTANT_PREFETCH_UNBOUNDED
+				if (state->resident + size > state->max_bytes) break;
+#endif
+			}
+			const auto begin = std::chrono::steady_clock::now();
+			auto       data  = ReadWholeFile(path);
+			const auto ns    = std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - begin).count();
+			state->read_ns.fetch_add(static_cast<uint64_t>(ns));
+			if (!data || data->empty()) continue;
+			state->files.fetch_add(1);
+			state->bytes.fetch_add(data->size());
+			std::scoped_lock lock(state->mutex);
+			if (state->stop) break;
+			state->resident += data->size();
+			state->store[key] = std::move(*data);
+		}
+		std::scoped_lock lock(state->mutex);
+		state->done = true;
+		state->wake.notify_all();
+	});
+}
+
+Prefetch::~Prefetch() {
+	{
+		std::scoped_lock lock(m_state->mutex);
+		m_state->stop = true;
+	}
+	m_state->wake.notify_all();
+	m_state->worker.join();
+	delete m_state;
+}
+
+std::optional<std::vector<uint8_t>> Prefetch::Take(const std::filesystem::path& path) {
+	std::scoped_lock lock(m_state->mutex);
+	const auto       it = m_state->store.find(path.generic_string());
+	if (it == m_state->store.end()) {
+		m_state->miss.fetch_add(1);
+		return std::nullopt;
+	}
+	std::vector<uint8_t> data = std::move(it->second);
+#ifndef KYTY_PROGDISK_MUTANT_PREFETCH_KEEPS_BYTES
+	m_state->resident -= data.size();
+	m_state->store.erase(it);
+#endif
+	m_state->hit.fetch_add(1);
+	return data;
+}
+
+void Prefetch::WaitDone() {
+	std::unique_lock lock(m_state->mutex);
+	m_state->wake.wait(lock, [&] { return m_state->done; });
+}
+
+Prefetch::Stats Prefetch::GetStats() const {
+	return {m_state->files.load(), m_state->bytes.load(), m_state->read_ns.load(), m_state->hit.load(), m_state->miss.load()};
 }
 
 namespace {
