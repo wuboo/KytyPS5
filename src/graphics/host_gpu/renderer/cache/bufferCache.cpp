@@ -676,7 +676,10 @@ void BufferCache::LogSyncReadback(SyncCensus::Site site, uint64_t vaddr, uint64_
 	static std::atomic<uint64_t> logged {0};
 	const auto                   flip = FrameTiming::GuestFlips();
 	const auto                   n    = logged.fetch_add(1, std::memory_order_relaxed);
-	if (n >= 300 && !(flip >= 6300 && flip <= 6310)) {
+	// S486 DIAG: every slow (>= 2 ms) readback of the landing phase is logged (own cap), not just the first 300.
+	static std::atomic<uint64_t> slow_logged {0};
+	const bool slow_landing = wait_ns >= 2000000 && flip >= 4400 && flip <= 5300 && slow_logged.fetch_add(1, std::memory_order_relaxed) < 3000;
+	if (n >= 300 && !(flip >= 6300 && flip <= 6310) && !slow_landing) {
 		return;
 	}
 	// S404: cmds_since_submit is the snapshot taken before the drain; the live difference would count from the drain's own Submit.
