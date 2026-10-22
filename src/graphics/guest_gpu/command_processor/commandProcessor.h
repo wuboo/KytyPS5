@@ -95,6 +95,8 @@ public:
 		marker = m_user_data_marker;
 	}
 
+	// S478 DIAG: how often the scout worker called SetIndexType since the last call, and with a value different from the CP's own.
+	static void TakeScoutRaceStats(uint64_t& calls, uint64_t& diff);
 	void SetIndexType(uint32_t index_type_and_size);
 	void SetIndexBaseAddress(uint64_t index_base_addr);
 	void SetIndexBufferSize(uint32_t index_buffer_size);

@@ -19,6 +19,7 @@
 #include "common/assert.h"
 #include "common/diagOut.h"
 #include "common/logging/log.h"
+#include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/gpuProbeSpv.h"
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
@@ -203,6 +204,12 @@ void Dump(State& s, uint64_t flip) {
 		                    static_cast<double>(s.reason_ns[i]) / fl / 1e6, static_cast<double>(s.long_n[i]) / fl, static_cast<double>(s.long_ns[i]) / fl / 1e6);
 	}
 	DiagPrintf("%s\n", line);
+	{
+		uint64_t calls = 0, diff = 0;
+		CommandProcessor::TakeScoutRaceStats(calls, diff);
+		DiagPrintf("[scout-race] SetIndexType calls from the scout worker in this window (n/flip)=%.2f, with a value different from the CP's own=%.2f\n", static_cast<double>(calls) / fl,
+		           static_cast<double>(diff) / fl);
+	}
 	DumpDetail(s, fl);
 	s.reason_n.fill(0);
 	s.reason_ns.fill(0);

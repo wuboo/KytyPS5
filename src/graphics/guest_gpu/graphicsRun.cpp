@@ -910,28 +910,55 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
 }
 
+// S478: the scout worker (CpScout) applies SET_*_REG packets of a lookahead buffer through the same handlers as the CP, with the register files redirected to its own copies
+// (ScoutRegsTls). These setters write members of the CP itself, so a call from the worker overwrote the CP's index type / base / size / instance count with the values of
+// a draw that is still ahead: the CP then drew with the next draw's index element size (16 / 32 bit). KYTY_SCOUT_RACE_FIX=1 drops the worker's writes.
+namespace {
+std::atomic<uint64_t> g_scout_set_calls {0}, g_scout_set_diff {0};
+
+bool ScoutRaceFix() {
+	static const bool v = [] { const char* e = std::getenv("KYTY_SCOUT_RACE_FIX"); return e != nullptr && e[0] == '1'; }();
+	return v;
+}
+} // namespace
+
+void CommandProcessor::TakeScoutRaceStats(uint64_t& calls, uint64_t& diff) {
+	calls = g_scout_set_calls.exchange(0);
+	diff  = g_scout_set_diff.exchange(0);
+}
+
 void CommandProcessor::SetIndexType(uint32_t index_type_and_size) {
+	if (ScoutRegsTls() != nullptr) { // the scout worker
+		g_scout_set_calls.fetch_add(1, std::memory_order_relaxed);
+		if ((index_type_and_size & 0x3u) != m_index_type_and_size) g_scout_set_diff.fetch_add(1, std::memory_order_relaxed);
+		if (ScoutRaceFix()) return;
+	}
 	m_index_type_and_size = index_type_and_size & 0x3u;
 }
 
 void CommandProcessor::SetIndexBaseAddress(uint64_t index_base_addr) {
+	if (ScoutRegsTls() != nullptr && ScoutRaceFix()) return;
 	m_index_base_addr = index_base_addr;
 }
 
 void CommandProcessor::SetIndexBufferSize(uint32_t index_buffer_size) {
+	if (ScoutRegsTls() != nullptr && ScoutRaceFix()) return;
 	m_index_buffer_size = index_buffer_size;
 }
 
 void CommandProcessor::SetDrawIndirectArgsBaseAddress(uint64_t draw_indirect_args_base_addr) {
+	if (ScoutRegsTls() != nullptr && ScoutRaceFix()) return;
 	m_draw_indirect_args_base_addr = draw_indirect_args_base_addr;
 }
 
 void CommandProcessor::SetDispatchIndirectArgsBaseAddress(
     uint64_t dispatch_indirect_args_base_addr) {
+	if (ScoutRegsTls() != nullptr && ScoutRaceFix()) return;
 	m_dispatch_indirect_args_base_addr = dispatch_indirect_args_base_addr;
 }
 
 void CommandProcessor::SetNumInstances(uint32_t num_instances) {
+	if (ScoutRegsTls() != nullptr && ScoutRaceFix()) return;
 	if (num_instances == 0) {
 		num_instances = 1;
 	}
