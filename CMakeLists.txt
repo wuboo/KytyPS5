@@ -778,6 +778,16 @@ add_executable(eager_submit_mutant_lowwater_any_backlog_tests EXCLUDE_FROM_ALL
 )
 target_include_directories(eager_submit_mutant_lowwater_any_backlog_tests PRIVATE ${inc_headers})
 target_compile_definitions(eager_submit_mutant_lowwater_any_backlog_tests PRIVATE KYTY_EAGER_MUTANT_LOWWATER_ANY_BACKLOG=1)
+# S479 (KYTY_CP_PIPE): the classification of PM4 packets, the FIFO ring, the writes pending in it, the CP-state gate (header only). Mutants (each must be
+# caught, WILL_FAIL): signals run at parse, the virtual wait ignores the mask, an unknown opcode does not drain, a worker may write the CP, a retire forgets all.
+add_executable(cp_pipe_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPipeTests.cpp")
+target_include_directories(cp_pipe_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS SIGNAL_AT_PARSE VIRTUAL_WAIT_IGNORES_MASK DRAIN_SKIPS_UNKNOWN WORKER_WRITES_CP RETIRE_ALL)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(cp_pipe_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPipeTests.cpp")
+	target_include_directories(cp_pipe_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_pipe_mutant_${mutant_lower}_tests PRIVATE KYTY_CPPIPE_MUTANT_${mutant}=1)
+endforeach()
 add_executable(gpu_gap_mutant_clock_max_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GpuGapTests.cpp"
 )
@@ -1777,6 +1787,11 @@ if(BUILD_TESTING)
 	add_test(NAME eager_submit_mutant_no_age COMMAND $<TARGET_FILE:eager_submit_mutant_no_age_tests>)
 	set_tests_properties(eager_submit_mutant_pass_open eager_submit_mutant_busy eager_submit_mutant_no_age PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME eager_submit_mutant_no_closing COMMAND $<TARGET_FILE:eager_submit_mutant_no_closing_tests>)
+	add_test(NAME cp_pipe COMMAND $<TARGET_FILE:cp_pipe_tests>)
+	foreach(mutant IN ITEMS signal_at_parse virtual_wait_ignores_mask drain_skips_unknown worker_writes_cp retire_all)
+		add_test(NAME cp_pipe_mutant_${mutant} COMMAND $<TARGET_FILE:cp_pipe_mutant_${mutant}_tests>)
+		set_tests_properties(cp_pipe_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME gpu_gap COMMAND $<TARGET_FILE:gpu_gap_tests>)
 	add_test(NAME gpu_gap_mutant_arm_first COMMAND $<TARGET_FILE:gpu_gap_mutant_arm_first_tests>)
 	set_tests_properties(eager_submit_mutant_pass_open eager_submit_mutant_busy eager_submit_mutant_no_age eager_submit_mutant_no_closing gpu_gap_mutant_arm_first PROPERTIES WILL_FAIL TRUE)
