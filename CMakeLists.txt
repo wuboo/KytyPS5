@@ -1298,6 +1298,16 @@ foreach(mutant IN ITEMS KEEP_ZERO OFF_BY_ONE)
 	target_compile_definitions(frame_dump_flips_mutant_${mutant_lower}_tests PRIVATE KYTY_FRAMEDUMP_MUTANT_${mutant}=1)
 endforeach()
 
+add_executable(present_rect_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PresentRectTests.cpp")
+target_include_directories(present_rect_tests PRIVATE ${inc_headers})
+# S482 mutants (each must be caught, WILL_FAIL): flag ignored (always keep aspect); axes swapped.
+foreach(mutant IN ITEMS IGNORE_FLAG SWAP_AXES)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(present_rect_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PresentRectTests.cpp")
+	target_include_directories(present_rect_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(present_rect_mutant_${mutant_lower}_tests PRIVATE KYTY_PRESENTRECT_MUTANT_${mutant}=1)
+endforeach()
+
 add_executable(signal_census_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SignalCensusTests.cpp")
 target_include_directories(signal_census_tests PRIVATE ${inc_headers})
 # S276 mutants (each must be caught, WILL_FAIL): SIGBUS counted as SIGSEGV; every thread counted as main; top list unsorted; repeat hits not accumulated; opcode copy ignores the page end; csv row shifted by one column.
@@ -1923,6 +1933,7 @@ if(BUILD_TESTING)
 	add_test(NAME desc_dyn COMMAND $<TARGET_FILE:desc_dyn_tests>)
 	add_test(NAME desc_assert COMMAND $<TARGET_FILE:desc_assert_tests>)
 	add_test(NAME frame_dump_flips COMMAND $<TARGET_FILE:frame_dump_flips_tests>)
+	add_test(NAME present_rect COMMAND $<TARGET_FILE:present_rect_tests>)
 	add_test(NAME signal_census COMMAND $<TARGET_FILE:signal_census_tests>)
 	add_test(NAME bc7 COMMAND $<TARGET_FILE:bc7_tests>)
 	add_test(NAME bc_dump COMMAND $<TARGET_FILE:bc_dump_tests>)
@@ -1954,6 +1965,7 @@ if(BUILD_TESTING)
 			lod_stats_mutant_real_as_full lod_stats_mutant_no_slot lod_stats_mutant_unset_zero
 			cp_counters_mutant_native_swap cp_counters_mutant_no_clamp cp_counters_mutant_flag_any cp_counters_mutant_skip_ignored
 			frame_dump_flips_mutant_keep_zero frame_dump_flips_mutant_off_by_one
+			present_rect_mutant_ignore_flag present_rect_mutant_swap_axes
 			depth_ro_union_mutant_ignore_dirty depth_ro_union_mutant_allow_general
 			desc_dyn_mutant_offset_in_key desc_dyn_mutant_no_gen desc_dyn_mutant_shadow_ignores_range
 			desc_assert_mutant_sample_never desc_assert_mutant_off_runs desc_assert_mutant_on_samples
@@ -2260,6 +2272,9 @@ if(BUILD_TESTING)
 		frame_dump_flips_tests
 		frame_dump_flips_mutant_keep_zero_tests
 		frame_dump_flips_mutant_off_by_one_tests
+		present_rect_tests
+		present_rect_mutant_ignore_flag_tests
+		present_rect_mutant_swap_axes_tests
 		signal_census_tests
 		signal_census_mutant_sig_swap_tests
 		signal_census_mutant_main_always_tests

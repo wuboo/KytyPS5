@@ -18,6 +18,7 @@
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window/frameDumpFlips.h"
+#include "graphics/presentation/window/presentRect.h"
 #include "graphics/presentation/window/windowInternal.h"
 
 #include <algorithm>
@@ -818,8 +819,23 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 		region.dstSubresource.mipLevel       = 0;
 		region.dstSubresource.baseArrayLayer = 0;
 		region.dstSubresource.layerCount     = 1;
-		region.dstOffsets[1].x               = static_cast<int>(m_extent.width);
-		region.dstOffsets[1].y               = static_cast<int>(m_extent.height);
+		// S482 KYTY_KEEP_ASPECT=1: centred rectangle of the source aspect; the rest of the swapchain image is cleared to black first.
+		static const bool keep_aspect = KeepAspectEnabled(std::getenv("KYTY_KEEP_ASPECT"));
+		const auto        fit = FitPresentRect(source->image.extent.width, source->image.extent.height, m_extent.width, m_extent.height, keep_aspect);
+		if (fit.w != static_cast<int32_t>(m_extent.width) || fit.h != static_cast<int32_t>(m_extent.height)) {
+			const vk::ClearColorValue black {};
+			vk_command.clearColorImage(m_images[m_image_index], vk::ImageLayout::eTransferDstOptimal, &black, 1,
+			                           &to_transfer.subresourceRange);
+			vk::MemoryBarrier clear_done {};
+			clear_done.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+			clear_done.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+			vk_command.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlags {}, 1,
+			                           &clear_done, 0, nullptr, 0, nullptr);
+		}
+		region.dstOffsets[0].x               = fit.x;
+		region.dstOffsets[0].y               = fit.y;
+		region.dstOffsets[1].x               = fit.x + fit.w;
+		region.dstOffsets[1].y               = fit.y + fit.h;
 		region.dstOffsets[1].z               = 1;
 		GpuLabel::With(
 		    vk_command, GpuLabel::Class::Present,
