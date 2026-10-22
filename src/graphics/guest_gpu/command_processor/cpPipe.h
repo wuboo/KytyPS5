@@ -7,7 +7,7 @@
 //
 // Mutants (WILL_FAIL, tests/CpPipeTests.cpp): KYTY_CPPIPE_MUTANT_SIGNAL_AT_PARSE (signals run at parse), KYTY_CPPIPE_MUTANT_VIRTUAL_WAIT_IGNORES_MASK,
 // KYTY_CPPIPE_MUTANT_DRAIN_SKIPS_UNKNOWN (an unknown opcode runs inline without a drain), KYTY_CPPIPE_MUTANT_WORKER_WRITES_CP (the CP-state gate lets a worker
-// through), KYTY_CPPIPE_MUTANT_RETIRE_ALL (retiring one FIFO item forgets every pending write), KYTY_CPPIPE_MUTANT_OVERLAP_IGNORED (a table read ignores the pending writes), KYTY_CPPIPE_MUTANT_GATE_IGNORED (a job starts before the writes it must not read ahead of).
+// through), KYTY_CPPIPE_MUTANT_RETIRE_ALL (retiring one FIFO item forgets every pending write), KYTY_CPPIPE_MUTANT_OVERLAP_IGNORED (a table read ignores the pending writes), KYTY_CPPIPE_MUTANT_GATE_IGNORED (a job starts before the writes it must not read ahead of), KYTY_CPPIPE_MUTANT_DISPATCH_GATE_ALL (a dispatch's job waits for the earlier dispatches: no parallelism).
 
 #include "graphics/guest_gpu/pm4.h"
 
@@ -400,7 +400,10 @@ inline SignalPolicy ParseSignalPolicy(const char* text) {
 class GateTracker {
 public:
 	void NoteItem(OpClass cls, uint32_t opcode, uint64_t seq) {
-		if (cls == OpClass::Dispatch || opcode == Pm4::IT_WRITE_DATA || opcode == Pm4::IT_DMA_DATA || opcode == Pm4::IT_COPY_DATA) m_writes = seq;
+		const bool cpu_write = opcode == Pm4::IT_WRITE_DATA || opcode == Pm4::IT_DMA_DATA || opcode == Pm4::IT_COPY_DATA;
+		if (cpu_write) m_cpu_writes = seq;
+		if (cls == OpClass::Ordered) m_ordered = seq;
+		if (cls == OpClass::Dispatch || cpu_write) m_writes = seq;
 		if (cls == OpClass::Dispatch || cls == OpClass::Ordered) m_all = seq;
 	}
 
@@ -416,10 +419,37 @@ public:
 #endif
 	}
 
+	// S485 (KYTY_CP_PIPE_DISPATCH): the gate of a dispatch's job. An earlier dispatch is not waited for (its effects are GPU-side: JoinJob drops the result when a page the
+	// worker read is GPU-dirty by then, or was written into the backing after the worker started), so consecutive dispatches can be computed in parallel; the CPU writes and
+	// the signals/flips before it are, as for a draw.
+	[[nodiscard]] uint64_t GateForDispatch(SignalPolicy policy, uint64_t front_seq) const {
+#ifdef KYTY_CPPIPE_MUTANT_GATE_IGNORED
+		(void)policy;
+		(void)front_seq;
+		return 0;
+#else
+#ifdef KYTY_CPPIPE_MUTANT_DISPATCH_GATE_ALL
+		return GateFor(policy, front_seq); // a dispatch waits for the dispatches before it too
+#else
+		const uint64_t gate = policy == SignalPolicy::Fifo ? m_ordered : (policy == SignalPolicy::Writes ? m_cpu_writes : 0u);
+		return gate >= front_seq ? gate : 0u;
+#endif
+#endif
+	}
+
 private:
-	uint64_t m_writes = 0;
-	uint64_t m_all    = 0;
+	uint64_t m_writes     = 0;
+	uint64_t m_all        = 0;
+	uint64_t m_cpu_writes = 0;
+	uint64_t m_ordered    = 0;
 };
+
+// KYTY_CP_PIPE_DISPATCH (read once; needs KYTY_CP_PIPE): 1 = the program of a compute dispatch is computed by a worker (S485), shadow = the worker computes it and the
+// recorder compares with its own. Default 0.
+inline Mode EnvDispatchMode() {
+	static const Mode mode = ParseMode(std::getenv("KYTY_CP_PIPE_DISPATCH"));
+	return mode;
+}
 
 } // namespace Libs::Graphics::CpPipe
 

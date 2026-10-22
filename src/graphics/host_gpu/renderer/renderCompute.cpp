@@ -7,6 +7,8 @@
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
+#include "graphics/guest_gpu/command_processor/cpPipe.h"
+#include "graphics/guest_gpu/command_processor/cpPipeJob.h"
 #include "graphics/guest_gpu/gpu_defs.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -25,6 +27,7 @@
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+#include "graphics/shader/scoutTableLog.h"
 #include "graphics/shader/shader.h"
 #include "kernel/eventQueue.h"
 #include "kernel/memory.h"
@@ -36,6 +39,7 @@
 #include <array>
 #include <atomic>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <mutex>
@@ -262,6 +266,123 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 	bindings.shared_memory = {storage.Handle(), 0, size};
 }
 
+// What a dispatch tells the program cache before it asks for the program (the recorder and the S485 worker build the same input).
+static void PrepareComputeInput(ShaderComputeInputInfo& input_info, const HW::ComputeShaderInfo& cs_regs, uint32_t thread_group_x, uint32_t thread_group_y,
+                                uint32_t thread_group_z, uint32_t mode, bool async_compute) {
+	constexpr uint32_t DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS = 1u << 5u;
+	input_info.async_compute = async_compute;
+	const bool use_thread_dimensions = (mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
+	input_info.dispatch_thread_dimensions = use_thread_dimensions;
+	input_info.workgroup_counts[0] = thread_group_x;
+	input_info.workgroup_counts[1] = thread_group_y;
+	input_info.workgroup_counts[2] = thread_group_z;
+	if (use_thread_dimensions) {
+		const uint32_t group_sizes[] = {cs_regs.cs_regs.num_thread_x, cs_regs.cs_regs.num_thread_y,
+		                                cs_regs.cs_regs.num_thread_z};
+		for (uint32_t axis = 0; axis < 3u; ++axis) {
+			const auto size = std::max(group_sizes[axis], 1u);
+			const auto threads = input_info.workgroup_counts[axis];
+			input_info.workgroup_counts[axis] = threads / size + (threads % size != 0u);
+		}
+	}
+}
+
+// S485 (KYTY_CP_PIPE_DISPATCH): the worker's GetComputeProgram for a dispatch, on the registers snapshotted with it (see RunGfpJob for the rules a worker keeps).
+void CpPipe::RunCsJob(CpPipe::GfpJob& job) {
+	const int64_t                 t0 = FrameTiming::SteadyNowNs();
+	CpPipe::WorkerScope           worker_flag;
+	PipelineCache::OffThreadScope scope;
+	PipelineCache::OffThreadScope::Reset();
+	job.write_seq = Libs::LibKernel::Memory::BackingWriteSeq(); // before the first read
+	job.cs_info   = {};
+	PrepareComputeInput(job.cs_info, job.sh->GetCs(), job.cs_groups[0], job.cs_groups[1], job.cs_groups[2], job.cs_mode, false);
+	job.cs_info.indirect_args_address = job.cs_indirect;
+	job.tables.reads.clear();
+	job.tables.words.clear();
+	job.tables.unsafe = false;
+	job.pages.clear();
+	ScoutTableLog::Active() = &job.tables;
+	Libs::LibKernel::Memory::SetWorkerReadLog(&job.pages);
+	job.cs_program = job.cache->GetComputeProgram(job.sh->GetCs(), job.ctx->GetShaderRegisters(), job.cs_info);
+	Libs::LibKernel::Memory::SetWorkerReadLog(nullptr);
+	ScoutTableLog::Active() = nullptr;
+	job.fail     = PipelineCache::OffThreadScope::FailReason();
+	job.answered = !PipelineCache::OffThreadScope::Failed() && static_cast<bool>(job.cs_program) && job.cs_info.stage.resources != nullptr && job.cs_info.stage.program != nullptr &&
+	               !job.tables.unsafe;
+	if (job.answered) {
+		// The stage input points at the worker's private snapshot, which its next call overwrites: the job keeps a copy.
+		job.cs_res                   = *job.cs_info.stage.resources;
+		job.cs_info.stage.resources = &job.cs_res;
+		std::sort(job.pages.begin(), job.pages.end());
+		job.pages.erase(std::unique(job.pages.begin(), job.pages.end()), job.pages.end());
+	}
+	job.worker_ns = FrameTiming::SteadyNowNs() - t0;
+	FrameTiming::AddAlways(FrameTiming::Counter::PipeCsWorkerNs, static_cast<uint64_t>(job.worker_ns));
+}
+
+// S485 shadow: the program the recorder computed against the worker's.
+static void CompareWithCsJob(const ShaderProgram& program, const ShaderComputeInputInfo& info, const CpPipe::GfpJob& job) {
+	using C = FrameTiming::Counter;
+	FrameTiming::Add(C::PipeCsShadowN);
+	const auto& a = *info.stage.resources;
+	const auto& b = *job.cs_info.stage.resources;
+	bool        same_spec = a.specialization_reads == b.specialization_reads;
+	if (!same_spec) { // the same bytes, however the reads were cut into ranges?
+		const auto merged = [](std::vector<std::pair<uint64_t, uint64_t>> ranges) {
+			std::sort(ranges.begin(), ranges.end());
+			std::vector<std::pair<uint64_t, uint64_t>> out;
+			for (const auto& [address, size]: ranges) {
+				if (size == 0) continue;
+				if (!out.empty() && address <= out.back().first + out.back().second) {
+					out.back().second = std::max(out.back().second, address + size - out.back().first);
+				} else {
+					out.emplace_back(address, size);
+				}
+			}
+			return out;
+		};
+		same_spec = merged(a.specialization_reads) == merged(b.specialization_reads);
+	}
+	const bool ne_prog = program.id != job.cs_program.id || info.stage.program != job.cs_info.stage.program;
+	const bool ne_res  = !same_spec || a.flattened_srt != b.flattened_srt || a.buffers != b.buffers || a.images != b.images || a.samplers != b.samplers || a.uniform_fill != b.uniform_fill;
+	const bool ne_info = std::memcmp(info.workgroup_counts, job.cs_info.workgroup_counts, sizeof(info.workgroup_counts)) != 0 || info.indirect_args_address != job.cs_info.indirect_args_address ||
+	                     info.lds_storage != job.cs_info.lds_storage || info.lds_size_dwords != job.cs_info.lds_size_dwords || info.host_subgroup_size != job.cs_info.host_subgroup_size ||
+	                     std::memcmp(info.threads_num, job.cs_info.threads_num, sizeof(info.threads_num)) != 0 || info.float_mode != job.cs_info.float_mode ||
+	                     info.thread_ids_num != job.cs_info.thread_ids_num || info.workgroup_register != job.cs_info.workgroup_register || info.tg_size_en != job.cs_info.tg_size_en ||
+	                     std::memcmp(info.group_id, job.cs_info.group_id, sizeof(info.group_id)) != 0;
+	if (ne_prog || ne_res || ne_info) {
+		FrameTiming::Add(C::PipeCsShadowNeN);
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1) < 16) {
+			std::fprintf(stderr, "[cp-pipe] shadow ne (cs): prog=%d res=%d info=%d\n", ne_prog, ne_res, ne_info);
+			std::fflush(stderr);
+		}
+	}
+}
+
+// The program of the dispatch the recorder is executing: the worker's, when it has one the recorder may use, otherwise its own call.
+static ShaderProgram ResolveComputeProgram(PipelineCache& cache, const HW::ComputeShaderInfo& cs_regs, const HW::ShaderRegisters& sh_regs, ShaderComputeInputInfo& input_info) {
+	using C = FrameTiming::Counter;
+	CpPipe::GfpJob* const job = CpPipe::CurrentJob();
+	const bool            has_job = job != nullptr && job->kind == CpPipe::GfpJob::Kind::Compute;
+	bool                  used    = false;
+	if (has_job) {
+		FrameTiming::Add(C::PipeCsJobN);
+		used = CpPipe::JoinJob(*job) && std::memcmp(input_info.workgroup_counts, job->cs_info.workgroup_counts, sizeof(input_info.workgroup_counts)) == 0 &&
+		       input_info.indirect_args_address == job->cs_info.indirect_args_address && input_info.dispatch_thread_dimensions == job->cs_info.dispatch_thread_dimensions &&
+		       input_info.async_compute == job->cs_info.async_compute;
+	}
+	if (used && CpPipe::EnvMode() == CpPipe::Mode::On && CpPipe::EnvDispatchMode() == CpPipe::Mode::On) {
+		input_info = job->cs_info;
+		FrameTiming::Add(C::PipeCsUsedN);
+		return job->cs_program;
+	}
+	if (has_job && !used) FrameTiming::Add(C::PipeCsFallbackN);
+	auto program = cache.GetComputeProgram(cs_regs, sh_regs, input_info);
+	if (used && program) CompareWithCsJob(program, input_info, *job);
+	return program;
+}
+
 void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_x, uint32_t thread_group_y,
                                     uint32_t thread_group_z, uint32_t mode, bool async_compute) {
@@ -318,24 +439,10 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	const auto& sh_regs = ctx.GetShaderRegisters();
 
 	ShaderComputeInputInfo input_info {};
-	input_info.async_compute = async_compute;
-	const bool use_thread_dimensions = (mode & DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0;
-	input_info.dispatch_thread_dimensions = use_thread_dimensions;
-	input_info.workgroup_counts[0] = thread_group_x;
-	input_info.workgroup_counts[1] = thread_group_y;
-	input_info.workgroup_counts[2] = thread_group_z;
-	if (use_thread_dimensions) {
-		const uint32_t group_sizes[] = {cs_regs.cs_regs.num_thread_x, cs_regs.cs_regs.num_thread_y,
-		                                cs_regs.cs_regs.num_thread_z};
-		for (uint32_t axis = 0; axis < 3u; ++axis) {
-			const auto size = std::max(group_sizes[axis], 1u);
-			const auto threads = input_info.workgroup_counts[axis];
-			input_info.workgroup_counts[axis] = threads / size + (threads % size != 0u);
-		}
-	}
+	PrepareComputeInput(input_info, cs_regs, thread_group_x, thread_group_y, thread_group_z, mode, async_compute);
+	const bool use_thread_dimensions = input_info.dispatch_thread_dimensions;
 	std::optional<CpPhases::SubTimer> disp_timer(std::in_place, FrameTiming::Counter::DispProgNs); // S463 DIAG
-	const auto compute_program =
-	    m_context.GetPipelineCache().GetComputeProgram(cs_regs, sh_regs, input_info);
+	const auto compute_program = ResolveComputeProgram(m_context.GetPipelineCache(), cs_regs, sh_regs, input_info);
 	if (use_thread_dimensions) {
 		input_info.dispatch_threads_num[0]    = thread_group_x;
 		input_info.dispatch_threads_num[1]    = thread_group_y;
@@ -527,8 +634,7 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	input_info.async_compute = async_compute;
 	input_info.indirect_args_address = args_addr;
 	std::optional<CpPhases::SubTimer> disp_timer(std::in_place, FrameTiming::Counter::DispProgNs); // S463 DIAG
-	const auto compute_program = m_context.GetPipelineCache().GetComputeProgram(
-	    cs_regs, buffer.GetRegisters().GetShaderRegisters(), input_info);
+	const auto compute_program = ResolveComputeProgram(m_context.GetPipelineCache(), cs_regs, buffer.GetRegisters().GetShaderRegisters(), input_info);
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
 	disp_timer.emplace(FrameTiming::Counter::DispPrepNs);

@@ -19,6 +19,9 @@ namespace Libs::Graphics::CpPipe {
 
 struct GfpJob {
 	enum : uint8_t { Idle, Queued, Done, Held }; // Held: parsed, not handed to a worker yet (KYTY_CP_PIPE_SIGNALS)
+	enum class Kind : uint8_t { Graphics, Compute };
+
+	Kind kind = Kind::Graphics; // Compute (S485, KYTY_CP_PIPE_DISPATCH): GetComputeProgram for a dispatch, the cs_* fields below
 
 	std::atomic<uint8_t> state {Idle};
 
@@ -46,10 +49,21 @@ struct GfpJob {
 	int64_t                                submit_ns = 0;
 	uint64_t                               write_seq = 0; // the log of backing writes when the worker started
 	uint64_t                               shard_key = 0;
+
+	// Compute inputs (the dispatch packet, decoded by the front) and outputs. `ctx`/`sh` above are the snapshot (with the wave size of the dispatch applied).
+	uint32_t               cs_groups[3]   = {0, 0, 0};
+	uint32_t               cs_mode        = 0;
+	uint64_t               cs_indirect    = 0; // DispatchIndirect: the address of the args
+	ShaderComputeInputInfo cs_info;             // as GetComputeProgram leaves it (stage.resources -> cs_res once answered)
+	ShaderProgram          cs_program;
+	ShaderRecompiler::IR::ResourceSnapshot cs_res;
 };
 
 // The worker's body (renderDraw.cpp: it needs the draw's own register decoding).
 void RunGfpJob(GfpJob& job);
+
+// The worker's body for a dispatch (renderCompute.cpp).
+void RunCsJob(GfpJob& job);
 
 // The job of the draw the recorder is executing (nullptr: none). CP thread only.
 GfpJob*& CurrentJob();

@@ -1407,11 +1407,9 @@ struct PipelineCache::ProgramCache {
 		auto                                         entry = programs.find(lookup_key);
 		gfp_key_timer.reset();
 		static_key_site.reset();
-		if constexpr (graphics_stage) {
-			if (worker && (entry == programs.end() || entry->second.call_source)) {
-				WorkerFail(1);
-				return {};
-			}
+		if (worker && (entry == programs.end() || entry->second.call_source)) { // S485: compute too
+			WorkerFail(1);
+			return {};
 		}
 		// S404: the reader is named for the whole lookup (hit, call-source refresh, compile), not only the compile.
 		const SyncCensus::ReaderScope reader_tag(

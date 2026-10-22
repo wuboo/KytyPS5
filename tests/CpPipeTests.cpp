@@ -148,6 +148,13 @@ void GateTests() {
 	Check(gate.GateFor(SignalPolicy::Writes, 6) == 0, "a gate that has run is gone");
 	gate.NoteItem(OpClass::Dispatch, Pm4::IT_DISPATCH_DIRECT, 7);
 	Check(gate.GateFor(SignalPolicy::Writes, 6) == 7, "a dispatch gates writes");
+	// S485: a dispatch's own job waits for the barriers and CPU writes before it, not for the dispatches (their effects are GPU-side).
+	Check(gate.GateForDispatch(SignalPolicy::Fifo, 1) == 5, "dispatch job, fifo: the last barrier/CPU write, not the dispatch at 7");
+	Check(gate.GateForDispatch(SignalPolicy::Writes, 1) == 5, "dispatch job, writes: the CPU write");
+	Check(gate.GateForDispatch(SignalPolicy::Parse, 1) == 0, "dispatch job, parse: no gate");
+	Check(gate.GateForDispatch(SignalPolicy::Fifo, 6) == 0, "dispatch job: a gate that has run is gone");
+	gate.NoteItem(OpClass::Ordered, Pm4::IT_EVENT_WRITE_EOP, 9);
+	Check(gate.GateForDispatch(SignalPolicy::Fifo, 6) == 9 && gate.GateForDispatch(SignalPolicy::Writes, 6) == 0, "dispatch job: a signal gates fifo only");
 }
 
 void RingTests() {

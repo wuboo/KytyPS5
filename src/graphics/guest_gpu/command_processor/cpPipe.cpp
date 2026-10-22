@@ -166,7 +166,8 @@ private:
 				queue.size.fetch_sub(1, std::memory_order_release);
 			}
 			FrameTiming::AddAlways(FrameTiming::Counter::PipeQueueNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - job->submit_ns));
-			RunGfpJob(*job);
+			if (job->kind == GfpJob::Kind::Compute) RunCsJob(*job);
+			else RunGfpJob(*job);
 			FrameTiming::AddAlways(FrameTiming::Counter::PipeWorkerNs, static_cast<uint64_t>(job->worker_ns));
 			job->state.store(GfpJob::Done, std::memory_order_release);
 		}
@@ -277,6 +278,58 @@ void CommandProcessor::PipeInit() {
 	LOGF("[cp-pipe] on: mode=%s depth=%zu workers=%zu shard=%d signals=%d\n", EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", m_pipe->depth, EnvWorkers(), EnvShard() ? 1 : 0, static_cast<int>(EnvSignals()));
 }
 
+// S485 (KYTY_CP_PIPE_DISPATCH): the worker's GetComputeProgram for a dispatch item. The packet is decoded the way CpOpDispatchDirect / CpOpDispatchIndirect do; anything the
+// handlers would reject, a zero-sized or null-shader dispatch (they return before asking for the program) and a dispatch with thread dimensions read through the guest's
+// own address (DispatchIndirect: the args are read on the front, by the handler as before) gets no job.
+namespace {
+bool FillCsJob(PipeItem& it, PipelineCache* cache) {
+	const auto*    buffer = it.dw.data() + 1;
+	const uint32_t cmd_id = it.dw[0] & ~1u;
+	uint32_t       groups[3] = {0, 0, 0};
+	uint32_t       mode      = 0;
+	uint64_t       indirect  = 0;
+	if (it.opcode == Pm4::IT_DISPATCH_DIRECT) {
+		if (KYTY_PM4_LEN(cmd_id) != 5u || it.dw.size() < 5u) return false;
+		groups[0] = buffer[0];
+		groups[1] = buffer[1];
+		groups[2] = buffer[2];
+		mode      = buffer[3];
+		if (groups[0] == 0 || groups[1] == 0 || groups[2] == 0) return false;
+	} else if (it.opcode == Pm4::IT_DISPATCH_INDIRECT) {
+		if (cmd_id == 0xc0021600 && it.dw.size() >= 4u) {
+			indirect = buffer[0] | (static_cast<uint64_t>(buffer[1]) << 32u);
+			mode     = buffer[2];
+		} else if (cmd_id == 0xc0011600 && it.dw.size() >= 3u && it.dispatch_indirect_base != 0) {
+			indirect = it.dispatch_indirect_base + buffer[0];
+			mode     = buffer[1];
+		} else {
+			return false;
+		}
+		if (indirect == 0 || (indirect & 3u) != 0 || (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0) return false;
+	} else {
+		return false;
+	}
+	if (it.sh.GetCs().cs_regs.data_addr == 0) return false;
+	auto& job = it.job;
+	job.kind         = CpPipe::GfpJob::Kind::Compute;
+	job.cache        = cache;
+	job.ctx_copy     = it.ctx;
+	job.sh_copy      = it.sh;
+	job.ucfg_copy    = it.ucfg;
+	job.sh_copy.SetCsWaveSize(Pm4::ComputeWaveSize(mode)); // what DispatchDirect/Indirect do before they ask for the program
+	job.ctx          = &job.ctx_copy;
+	job.sh           = &job.sh_copy;
+	job.ucfg         = &job.ucfg_copy;
+	job.cs_groups[0] = groups[0];
+	job.cs_groups[1] = groups[1];
+	job.cs_groups[2] = groups[2];
+	job.cs_mode      = mode;
+	job.cs_indirect  = indirect;
+	job.shard_key    = it.sh.GetCs().cs_regs.data_addr;
+	return true;
+}
+} // namespace
+
 void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const uint32_t* packet, uint32_t packet_dw) {
 	using C = FrameTiming::Counter;
 	auto& p = *m_pipe;
@@ -288,6 +341,7 @@ void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const u
 	it.cls    = cls;
 	it.opcode = opcode;
 	it.dw.assign(packet, packet + packet_dw);
+	it.job.kind = CpPipe::GfpJob::Kind::Graphics;
 	if (cls == CpPipe::OpClass::Draw || cls == CpPipe::OpClass::Dispatch) {
 		const FrameTiming::ScopedCounterNs timer(C::PipeSnapshotNs);
 		it.ctx                    = m_ctx;
@@ -310,6 +364,15 @@ void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const u
 		it.job.ucfg      = &it.job.ucfg_copy;
 		it.job.shard_key = it.sh.GetPs().ps_regs.data_addr != 0 ? it.sh.GetPs().ps_regs.data_addr : it.sh.GetVs().es_regs.data_addr;
 		const uint64_t gate = p.gates.GateFor(EnvSignals(), p.ring.FrontSeq());
+		if (gate != 0) {
+			it.job.state.store(CpPipe::GfpJob::Held, std::memory_order_relaxed);
+			p.held.push_back({&it.job, gate});
+		} else {
+			SubmitJob(&it.job);
+		}
+	}
+	if (cls == CpPipe::OpClass::Dispatch && CpPipe::EnvDispatchMode() != CpPipe::Mode::Off && EnvWorkers() != 0 && FillCsJob(it, &m_renderer.GetPipelineCache())) {
+		const uint64_t gate = p.gates.GateForDispatch(EnvSignals(), p.ring.FrontSeq());
 		if (gate != 0) {
 			it.job.state.store(CpPipe::GfpJob::Held, std::memory_order_relaxed);
 			p.held.push_back({&it.job, gate});
