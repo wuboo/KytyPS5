@@ -256,6 +256,8 @@ void TestLearning() {
 	Pa::Override().store(static_cast<int>(Pa::Mode::On));
 	for (uint64_t i = 0; i < 20; ++i) (void)Pa::Global().Note(12u, 0x1000u * (i + 1));
 	Check(Pa::Global().PagesOf(12u) == Pa::HotPages::kPerProgram, "pages per program are capped");
+	Check(!Pa::Global().Note(12u, 0x99000u), "a ninth page was accepted");
+	Check(!Pa::Global().Note(12u, 0x1000u), "a known page was reported as new");
 	Check(Pa::Parse("1") == Pa::Mode::On && Pa::Parse("shadow") == Pa::Mode::Shadow && Pa::Parse("0") == Pa::Mode::Off && Pa::Parse(nullptr) == Pa::Mode::Off, "Parse");
 }
 
