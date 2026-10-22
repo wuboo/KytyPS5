@@ -2327,6 +2327,7 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
 	} else {
+		buffer.NoteDrawTs(state.programs.vertex[0].id, state.programs.pixel.id, draw.index_count); // S478 DIAG
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);

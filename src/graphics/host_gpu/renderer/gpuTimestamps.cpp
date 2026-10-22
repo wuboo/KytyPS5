@@ -74,6 +74,10 @@ struct State {
 	uint64_t                      probe_sum = 0;
 	uint32_t                      probe_iters = 0, probe_every = 2, probe_ctr = 0;
 	bool                          probe_ok = false;
+	bool                          draw_ts = false;  // KYTY_GPU_DRAW_TS=1
+	struct DrawAgg { uint64_t n = 0, ns = 0, count = 0; };
+	std::map<std::string, DrawAgg> draw_agg;
+	uint64_t                      draw_ts_total = 0, draw_ts_n = 0;
 	uint32_t                      fill_iters = 0;   // S478 H-ZEGAR (c): KYTY_GPU_FILL=N, a thread submits an N-step ALU chain whenever the GPU has no guest work
 	uint32_t                      fill_pause_us = 0; // KYTY_GPU_FILL_PAUSE_US: pause between two fillers
 	bool                          fill_started = false;
@@ -96,6 +100,7 @@ void InitEnv(State& s) {
 	if (const char* p = std::getenv("KYTY_GPU_PROBE"); p != nullptr && p[0] != '\0') s.probe_iters = static_cast<uint32_t>(std::strtoul(p, nullptr, 10));
 	if (const char* p = std::getenv("KYTY_GPU_PROBE_MEM_MB"); p != nullptr && p[0] != '\0') s.mem_mb = static_cast<uint32_t>(std::strtoul(p, nullptr, 10));
 	if (const char* p = std::getenv("KYTY_GPU_PROBE_MEM_EVERY"); p != nullptr && p[0] != '\0') s.mem_every = std::max(1u, static_cast<uint32_t>(std::strtoul(p, nullptr, 10)));
+	if (const char* p = std::getenv("KYTY_GPU_DRAW_TS"); p != nullptr && p[0] == '1') s.draw_ts = true;
 	if (const char* p = std::getenv("KYTY_GPU_FILL"); p != nullptr && p[0] != '\0') s.fill_iters = static_cast<uint32_t>(std::strtoul(p, nullptr, 10));
 	if (const char* p = std::getenv("KYTY_GPU_FILL_PAUSE_US"); p != nullptr && p[0] != '\0') s.fill_pause_us = static_cast<uint32_t>(std::strtoul(p, nullptr, 10));
 	if (const char* p = std::getenv("KYTY_GPU_PROBE_EVERY"); p != nullptr && p[0] != '\0') s.probe_every = std::max(1u, static_cast<uint32_t>(std::strtoul(p, nullptr, 10)));
@@ -298,6 +303,28 @@ void Detail(State& s, GraphicContext& graphics, const Pending& p, uint64_t sum_n
 			if (b > a && static_cast<double>(b - a) * s.period < 5e7 && s.mem_ns.size() < 100000) s.mem_ns.push_back(static_cast<uint32_t>(static_cast<double>(b - a) * s.period));
 		}
 	}
+	if (s.draw_ts && p.stats.ndraw_ts > 1) { // S478: front-end time of every draw (distance of two TOP_OF_PIPE stamps), by pass shape and shader pair
+		const uint32_t nd = std::min(p.stats.ndraw_ts, kMaxDraw);
+		uint64_t       t[kMaxDraw] = {};
+		if (graphics.device.getQueryPoolResults(s.pool, base + kDrawQuery, nd, nd * sizeof(uint64_t), t, sizeof(uint64_t), vk::QueryResultFlagBits::e64) == vk::Result::eSuccess) {
+			for (uint32_t i = 0; i + 1 < nd; i++) {
+				const uint64_t a = t[i] & s.mask, b = t[i + 1] & s.mask;
+				if (b < a) continue;
+				const auto ns = static_cast<uint64_t>(static_cast<double>(b - a) * s.period);
+				if (ns > 50000000) continue;
+				const auto& r = p.stats.draw_ts[i];
+				char key[200];
+				const auto pk = r.pass < p.stats.npass && r.pass < kMaxPass ? PassKey(p.stats.pass[r.pass]) : std::string("?");
+				std::snprintf(key, sizeof(key), "%-22s vs=%llx ps=%llx", pk.c_str(), static_cast<unsigned long long>(r.vs), static_cast<unsigned long long>(r.ps));
+				auto& agg = s.draw_agg[key];
+				agg.n++;
+				agg.ns += ns;
+				agg.count += r.count;
+				s.draw_ts_total += ns;
+				s.draw_ts_n++;
+			}
+		}
+	}
 	const uint32_t np = std::min(p.stats.npass, kMaxPass);
 	std::string    first;
 	for (uint32_t i = 0; i < np; i++) {
@@ -343,6 +370,21 @@ void DumpDetail(State& s, double fl) {
 		}
 		m.clear();
 	};
+	if (!s.draw_agg.empty()) {
+		std::vector<std::pair<std::string, State::DrawAgg>> v(s.draw_agg.begin(), s.draw_agg.end());
+		std::sort(v.begin(), v.end(), [](const auto& a, const auto& b) { return a.second.ns > b.second.ns; });
+		std::snprintf(line, sizeof(line), "[gpu-ts-draw] total draws with a successor n/flip=%.1f front-end distance ms/flip=%.3f", static_cast<double>(s.draw_ts_n) / fl,
+		              static_cast<double>(s.draw_ts_total) / fl / 1e6);
+		DiagPrintf("%s\n", line);
+		for (size_t i = 0; i < v.size() && i < 30; i++) {
+			const auto& a = v[i].second;
+			std::snprintf(line, sizeof(line), "[gpu-ts-draw] %s n/flip=%.2f ms/flip=%.3f us_each=%.2f idx_each=%.0f", v[i].first.c_str(), static_cast<double>(a.n) / fl,
+			              static_cast<double>(a.ns) / fl / 1e6, static_cast<double>(a.ns) / static_cast<double>(a.n) / 1e3, static_cast<double>(a.count) / static_cast<double>(a.n));
+			DiagPrintf("%s\n", line);
+		}
+		s.draw_agg.clear();
+		s.draw_ts_total = s.draw_ts_n = 0;
+	}
 	top(s.pass_agg, "pass", 14);
 	top(s.long_agg, "long", 10);
 	{
@@ -460,6 +502,13 @@ void OnPassBegin(vk::CommandBuffer buffer, int32_t slot, BufStats& stats, uint32
 	stats.pass[i] = PassRec {static_cast<uint16_t>(w), static_cast<uint16_t>(h), static_cast<uint8_t>(ncol), static_cast<uint8_t>(flags), stats.draws};
 	stats.pass_open = true;
 	if (slot >= 0) buffer.writeTimestamp(vk::PipelineStageFlagBits::eBottomOfPipe, S().pool, static_cast<uint32_t>(slot) * kQueriesPerSlot + 4 + 2 * i);
+}
+
+void OnDraw(vk::CommandBuffer buffer, int32_t slot, BufStats& stats, uint64_t vs, uint64_t ps, uint32_t count) {
+	const uint32_t i = stats.ndraw_ts++;
+	if (i >= kMaxDraw || slot < 0 || !S().draw_ts) return;
+	stats.draw_ts[i] = DrawRec {vs, ps, count, static_cast<uint8_t>(stats.npass > 0 ? std::min(stats.npass - 1, 255u) : 0)};
+	buffer.writeTimestamp(vk::PipelineStageFlagBits::eTopOfPipe, S().pool, static_cast<uint32_t>(slot) * kQueriesPerSlot + kDrawQuery + i);
 }
 
 void OnPassEnd(vk::CommandBuffer buffer, int32_t slot, BufStats& stats) {

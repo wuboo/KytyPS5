@@ -61,6 +61,10 @@ void CommandBuffer::End() const {
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 }
 
+void CommandBuffer::NoteDrawTs(uint64_t vs, uint64_t ps, uint32_t count) const {
+	if (m_ts_slot >= 0) GpuTs::OnDraw(Handle(), m_ts_slot, m_ts_stats, vs, ps, count);
+}
+
 void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0, uint32_t arg1,
                                  uint32_t arg2, uint32_t arg3, uint64_t arg4) {
 	m_debug_op        = op;

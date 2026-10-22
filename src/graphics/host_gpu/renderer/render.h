@@ -177,6 +177,7 @@ public:
 	void EndRendering() const;
 
 	[[nodiscard]] vk::CommandBuffer Handle() const;
+	void NoteDrawTs(uint64_t vs, uint64_t ps, uint32_t count) const; // S478 DIAG (KYTY_GPU_DRAW_TS=1)
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }
 	[[nodiscard]] RenderContext&    GetContext() const noexcept { return m_context; }
 	[[nodiscard]] HW::Context&      GetRegisters() const noexcept { return *m_registers; }

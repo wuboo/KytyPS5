@@ -28,7 +28,9 @@ constexpr uint32_t kSlots = 256;
 // Queries of a slot: 0/1 = start/end of the buffer, 2/3 = clock probe, 4+2i / 5+2i = pass i.
 constexpr uint32_t kMaxPass        = 24;
 constexpr uint32_t kMemQuery       = 4 + 2 * kMaxPass; // memory probe (a fill of a big buffer), 2 queries
-constexpr uint32_t kQueriesPerSlot = 6 + 2 * kMaxPass;
+constexpr uint32_t kMaxDraw        = 256;               // KYTY_GPU_DRAW_TS=1: a TOP_OF_PIPE timestamp before each of the first kMaxDraw draws of a buffer
+constexpr uint32_t kDrawQuery      = 6 + 2 * kMaxPass;
+constexpr uint32_t kQueriesPerSlot = kDrawQuery + kMaxDraw;
 
 struct PassRec {
 	uint16_t w = 0, h = 0;
@@ -36,10 +38,17 @@ struct PassRec {
 	uint32_t draw0 = 0;           // draws of the buffer before this pass
 };
 
+struct DrawRec {
+	uint64_t vs = 0, ps = 0;
+	uint32_t count = 0;
+	uint8_t  pass = 0;
+};
+
 struct BufStats {
-	uint32_t draws = 0, disp = 0, npass = 0;
+	uint32_t draws = 0, disp = 0, npass = 0, ndraw_ts = 0;
 	bool     probed = false, mem_probed = false, pass_open = false;
 	PassRec  pass[kMaxPass] {};
+	DrawRec  draw_ts[kMaxDraw] {};
 };
 
 struct Acc {
@@ -79,6 +88,7 @@ inline uint32_t Bucket(uint64_t ns) {
 [[nodiscard]] int32_t OnBegin(GraphicContext& graphics, vk::CommandBuffer buffer, BufStats& stats);
 void                  OnEnd(GraphicContext& graphics, vk::CommandBuffer buffer, int32_t slot);
 void                  OnPassBegin(vk::CommandBuffer buffer, int32_t slot, BufStats& stats, uint32_t w, uint32_t h, uint32_t ncol, uint32_t flags);
+void                  OnDraw(vk::CommandBuffer buffer, int32_t slot, BufStats& stats, uint64_t vs, uint64_t ps, uint32_t count);
 void                  OnPassEnd(vk::CommandBuffer buffer, int32_t slot, BufStats& stats);
 void                  OnSubmit(int32_t slot, uint64_t tick, uint8_t reason, const BufStats& stats, uint32_t debug_op);
 void                  Poll(GraphicContext& graphics, MasterSemaphore& master);
