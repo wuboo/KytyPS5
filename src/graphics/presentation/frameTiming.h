@@ -428,6 +428,8 @@ enum class Counter : uint32_t {
 	// S477 D5 (KYTY_SCOUT_PAGECACHE=1): reads of the scout worker through its page cache: reads, served from a cached page, pages resolved (one shared lock each),
 	// pieces that fell back to TryReadBacking.
 	ScoutPcReadsN, ScoutPcHitN, ScoutPcResolveN, ScoutPcFallbackN,
+	// S477 D3 (KYTY_GPU_TIMESTAMPS=1): real GPU time of the submits from timestamp queries (gpuTimestamps.h)
+	GpuTsBusyNs, GpuTsIdleNs, GpuTsN, GpuTsSumNs, GpuTsOverlapN, GpuTsSkipN,
 	Count,
 };
 

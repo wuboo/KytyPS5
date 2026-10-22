@@ -10,6 +10,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/eagerSubmit.h"
 #include "graphics/host_gpu/renderer/gpuDone.h"
+#include "graphics/host_gpu/renderer/gpuTimestamps.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -47,11 +48,13 @@ void CommandBuffer::Begin() {
 	m_recorded       = false;
 	m_t_first_rec    = 0;
 	m_reopen_if_same = false;
+	m_ts_slot        = GpuTs::OnBegin(m_graphics, buffer); // S477 D3 DIAG
 }
 
 void CommandBuffer::End() const {
 	EndRendering();
 	auto buffer = Handle();
+	GpuTs::OnEnd(m_graphics, buffer, m_ts_slot); // S477 D3 DIAG
 
 	auto result = buffer.end();
 
