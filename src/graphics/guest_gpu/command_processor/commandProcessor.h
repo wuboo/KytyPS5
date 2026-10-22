@@ -96,7 +96,7 @@ public:
 	}
 
 	// S478 DIAG: how often the scout worker called SetIndexType since the last call, and with a value different from the CP's own.
-	static void TakeScoutRaceStats(uint64_t& calls, uint64_t& diff);
+	static void TakeScoutRaceStats(uint64_t& calls, uint64_t& diff, uint64_t& draws, uint64_t& wrong);
 	void SetIndexType(uint32_t index_type_and_size);
 	void SetIndexBaseAddress(uint64_t index_base_addr);
 	void SetIndexBufferSize(uint32_t index_buffer_size);
@@ -199,6 +199,7 @@ private:
 	HW::Shader       m_sh_ctx;
 	HW::UserSgprType m_user_data_marker                 = HW::UserSgprType::Unknown;
 	uint32_t         m_index_type_and_size              = 0;
+	uint32_t         m_cp_index_type_truth              = 0; // S478 DIAG: the index type the CP's own stream set last (never written by the scout worker)
 	uint32_t         m_index_buffer_size                = 0;
 	uint64_t         m_index_base_addr                  = 0;
 	uint64_t         m_draw_indirect_args_base_addr     = 0;

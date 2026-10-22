@@ -218,6 +218,7 @@ void CommandProcessor::Reset() {
 	m_saved_ctx.Reset();
 	m_context_state_pushed             = false;
 	m_index_type_and_size              = 0;
+	m_cp_index_type_truth              = 0;
 	m_index_buffer_size                = 0;
 	m_index_base_addr                  = 0;
 	m_num_instances                    = 1;
@@ -915,7 +916,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 // a draw that is still ahead: the CP then drew with the next draw's index element size (16 / 32 bit) and hit the GPU with huge wrong draws (RESULT-S478). The worker's
 // writes are dropped (CpScout::WriteCpMember); KYTY_SCOUT_RACE_FIX=0 restores the old behaviour for an A/B.
 namespace {
-std::atomic<uint64_t> g_scout_set_calls {0}, g_scout_set_diff {0};
+std::atomic<uint64_t> g_scout_set_calls {0}, g_scout_set_diff {0}, g_idx_draws {0}, g_idx_wrong {0};
 
 bool ScoutRaceFix() {
 	static const bool v = [] { const char* e = std::getenv("KYTY_SCOUT_RACE_FIX"); return e == nullptr || e[0] != '0'; }();
@@ -923,9 +924,11 @@ bool ScoutRaceFix() {
 }
 } // namespace
 
-void CommandProcessor::TakeScoutRaceStats(uint64_t& calls, uint64_t& diff) {
+void CommandProcessor::TakeScoutRaceStats(uint64_t& calls, uint64_t& diff, uint64_t& draws, uint64_t& wrong) {
 	calls = g_scout_set_calls.exchange(0);
 	diff  = g_scout_set_diff.exchange(0);
+	draws = g_idx_draws.exchange(0);
+	wrong = g_idx_wrong.exchange(0);
 }
 
 void CommandProcessor::SetIndexType(uint32_t index_type_and_size) {
@@ -934,6 +937,7 @@ void CommandProcessor::SetIndexType(uint32_t index_type_and_size) {
 		g_scout_set_calls.fetch_add(1, std::memory_order_relaxed);
 		if ((index_type_and_size & 0x3u) != m_index_type_and_size) g_scout_set_diff.fetch_add(1, std::memory_order_relaxed);
 	}
+	if (!worker) m_cp_index_type_truth = index_type_and_size & 0x3u; // DIAG: what the CP's own stream set last
 	CpScout::WriteCpMember(m_index_type_and_size, index_type_and_size & 0x3u, worker, ScoutRaceFix());
 }
 
@@ -1014,6 +1018,8 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 }
 
 void CommandProcessor::DrawIndex(DrawIndexArgs args) {
+	g_idx_draws.fetch_add(1, std::memory_order_relaxed); // DIAG: this draw is made with the index type the worker wrote, not the one the CP's stream set
+	if (m_index_type_and_size != m_cp_index_type_truth) g_idx_wrong.fetch_add(1, std::memory_order_relaxed);
 	args.index_type_and_size = m_index_type_and_size;
 	if (args.instance_count == 0) {
 		args.instance_count = m_num_instances;

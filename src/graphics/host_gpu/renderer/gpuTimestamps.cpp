@@ -205,10 +205,10 @@ void Dump(State& s, uint64_t flip) {
 	}
 	DiagPrintf("%s\n", line);
 	{
-		uint64_t calls = 0, diff = 0;
-		CommandProcessor::TakeScoutRaceStats(calls, diff);
-		DiagPrintf("[scout-race] SetIndexType calls from the scout worker in this window (n/flip)=%.2f, with a value different from the CP's own=%.2f\n", static_cast<double>(calls) / fl,
-		           static_cast<double>(diff) / fl);
+		uint64_t calls = 0, diff = 0, draws = 0, wrong = 0;
+		CommandProcessor::TakeScoutRaceStats(calls, diff, draws, wrong);
+		DiagPrintf("[scout-race] SetIndexType calls from the scout worker (n/flip)=%.2f, with a value different from the CP's own=%.2f; indexed draws of the CP (n/flip)=%.2f, made with an index type the CP's own stream did not set=%.2f\n",
+		           static_cast<double>(calls) / fl, static_cast<double>(diff) / fl, static_cast<double>(draws) / fl, static_cast<double>(wrong) / fl);
 	}
 	DumpDetail(s, fl);
 	s.reason_n.fill(0);
