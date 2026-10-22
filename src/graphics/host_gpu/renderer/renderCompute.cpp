@@ -368,7 +368,11 @@ static ShaderProgram ResolveComputeProgram(PipelineCache& cache, const HW::Compu
 	bool                  used    = false;
 	if (has_job) {
 		FrameTiming::Add(C::PipeCsJobN);
-		used = CpPipe::JoinJob(*job) && std::memcmp(input_info.workgroup_counts, job->cs_info.workgroup_counts, sizeof(input_info.workgroup_counts)) == 0 &&
+		if (job->state.load(std::memory_order_acquire) == CpPipe::GfpJob::Done) FrameTiming::Add(C::PipeCsReadyN);
+		const int64_t join_t0 = FrameTiming::SteadyNowNs();
+		const bool    joined  = CpPipe::JoinJob(*job);
+		FrameTiming::Add(C::PipeCsWaitNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - join_t0));
+		used = joined && std::memcmp(input_info.workgroup_counts, job->cs_info.workgroup_counts, sizeof(input_info.workgroup_counts)) == 0 &&
 		       input_info.indirect_args_address == job->cs_info.indirect_args_address && input_info.dispatch_thread_dimensions == job->cs_info.dispatch_thread_dimensions &&
 		       input_info.async_compute == job->cs_info.async_compute;
 	}

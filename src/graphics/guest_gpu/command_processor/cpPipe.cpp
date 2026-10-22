@@ -54,6 +54,15 @@ CpPipe::SignalPolicy EnvSignals() {
 	return policy;
 }
 
+// KYTY_CP_PIPE_DISPATCH_GATE (S485): the signal policy of the jobs of dispatches only; default = KYTY_CP_PIPE_SIGNALS.
+CpPipe::SignalPolicy EnvDispatchGate() {
+	static const CpPipe::SignalPolicy policy = [] {
+		const char* text = std::getenv("KYTY_CP_PIPE_DISPATCH_GATE");
+		return text != nullptr ? CpPipe::ParseSignalPolicy(text) : EnvSignals();
+	}();
+	return policy;
+}
+
 bool EnvShard() {
 	static const bool shard = [] {
 		const char* text = std::getenv("KYTY_CP_PIPE_SHARD");
@@ -372,8 +381,9 @@ void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const u
 		}
 	}
 	if (cls == CpPipe::OpClass::Dispatch && CpPipe::EnvDispatchMode() != CpPipe::Mode::Off && EnvWorkers() != 0 && FillCsJob(it, &m_renderer.GetPipelineCache())) {
-		const uint64_t gate = p.gates.GateForDispatch(EnvSignals(), p.ring.FrontSeq());
+		const uint64_t gate = p.gates.GateForDispatch(EnvDispatchGate(), p.ring.FrontSeq());
 		if (gate != 0) {
+			FrameTiming::Add(C::PipeCsHeldN);
 			it.job.state.store(CpPipe::GfpJob::Held, std::memory_order_relaxed);
 			p.held.push_back({&it.job, gate});
 		} else {
