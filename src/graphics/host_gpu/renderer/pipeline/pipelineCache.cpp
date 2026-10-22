@@ -1223,6 +1223,7 @@ struct PipelineCache::ProgramCache {
 		    .handle         = handle,
 		});
 		FrameTiming::Add(FrameTiming::Counter::ProgDiskHitN);
+		ReportDiskWriter(); // S476: the prefetch counters (a warm run never compiles, so DiskAfterCompile does not report)
 		return &source.permutations.back();
 	}
 
