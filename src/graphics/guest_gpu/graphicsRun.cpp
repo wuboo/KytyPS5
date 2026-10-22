@@ -952,25 +952,32 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	if (RdHazard::Enabled()) RdHazard::AtCallEnd(); // S477 D2 DIAG
 }
 
+// S479: the state of the CP belongs to the CP thread. A pipeline worker works on a snapshot and never gets here; the gate says so loudly if it ever does (S478: a
+// scout that wrote m_index_type_and_size made the GPU run twice as long).
+template <class T, class V>
+static void SetCpMember(T& member, V value) {
+	EXIT_IF(!CpPipe::WriteCpMember(member, value));
+}
+
 void CommandProcessor::SetIndexType(uint32_t index_type_and_size) {
-	m_index_type_and_size = index_type_and_size & 0x3u;
+	SetCpMember(m_index_type_and_size, index_type_and_size & 0x3u);
 }
 
 void CommandProcessor::SetIndexBaseAddress(uint64_t index_base_addr) {
-	m_index_base_addr = index_base_addr;
+	SetCpMember(m_index_base_addr, index_base_addr);
 }
 
 void CommandProcessor::SetIndexBufferSize(uint32_t index_buffer_size) {
-	m_index_buffer_size = index_buffer_size;
+	SetCpMember(m_index_buffer_size, index_buffer_size);
 }
 
 void CommandProcessor::SetDrawIndirectArgsBaseAddress(uint64_t draw_indirect_args_base_addr) {
-	m_draw_indirect_args_base_addr = draw_indirect_args_base_addr;
+	SetCpMember(m_draw_indirect_args_base_addr, draw_indirect_args_base_addr);
 }
 
 void CommandProcessor::SetDispatchIndirectArgsBaseAddress(
     uint64_t dispatch_indirect_args_base_addr) {
-	m_dispatch_indirect_args_base_addr = dispatch_indirect_args_base_addr;
+	SetCpMember(m_dispatch_indirect_args_base_addr, dispatch_indirect_args_base_addr);
 }
 
 void CommandProcessor::SetNumInstances(uint32_t num_instances) {
@@ -978,7 +985,7 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances) {
 		num_instances = 1;
 	}
 
-	m_num_instances = num_instances;
+	SetCpMember(m_num_instances, num_instances);
 }
 
 void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t wait_op,

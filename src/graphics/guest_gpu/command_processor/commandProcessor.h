@@ -75,9 +75,9 @@ public:
 	[[nodiscard]] bool FlushRequested() const;
 	void            BufferFlushAndWait();
 	void            BufferWait();
-	HW::Context&    GetCtx() { return m_ctx; }
-	HW::UserConfig& GetUcfg() { return m_ucfg; }
-	HW::Shader&     GetShCtx() { return m_sh_ctx; }
+	HW::Context&    GetCtx() { EXIT_IF(!CpPipe::MayWriteCpState()); return m_ctx; }
+	HW::UserConfig& GetUcfg() { EXIT_IF(!CpPipe::MayWriteCpState()); return m_ucfg; }
+	HW::Shader&     GetShCtx() { EXIT_IF(!CpPipe::MayWriteCpState()); return m_sh_ctx; }
 
 	void SetIndexType(uint32_t index_type_and_size);
 	void SetIndexBaseAddress(uint64_t index_base_addr);
