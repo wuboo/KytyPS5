@@ -78,6 +78,8 @@ struct State {
 	struct DrawAgg { uint64_t n = 0, ns = 0, count = 0; };
 	std::map<std::string, DrawAgg> draw_agg;
 	uint64_t                      draw_ts_total = 0, draw_ts_n = 0;
+	std::array<uint64_t, 12>      gap_n {}, gap_ns {};  // draw-to-draw TOP_OF_PIPE distance, log2 buckets of microseconds (<2, <4, ... >=2048 us)
+	uint32_t                      gap_logged = 0;
 	uint32_t                      fill_iters = 0;   // S478 H-ZEGAR (c): KYTY_GPU_FILL=N, a thread submits an N-step ALU chain whenever the GPU has no guest work
 	uint32_t                      fill_pause_us = 0; // KYTY_GPU_FILL_PAUSE_US: pause between two fillers
 	bool                          fill_started = false;
@@ -322,6 +324,18 @@ void Detail(State& s, GraphicContext& graphics, const Pending& p, uint64_t sum_n
 				agg.count += r.count;
 				s.draw_ts_total += ns;
 				s.draw_ts_n++;
+				{
+					uint32_t b = 0;
+					for (uint64_t us = ns / 1000; us >= 2 && b < 11; us >>= 1) b++;
+					s.gap_n[b]++;
+					s.gap_ns[b] += ns;
+					if (ns > 700000 && s.gap_logged < 60) { // single big gaps: where in the buffer they sit
+						s.gap_logged++;
+						DiagPrintf("[gpu-ts-gapev] flip=%llu slot=%d draw=%u/%u pass=%u/%u first_draw_of_pass=%u gap_us=%.0f vs=%llx ps=%llx reason=%s buf_total_us=%.0f\n", static_cast<unsigned long long>(FrameTiming::GuestFlips()),
+						           p.slot, i, p.stats.ndraw_ts, r.pass, p.stats.npass, p.stats.pass[std::min<uint32_t>(r.pass, kMaxPass - 1)].draw0, static_cast<double>(ns) / 1e3,
+						           static_cast<unsigned long long>(r.vs), static_cast<unsigned long long>(r.ps), ReasonName(p.reason), static_cast<double>(sum_ns) / 1e3);
+					}
+				}
 			}
 		}
 	}
@@ -384,6 +398,18 @@ void DumpDetail(State& s, double fl) {
 		}
 		s.draw_agg.clear();
 		s.draw_ts_total = s.draw_ts_n = 0;
+		{
+			char* w = line;
+			w += std::snprintf(w, sizeof(line), "[gpu-ts-gap] draw-to-draw distance, n/flip|ms/flip by bucket(us):");
+			for (size_t b = 0; b < 12; b++) {
+				w += std::snprintf(w, sizeof(line) - static_cast<size_t>(w - line), " %s%zu=%.1f|%.2f", b == 11 ? ">=" : "<", b == 11 ? 2048 : (2ull << b), static_cast<double>(s.gap_n[b]) / fl,
+				                   static_cast<double>(s.gap_ns[b]) / fl / 1e6);
+			}
+			DiagPrintf("%s\n", line);
+			s.gap_n.fill(0);
+			s.gap_ns.fill(0);
+			s.gap_logged = 0;
+		}
 	}
 	top(s.pass_agg, "pass", 14);
 	top(s.long_agg, "long", 10);
