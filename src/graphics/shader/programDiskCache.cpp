@@ -305,17 +305,10 @@ struct Prefetch::State {
 	std::thread                                               worker;
 };
 
-Prefetch::Prefetch(std::filesystem::path dir, uint64_t max_bytes): m_state(new State) {
+Prefetch::Prefetch(std::vector<std::filesystem::path> paths, uint64_t max_bytes): m_state(new State) {
 	State* state     = m_state;
 	state->max_bytes = max_bytes;
-	state->worker    = std::thread([state, dir = std::move(dir)] {
-		std::vector<std::filesystem::path> paths;
-		{
-			std::error_code error;
-			for (std::filesystem::directory_iterator it(dir, error), end; !error && it != end; it.increment(error)) {
-				if (it->path().extension() == ".kpp") paths.push_back(it->path());
-			}
-		}
+	state->worker    = std::thread([state, paths = std::move(paths)] {
 		for (const auto& path: paths) {
 			const auto key = path.generic_string();
 			{
@@ -326,6 +319,8 @@ Prefetch::Prefetch(std::filesystem::path dir, uint64_t max_bytes): m_state(new S
 				if (error) continue;
 #ifndef KYTY_PROGDISK_MUTANT_PREFETCH_UNBOUNDED
 				if (state->resident + size > state->max_bytes) break;
+#else
+				(void)size;
 #endif
 			}
 			const auto begin = std::chrono::steady_clock::now();
@@ -344,6 +339,51 @@ Prefetch::Prefetch(std::filesystem::path dir, uint64_t max_bytes): m_state(new S
 		state->done = true;
 		state->wake.notify_all();
 	});
+}
+
+namespace {
+bool IsUsedListName(std::string_view name) {
+	constexpr std::string_view kExtension = ".kpp";
+	if (name.size() <= kExtension.size() || name.size() > 64 || !name.ends_with(kExtension)) return false;
+	for (const char ch: name.substr(0, name.size() - kExtension.size())) {
+		const bool ok = (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || ch == '_';
+		if (!ok) return false;
+	}
+	return true;
+}
+} // namespace
+
+std::filesystem::path UsedListPath(const std::filesystem::path& dir) {
+	return dir / "prog_used_v1.lst";
+}
+
+std::string SerializeUsedList(const Key& fingerprint, std::span<const std::string> names) {
+	std::string text = fingerprint.Hex() + "\n";
+	for (const auto& name: names) {
+		text += name;
+		text += '\n';
+	}
+	return text;
+}
+
+std::vector<std::string> ParseUsedList(std::string_view text, const Key& fingerprint) {
+	std::vector<std::string> names;
+	bool                     first = true;
+	while (!text.empty()) {
+		const auto end  = text.find('\n');
+		auto       line = text.substr(0, end);
+		text            = end == std::string_view::npos ? std::string_view {} : text.substr(end + 1);
+		if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
+		if (first) {
+			first = false;
+#ifndef KYTY_PROGDISK_MUTANT_LIST_IGNORES_FINGERPRINT
+			if (line != fingerprint.Hex()) return {};
+#endif
+			continue;
+		}
+		if (IsUsedListName(line)) names.emplace_back(line);
+	}
+	return names;
 }
 
 Prefetch::~Prefetch() {

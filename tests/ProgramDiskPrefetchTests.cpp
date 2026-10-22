@@ -1,7 +1,7 @@
 // S476: (1) the fingerprint of KYTY_PROGRAM_DISK_CACHE reads the real environment of the process on every platform (it was nullptr off macOS, so a
 // KYTY_* switch that changes the SPIR-V, e.g. KYTY_FIX_PS_WAVE32_MASK, did not move the key on Windows); (2) KYTY_PROGRAM_DISK_PREFETCH: the read-ahead
 // store answers Load() with the bytes of the file, once, under its byte limit, and the bytes still go through the checks of the file format.
-// Mutants (WILL_FAIL): PROCESS_ENV_NULL, PREFETCH_UNUSED, PREFETCH_KEEPS_BYTES, PREFETCH_UNBOUNDED.
+// Mutants (WILL_FAIL): PROCESS_ENV_NULL, PREFETCH_UNUSED, PREFETCH_KEEPS_BYTES, PREFETCH_UNBOUNDED, LIST_IGNORES_FINGERPRINT.
 
 #include "common/knownEnv.h"
 #include "graphics/shader/programDiskCache.h"
@@ -91,7 +91,7 @@ void TestPrefetch() {
 	Check(Save(path_b, SerializeFile(program, Key {5, 6}, payload_b)), "save b");
 
 	{
-		Prefetch prefetch(dir, 1ull << 20);
+		Prefetch prefetch({path_a, path_b}, 1ull << 20);
 		prefetch.WaitDone();
 		SetPrefetch(&prefetch);
 		bool rejected = true;
@@ -116,7 +116,7 @@ void TestPrefetch() {
 		bytes[bytes.size() / 2] ^= 0xff;
 		const auto path_bad = FilePath(dir.parent_path(), 9, program, permutation);
 		Check(Save(path_bad, bytes), "save damaged");
-		Prefetch prefetch(dir, 1ull << 20);
+		Prefetch prefetch({path_bad}, 1ull << 20);
 		prefetch.WaitDone();
 		SetPrefetch(&prefetch);
 		bool rejected = false;
@@ -125,13 +125,34 @@ void TestPrefetch() {
 	}
 	{
 		// The limit: 3 files of about 450 bytes, room for one.
-		Prefetch prefetch(dir, 600);
+		Prefetch prefetch({path_a, path_b, FilePath(dir.parent_path(), 9, program, permutation)}, 600);
 		prefetch.WaitDone();
 		const auto stats = prefetch.GetStats();
 		Check(stats.files == 1 && stats.bytes <= 600, "the worker stops at the byte limit");
 	}
+	{
+		// Only the listed files are read: a file that is in the directory but not in the list is not prefetched.
+		Prefetch prefetch({path_a}, 1ull << 20);
+		prefetch.WaitDone();
+		Check(prefetch.GetStats().files == 1, "only the listed file is read");
+		Check(!prefetch.Take(path_b), "a file that is not in the list is not in the store");
+	}
 	std::error_code error;
 	fs::remove_all(dir.parent_path(), error);
+}
+
+void TestUsedList() {
+	const Key fp {0x1111, 0x2222};
+	const Key other {0x1111, 0x2223};
+	const std::vector<std::string> names = {"1_00000000000000aa_00000000000000bb.kpp", "7_00000000000000cc_00000000000000dd.kpp"};
+	const auto text = SerializeUsedList(fp, names);
+	Check(ParseUsedList(text, fp) == names, "the used list round-trips");
+	Check(ParseUsedList(text, other).empty(), "a list of another fingerprint gives no names");
+	Check(ParseUsedList("", fp).empty(), "an empty list gives no names");
+	const auto hostile = fp.Hex() + "\n../x.kpp\n/etc/passwd\na\\b.kpp\n1_00000000000000aa_00000000000000bb.kpp\r\nnot a name\n..kpp\n";
+	const auto parsed  = ParseUsedList(hostile, fp);
+	Check(parsed.size() == 1 && parsed[0] == names[0], "lines that are not file names are skipped (no path separators, no ..)");
+	Check(UsedListPath("d").filename() == "prog_used_v1.lst", "list path");
 }
 
 } // namespace
@@ -139,6 +160,7 @@ void TestPrefetch() {
 int main() {
 	TestProcessEnvironment();
 	TestPrefetch();
+	TestUsedList();
 	if (g_failures != 0) {
 		std::fprintf(stderr, "%d failure(s)\n", g_failures);
 		return 1;

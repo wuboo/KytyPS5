@@ -17,7 +17,8 @@
 //
 // Mutants (tests/ProgramDiskCacheTests.cpp, KYTY_PROGDISK_MUTANT_*): KEY_IGNORES_ENV, KEY_IGNORES_SIGNATURE, KEY_DROPS_STATIC_STATE,
 // ACCEPTS_CORRUPT, ACCEPT_TRUNCATED, NO_RENAME, WRITE_ON_CALLER. S476 (tests/ProgramDiskPrefetchTests.cpp): PROCESS_ENV_NULL, PREFETCH_UNUSED,
-// PREFETCH_KEEPS_BYTES, PREFETCH_UNBOUNDED.
+// PREFETCH_KEEPS_BYTES, PREFETCH_UNBOUNDED,
+// LIST_IGNORES_FINGERPRINT.
 
 #include <cstdint>
 #include <filesystem>
@@ -139,14 +140,15 @@ struct ProgramIdentity {
 // Synchronous atomic write: tmp file in the same directory, then rename.
 [[nodiscard]] bool Save(const std::filesystem::path& path, std::span<const uint8_t> file_bytes);
 
-// S476 (KYTY_PROGRAM_DISK_PREFETCH=0|1, default 0): a worker thread reads the files of <dir>/prog_v1 into memory ahead of the first lookup, so the CP thread
-// finds the bytes instead of opening the file (the 35-200 ms frames of a warm run were prog_disk_load_ns). It reads nothing from the guest: it knows no
-// key, only file names. Load() takes the bytes from the installed Prefetch when it has them and reads the file otherwise (never waits for the worker).
-// The bytes still go through the same checks (checksum, both keys, size), so a stale or damaged file is refused as before. Memory: bytes read and not
-// yet taken stay under max_bytes (the worker stops reading at the limit).
+// S476 (KYTY_PROGRAM_DISK_PREFETCH=0|1, default 0): a worker thread reads prog_v1 files into memory ahead of the first lookup, so the CP thread finds
+// the bytes instead of opening the file (the 35-200 ms frames of a warm run were prog_disk_load_ns). Which files: the list of the previous runs of the same
+// fingerprint (prog_used_v1.lst, names in order of first use) - the directory also holds files of every other fingerprint, reading it all took 7 s and
+// 270 MB in the bench. It reads nothing from the guest: it knows no key, only file names. Load() takes the bytes from the installed Prefetch when it has
+// them and reads the file otherwise (never waits for the worker). The bytes still go through the same checks (checksum, both keys, size), so a stale or
+// damaged file is refused as before. Memory: bytes read and not yet taken stay under max_bytes (the worker stops reading at the limit).
 class Prefetch {
 public:
-	Prefetch(std::filesystem::path dir, uint64_t max_bytes);
+	Prefetch(std::vector<std::filesystem::path> paths, uint64_t max_bytes); // read in this order
 	~Prefetch();
 	Prefetch(const Prefetch&)            = delete;
 	Prefetch& operator=(const Prefetch&) = delete;
@@ -170,6 +172,11 @@ private:
 };
 
 [[nodiscard]] bool PrefetchEnvEnabled(); // KYTY_PROGRAM_DISK_PREFETCH=1
+// prog_used_v1.lst: first line = hex of the fingerprint, then one file name (<stage>_<program16>_<permutation16>.kpp) per line, in order of first use.
+// ParseUsedList returns no names for another fingerprint and skips every line that is not such a name (no path separators, no "..").
+[[nodiscard]] std::string              SerializeUsedList(const Key& fingerprint, std::span<const std::string> names);
+[[nodiscard]] std::vector<std::string> ParseUsedList(std::string_view text, const Key& fingerprint);
+[[nodiscard]] std::filesystem::path    UsedListPath(const std::filesystem::path& dir);
 // Process-wide read-ahead used by Load(); nullptr = none. The caller keeps the object alive until it has been reset to nullptr.
 void SetPrefetch(Prefetch* prefetch);
 // Nanoseconds the last Load() of the calling thread spent getting the bytes (file read or store lookup), before the checks.

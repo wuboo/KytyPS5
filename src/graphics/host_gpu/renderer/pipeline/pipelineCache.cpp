@@ -940,6 +940,11 @@ struct PipelineCache::ProgramCache {
 		std::unique_ptr<ProgramDisk::AsyncWriter> writer;
 		std::unique_ptr<ProgramDisk::Prefetch>    prefetch;          // S476 (KYTY_PROGRAM_DISK_PREFETCH=1)
 		ProgramDisk::Prefetch::Stats              reported_prefetch;
+		// S476: files of this fingerprint in order of first use (prog_used_v1.lst, the previous runs' list first); only kept with the prefetch on.
+		std::vector<std::string>                  used_names;
+		std::unordered_set<std::string>           used_set;
+		bool                                      used_dirty = false;
+		std::chrono::steady_clock::time_point     used_saved {};
 		uint64_t                                  reported_written = 0;
 		uint64_t                                  reported_failed  = 0;
 		uint64_t                                  reported_bytes   = 0;
@@ -989,8 +994,19 @@ struct PipelineCache::ProgramCache {
 			disk.writer = std::make_unique<ProgramDisk::AsyncWriter>();
 			disk.mode   = mode;
 			if (mode == ProgramDisk::Mode::On && ProgramDisk::PrefetchEnvEnabled()) {
-				disk.prefetch = std::make_unique<ProgramDisk::Prefetch>(disk.dir / "prog_v1", 256ull << 20);
-				ProgramDisk::SetPrefetch(disk.prefetch.get());
+				std::vector<std::filesystem::path> paths;
+				if (std::ifstream list(ProgramDisk::UsedListPath(disk.dir), std::ios::binary); list) {
+					const std::string text((std::istreambuf_iterator<char>(list)), std::istreambuf_iterator<char>());
+					disk.used_names = ProgramDisk::ParseUsedList(text, disk.fingerprint);
+				}
+				for (const auto& name: disk.used_names) {
+					disk.used_set.insert(name);
+					paths.push_back(disk.dir / "prog_v1" / name);
+				}
+				if (!paths.empty()) {
+					disk.prefetch = std::make_unique<ProgramDisk::Prefetch>(std::move(paths), 256ull << 20);
+					ProgramDisk::SetPrefetch(disk.prefetch.get());
+				}
 			}
 			LOGF("[progdisk] mode=%s dir=%s %s\n", mode == ProgramDisk::Mode::Verify ? "verify" : "on", dir_text.c_str(), fingerprint.description.c_str());
 		}
@@ -1149,6 +1165,23 @@ struct PipelineCache::ProgramCache {
 		prewarm.writer->Enqueue(prewarm.path, ShaderPrewarm::SerializeManifest(disk.fingerprint, PrewarmLayout(), prewarm.builder.Entries()));
 	}
 
+	// S476: a file of this fingerprint was used (adopted or written). The list goes to disk at most every 2 s and when the cache is destroyed.
+	void NoteUsedFile(const std::filesystem::path& path, bool force = false) {
+		if (!ProgramDisk::PrefetchEnvEnabled() || !disk.writer) return;
+		if (path.empty()) {
+			if (!disk.used_dirty) return;
+		} else if (disk.used_set.insert(path.filename().string()).second) {
+			disk.used_names.push_back(path.filename().string());
+			disk.used_dirty = true;
+		}
+		const auto now = std::chrono::steady_clock::now();
+		if (!disk.used_dirty || (!force && now - disk.used_saved < std::chrono::seconds(2))) return;
+		disk.used_saved = now;
+		disk.used_dirty = false;
+		const auto text = ProgramDisk::SerializeUsedList(disk.fingerprint, disk.used_names);
+		disk.writer->Enqueue(ProgramDisk::UsedListPath(disk.dir), std::vector<uint8_t>(text.begin(), text.end()));
+	}
+
 	// The writer runs on its own thread: its totals reach the per-flip columns as the difference since the last look.
 	void ReportDiskWriter() {
 		if (disk.prefetch) {
@@ -1223,6 +1256,7 @@ struct PipelineCache::ProgramCache {
 		    .handle         = handle,
 		});
 		FrameTiming::Add(FrameTiming::Counter::ProgDiskHitN);
+		NoteUsedFile(request.path);
 		ReportDiskWriter(); // S476: the prefetch counters (a warm run never compiles, so DiskAfterCompile does not report)
 		return &source.permutations.back();
 	}
@@ -1258,6 +1292,7 @@ struct PipelineCache::ProgramCache {
 		if (write && !disk.writer->Enqueue(request.path, ProgramDisk::MakeFileBytes(request, record))) {
 			FrameTiming::Add(FrameTiming::Counter::ProgDiskWriteFailN);
 		}
+		NoteUsedFile(request.path);
 		ReportDiskWriter();
 	}
 
@@ -1538,6 +1573,7 @@ struct PipelineCache::ProgramCache {
 	~ProgramCache() {
 		ProgramDisk::SetPrefetch(nullptr);
 		disk.prefetch.reset();
+		NoteUsedFile({}, true);
 		if (prewarm.box) {
 			ShaderPrewarm::SetMappedHook({}); // the hook refers to this object
 			ReportPrewarm();

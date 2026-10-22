@@ -2324,8 +2324,8 @@ if(BUILD_TESTING)
 endif()
 
 # S476: the real process environment in the program disk cache fingerprint and the KYTY_PROGRAM_DISK_PREFETCH read-ahead (src/graphics/shader/programDiskCache.cpp),
-# portable (the S434 tests below build on macOS x86_64 only). Mutants (WILL_FAIL): PROCESS_ENV_NULL, PREFETCH_UNUSED, PREFETCH_KEEPS_BYTES, PREFETCH_UNBOUNDED.
-foreach(mutant IN ITEMS "" PROCESS_ENV_NULL PREFETCH_UNUSED PREFETCH_KEEPS_BYTES PREFETCH_UNBOUNDED)
+# portable (the S434 tests below build on macOS x86_64 only). Mutants (WILL_FAIL): PROCESS_ENV_NULL, PREFETCH_UNUSED, PREFETCH_KEEPS_BYTES, PREFETCH_UNBOUNDED, LIST_IGNORES_FINGERPRINT.
+foreach(mutant IN ITEMS "" PROCESS_ENV_NULL PREFETCH_UNUSED PREFETCH_KEEPS_BYTES PREFETCH_UNBOUNDED LIST_IGNORES_FINGERPRINT)
 	if(mutant STREQUAL "")
 		set(pdpf_target program_disk_prefetch_tests)
 		set(pdpf_test program_disk_prefetch)
