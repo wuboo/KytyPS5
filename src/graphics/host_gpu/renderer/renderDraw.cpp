@@ -19,6 +19,8 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
+#include "graphics/guest_gpu/command_processor/cpPipe.h"
+#include "graphics/guest_gpu/command_processor/cpPipeJob.h"
 #include "graphics/host_gpu/renderer/meshIndirectRuntime.h"
 #include "graphics/host_gpu/renderer/pvIndirect.h"
 #include "graphics/host_gpu/renderer/render.h"
