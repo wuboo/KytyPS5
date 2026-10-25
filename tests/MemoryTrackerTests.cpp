@@ -1403,12 +1403,14 @@ void TestHotPages() {
         "unchanged hot page was not counted as skipped");
 
   // Hot pages are reported for BDA synchronisation although they raise no fault.
-  (void)tracker.TakeBdaSync();
-  Check(tracker.TakeBdaSync().Intersects(page, 1), "hot page missing from BDA sync");
+  {
+    Libs::Graphics::RangeSet bda;
+    tracker.AddHotPages(bda); // BufferCache::TakeBdaSync adds them (S487: the BDA queue moved there)
+    Check(bda.Intersects(page, 1), "hot page missing from BDA sync");
+  }
 
   // An explicit CPU modification makes the next upload happen although the bytes did not change.
   tracker.MarkRegionAsCpuModified(page, 1);
-  (void)tracker.TakeBdaSync();
   Check(HotUpload(tracker, page, 1) == 1 && HotUpload(tracker, page, 1) == 0,
         "explicit CPU modification did not force an upload of a hot page");
 
@@ -1537,8 +1539,11 @@ void TestFlipUnprotect() {
   Check(HotUpload(tracker, page, 1) == 1 && IsWritable(memory + page_size), "write to a kept page was not uploaded");
   Check(HotUpload(tracker, page, 1) == 1, "kept page was not uploaded when nothing changed (it is dirty: always copied)");
   Check(!IsWritable(memory) && !IsWritable(memory + 2 * page_size), "neighbour pages lost their protection");
-  (void)tracker.TakeBdaSync();
-  Check(tracker.TakeBdaSync().Intersects(page, 1), "kept page missing from BDA sync");
+  {
+    Libs::Graphics::RangeSet bda;
+    tracker.AddHotPages(bda);
+    Check(bda.Intersects(page, 1), "kept page missing from BDA sync");
+  }
 
   // The flip ends: the next upload copies the page and protects it; a later fault starts a fresh count.
   g_hot_epoch = 101;
