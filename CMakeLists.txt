@@ -850,6 +850,7 @@ add_executable(memory_tracker_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/MemoryTrackerTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/pageManager.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/memoryTracker.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
 )
 target_link_libraries(memory_tracker_tests fmt::fmt common)
 target_include_directories(memory_tracker_tests PRIVATE ${inc_headers})
@@ -860,6 +861,7 @@ foreach(mutant IN ITEMS NO_BUMP_CPU NO_BUMP_GPU HOT_SKIPS_HASH HOT_NEVER_REPROTE
 		"${KYTY_TESTS_DIR}/MemoryTrackerTests.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/pageManager.cpp"
 		"${KYTY_SOURCE_DIR}/graphics/host_gpu/memoryTracker.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
 	)
 	target_link_libraries(memory_tracker_mutant_${mutant_lower}_tests fmt::fmt common)
 	target_include_directories(memory_tracker_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})

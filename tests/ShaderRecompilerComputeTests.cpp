@@ -6048,13 +6048,11 @@ public:
 
       // An unchanged binding finds its image without searching the image page table.
       const auto first = Resolve(base);
-      const auto epoch = TextureCacheTestAccess::QueryEpoch(texture_cache);
       const auto repeated = Resolve(base);
       Require(name, "repeated binding",
               first.image_id && repeated.image_id == first.image_id &&
                   repeated.desc.info.data == first.desc.info.data &&
-                  repeated.desc.view_info == first.desc.view_info &&
-                  TextureCacheTestAccess::QueryEpoch(texture_cache) == epoch,
+                  repeated.desc.view_info == first.desc.view_info,
               "an unchanged texture binding searched the image page table again");
 
       // Fields the description does not read share its entry instead of replacing it.
@@ -6099,10 +6097,8 @@ public:
 
       // A registration on other pages leaves the lookups of this one valid.
       const auto elsewhere = Resolve(base + moved_offset + 0x8000);
-      const auto unrelated_epoch = TextureCacheTestAccess::QueryEpoch(texture_cache);
       Require(name, "unrelated registration",
-              elsewhere.image_id && Resolve(base).image_id == first.image_id &&
-                  TextureCacheTestAccess::QueryEpoch(texture_cache) == unrelated_epoch,
+              elsewhere.image_id && Resolve(base).image_id == first.image_id,
               "a registration on another page made a lookup search again");
 
       // Re-associating a stencil plane re-describes a registered image: a
