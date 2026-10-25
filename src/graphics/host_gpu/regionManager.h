@@ -107,6 +107,11 @@ public:
 	KYTY_CLASS_NO_COPY(RegionManager);
 
 	[[nodiscard]] uint64_t GetCpuAddr() const { return m_cpu_addr; }
+	// Lock-free: grows with every change of the dirty bits, made under the lock. Equal values
+	// mean no change in between (see MemoryTracker::ForEachUploadRange).
+	[[nodiscard]] uint64_t Generation() const noexcept {
+		return m_generation.load(std::memory_order_acquire);
+	}
 	template <DirtySource source>
 	[[nodiscard]] bool IsModified(uint64_t offset, uint64_t size) const {
 		const auto [start, end] = GetPageRange(m_cpu_addr + offset, size);
@@ -126,6 +131,7 @@ public:
 				EXIT("GPU dirty state conflicts with CPU dirty state\n");
 			}
 		}
+		Bump();
 		auto& bits = GetBits<source>();
 		if constexpr (enable) {
 #if defined(KYTY_MEMTRACKER_MUTANT_NO_BUMP_CPU)
@@ -167,6 +173,7 @@ public:
 		}
 		RegionBits mask(bits, start, end);
 		if constexpr (clear) {
+			Bump();
 			bits.UnsetRange(start, end);
 			if constexpr (source == DirtySource::Cpu) {
 				UpdateProtection<true, false>();
@@ -563,6 +570,7 @@ private:
 		const auto fn = HotPages::HasherSource().load(std::memory_order_relaxed);
 		return fn != nullptr && fn(m_cpu_addr + page * TRACKER_PAGE_SIZE, hash);
 	}
+	void Bump() noexcept { m_generation.fetch_add(1, std::memory_order_release); }
 
 	template <bool track, bool is_read>
 	void UpdateProtection() {
@@ -614,6 +622,8 @@ private:
 	std::array<uint64_t, TRACKER_REGION_PAGES> m_stamps {};
 	std::unique_ptr<HotState>                  m_hot_state;
 	std::atomic<uint32_t>                      m_hot_count {0};
+	// Starts at 1: a sum of existing regions' generations is never 0.
+	std::atomic<uint64_t> m_generation {1};
 };
 
 } // namespace Libs::Graphics
