@@ -3,7 +3,6 @@
 
 #include "common/assert.h"
 #include "graphics/guest_gpu/command_processor/cpPipe.h"
-#include "graphics/guest_gpu/command_processor/eopCoalesce.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"

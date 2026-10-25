@@ -758,7 +758,6 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		}
 
 		// S479 (KYTY_CP_PIPE): draws, dispatches, signals and CPU writes wait in the FIFO; the rest runs here as before, after a drain when it is not known to be harmless.
-		bool pipe_front = false; // a packet the front runs itself (register write / wait): no prototype batch flush needed first
 		if (m_pipe != nullptr) {
 			const auto pipe_dw  = KYTY_PM4_LEN(packet_header);
 			const auto pipe_cls = CpPipe::Classify(opcode, opcode == Pm4::IT_NOP ? KYTY_PM4_R(packet_header) : 0u, pipe_dw >= 2u ? packet[1] : 0u, pipe_dw);
@@ -776,12 +775,9 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			}
 			if (pipe_cls == CpPipe::OpClass::Drain) {
 				PipeDrain(0, opcode == Pm4::IT_NOP ? 256u + KYTY_PM4_R(packet_header) : opcode);
-			} else {
-				pipe_front = true;
 			}
 		}
 
-		(void)pipe_front;
 		if (CpPhases::Enabled()) FrameTiming::Add(FrameTiming::Counter::Pm4Packets);
 		if (RdHazard::Enabled() && Pm4Hist::Classify(opcode, opcode == Pm4::IT_NOP ? KYTY_PM4_R(packet_header) : 0u) == Pm4Hist::Cls::Draw) RdHazard::OnDraw(); // S477 D2 DIAG
 		if (Pm4Hist::Enabled()) Pm4Hist::Packet(opcode, opcode == Pm4::IT_NOP ? KYTY_PM4_R(packet_header) : 0u, KYTY_PM4_LEN(packet_header) + 1u); // S477 D1 DIAG
@@ -972,88 +968,6 @@ static void PatchIndirectDrawOffsets(CommandProcessor& cp, IndirectDrawRegisters
 	write(registers.index_offset, first_index);
 }
 
-namespace {
-// S398: what DrawIndirectMulti saw before its first read of the args (KYTY_DIAG_INDIRECT=1).
-struct IndirectDiag {
-	bool     count_dirty  = false;
-	bool     args_dirty   = false;
-	uint64_t wait_ns      = 0;
-	uint32_t regs_patched = 0;
-	uint32_t args_changed = 0;
-	uint32_t clamped      = 0;
-	uint64_t pv_before    = 0;
-	uint64_t pv_draws     = 0;
-};
-
-// True when the args at this address differ from the ones last seen in an earlier flip.
-bool NoteIndirectArgsChanged(uint64_t args_addr, uint64_t size) {
-	struct Entry {
-		uint64_t flip = 0;
-		uint32_t words[5] {};
-	};
-	static std::unordered_map<uint64_t, Entry> seen;
-	if (size > sizeof(Entry::words)) {
-		return false;
-	}
-	const auto flip  = FrameTiming::GuestFlips();
-	auto&      entry = seen[args_addr];
-	const bool changed = entry.flip != 0 && entry.flip < flip &&
-	                     std::memcmp(entry.words, reinterpret_cast<const void*>(args_addr), size) != 0;
-	if (entry.flip != flip) {
-		entry.flip = flip;
-		std::memcpy(entry.words, reinterpret_cast<const void*>(args_addr), size);
-	}
-	if (seen.size() > 8192) {
-		seen.clear();
-	}
-	return changed;
-}
-
-void LogIndirectDiag(const IndirectDiag& probe, bool indexed, bool has_count, uint32_t draw_count, uint32_t index_type,
-                     uint32_t index_buffer_size, uint64_t args_addr) {
-	FrameTiming::Add(FrameTiming::Counter::IndirectN, draw_count);
-	if (probe.args_dirty || probe.count_dirty) {
-		FrameTiming::Add(FrameTiming::Counter::IndirectDirtyN);
-	}
-	FrameTiming::Add(FrameTiming::Counter::IndirectDirtyWaitNs, probe.wait_ns);
-	FrameTiming::Add(FrameTiming::Counter::IndirectRegsPatchedN, static_cast<uint64_t>(probe.regs_patched) * draw_count);
-	FrameTiming::Add(FrameTiming::Counter::IndirectPvN, probe.pv_draws);
-	FrameTiming::Add(FrameTiming::Counter::IndirectArgsChangedN, probe.args_changed);
-	static std::atomic<uint64_t> logged {0};
-	const auto                   flip = FrameTiming::GuestFlips();
-	if (logged.fetch_add(1, std::memory_order_relaxed) >= 200 && !(flip >= 6300 && flip <= 6310)) {
-		return;
-	}
-	LOGF("[indirect] flip=%" PRIu64 " indexed=%d count_addr=%d draws=%u args=0x%016" PRIx64
-	     " count_dirty=%d args_dirty=%d wait_us=%" PRIu64 " regs=%u index_type=%u index_buffer_size=%u clamped=%u pv=%" PRIu64
-	     " changed=%u\n",
-	     flip, indexed ? 1 : 0, has_count ? 1 : 0, draw_count, args_addr, probe.count_dirty ? 1 : 0,
-	     probe.args_dirty ? 1 : 0, probe.wait_ns / 1000, probe.regs_patched, index_type, index_buffer_size, probe.clamped,
-	     probe.pv_draws, probe.args_changed);
-}
-
-// S404 (KYTY_INDIRECT_GPU=shadow|1): one line per indexed indirect draw (the first 200 and flips 6300..6310), with the running count of
-// its reason so the histogram can be read from the last line of each reason.
-void LogIndirectGpu(const char* what, uint64_t args_addr, IndirectGpu::Reason cmd_reason, IndirectGpu::Reason host_reason,
-                    uint32_t index_buffer_size, bool have_args, uint32_t index_count, bool clamp_risk) {
-	static std::array<std::atomic<uint64_t>, static_cast<size_t>(IndirectGpu::Reason::Count)> by_reason {};
-	const auto reason = cmd_reason != IndirectGpu::Reason::Eligible ? cmd_reason : host_reason;
-	const auto n      = by_reason[static_cast<size_t>(reason)].fetch_add(1, std::memory_order_relaxed) + 1;
-	static std::atomic<uint64_t> logged {0};
-	const auto                   flip = FrameTiming::GuestFlips();
-	if (logged.fetch_add(1, std::memory_order_relaxed) >= 200 && !(flip >= 6300 && flip <= 6310)) {
-		return;
-	}
-	char count_text[16] = "?";
-	if (have_args) {
-		std::snprintf(count_text, sizeof(count_text), "%u", index_count);
-	}
-	LOGF("[indirect-gpu] flip=%" PRIu64 " %s args=0x%016" PRIx64 " cmd_reason=%s host_reason=%s n_reason=%" PRIu64
-	     " index_buffer_size=%u index_count=%s clamp_risk=%d\n",
-	     flip, what, args_addr, IndirectGpu::ReasonName(cmd_reason), IndirectGpu::ReasonName(host_reason), n, index_buffer_size,
-	     count_text, clamp_risk ? 1 : 0);
-}
-} // namespace
 
 void CommandProcessor::DrawIndirect(uint32_t data_offset, IndirectDrawRegisters registers,
                                     uint32_t draw_initiator, bool indexed) {

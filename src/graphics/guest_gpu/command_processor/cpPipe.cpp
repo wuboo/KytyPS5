@@ -294,12 +294,15 @@ void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const u
 		it.ucfg                   = m_ucfg;
 		it.index_type_and_size    = m_index_type_and_size;
 		it.index_buffer_size      = m_index_buffer_size;
-		it.num_instances          = m_num_instances;
+		it.num_instances          = NumInstances(); // resolves an inherited count now, as the unpiped path does at the draw
 		it.index_base_addr        = m_index_base_addr;
 		it.draw_indirect_base     = m_draw_indirect_args_base_addr;
 		it.dispatch_indirect_base = m_dispatch_indirect_args_base_addr;
 	}
-	if (cls == CpPipe::OpClass::Draw && CpPipe::IsGraphicsDraw(opcode) && EnvWorkers() != 0) {
+	// S487: upstream reads a draw's programs from the command buffer (PipelineCache::GetGraphicsPrograms(command, state)) and the program cache is not shared with
+	// other threads, so a worker has nothing to compute yet (RunGfpJob never answers). No job is created; the FIFO (front / recorder) still runs.
+	constexpr bool kWorkersPorted = false;
+	if (kWorkersPorted && cls == CpPipe::OpClass::Draw && CpPipe::IsGraphicsDraw(opcode) && EnvWorkers() != 0) {
 		it.job.cache     = &m_renderer.GetPipelineCache();
 		it.job.ctx_copy  = it.ctx;
 		it.job.sh_copy   = it.sh;
@@ -373,10 +376,6 @@ void CommandProcessor::PipeExecuteFront() {
 	const auto handler = g_cp_op_func[it.opcode];
 	EXIT_IF(handler == nullptr);
 	const bool state_item = it.cls == CpPipe::OpClass::Draw || it.cls == CpPipe::OpClass::Dispatch;
-	if (it.opcode != Pm4::IT_DRAW_INDEX_2 && it.opcode != Pm4::IT_DISPATCH_DRAW_PREAMBLE && it.opcode != Pm4::IT_DRAW_INDEX_AUTO) {
-		// Everything but a draw must see the effects of the draws before it applied (the same rule ProcessPm4 has for the pending prototype batch).
-		m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
-	}
 	if (state_item) {
 		GetScheduler().Rebind(it.ctx, it.ucfg, it.sh);
 		m_exec_sh   = &it.sh;
