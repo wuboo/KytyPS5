@@ -29,15 +29,14 @@ void ClassifyTests() {
 	Check(Classify(Pm4::IT_WAIT_REG_MEM, 0, 0, 7) == OpClass::Wait, "WAIT_REG_MEM is a wait");
 	Check(Classify(Pm4::IT_WAIT_REG_MEM_64, 0, 0, 9) == OpClass::Wait, "WAIT_REG_MEM_64 is a wait");
 	// signals and CPU writes wait in the FIFO behind the draws that precede them
-	Check(Classify(Pm4::IT_NOP, Pm4::R_RELEASE_MEM, 0, 8) == OpClass::Ordered, "RELEASE_MEM is ordered");
+	Check(Classify(Pm4::IT_RELEASE_MEM, 0, 0, 8) == OpClass::Ordered, "RELEASE_MEM is ordered");
 	Check(Classify(Pm4::IT_EVENT_WRITE, 0, 0, 4) == OpClass::Ordered, "EVENT_WRITE is ordered");
-	Check(Classify(Pm4::IT_EVENT_WRITE_EOP, 0, 0, 6) == OpClass::Ordered, "EVENT_WRITE_EOP is ordered");
 	Check(Classify(Pm4::IT_WRITE_DATA, 0, 0, 6) == OpClass::Ordered, "WRITE_DATA is ordered");
 	Check(Classify(Pm4::IT_DMA_DATA, 0, 0, 7) == OpClass::Ordered, "DMA_DATA is ordered");
 	Check(Classify(Pm4::IT_NOP, Pm4::R_FLIP, 0, 6) == OpClass::Ordered, "FLIP is ordered");
-	// markers: user data tags stay inline, a flip tag is ordered
+	// markers: upstream no longer executes them (S487), all stay inline
 	Check(Classify(Pm4::IT_NOP, Pm4::R_ZERO, 0x68750004u, 3) == OpClass::Inline, "marker tag 4 is inline");
-	Check(Classify(Pm4::IT_NOP, Pm4::R_ZERO, 0x68750777u, 3) == OpClass::Ordered, "marker flip is ordered");
+	Check(Classify(Pm4::IT_NOP, Pm4::R_ZERO, 0x68750777u, 3) == OpClass::Inline, "marker flip tag is inline");
 	Check(Classify(Pm4::IT_NOP, Pm4::R_ZERO, 0, 2) == OpClass::Inline, "plain NOP is inline");
 	// everything the table does not know drains
 	Check(Classify(Pm4::IT_SET_SH_REG_INDIRECT, 0, 0, 5) == OpClass::Inline && ReadsIndirectTable(Pm4::IT_SET_SH_REG_INDIRECT), "indirect register sets run at parse, after a table check");
@@ -45,7 +44,6 @@ void ClassifyTests() {
 	Check(Classify(Pm4::IT_COND_EXEC, 0, 0, 5) == OpClass::Drain, "COND_EXEC drains");
 	Check(Classify(Pm4::IT_SET_PREDICATION, 0, 0, 5) == OpClass::Drain, "SET_PREDICATION drains");
 	Check(Classify(Pm4::IT_DRAW_INDIRECT, 0, 0, 5) == OpClass::Drain, "DRAW_INDIRECT drains");
-	Check(Classify(Pm4::IT_DUMP_CONST_RAM, 0, 0, 5) == OpClass::Drain, "DUMP_CONST_RAM drains");
 	Check(Classify(0xee, 0, 0, 5) == OpClass::Drain, "an unknown opcode drains");
 	Check(Classify(Pm4::IT_NOP, Pm4::R_WAIT_FLIP_DONE, 0, 4) == OpClass::Drain, "WAIT_FLIP_DONE drains");
 	Check(IsGraphicsDraw(Pm4::IT_DRAW_INDEX_2) && !IsGraphicsDraw(Pm4::IT_DISPATCH_DIRECT), "graphics draw predicate");

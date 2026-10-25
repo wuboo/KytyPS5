@@ -1,6 +1,3 @@
-#include <atomic>
-#include <memory>
-#include <unordered_map>
 #include "common/assert.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
@@ -102,43 +99,6 @@ bool EquivalentValue(const ResourcePlan& program, Value left, Value right,
 }
 
 } // namespace
-
-namespace {
-thread_local bool t_scratch_per_thread = false;
-} // namespace
-
-void SetScratchPerThread(bool on) {
-	t_scratch_per_thread = on;
-}
-
-uint64_t ResourcePlan::NextScratchKey() {
-	static std::atomic<uint64_t> next {1};
-	return next.fetch_add(1, std::memory_order_relaxed);
-}
-
-ResourcePlan::Scratch& ResourcePlan::scratch() const {
-	if (!t_scratch_per_thread) return own_scratch;
-	static thread_local std::unordered_map<uint64_t, std::unique_ptr<Scratch>> mine;
-	static thread_local uint64_t last_key = 0; // a walk asks for the same plan's scratch over and over
-	static thread_local Scratch* last     = nullptr;
-	if (last != nullptr && last_key == scratch_key) return *last;
-	auto& slot = mine[scratch_key];
-	if (!slot) {
-		slot = std::make_unique<Scratch>();
-		// The selector groups are part of the plan's shape; their values and flags are scratch.
-		slot->selector_keys.resize(own_scratch.selector_keys.size());
-		for (size_t i = 0; i < slot->selector_keys.size(); i++) slot->selector_keys[i].source = own_scratch.selector_keys[i].source;
-	}
-	last_key = scratch_key;
-	last     = slot.get();
-	return *slot;
-}
-
-void ResourcePlan::IndexEvaluation() {
-	for (auto& inst: value_storage) {
-		(void)inst.EvaluationIndex(evaluation_value_count);
-	}
-}
 
 ResourcePlan::ResourcePlan() = default;
 ResourcePlan::ResourcePlan(ResourcePlan&&) noexcept = default;

@@ -241,21 +241,10 @@ private:
 		std::optional<PreparedBindings> pixel;
 	};
 
-	// ps_hash/slot (pixel stage only, 0 = none) let the control file's force_tex replace the T#.
-	// hint is the S379 stand-in reason for this slot (null when the diag is off).
-	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource& resource,
-	                                            const ShaderRecompiler::IR::DescriptorValue& value,
-	                                            uint64_t ps_hash = 0, uint32_t slot = 0,
-	                                            const NullDesc::Hint* null_hint = nullptr);
-	void                         PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
-	                                                     std::span<RenderColorInfo>         colors);
-
-	// The description of a texture binding, kept for inputs seen before.
-	[[nodiscard]] const TextureDescription&
-	FindTextureDescription(const ShaderRecompiler::IR::ImageResource&   resource,
-	                       const ShaderRecompiler::IR::DescriptorValue& value,
-	                       TexMemo::Entry<ImageId>**                    memo = nullptr);
-
+	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
+	                                            const ShaderRecompiler::IR::DescriptorValue& value);
+	void PrepareGraphicsBindings(std::span<PreparedBindings* const> stages,
+	                             std::span<RenderColorInfo> colors);
 	void ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& target,
 	                              uint32_t render_target_slice_offset, uint32_t render_target_slot,
 	                              bool ignore_target_mask = false, bool exact_format = false);

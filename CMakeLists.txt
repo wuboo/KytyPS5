@@ -262,7 +262,6 @@ list(REMOVE_ITEM kyty_emulator_src
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/perVertexVsStoreRuntime.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/pvIndirectRuntime.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/host_gpu/renderer/renderPvIndirect.cpp"
-	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/backend/spirv/spirvEmitterPvStore.cpp"
 )
 
 find_program(KYTY_GLSLANG_VALIDATOR NAMES glslangValidator glslang REQUIRED)

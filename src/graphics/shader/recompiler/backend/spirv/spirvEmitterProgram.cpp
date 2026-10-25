@@ -1,6 +1,5 @@
-#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
-
 #include "common/assert.h"
+#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 
 #include <algorithm>
 #include <bit>
@@ -55,11 +54,11 @@ struct StructuredFunctionState {
 
 struct DispatcherFunctionState {
 	std::array<std::unordered_map<const IR::Inst*, uint32_t>, 2> spills;
-	uint32_t                                      header_label       = 0;
-	uint32_t                                      select_label       = 0;
-	uint32_t                                      after_switch_label = 0;
-	uint32_t                                      continue_label     = 0;
-	uint32_t                                      merge_label        = 0;
+	uint32_t                                                     header_label       = 0;
+	uint32_t                                                     select_label       = 0;
+	uint32_t                                                     after_switch_label = 0;
+	uint32_t                                                     continue_label     = 0;
+	uint32_t                                                     merge_label        = 0;
 };
 
 void StoreDispatcherPhiEdge(ValueEmitContext& ctx, const DispatcherFunctionState& dispatcher,
@@ -79,6 +78,29 @@ void StoreDispatcherPhiEdge(ValueEmitContext& ctx, const DispatcherFunctionState
 			}
 		}
 	}
+}
+
+// Wraps a loop header's branch condition so the loop exits after ShaderLoopLimit() iterations.
+uint32_t GuardLoopCondition(ValueEmitContext& ctx, const IR::Block& block, uint32_t condition) {
+	auto&      state = ctx.state;
+	const auto found = state.loop_counter_variables.find(block.id);
+	if (found == state.loop_counter_variables.end()) {
+		return condition;
+	}
+	// Loop watchdog, part 2: an exit of the loop is forced once its iteration count (counted on
+	// the back edges) passes the limit.
+	const auto [variable, exit_block] = found->second;
+	const auto counter                = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), counter, variable);
+	const auto over = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpUGreaterThanEqual, TypeBool(state), over, counter,
+	                          ConstantU32(state, ShaderLoopLimit()));
+	const bool exit_when_true = block.terminator.true_block != nullptr &&
+	                            block.terminator.true_block->id == exit_block;
+	const auto guarded        = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpSelect, TypeBool(state), guarded, over,
+	                          ConstantBool(state, exit_when_true), condition);
+	return guarded;
 }
 
 void EmitReturn(ValueEmitContext& ctx) {
@@ -129,7 +151,7 @@ void EmitStructuredTerminator(ValueEmitContext& ctx, const IR::Block* block) {
 				EmitReturn(ctx);
 				return;
 			}
-			const auto condition = ctx.Def(block->condition);
+			const auto condition = GuardLoopCondition(ctx, *block, ctx.Def(block->condition));
 			emit_merge();
 			ctx.state.builder.AddFunction(spv::OpBranchConditional, condition,
 			                              true_block->Definition(), false_block->Definition());
@@ -332,8 +354,22 @@ void PatchStructuredPhis(ValueEmitContext& ctx, StructuredFunctionState& structu
 	}
 }
 
+// Loop watchdog, part 1: every back edge (latch) of a loop counts one iteration. The exits of
+// the loop test the count (GuardLoopCondition), so only existing edges are ever taken.
+void EmitBackEdgeGuard(ValueEmitContext& ctx, const IR::Block& block) {
+	auto&      state = ctx.state;
+	const auto found = state.back_edge_counters.find(block.id);
+	if (found == state.back_edge_counters.end()) {
+		return;
+	}
+	const auto counter = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpLoad, TypeU32(state), counter, found->second);
+	const auto next = EmitBinaryU32(state, spv::OpIAdd, counter, ConstantU32(state, 1));
+	state.builder.AddFunction(spv::OpStore, found->second, next);
+}
+
 void EmitStructuredFunction(ValueEmitContext& ctx) {
-	const auto& program = ctx.state.program;
+	const auto&             program = ctx.state.program;
 	StructuredFunctionState structured;
 	ctx.state.builder.AddFunction(spv::OpBranch, program.blocks.front()->Definition());
 	for (size_t index = 0; index < program.blocks.size(); index++) {
@@ -341,6 +377,7 @@ void EmitStructuredFunction(ValueEmitContext& ctx) {
 		EmitBlock(ctx, block, [&](ValueEmitContext& lane, const IR::Inst& inst) {
 			EmitStructuredInstruction(lane, structured, inst);
 		});
+		EmitBackEdgeGuard(ctx, *block);
 		structured.block_exit_labels.emplace(block, ctx.state.current_label);
 		EmitStructuredTerminator(ctx, block);
 	}
@@ -364,9 +401,29 @@ void EmitDispatcherFunction(ValueEmitContext& ctx, const DispatcherFunctionState
 	const auto next_pc = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpPhi, TypeU32(state), pc, initial_pc, initial_parent, next_pc,
 	                          dispatcher.continue_label);
-	const auto done = state.builder.AllocateId();
+	// Loop watchdog for the dispatcher: count dispatched blocks and leave when over the cap.
+	// Phis must lead the block, so the counter's phi goes before the exit test.
+	uint32_t iteration      = 0;
+	uint32_t next_iteration = 0;
+	if (ShaderLoopLimit() != 0) {
+		iteration      = state.builder.AllocateId();
+		next_iteration = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpPhi, TypeU32(state), iteration, ConstantU32(state, 0),
+		                          initial_parent, next_iteration, dispatcher.continue_label);
+	}
+	auto done = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpIEqual, TypeBool(state), done, pc,
 	                          ConstantU32(ctx.state, UINT32_MAX));
+	if (ShaderLoopLimit() != 0) {
+		state.builder.AddFunction(spv::OpIAdd, TypeU32(state), next_iteration, iteration,
+		                          ConstantU32(state, 1));
+		const auto over = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpUGreaterThanEqual, TypeBool(state), over, iteration,
+		                          ConstantU32(state, ShaderLoopLimit()));
+		const auto stop = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLogicalOr, TypeBool(state), stop, done, over);
+		done = stop;
+	}
 	state.builder.AddFunction(spv::OpLoopMerge, dispatcher.merge_label, dispatcher.continue_label,
 	                          spv::LoopControlMaskNone);
 	state.builder.AddFunction(spv::OpBranchConditional, done, dispatcher.merge_label,
@@ -465,26 +522,43 @@ uint32_t ValueEmitContext::Arg(const IR::Inst& inst, size_t index) {
 	return Def(inst.Arg(index));
 }
 
+uint32_t ValueEmitContext::ExecutionMask(const IR::Inst& inst, size_t index) {
+	return MaskCaptureExecution(state, Arg(inst, index), half);
+}
+
 uint32_t ValueEmitContext::HalfArg(const IR::Inst& inst, size_t index, uint32_t lane_half) {
 	return lane_half == half ? Arg(inst, index) : other_half->Arg(inst, index);
 }
 
-uint32_t ValueEmitContext::Ballot(IR::Value predicate) {
+uint32_t ValueEmitContext::Ballot(IR::Value predicate, bool negate) {
 	const auto ballot_type = TypeU32Vector(state, 4);
 	const auto scope       = ConstantU32(state, spv::ScopeSubgroup);
-	const auto low         = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpGroupNonUniformBallot, ballot_type, low, scope,
-	                          other_half == nullptr || half == 0 ? Def(predicate)
-	                                                             : other_half->Def(predicate));
+	const auto value       = [&](uint32_t id) {
+		if (!negate) {
+			return id;
+		}
+		const auto inverted = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLogicalNot, TypeBool(state), inverted, id);
+		return inverted;
+	};
+	const auto low = state.builder.AllocateId();
+	state.builder.AddFunction(
+	    spv::OpGroupNonUniformBallot, ballot_type, low, scope,
+	    MaskCaptureExecution(
+	        state,
+	        value(other_half == nullptr || half == 0 ? Def(predicate) : other_half->Def(predicate)),
+	        0));
 	if (other_half == nullptr) {
-		return low;
+		return state.pixel_wave32_wide_host ? EmitOwnHalfBallot(state, low) : low;
 	}
 	const auto high      = state.builder.AllocateId();
 	const auto low_word  = state.builder.AllocateId();
 	const auto high_word = state.builder.AllocateId();
 	const auto ballot    = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpGroupNonUniformBallot, ballot_type, high, scope,
-	                          half == 1 ? Def(predicate) : other_half->Def(predicate));
+	state.builder.AddFunction(
+	    spv::OpGroupNonUniformBallot, ballot_type, high, scope,
+	    MaskCaptureExecution(state, value(half == 1 ? Def(predicate) : other_half->Def(predicate)),
+	                         1));
 	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), low_word, low, 0);
 	state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), high_word, high, 0);
 	state.builder.AddFunction(spv::OpCompositeConstruct, ballot_type, ballot, low_word, high_word,
@@ -524,9 +598,9 @@ uint32_t ValueEmitContext::Shuffle(const IR::Inst& inst, size_t index, uint32_t 
 	}
 	const auto physical_lane =
 	    EmitBinaryU32(state, spv::OpBitwiseAnd, lane, ConstantU32(state, 31));
-	const auto high          = state.builder.AllocateId();
-	const auto in_high       = state.builder.AllocateId();
-	const auto value         = state.builder.AllocateId();
+	const auto high    = state.builder.AllocateId();
+	const auto in_high = state.builder.AllocateId();
+	const auto value   = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpGroupNonUniformShuffle, type, low, scope,
 	                          HalfArg(inst, index, 0), physical_lane);
 	state.builder.AddFunction(spv::OpGroupNonUniformShuffle, type, high, scope,
@@ -706,6 +780,55 @@ void EmitProgram(EmitterState& state) {
 		                          TypePointer(state, spv::StorageClassFunction, TypeU32(state)),
 		                          state.pixel_valid_mask_variable, spv::StorageClassFunction);
 	}
+	state.loop_counter_variables.clear();
+	state.back_edge_counters.clear();
+	if (ShaderLoopLimit() != 0 && !state.program.dispatcher_fallback) {
+		const auto new_counter = [&]() {
+			const auto variable = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpVariable,
+			                          TypePointer(state, spv::StorageClassFunction, TypeU32(state)),
+			                          variable, spv::StorageClassFunction, ConstantU32(state, 0));
+			return variable;
+		};
+		// Latches (blocks with a back edge to an earlier loop header) count iterations; every
+		// conditional branch that leaves a loop to its merge block tests that loop's count.
+		std::unordered_map<const IR::Block*, size_t> order;
+		for (size_t index = 0; index < program.blocks.size(); index++) {
+			order.emplace(program.blocks[index], index);
+		}
+		std::unordered_map<const IR::Block*, uint32_t> loop_counters; // header -> counter
+		for (size_t index = 0; index < program.blocks.size(); index++) {
+			const auto* block = program.blocks[index];
+			const auto& term  = block->terminator;
+			for (const auto* target: {term.true_block, term.false_block}) {
+				const auto found = order.find(target);
+				if (target == nullptr || found == order.end() || found->second > index ||
+				    !program.blocks[found->second]->terminator.loop_header) {
+					continue;
+				}
+				auto counter = loop_counters.find(target);
+				if (counter == loop_counters.end()) {
+					counter = loop_counters.emplace(target, new_counter()).first;
+				}
+				state.back_edge_counters.emplace(block->id, counter->second);
+				break;
+			}
+		}
+		for (const auto& [header, counter]: loop_counters) {
+			const auto* merge = header->terminator.merge_block;
+			if (merge == nullptr) {
+				continue;
+			}
+			for (const auto* block: program.blocks) {
+				const auto& term = block->terminator;
+				if (term.kind == CFG::TerminatorKind::ConditionalBranch &&
+				    (term.true_block == merge) != (term.false_block == merge) &&
+				    !state.loop_counter_variables.contains(block->id)) {
+					state.loop_counter_variables.emplace(block->id, std::pair {counter, merge->id});
+				}
+			}
+		}
+	}
 	for (uint32_t half = 0; half < state.lane_count; half++) {
 		auto& lane = half == 0 ? ctx : high;
 		if (state.program.dispatcher_fallback) {
@@ -746,6 +869,8 @@ void EmitProgram(EmitterState& state) {
 		state.lds_base_dwords = EmitBinaryU32(state, spv::OpIMul, index,
 		                                     ConstantU32(state, LdsDwordCount(state)));
 	}
+	InitializeVertexCapture(state);
+	InitializePvStore(state);
 	EmitMemoryOffsets(state);
 	if (program.blocks.empty()) {
 		EmitReturn(ctx);

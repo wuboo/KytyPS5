@@ -1,6 +1,5 @@
-#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
-
 #include "common/logging/log.h"
+#include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
 
 #include <algorithm>
 #include <atomic>
@@ -22,6 +21,10 @@ bool UserDataDwordIndex(const EmitterState& state, IR::ScalarReg reg, uint32_t& 
 }
 
 uint32_t EmitBuiltinU32(EmitterState& state, IR::StageInputKind kind, uint32_t component) {
+	if (state.vertex_capture != nullptr &&
+	    (kind == IR::StageInputKind::VertexIndex || kind == IR::StageInputKind::InstanceIndex)) {
+		return CaptureInput(state, false, 0, kind == IR::StageInputKind::InstanceIndex ? 1u : 0u);
+	}
 	if (kind == IR::StageInputKind::LocalInvocationIndex) {
 		return EmitLocalInvocationIndex(state);
 	}
@@ -85,7 +88,8 @@ uint32_t EmitBuiltinU32(EmitterState& state, IR::StageInputKind kind, uint32_t c
 	    kind == IR::StageInputKind::BaryCoordNoPerspective) {
 		const auto value   = state.builder.AllocateId();
 		const auto bits    = state.builder.AllocateId();
-		if (centroid || sample) {
+		// A covered single-sample fragment has its only sample at the pixel center.
+		if ((centroid && !state.input_info.pixel->ps_single_sample) || sample) {
 			const auto coordinates = state.builder.AllocateId();
 			state.builder.RequireCapability(spv::CapabilityInterpolationFunction);
 			if (sample) {
@@ -238,8 +242,14 @@ uint32_t EmitPixelAttribute(EmitterState& state, const InputBinding& input, uint
 }
 
 uint32_t EmitAttribute(EmitterState& state, uint32_t attr, uint32_t chan) {
+	if (state.vertex_capture != nullptr) {
+		EXIT_IF(attr >= state.vertex_capture->num_attributes);
+		return CaptureInput(state, true, attr, chan & 3u);
+	}
 	const auto* input = InputBindingForParameter(state, attr);
-	if (input == nullptr || input->variable_id == 0) {
+	const bool  pv_store_input = state.pv_store != nullptr && input != nullptr && input->per_vertex &&
+	                            state.program.stage == ShaderType::Pixel;
+	if (input == nullptr || (input->variable_id == 0 && !pv_store_input)) {
 		return ConstantU32(state, 0);
 	}
 	if (state.program.stage == ShaderType::Vertex || state.program.stage == ShaderType::Local) {
@@ -450,8 +460,8 @@ void EmitAuxPositionExport(ValueEmitContext& ctx, uint32_t data, const IR::Expor
 	}
 }
 
-uint32_t ConvertClipCoordinate(EmitterState& state, uint32_t coordinate, float scale,
-                               float offset, float half_extent) {
+uint32_t ConvertClipCoordinate(EmitterState& state, uint32_t coordinate, float scale, float offset,
+                               float half_extent) {
 	const auto window  = state.builder.AllocateId();
 	const auto biased  = state.builder.AllocateId();
 	const auto divided = state.builder.AllocateId();
@@ -475,10 +485,10 @@ uint32_t ConvertPositionToClipSpace(EmitterState& state, uint32_t position) {
 		state.builder.AddFunction(spv::OpCompositeExtract, TypeF32(state), components[i], position,
 		                          i);
 	}
-	components[0] = ConvertClipCoordinate(state, components[0], transform.scale[0],
-	                                      transform.offset[0], transform.half_extent[0]);
-	components[1] = ConvertClipCoordinate(state, components[1], transform.scale[1],
-	                                      transform.offset[1], transform.half_extent[1]);
+	components[0]        = ConvertClipCoordinate(state, components[0], transform.scale[0],
+	                                             transform.offset[0], transform.half_extent[0]);
+	components[1]        = ConvertClipCoordinate(state, components[1], transform.scale[1],
+	                                             transform.offset[1], transform.half_extent[1]);
 	const auto converted = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpCompositeConstruct, TypeF32Vector(state, 4), converted,
 	                          components[0], components[1], components[2], components[3]);
@@ -510,7 +520,7 @@ uint32_t EmitWqmU64(EmitterState& state, uint32_t value) {
 void EmitSetAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto&       state = ctx.state;
 	const auto& exp   = ctx.Export(inst);
-	const auto  exec  = ctx.Arg(inst, 1);
+	const auto  exec  = ctx.ExecutionMask(inst, 1);
 	if (state.program.stage == ShaderType::Pixel && exp.vm && state.program.info.pixel_valid_mask &&
 	    state.pixel_valid_mask_variable != 0) {
 		const auto value = state.builder.AllocateId();
@@ -560,7 +570,13 @@ void EmitSetAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {
 		}
 		const auto variable =
 		    state.program.stage == ShaderType::Mesh ? 0u : OutputVariableForExport(state, exp);
-		if (state.program.stage != ShaderType::Mesh && variable == 0) {
+		if (state.vertex_capture != nullptr && exp.kind == IR::ExportTargetKind::Parameter &&
+		    std::ranges::none_of(state.outputs, [&](const OutputBinding& binding) {
+			    return binding.kind == IR::StageOutputKind::Parameter && binding.index == exp.index;
+		    }))
+			return;
+		if (state.program.stage != ShaderType::Mesh && state.vertex_capture == nullptr &&
+		    variable == 0) {
 			return;
 		}
 		const bool uint_output = MrtOutputMode(state, exp) == 7u;
@@ -648,9 +664,10 @@ void EmitSetAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {
 			                          value);
 		} else if (exp.kind == IR::ExportTargetKind::Position) {
 			if (state.invalid_position_clip_distance != UINT32_MAX) {
-				const auto zero = state.builder.Constant(spv::OpConstantNull, TypeF32Vector(state, 4));
-				const auto equal = state.builder.AllocateId();
-				const auto invalid = state.builder.AllocateId();
+				const auto zero =
+				    state.builder.Constant(spv::OpConstantNull, TypeF32Vector(state, 4));
+				const auto equal    = state.builder.AllocateId();
+				const auto invalid  = state.builder.AllocateId();
 				const auto distance = state.builder.AllocateId();
 				state.builder.AddFunction(spv::OpFOrdEqual, TypeBoolVector(state, 4), equal,
 				                          value, zero);
@@ -666,18 +683,44 @@ void EmitSetAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {
 				                          distance);
 				static std::atomic_bool logged = false;
 				if (!logged.exchange(true, std::memory_order_relaxed)) {
-					Log::WriteToConsoleAndLog(
-					    "Shader: emitted zero-position clip guard\n");
+					Log::WriteToConsoleAndLog("Shader: emitted zero-position clip guard\n");
 				}
 			}
-			const auto pointer = state.builder.AllocateId();
-			state.builder.AddFunction(
-			    spv::OpAccessChain,
-			    TypePointer(state, spv::StorageClassOutput, TypeF32Vector(state, 4)), pointer,
-			    variable, ConstantU32(state, 0));
+			const auto pointer = state.vertex_capture != nullptr ? CaptureOutputPointer(state, 0)
+			                                                     : state.builder.AllocateId();
+			if (state.vertex_capture == nullptr) {
+				state.builder.AddFunction(
+				    spv::OpAccessChain,
+				    TypePointer(state, spv::StorageClassOutput, TypeF32Vector(state, 4)), pointer,
+				    variable, ConstantU32(state, 0));
+			}
 			state.builder.AddFunction(spv::OpStore, pointer, value);
+		} else if (state.vertex_capture != nullptr) {
+			const auto output =
+			    std::ranges::find_if(state.outputs, [&](const OutputBinding& binding) {
+				    return binding.kind == IR::StageOutputKind::Parameter &&
+				           binding.index == exp.index;
+			    });
+			EXIT_IF(output == state.outputs.end());
+			state.builder.AddFunction(
+			    spv::OpStore,
+			    CaptureOutputPointer(state,
+			                         state.vertex_capture->parameter_slots.at(output->location)),
+			    value);
 		} else {
+			// S388: a PS that read a record outside the draw's range writes magenta (float MRTs only).
+			const bool packed_unorm = state.program.stage == ShaderType::Pixel && exp.kind == IR::ExportTargetKind::Mrt &&
+			                          (state.input_info.pixel->target_packed_unorm_mask & (1u << exp.index)) != 0u;
+			if (exp.kind == IR::ExportTargetKind::Mrt && !uint_output && !packed_unorm) value = PvGuardColor(state, value);
 			state.builder.AddFunction(spv::OpStore, variable, value);
+			if (state.pv_store != nullptr && exp.kind == IR::ExportTargetKind::Parameter) {
+				const auto output =
+				    std::ranges::find_if(state.outputs, [&](const OutputBinding& binding) {
+					    return binding.kind == IR::StageOutputKind::Parameter &&
+					           binding.index == exp.index;
+				    });
+				if (output != state.outputs.end()) EmitPvStoreParameter(state, output->location, value);
+			}
 		}
 	});
 }
@@ -709,6 +752,35 @@ void EmitBarrier(EmitterState& state) {
 	if (!tessellation && ShaderWorkgroupInput(state.program.stage, state.input_info) == nullptr) {
 		// Independent graphics invocations have no native workgroup left to synchronize.
 		return;
+	}
+	// A guest s_barrier runs for the whole wave whatever EXEC is, but EXEC/VCC branches become
+	// per-invocation branches here (one lane per invocation): a barrier under such a branch is
+	// not reached by every invocation and can hang the GPU. Log such shaders; the bench switch
+	// KYTY_BENCH_DROP_DIVERGENT_BARRIERS=1 leaves their barriers out (diagnosis only).
+	if (!tessellation && state.lane_count == 1) {
+		const bool divergent = std::ranges::any_of(state.program.blocks, [](const IR::Block* block) {
+			const auto* condition = block->condition.IsEmpty() ? nullptr : block->condition.TryInstruction();
+			if (condition == nullptr || condition->GetOpcode() != IR::ValueOpcode::ConditionRef) return false;
+			switch (condition->Flags<CFG::BranchCondition>()) {
+				case CFG::BranchCondition::VccZero:
+				case CFG::BranchCondition::VccNonZero:
+				case CFG::BranchCondition::ExecZero:
+				case CFG::BranchCondition::ExecNonZero: return true;
+				default: return false;
+			}
+		});
+		if (divergent) {
+			static std::atomic<uint32_t> logged {0};
+			if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+				LOGF("[bench-divergent-barrier] stage=%d blocks=%zu: barrier with per-invocation "
+				     "EXEC/VCC branches\n",
+				     static_cast<int>(state.program.stage), state.program.blocks.size());
+			}
+			static const bool drop = std::getenv("KYTY_BENCH_DROP_DIVERGENT_BARRIERS") != nullptr;
+			if (drop) {
+				return;
+			}
+		}
 	}
 	const auto memory_scope = tessellation ? spv::ScopeInvocation : spv::ScopeWorkgroup;
 	const auto memory = state.lds_storage_class == spv::StorageClassStorageBuffer
@@ -795,10 +867,23 @@ uint32_t EmitConditionRef(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const bool zero = kind == CFG::BranchCondition::ExecZero ||
 	                  kind == CFG::BranchCondition::VccZero || kind == CFG::BranchCondition::SccZero;
 	// Zero-kind predicates are already inverted by translation.
-	auto predicate = ctx.Arg(inst, 0);
+	// A *Zero branch is taken when no lane fails: the native PerVertex capture masks out lanes
+	// without work (a wave past the vertex count), and those must not keep the wave in a loop.
+	const auto live = [&](uint32_t predicate, uint32_t half) {
+		if (ctx.state.vertex_capture == nullptr) {
+			return predicate;
+		}
+		if (!zero) {
+			return MaskCaptureExecution(ctx.state, predicate, half);
+		}
+		const auto inverted = Unary(ctx.state, spv::OpLogicalNot, TypeBool(ctx.state), predicate);
+		return Unary(ctx.state, spv::OpLogicalNot, TypeBool(ctx.state),
+		             MaskCaptureExecution(ctx.state, inverted, half));
+	};
+	auto predicate = live(ctx.Arg(inst, 0), 0);
 	if (ctx.other_half != nullptr) {
 		predicate = Binary(ctx.state, zero ? spv::OpLogicalAnd : spv::OpLogicalOr,
-		                   TypeBool(ctx.state), predicate, ctx.HalfArg(inst, 0, 1));
+		                   TypeBool(ctx.state), predicate, live(ctx.HalfArg(inst, 0, 1), 1));
 	}
 	const auto result = ctx.state.builder.AllocateId();
 	ctx.state.builder.AddFunction(zero ? spv::OpGroupNonUniformAll : spv::OpGroupNonUniformAny,
@@ -818,7 +903,7 @@ uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 }
 
 uint32_t EmitReadLane(ValueEmitContext& ctx, const IR::Inst& inst) {
-	return ctx.Shuffle(inst, 0, ctx.Arg(inst, 1));
+	return ctx.Shuffle(inst, 0, EmitHostLaneOfGuestLane(ctx.state, ctx.Arg(inst, 1)));
 }
 
 uint32_t EmitSubgroupUMinU32(ValueEmitContext& ctx, const IR::Inst& inst) {
@@ -837,7 +922,7 @@ uint32_t EmitWriteLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto&      state = ctx.state;
 	const auto hit   = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpIEqual, TypeBool(state), hit,
-	                          EmitSubgroupLocalInvocationId(state), ctx.Arg(inst, 2));
+	                          EmitGuestLaneId(state), ctx.Arg(inst, 2));
 	return EmitNative<spv::OpSelect, IR::Type::U32>(ctx.state, hit, ctx.Arg(inst, 1),
 	                                                ctx.Arg(inst, 0));
 }

@@ -781,26 +781,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			}
 		}
 
-		// Register writes only change state for later draws: a pending prototype batch has already
-		// captured everything it will read (bindings, pipeline, and a copy of the registers for its
-		// dynamic state) when each of its draws was issued, so they need not flush it. Astro Bot
-		// sets SH/context registers between every pair of draws; without this, batches never grew
-		// past one draw (bench-notes.md 2026-09-28, "Kierunek A v2").
-		const bool register_write = opcode == Pm4::IT_SET_SH_REG || opcode == Pm4::IT_SET_CONTEXT_REG ||
-		                            opcode == Pm4::IT_SET_CONTEXT_REG_INDIRECT ||
-		                            opcode == Pm4::IT_NUM_INSTANCES;
-		if (!pipe_front && opcode != Pm4::IT_DRAW_INDEX_2 && opcode != Pm4::IT_DISPATCH_DRAW_PREAMBLE &&
-		    opcode != Pm4::IT_DRAW_INDEX_AUTO && !register_write) {
-			// Every op other than a (possibly per-vertex-prototype) draw must see this op's
-			// effects fully applied first: flush any prototype draws whose replay was deferred for
-			// batching (bench-notes.md 2026-09-27 "Kierunek A") before this op runs, so nothing
-			// else in the whole PM4 stream can ever observe a partially-applied batch. The other
-			// half of this decision -- whether a draw itself is batchable, and with what -- lives
-			// in RenderExecutor::ExecutePerVertexPrototype/FlushPendingPrototypeBatch.
-			KYTY_CP_SITE(DrawFlushProto);
-			m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
-		}
-
+		(void)pipe_front;
 		if (CpPhases::Enabled()) FrameTiming::Add(FrameTiming::Counter::Pm4Packets);
 		if (RdHazard::Enabled() && Pm4Hist::Classify(opcode, opcode == Pm4::IT_NOP ? KYTY_PM4_R(packet_header) : 0u) == Pm4Hist::Cls::Draw) RdHazard::OnDraw(); // S477 D2 DIAG
 		if (Pm4Hist::Enabled()) Pm4Hist::Packet(opcode, opcode == Pm4::IT_NOP ? KYTY_PM4_R(packet_header) : 0u, KYTY_PM4_LEN(packet_header) + 1u); // S477 D1 DIAG
@@ -836,7 +817,6 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			// flush again before giving up the command buffer across a suspend/resume boundary
 			// that may span an arbitrary amount of real time.
 			PipeDrain(2, 0x1f2); // S479
-			m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
 			if (RdHazard::Enabled()) RdHazard::AtCallEnd(); // S477 D2 DIAG
 			return;
 		}
@@ -853,10 +833,6 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		}
 	}
 	PipeDrain(2, 0x1f2); // S479
-	// End of this PM4 stream (buffer stack drained without a suspend): nothing can observe a
-	// pending batch until the next Process() call, but that may run on a different command buffer
-	// entirely, so it must not still be pending here.
-	m_renderer.GetRenderExecutor().FlushPendingPrototypeBatch(CurrentBuffer());
 	if (RdHazard::Enabled()) RdHazard::AtCallEnd(); // S477 D2 DIAG
 }
 

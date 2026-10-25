@@ -1,6 +1,8 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
+#include "graphics/shader/recompiler/nggVertexCount.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <bit>
 
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
@@ -184,6 +186,19 @@ uint32_t PushConstantArrayType(EmitterState& state) {
 }
 
 uint32_t PushConstantBlockType(EmitterState& state) {
+	if (state.pv_store != nullptr) {
+		const auto fused = state.builder.DecoratedType(
+		    spv::OpTypeArray, {{spv::OpDecorate, {spv::DecorationArrayStride, sizeof(uint32_t)}}},
+		    TypeU32(state),
+		    ConstantU32(state, PvVsStorePushDwords(state.pv_store->guard)));
+		return state.builder.DecoratedType(
+		    spv::OpTypeStruct,
+		    {{spv::OpMemberDecorate, {0, spv::DecorationOffset, 0}},
+		     {spv::OpMemberDecorate,
+		      {1, spv::DecorationOffset, IR::PushData::DwordCount * sizeof(uint32_t)}},
+		     {spv::OpDecorate, {spv::DecorationBlock}}},
+		    PushConstantArrayType(state), fused);
+	}
 	return state.builder.DecoratedType(spv::OpTypeStruct,
 	                                   {{spv::OpMemberDecorate, {0, spv::DecorationOffset, 0}},
 	                                    {spv::OpDecorate, {spv::DecorationBlock}}},
@@ -485,6 +500,11 @@ void DefineInputs(EmitterState& state) {
 	for (const auto& input: state.program.info.inputs) {
 		state.inputs.push_back({input});
 	}
+	if (state.vertex_capture != nullptr) {
+		state.inputs = {
+		    {{IR::StageInputKind::WorkgroupId, 0, 3, "gl_WorkGroupID"}},
+		    {{IR::StageInputKind::LocalInvocationIndex, 0, 1, "gl_LocalInvocationIndex"}}};
+	}
 	const auto add_builtin = [&](IR::StageInputKind kind, uint32_t components,
 	                             const char* name) {
 		if (std::ranges::none_of(state.inputs, [kind](const InputBinding& input) {
@@ -493,6 +513,14 @@ void DefineInputs(EmitterState& state) {
 			state.inputs.push_back({{kind, 0, components, name}});
 		}
 	};
+	if (state.pv_store != nullptr) {
+		if (state.pv_store->role == PvStoreInfo::Role::Vertex) {
+			add_builtin(IR::StageInputKind::VertexIndex, 1, "gl_VertexIndex");
+			add_builtin(IR::StageInputKind::InstanceIndex, 1, "gl_InstanceIndex");
+		} else {
+			add_builtin(IR::StageInputKind::PrimitiveId, 1, "gl_PrimitiveID");
+		}
+	}
 	if (state.program.info.uses_lds && state.lds_storage_class == spv::StorageClassStorageBuffer) {
 		add_builtin(IR::StageInputKind::WorkgroupId, 3, "gl_WorkGroupID");
 		add_builtin(IR::StageInputKind::NumWorkgroups, 3, "gl_NumWorkGroups");
@@ -518,6 +546,11 @@ void DefineInputs(EmitterState& state) {
 				input.variable_id = alias->variable_id;
 				continue;
 			}
+		}
+		// S149: the PerVertex values come from the cap buffer, not from a PerVertexKHR variable.
+		if (state.pv_store != nullptr && state.pv_store->role == PvStoreInfo::Role::Pixel &&
+		    input.kind == IR::StageInputKind::Parameter && input.per_vertex) {
+			continue;
 		}
 		uint32_t type = TypeU32(state);
 		switch (input.kind) {
@@ -585,7 +618,15 @@ void DefineInputs(EmitterState& state) {
 			                            builtin);
 		}
 	}
-	if (state.program.info.subgroup_local_invocation_id) {
+#if defined(__APPLE__)
+	// Bench bring-up: MoltenVK rejects SubgroupLocalInvocationId in vertex functions.
+	// KYTY_VS_LANE_FROM_INDEX=0 restores the builtin (for tests that check lane selection).
+	if (VertexLanesFromIndex() && state.program.info.subgroup_local_invocation_id &&
+	    state.program.stage == ShaderType::Vertex) {
+		state.vertex_lane_from_index = true;
+	} else
+#endif
+	    if (state.program.info.subgroup_local_invocation_id || state.pixel_wave32_wide_host) {
 		const auto variable = DefineInterfaceVariable(state, TypeU32(state), spv::StorageClassInput,
 		                                              "gl_SubgroupInvocationID");
 		state.subgroup_local_invocation_id_variable = variable;
@@ -631,6 +672,18 @@ void DefineOutputs(EmitterState& state) {
 		state.invalid_position_clip_distance = clip_distance_count++;
 		state.outputs.push_back({{IR::StageOutputKind::ClipDistance,
 		                          state.invalid_position_clip_distance, 0, "gl_ClipDistance"}});
+	}
+	if (state.vertex_capture != nullptr) {
+		EXIT_IF(clip_distance_count > 1 || cull_distance_count != 0);
+		EXIT_IF((clip_distance_count != 0) != (state.vertex_capture->clip_slot != UINT32_MAX));
+		for (const auto& output: state.outputs) {
+			EXIT_IF(output.kind != IR::StageOutputKind::Position &&
+			        output.kind != IR::StageOutputKind::Parameter &&
+			        output.kind != IR::StageOutputKind::ClipDistance);
+			EXIT_IF(output.kind == IR::StageOutputKind::Parameter &&
+			        !state.vertex_capture->parameter_slots.contains(output.location));
+		}
+		return;
 	}
 	const auto BuiltIn = [&](uint32_t& variable, uint32_t type, const char* name,
 	                         spv::BuiltIn builtin) {
@@ -726,6 +779,8 @@ void DefineModule(EmitterState& state) {
 	DefineOutputs(state);
 	DefineTessellationInterfaces(state);
 	DefineDescriptors(state);
+	if (state.vertex_capture != nullptr) DefineVertexCapture(state);
+	if (state.pv_store != nullptr) DefinePvStore(state);
 	if (state.program.info.function_lds) {
 		state.lds_variable = state.builder.AllocateId();
 	}
@@ -799,7 +854,8 @@ void DefineModule(EmitterState& state) {
 	if (state.lane_count == 2 || state.program.info.subgroup_barrier ||
 	    state.program.info.subgroup_ballot || state.program.info.subgroup_vote ||
 	    state.program.info.subgroup_shuffle ||
-	    state.program.info.subgroup_arithmetic || state.program.info.subgroup_local_invocation_id) {
+	    state.program.info.subgroup_arithmetic || state.program.info.subgroup_local_invocation_id ||
+	    state.pixel_wave32_wide_host) {
 		state.builder.RequireCapability(spv::CapabilityGroupNonUniform);
 	}
 	if (state.lane_count == 2 || state.program.info.subgroup_ballot) {
@@ -848,7 +904,10 @@ void DefineModule(EmitterState& state) {
 		// state.builder.RequireCapability(spv::CapabilityDenormPreserve);
 		// state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeDenormPreserve, 64u);
 	}
-	if (const auto* cs = ShaderWorkgroupInput(state.program.stage, state.input_info)) {
+	if (state.vertex_capture != nullptr) {
+		state.builder.AddExecutionMode(state.main_func, spv::ExecutionModeLocalSize,
+		                               64u / state.lane_count, 1u, 1u);
+	} else if (const auto* cs = ShaderWorkgroupInput(state.program.stage, state.input_info)) {
 		uint32_t    local_x = state.program.info.compute_derivatives ? 2u : 1u;
 		uint32_t    local_y = state.program.info.compute_derivatives ? 2u : 1u;
 		uint32_t    local_z = 1u;
