@@ -67,16 +67,12 @@ inline OpClass Classify(uint32_t opcode, uint32_t r, uint32_t payload0, uint32_t
 		case IT_SET_CONTEXT_REG_INDIRECT: // they read a table of (offset, value) pairs from guest memory: ReadsIndirectTable tells the front where
 		case IT_PFP_SYNC_ME:
 		case IT_ACQUIRE_MEM:
-		case IT_INCREMENT_CE_COUNTER:
-		case IT_INCREMENT_DE_COUNTER:
-		case IT_WRITE_CONST_RAM:
 		case IT_INDIRECT_BUFFER: return OpClass::Inline;
 		case IT_WRITE_DATA:
 		case IT_DMA_DATA:
 		case IT_COPY_DATA:
 		case IT_EVENT_WRITE:
-		case IT_EVENT_WRITE_EOP:
-		case IT_EVENT_WRITE_EOS:
+		case IT_RELEASE_MEM:
 #ifdef KYTY_CPPIPE_MUTANT_SIGNAL_AT_PARSE
 			return OpClass::Inline;
 #else
@@ -93,21 +89,13 @@ inline OpClass Classify(uint32_t opcode, uint32_t r, uint32_t payload0, uint32_t
 		case IT_NOP:
 			switch (r) {
 				case R_ZERO:
-					if (packet_dw >= 2u && (payload0 & kMarkerTagMask) == kMarkerTag) {
-						switch (payload0) {
-							case 0x68750777: // flip
-							case 0x68750778:
-							case 0x68750781: return OpClass::Ordered;
-							default: return OpClass::Inline;
-						}
-					}
+					(void)payload0; // upstream no longer executes the marker NOPs (S487): they carry caller-owned data
 					return OpClass::Inline;
 				case R_PUSH_MARKER:
 				case R_POP_MARKER:
 				case R_CONTEXT_STATE:
 				case R_DISPATCH_RESET: return OpClass::Inline;
 				case R_FLIP:
-				case R_RELEASE_MEM:
 #ifdef KYTY_CPPIPE_MUTANT_SIGNAL_AT_PARSE
 					return OpClass::Inline;
 #else
@@ -316,12 +304,12 @@ inline bool InterruptOnly(uint32_t interrupt_selector, bool async_queue) {
 	return interrupt_selector == 1u && !async_queue;
 }
 
-// NOP R_RELEASE_MEM payload (the dwords after the header): [1] = data_sel / interrupt selector, [2..3] = address, [4..5] = value.
+// IT_RELEASE_MEM payload (the dwords after the header): [1] = data_sel / interrupt selector, [2..3] = address, [4..5] = value.
 inline SignalWrite DecodeReleaseMem(const uint32_t* payload, bool async_queue, uint64_t* address) {
 	SignalWrite    out;
 	const uint32_t data_sel  = (payload[1] >> 29u) & 0x7u;
 	const uint32_t interrupt = (payload[1] >> 24u) & 0x7u;
-	*address                 = payload[2] | (static_cast<uint64_t>(payload[3]) << 32u);
+	*address                 = (payload[2] & ~0x3u) | (static_cast<uint64_t>(payload[3]) << 32u);
 	const uint64_t value     = payload[4] | (static_cast<uint64_t>(payload[5]) << 32u);
 	if (data_sel == 0 || interrupt == 4u || *address == 0 || InterruptOnly(interrupt, async_queue)) return out;
 	switch (data_sel) {

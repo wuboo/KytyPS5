@@ -19,9 +19,12 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
+#include "graphics/host_gpu/renderer/meshIndirectRuntime.h"
+#include "graphics/host_gpu/renderer/pvIndirect.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
@@ -1044,10 +1047,50 @@ bool RenderExecutor::CopyDepthToColor(CommandBuffer& buffer, const DrawCallInfo&
 	return true;
 }
 
+// S404: primitive restart is on for a strip / fan topology (ResolvePrimitiveRestart then looks at the indices).
+static bool PrimitiveRestartControlOn(const CommandBuffer& buffer) {
+	if ((buffer.GetUserConfig().GetPrimitiveResetControl() & 0x1u) == 0) {
+		return false;
+	}
+	switch (buffer.GetUserConfig().GetPrimType()) {
+		case Prospero::PrimitiveType::kLineStrip:
+		case Prospero::PrimitiveType::kTriFan:
+		case Prospero::PrimitiveType::kTriStrip: return true;
+		default: return false;
+	}
+}
+
+// S472: the commands of the mesh prepare compute (the shared order is PvIndirect::RecordPrepare).
+namespace {
+struct MeshIndirectRecorder {
+	CommandScheduler&                    scheduler;
+	CommandBuffer&                       buffer;
+	const RenderState&                   rendering;
+	MeshIndirectRuntime&                 runtime;
+	const MeshIndirectRuntime::Prepared& prepared;
+	vk::CommandBuffer                    command;
+	void EndPass() {
+		const bool same = buffer.SamePass(rendering);
+		scheduler.EndRendering();
+		if (same) buffer.ArmReopenLoad();
+	}
+	void BindCompute() { runtime.Bind(command); }
+	void Push() { runtime.Push(command, prepared); }
+	void Dispatch() { runtime.Dispatch(command); }
+	void BarrierToIndirect() { runtime.BarrierToIndirect(command); }
+};
+} // namespace
+
+MeshIndirectRuntime& RenderExecutor::MeshIndirectRt() {
+	if (!m_mesh_ind_rt) m_mesh_ind_rt = std::make_shared<MeshIndirectRuntime>(m_context.GetGraphics(), m_context.GetCommandScheduler());
+	return *m_mesh_ind_rt;
+}
+
 void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buffer,
                                          const DrawCallInfo& draw, DrawRenderState& state,
                                          const DrawEmitInfo&          emit,
-                                         const DrawIndexBufferSource& index_source) {
+                                         const DrawIndexBufferSource& index_source,
+                                         MeshIndirectRequest*         mesh_gpu_request) {
 	auto&      ucfg                     = buffer.GetUserConfig();
 	const bool primitive_restart_enable = state.primitive_restart_enable;
 	if (CopyDepthToColor(buffer, draw, emit, state)) {
@@ -1056,6 +1099,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	const auto vertex_stages = state.VertexStages();
 	const bool mesh_active = state.vertex_info[0].stage.module->info.stage == ShaderType::Mesh;
 	uint32_t   mesh_groups = 0;
+	// S472 (KYTY_INDIRECT_GPU_MESH=1): the draw is recorded from the guest args (draw.index_count and instance_count are placeholders); the groups
+	// come from a prepare compute that reads the args on the GPU.
+	const bool mesh_gpu = mesh_active && mesh_gpu_request != nullptr;
 	if (mesh_active) {
 		const auto& mesh = state.vertex_info[0].mesh;
 		EXIT_NOT_IMPLEMENTED(mesh.fast_launch && (draw.IsIndexed() || primitive_restart_enable));
@@ -1069,19 +1115,30 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 			EXIT("unsupported mesh draw: primitive=%u indexed=%u restart=%u\n",
 			     static_cast<uint32_t>(ucfg.GetPrimType()), draw.IsIndexed(), primitive_restart_enable);
 		}
-		const auto primitives = mesh.InputPrimitiveCount(draw.index_count);
-		if (primitives == 0 || draw.instance_count == 0) {
-			return;
+		if (mesh_gpu) {
+			// S472: the counts are in the guest args (placeholders here); the groups come from the prepare compute.
+			EXIT_IF(mesh.fast_launch);
+		} else {
+			const auto primitives = mesh.InputPrimitiveCount(draw.index_count);
+			if (primitives == 0 || draw.instance_count == 0) {
+				return;
+			}
+			mesh_groups        = (primitives - 1u) / mesh.primitives_per_group + 1u;
+			const auto& limits = m_context.GetGraphics().mesh_shader_properties;
+			if (mesh_groups > limits.maxMeshWorkGroupCount[0] ||
+			    draw.instance_count > limits.maxMeshWorkGroupCount[1] ||
+			    static_cast<uint64_t>(mesh_groups) * draw.instance_count >
+			        limits.maxMeshWorkGroupTotalCount) {
+				EXIT("mesh draw exceeds host workgroup limits: %ux%u\n", mesh_groups,
+				     draw.instance_count);
+			}
 		}
-		mesh_groups        = (primitives - 1u) / mesh.primitives_per_group + 1u;
-		const auto& limits = m_context.GetGraphics().mesh_shader_properties;
-		if (mesh_groups > limits.maxMeshWorkGroupCount[0] ||
-		    draw.instance_count > limits.maxMeshWorkGroupCount[1] ||
-		    static_cast<uint64_t>(mesh_groups) * draw.instance_count >
-		        limits.maxMeshWorkGroupTotalCount) {
-			EXIT("mesh draw exceeds host workgroup limits: %ux%u\n", mesh_groups,
-			     draw.instance_count);
-		}
+	}
+	uint64_t mesh_args_addr = 0;
+	if (mesh_gpu) {
+		mesh_args_addr = mesh_gpu_request->args_addr;
+		// The args are a GPU-read buffer of the cache; they are obtained before the registrations below so a later lookup finds the same one.
+		(void)m_context.GetBufferCache().ObtainBuffer(mesh_args_addr, sizeof(vk::DrawIndexedIndirectCommand), false);
 	}
 
 	if (mesh_active && draw.IsIndexed()) {
@@ -1090,6 +1147,10 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 		(void)m_context.GetBufferCache().FindBuffer(
 		    index_source.address, static_cast<uint64_t>(draw.index_count) *
 		                              index_source.guest_element_size);
+	}
+	if (mesh_gpu) {
+		// S472: the mesh shader reads the args itself (BDA), like the indices.
+		(void)m_context.GetBufferCache().FindBuffer(mesh_args_addr, sizeof(vk::DrawIndexedIndirectCommand));
 	}
 	LogDrawPhase(draw.Name(), "PrepareBindings");
 	auto&                            bindings = m_graphics_bindings;
@@ -1130,10 +1191,45 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
 	                         feedback_aspects, stages);
 
+	// S327: the pass about to be needed differs from the open one (BeginRendering would close it below): split here, before this draw
+	// records anything into the buffer (KYTY_EAGER_SUBMIT).
+	m_context.GetCommandScheduler().MaybeEagerSplitAtPass(rendering);
+
+	// S472: a ring slot for the mesh prepare compute (taken for the command buffer that records it).
+	MeshIndirectRuntime::Prepared mesh_prepared;
+	if (mesh_gpu) {
+		const auto& mesh_stage = state.vertex_info[0];
+		const auto [mesh_args_buffer, mesh_args_offset] =
+		    m_context.GetBufferCache().ObtainBuffer(mesh_args_addr, sizeof(vk::DrawIndexedIndirectCommand), false);
+		EXIT_IF(mesh_args_buffer == nullptr || (mesh_args_offset & 3u) != 0);
+		const auto& limits = m_context.GetGraphics().mesh_shader_properties;
+		MeshIndirectRuntime::Job job;
+		job.args_buffer       = mesh_args_buffer->Handle();
+		job.args_offset       = mesh_args_offset;
+		job.mesh              = {mesh_stage.mesh.InputPrimitiveSize(), mesh_stage.mesh.InputPrimitiveStep(), mesh_stage.mesh.primitives_per_group,
+		                         mesh_stage.mesh.fast_launch};
+		job.limits            = {limits.maxMeshWorkGroupCount[0], limits.maxMeshWorkGroupCount[1], limits.maxMeshWorkGroupTotalCount};
+		job.index_buffer_size = mesh_gpu_request->index_buffer_size;
+		job.native_fetch      = !mesh_stage.fetch_embedded;
+		job.shadow            = false;
+		mesh_prepared         = MeshIndirectRt().Reserve(job);
+		if (!mesh_prepared.ok) {
+			FrameTiming::Add(FrameTiming::Counter::MeshIndRingFullN);
+			mesh_gpu_request->declined = true; // nothing of the draw is recorded: the caller reads the args and draws the old way
+			return;
+		}
+	}
+
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
 	// point onward, every operation targets the current command buffer and cannot touch guest
 	// memory.
 	auto vk_buffer = buffer.Handle();
+	if (mesh_prepared.ok) {
+		// The prepare compute runs outside a pass, before the draw: the draw takes its output as indirect args.
+		MeshIndirectRecorder recorder {m_context.GetCommandScheduler(), buffer, rendering, MeshIndirectRt(), mesh_prepared, vk_buffer};
+		(void)PvIndirect::RecordPrepare(recorder, m_context.GetCommandScheduler().RenderingOpen());
+		FrameTiming::Add(FrameTiming::Counter::MeshIndGpuN);
+	}
 	SetDrawDebugPhase(buffer, submit_id, draw, draw.IsIndexed() ? 0x100u : 0x200u);
 	if (!mesh_active) {
 		CommitVertexBuffers(vk_buffer, vertex_bindings);
@@ -1153,7 +1249,15 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	    PushData::GraphicsDrawDwords(mesh_active, state.ps_input_info.object_primitive_id);
 	if (draw_dwords != 0) {
 		std::array<uint32_t, PushData::MeshDrawDwordCount> draw_data {};
-		if (mesh_active) {
+		if (mesh_gpu) {
+			// S472: the shader reads the counts and offsets from the guest args (Translate.cpp); see MeshIndirect::PushElementWord.
+			draw_data = {draw.index_count,
+			             static_cast<uint32_t>(mesh_args_addr),
+			             static_cast<uint32_t>(mesh_args_addr >> 32u),
+			             MeshIndirect::PushElementWord(index_source.guest_element_size, !state.vertex_info[0].fetch_embedded),
+			             static_cast<uint32_t>(index_source.address),
+			             static_cast<uint32_t>(index_source.address >> 32u)};
+		} else if (mesh_active) {
 			draw_data = {draw.index_count,
 			             static_cast<uint32_t>(emit.vertex_offset),
 			             emit.first_instance,
@@ -1204,7 +1308,9 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 	auto&         occlusion_queries = m_context.GetOcclusionQueries();
 	const int32_t occlusion_query   = occlusion_queries.Begin(vk_buffer);
-	if (mesh_active) {
+	if (mesh_gpu) {
+		vk_buffer.drawMeshTasksIndirectEXT(mesh_prepared.out_buffer, mesh_prepared.out_offset, 1, 0);
+	} else if (mesh_active) {
 		vk_buffer.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
 	} else if (args_buffer.first == nullptr) {
 		EmitDrawPrimitives(ucfg, vk_buffer, draw, emit);
@@ -1230,6 +1336,15 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	if (!draw.IsIndexed()) {
 		SetDrawDebugPhase(buffer, submit_id, draw, 0x700u);
 	}
+}
+
+// S479 (KYTY_CP_PIPE): the worker's GetGraphicsPrograms for a deferred draw. S487: upstream reads the draw's programs from the command buffer
+// (PipelineCache::GetGraphicsPrograms(command, state)), so a worker has nothing it can compute on the snapshot yet: the job is never answered and
+// the recorder computes the programs itself.
+void CpPipe::RunGfpJob(CpPipe::GfpJob& job) {
+	job.answered  = false;
+	job.fail      = 0;
+	job.worker_ns = 0;
 }
 
 // Vulkan offsets for a prepared draw, or nullopt when its indirect records need CPU counts, as
@@ -1258,6 +1373,15 @@ static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        
 bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
                                const DrawIndexArgs& args) {
 	KYTY_PROFILER_FUNCTION();
+	FrameTiming::Add(FrameTiming::Counter::Draws);
+	m_context.GetCommandScheduler().MaybeEagerSplit(); // KYTY_EAGER_SUBMIT
+	// S472: the draw is declined before anything of it is recorded: the caller reads the args and draws the old way (counted by that call).
+	const auto decline = [&] {
+		args.indirect_gpu->declined = true;
+		ResetBindings();
+		FrameTiming::Add(FrameTiming::Counter::Draws, ~uint64_t {0});
+		return true;
+	};
 
 	EXIT_IF(buffer.IsInvalid());
 	EXIT_IF(args.offset_source == DrawOffsetSource::DrawState && args.first_instance != 0);
@@ -1328,7 +1452,18 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		default: EXIT("unknown index_type_and_size: %u\n", args.index_type_and_size);
 	}
 	index_source.size = static_cast<uint64_t>(args.index_count) * index_source.guest_element_size;
-	state.primitive_restart_enable = ResolvePrimitiveRestart(buffer, index_source);
+	if (args.indirect_gpu != nullptr) {
+		// S472: a candidate's index range is the whole INDEX_BUFFER_SIZE: scanning it for a restart value would read indices the draw may never
+		// fetch, so restart control on a strip / fan, a legacy quad list and a depth-to-color copy take the old path.
+		if (PrimitiveRestartControlOn(buffer) || ucfg.GetPrimType() == Prospero::PrimitiveType::kQuadListLegacy ||
+		    buffer.GetRegisters().GetRenderControl().copy_depth_to_color) {
+			args.indirect_gpu->host_reason = IndirectGpu::Reason::PrimitiveType;
+			return decline();
+		}
+		state.primitive_restart_enable = false;
+	} else {
+		state.primitive_restart_enable = ResolvePrimitiveRestart(buffer, index_source);
+	}
 
 	std::vector<uint16_t> expanded_indices;
 	if (index_source.guest_element_size == 1) {
@@ -1352,10 +1487,28 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 	LogDrawStateIfNeeded(buffer, draw, state, args.index_type_and_size,
 	                     args.index_addr);
+	MeshIndirectRequest* mesh_gpu_request = nullptr;
+	if (args.indirect_gpu != nullptr) {
+		// S472: only a mesh shader that can read the args itself takes the GPU path; any other host path declines.
+		const auto& first_stage = state.vertex_info[0];
+		const bool  mesh_gpu_ok = first_stage.stage.module->info.stage == ShaderType::Mesh && args.mesh_indirect != nullptr &&
+		                         args.mesh_indirect->mode == MeshIndirect::Mode::On &&
+		                         MeshIndirect::MeshCanGoGpu({first_stage.mesh.InputPrimitiveSize(), first_stage.mesh.InputPrimitiveStep(),
+		                                                     first_stage.mesh.primitives_per_group, first_stage.mesh.fast_launch});
+		if (!mesh_gpu_ok) {
+			args.indirect_gpu->host_reason = IndirectGpu::Reason::Mesh;
+			return decline();
+		}
+		mesh_gpu_request = args.mesh_indirect;
+	}
 	const auto emit = ResolveDrawEmit(ucfg, state.vertex_info[0], args.offset_source,
 	                                  args.base_vertex, args.first_instance, args.indirect);
 	if (emit) {
-		ExecutePreparedDraw(submit_id, buffer, draw, state, *emit, index_source);
+		ExecutePreparedDraw(submit_id, buffer, draw, state, *emit, index_source, mesh_gpu_request);
+		if (mesh_gpu_request != nullptr && mesh_gpu_request->declined) {
+			// The ring was full before anything of the draw was recorded: the caller reads the args and draws the old way.
+			return decline();
+		}
 	}
 	ResetBindings();
 	return emit.has_value();
@@ -1363,6 +1516,8 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 bool RenderExecutor::DrawAuto(uint64_t submit_id, CommandBuffer& buffer, const DrawAutoArgs& args) {
+	FrameTiming::Add(FrameTiming::Counter::Draws);
+	m_context.GetCommandScheduler().MaybeEagerSplit(); // KYTY_EAGER_SUBMIT
 	KYTY_PROFILER_FUNCTION();
 
 	EXIT_IF(buffer.IsInvalid());

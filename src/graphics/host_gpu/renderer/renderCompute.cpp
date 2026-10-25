@@ -12,6 +12,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/gpuLabelsVk.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -19,6 +20,9 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/cpPhaseScope.h"
+#include "graphics/presentation/cpSampler.h"
+#include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/shader.h"
@@ -28,6 +32,7 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <optional>
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -193,16 +198,34 @@ bool RenderExecutor::TryConsumeComputeFill(const ShaderComputeInputInfo& input,
 	const bool image_clear =
 	    cache.ClearImageFromBuffer(command, descriptor.Base48(), size, packed_clear);
 	if (!image_clear) {
-		// CPU fills invalidate overlapping cached images. Preserve the native dispatch for
-		// partial or ambiguous image backings, including pooled metadata aliases.
-		if ((descriptor.Base48() & 3u) != 0 ||
+		// No image lives there (DCC metadata, for one). KYTY_DCC_KNOWN=1: the dispatch only stores one value over the whole
+		// buffer, which a transfer fill does without a compute pass, and the buffer cache then knows the bytes: reading DCC
+		// clear codes needs no GPU drain. shadow: the dispatch stays; the buffer cache records the prediction.
+		const auto known = DccFillPublish::EnvMode();
+		auto& buffer_cache = command.GetContext().GetBufferCache();
+		if (known != DccFillPublish::Mode::Off) {
+			if ((descriptor.Base48() & 3u) != 0 || (size & 3u) != 0) {
+				return false;
+			}
+			if (known == DccFillPublish::Mode::Shadow) {
+				buffer_cache.NoteShadowFill(descriptor.Base48(), size, packed_clear);
+				return false;
+			}
+			// Like the shader it replaces, write on the GPU: a CPU fill of a tracked range takes a write fault per page.
+			buffer_cache.FillBuffer(descriptor.Base48(), size, packed_clear, false, true);
+			FrameTiming::Add(FrameTiming::Counter::ComputeFillsReplaced);
+			return true;
+		}
+		// Upstream (#1628), only for ranges our DCC_KNOWN path did not take (DCC_KNOWN=0). Preserve the native
+		// dispatch for partial or ambiguous image backings, including pooled metadata aliases. The fill goes
+		// through the GPU as well: a CPU fill of a range the guest tracks is a write fault per page.
+		if ((descriptor.Base48() & 3u) != 0 || (size & 3u) != 0 ||
 		    !m_context.IsMapped(descriptor.Base48(), size) ||
 		    cache.IsRegionRegistered(descriptor.Base48(), size)) {
 			return false;
 		}
-		// Metadata need not have an image backing yet. Keep proven fills in guest memory
-		// when CPU-owned, so color-clear discovery can read them without a GPU download.
-		m_context.GetBufferCache().FillBuffer(descriptor.Base48(), size, packed_clear, false);
+		buffer_cache.FillBuffer(descriptor.Base48(), size, packed_clear, false, true);
+		FrameTiming::Add(FrameTiming::Counter::ComputeFillsReplaced);
 	}
 	static std::atomic<uint32_t> logged_clears {0};
 	if (logged_clears.fetch_add(1, std::memory_order_relaxed) < 32) {
@@ -246,7 +269,10 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_x, uint32_t thread_group_y,
                                     uint32_t thread_group_z, uint32_t mode, bool async_compute) {
+	CpPhases::Scope dispatch_phase(CpPhases::Phase::Dispatch);
 	EXIT_IF(buffer.IsInvalid());
+	FrameTiming::Add(FrameTiming::Counter::Dispatches);
+	m_context.GetCommandScheduler().MaybeEagerSplit();
 	m_context.GetCommandScheduler().PopPendingOperations();
 	auto& sh_ctx = buffer.GetShaders();
 
@@ -367,8 +393,15 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	RebindBuffers(bindings);
 
 	auto              vk_buffer        = buffer.Handle();
-	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
-	               std::span {&descriptor_stage, 1u});
+	disp_site.reset();
+	disp_timer.emplace(FrameTiming::Counter::DispCommitNs);
+	{
+		KYTY_CP_SITE(DispDesc);
+		CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
+		               std::span {&descriptor_stage, 1u});
+	}
+	disp_timer.reset();
+	KYTY_CP_SITE(DispRecord);
 	bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
 	    HasShaderBufferWrites(input_info.stage);
 	has_storage_writes =
@@ -468,23 +501,34 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		vk_buffer.dispatch(thread_group_x, thread_group_y, thread_group_z);
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
+	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Guest);
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	GpuLabel::NoteCause(GpuLabel::Cause::Cs);
 	ResetBindings();
 }
 
 void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
                                       uint64_t args_addr, uint32_t mode, bool async_compute) {
+	CpPhases::Scope dispatch_phase(CpPhases::Phase::Dispatch);
 	EXIT_IF(buffer.IsInvalid() || args_addr == 0 || (args_addr & 3u) != 0 ||
 	        (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0);
+	FrameTiming::Add(FrameTiming::Counter::Dispatches);
+	m_context.GetCommandScheduler().MaybeEagerSplit();
 	m_context.GetCommandScheduler().PopPendingOperations();
 	buffer.SetDebugInfo(static_cast<uint32_t>(CommandBufferDebugOp::DispatchIndirect), submit_id,
 	                    static_cast<uint32_t>(args_addr), static_cast<uint32_t>(args_addr >> 32u),
 	                    0, mode, buffer.GetShaders().GetCs().cs_regs.data_addr);
 	Common::LockGuard lock(m_context.GetMutex());
 	vk::DispatchIndirectCommand args {};
-	if (!m_context.GetBufferCache().HasGpuDirtyBytes(args_addr, sizeof(args)) &&
+	// S418: a copy of the args still in flight leaves the tracker clear and the backing stale (zeros from the previous use).
+	int args_refusal = 0;
+	const bool args_readable = m_context.GetBufferCache().CanReadBacking(args_addr, sizeof(args), &args_refusal);
+	if (args_refusal == 2) {
+		FrameTiming::Add(FrameTiming::Counter::DispIndirectBackingInflightN);
+	}
+	if (args_readable &&
 	    LibKernel::Memory::TryReadBacking(args_addr, &args, sizeof(args)) &&
 	    (args.x == 0 || args.y == 0 || args.z == 0)) {
 		return;
@@ -518,8 +562,15 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
 	RebindBuffers(bindings);
-	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
-	               std::span {&descriptor_stage, 1u});
+	disp_site.reset();
+	disp_timer.emplace(FrameTiming::Counter::DispCommitNs);
+	{
+		KYTY_CP_SITE(DispDesc);
+		CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
+		               std::span {&descriptor_stage, 1u});
+	}
+	disp_timer.reset();
+	KYTY_CP_SITE(DispRecord);
 	const auto vk_buffer = buffer.Handle();
 	const bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
 	    HasShaderBufferWrites(input_info.stage) ||
@@ -539,9 +590,13 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	                          vk::PipelineStageFlagBits::eDrawIndirect, {},
 	                          1, &barrier, 0, nullptr, 0, nullptr);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
-	vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset);
+	GpuLabel::With(
+	    vk_buffer, GpuLabel::Class::GuestCs, [&] { vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset); },
+	    "G.cs.%08x.a%d.ind", static_cast<uint32_t>(program.shader_hash), async_compute ? 1 : 0);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
+	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Guest);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	GpuLabel::NoteCause(GpuLabel::Cause::Cs);
 	ResetBindings();
 }
 

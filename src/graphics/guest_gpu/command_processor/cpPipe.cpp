@@ -333,14 +333,10 @@ void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const u
 	};
 	switch (opcode) {
 		case Pm4::IT_NOP:
-			if (r == Pm4::R_RELEASE_MEM && packet_dw >= 8u) note_signal(CpPipe::DecodeReleaseMem(payload, async, &address));
-			else if (r == Pm4::R_FLIP || r == Pm4::R_ZERO) p.pending.Note(0, kEverything, false, 0, seq); // a flip writes labels
+			if (r == Pm4::R_FLIP || r == Pm4::R_ZERO) p.pending.Note(0, kEverything, false, 0, seq); // a flip writes labels
 			break;
-		case Pm4::IT_EVENT_WRITE_EOP:
-			if (packet_dw >= 6u) note_signal(CpPipe::DecodeEventWriteEop(payload, async, &address));
-			break;
-		case Pm4::IT_EVENT_WRITE_EOS:
-			if (packet_dw >= 5u) note_signal(CpPipe::DecodeEventWriteEos(payload, async, &address));
+		case Pm4::IT_RELEASE_MEM:
+			if (packet_dw >= 8u) note_signal(CpPipe::DecodeReleaseMem(payload, async, &address));
 			break;
 		case Pm4::IT_EVENT_WRITE:
 			if (packet_dw > 3u) p.pending.Note(0, kEverything, false, 0, seq); // event types that write an address

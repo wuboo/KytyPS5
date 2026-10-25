@@ -113,8 +113,15 @@ void PipelineCacheLog(fmt::format_string<Args...> format, Args&&... args) {
 bool ReadShaderGuestMemory(void*, uint64_t address, std::span<uint32_t> values) {
 	// Scalar and unformatted buffer dependencies use the same backing as native raw loads.
 	// Image synchronization belongs to formatted buffer bindings, not these reads.
-	return !values.empty() &&
-	       Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
+	if (values.empty()) {
+		return false;
+	}
+	// S430 (KYTY_SPEC_READ_FAST=1): a page remembered as quiet (not GPU-dirty, nothing in flight) is read without asking again.
+	if (Libs::LibKernel::Memory::SpecFastEnvMode() == Libs::LibKernel::Memory::SpecFastMode::On) {
+		bool hit = false;
+		return Libs::LibKernel::Memory::TryReadBufferBackingFast(address, values.data(), values.size_bytes(), &hit);
+	}
+	return Libs::LibKernel::Memory::TryReadBufferBacking(address, values.data(), values.size_bytes());
 }
 
 void DumpShader(std::span<const uint32_t> words, const std::string& name) {

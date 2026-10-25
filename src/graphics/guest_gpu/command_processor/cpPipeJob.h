@@ -35,7 +35,6 @@ struct GfpJob {
 	bool                                   answered  = false; // the worker produced programs for every stage the draw needs
 	bool                                   ps_active = false;
 	uint32_t                               fail      = 0; // PipelineCache::OffThreadScope::FailReason() when not answered
-	PipelineCache::GraphicsPrograms        programs;
 	std::array<ShaderVertexInputInfo, 3>   vertex_info {};
 	ShaderPixelInputInfo                   pixel_info {};
 	ShaderRecompiler::IR::ResourceSnapshot vs_res;

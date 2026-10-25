@@ -46,16 +46,16 @@ inline Cls Classify(uint32_t opcode, uint32_t r) {
 		case IT_SET_SH_REG_INDIRECT: case IT_SET_CONTEXT_REG_INDIRECT: case IT_SET_UCONFIG_REG_INDIRECT: case IT_NUM_INSTANCES:
 		case IT_INDEX_TYPE: case IT_INDEX_BASE: case IT_INDEX_BUFFER_SIZE: case IT_SET_BASE: case IT_CLEAR_STATE: case IT_CONTEXT_CONTROL:
 			return Cls::Reg;
-		case IT_RELEASE_MEM: case IT_EVENT_WRITE_EOP: case IT_EVENT_WRITE_EOS: return Cls::Signal;
+		case IT_RELEASE_MEM: return Cls::Signal;
 		case IT_EVENT_WRITE: case IT_ACQUIRE_MEM: case IT_PFP_SYNC_ME: case IT_SURFACE_SYNC: case IT_MEM_SEMAPHORE: return Cls::Barrier;
-		case IT_WRITE_DATA: case IT_DMA_DATA: case IT_COPY_DATA: case IT_CP_DMA: case IT_WRITE_CONST_RAM: case IT_DUMP_CONST_RAM:
+		case IT_WRITE_DATA: case IT_DMA_DATA: case IT_COPY_DATA: case IT_CP_DMA:
 			return Cls::CpuWrite;
 		case IT_WAIT_REG_MEM: case IT_WAIT_REG_MEM_64: return Cls::Wait;
 		case IT_COND_EXEC: case IT_SET_PREDICATION: return Cls::Pred;
-		case IT_INDIRECT_BUFFER: case IT_INDIRECT_BUFFER_CNST: return Cls::Struct;
+		case IT_INDIRECT_BUFFER: return Cls::Struct;
 		case IT_NOP:
 			switch (r) {
-				case R_RELEASE_MEM: case R_FLIP: return Cls::Signal;
+				case R_FLIP: return Cls::Signal;
 				case R_WRITE_DATA: case R_DMA_DATA: return Cls::CpuWrite;
 				case R_WAIT_FLIP_DONE: return Cls::Other;
 				default: return Cls::Marker;
