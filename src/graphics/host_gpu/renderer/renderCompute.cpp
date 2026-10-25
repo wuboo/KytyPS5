@@ -393,14 +393,11 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 	RebindBuffers(bindings);
 
 	auto              vk_buffer        = buffer.Handle();
-	disp_site.reset();
-	disp_timer.emplace(FrameTiming::Counter::DispCommitNs);
 	{
 		KYTY_CP_SITE(DispDesc);
 		CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 		               std::span {&descriptor_stage, 1u});
 	}
-	disp_timer.reset();
 	KYTY_CP_SITE(DispRecord);
 	bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
 	    HasShaderBufferWrites(input_info.stage);
@@ -562,14 +559,11 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF(args_buffer == nullptr || (args_offset & 3u) != 0);
 	RebindBuffers(bindings);
-	disp_site.reset();
-	disp_timer.emplace(FrameTiming::Counter::DispCommitNs);
 	{
 		KYTY_CP_SITE(DispDesc);
 		CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 		               std::span {&descriptor_stage, 1u});
 	}
-	disp_timer.reset();
 	KYTY_CP_SITE(DispRecord);
 	const auto vk_buffer = buffer.Handle();
 	const bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
