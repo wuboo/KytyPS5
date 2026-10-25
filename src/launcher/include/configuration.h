@@ -102,16 +102,17 @@ public:
 
 	Configuration() = default;
 
-	QString    name;
-	QString    title_id;    /* Serial / title id from sce_sys/param.json */
-	QString    gameVersion; /* appVersion / contentVersion from sce_sys/param.json */
-	QString    firmwareVer; /* requiredSystemSoftwareVersion from sce_sys/param.json */
-	QString    basedir;     /* Game base directory */
-	QString    game_path;   /* Launcher-unique game path */
-	QString    addons_dir;  /* Global setting; not saved per game. */
-	bool       custom_settings = false;
-	GameStatus game_status     = GameStatus::Unknown;
-	QString    game_comment;
+	QString     name;
+	QString     title_id;    /* Serial / title id from sce_sys/param.json */
+	QString     gameVersion; /* appVersion / contentVersion from sce_sys/param.json */
+	QString     firmwareVer; /* requiredSystemSoftwareVersion from sce_sys/param.json */
+	QString     basedir;     /* Game base directory */
+	QString     game_path;   /* Launcher-unique game path */
+	QString     addons_dir;  /* Global setting; not saved per game. */
+	QStringList addcont;     /* User add-ons ("LABEL" or "LABEL=DIR"), saved by title ID. */
+	bool        custom_settings = false;
+	GameStatus  game_status     = GameStatus::Unknown;
+	QString     game_comment;
 
 	// Controller preferences always come from the global configuration.
 	ControllerSettings controller;
@@ -126,9 +127,11 @@ public:
 	bool                   hdr_enabled                 = false;
 	bool                   hide_cursor_enabled         = false;
 	bool                   readback_linear_images      = false;
+	bool                   readback_tiled_images       = false;
 	bool                   sync_raw_image_buffers      = false;
-	bool                   support_zmask               = false;
 	bool                   tessellation_enabled        = false;
+	bool                   occlusion_queries_enabled   = false;
+	bool                   shader_cache_enabled        = true;
 	bool                   trophy_enabled              = true;
 	int                    trophy_duration_seconds     = 6;
 	bool                   perf_overlay_enabled        = false;
@@ -166,9 +169,11 @@ public:
 		hdr_enabled                 = other.hdr_enabled;
 		hide_cursor_enabled         = other.hide_cursor_enabled;
 		readback_linear_images      = other.readback_linear_images;
+		readback_tiled_images       = other.readback_tiled_images;
 		sync_raw_image_buffers      = other.sync_raw_image_buffers;
-		support_zmask               = other.support_zmask;
 		tessellation_enabled        = other.tessellation_enabled;
+		occlusion_queries_enabled   = other.occlusion_queries_enabled;
+		shader_cache_enabled        = other.shader_cache_enabled;
 		trophy_enabled              = other.trophy_enabled;
 		trophy_duration_seconds     = other.trophy_duration_seconds;
 		perf_overlay_enabled        = other.perf_overlay_enabled;

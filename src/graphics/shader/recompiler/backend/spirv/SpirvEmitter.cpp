@@ -177,6 +177,7 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 		if (!kind.has_value()) {
 			Fail(program, "native shader plan has an invalid image class");
 		}
+		if (image.heap) continue;
 		if (image.mip_count == 0u ||
 		    (image.mip_mode != IR::ImageMipMode::Dynamic && image.mip_count != 1u)) {
 			Fail(program, "native shader plan has an invalid image mip descriptor count");
@@ -220,9 +221,8 @@ void ValidateNativeProgram(const IR::Program& program, bool lds_storage) {
 } // namespace
 
 std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo input_info,
-                                  uint32_t push_data_start_dword, bool maintenance8_enabled,
-                                  bool emit_debug_info, const VertexCaptureInfo* vertex_capture,
-                                  const PvStoreInfo* pv_store) {
+                                  uint32_t push_data_start_dword, const Profile& profile,
+                                  bool emit_debug_info) {
 	using namespace Emitter;
 
 	if (program.stage != ShaderType::Compute && program.stage != ShaderType::Vertex &&
@@ -237,22 +237,13 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	}
 	IR::ValidateProgram(program, true);
 	program.bindings = {.push_data_start_dword = push_data_start_dword};
-	EmitterState state(program, input_info, maintenance8_enabled);
-	state.vertex_capture = vertex_capture;
-	state.pv_store = pv_store;
-	if (pv_store != nullptr) {
-		const bool vertex = pv_store->role == PvStoreInfo::Role::Vertex;
-		if (vertex_capture != nullptr ||
-		    program.stage != (vertex ? ShaderType::Vertex : ShaderType::Pixel) ||
-		    (vertex ? input_info.vertex == nullptr : input_info.pixel == nullptr)) {
-			Fail(program, "invalid PerVertex VS-store stage or record layout");
-		}
-	}
+	EmitterState state(program, input_info, profile);
 	if (emit_debug_info) {
 		char name[64];
 		std::snprintf(name, sizeof(name), "rdna2-%016" PRIx64 "-block-byte-pc-plus-one",
 		              program.shader_hash);
 		state.debug_source = state.builder.AddString(name);
+		state.builder.EnableNames();
 	}
 	const auto* workgroup = ShaderWorkgroupInput(program.stage, input_info);
 	state.lane_count =
@@ -260,23 +251,12 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 	        ? 2u
 	        : 1u;
 	state.pixel_wave32_wide_host = program.stage == ShaderType::Pixel && PixelWave32OnWideHost(program.wave_size);
-	if (vertex_capture != nullptr) {
-		if (program.stage != ShaderType::Vertex || input_info.vertex == nullptr ||
-		    (vertex_capture->host_subgroup_size != 32 &&
-		     vertex_capture->host_subgroup_size != 64)) {
-			Fail(program, "invalid vertex capture stage or host subgroup size");
-		}
-		state.lane_count =
-		    program.wave_size == 64 && vertex_capture->host_subgroup_size == 32 ? 2u : 1u;
-	}
 	DefineModule(state);
-	ValidateNativeProgram(program, program.stage == ShaderType::Compute &&
-	                                   input_info.compute != nullptr && input_info.compute->lds_storage);
+	ValidateNativeProgram(program,
+	                      program.stage == ShaderType::Compute && input_info.compute->lds_storage);
 	EmitProgram(state);
-	state.builder.AddEntryPoint(vertex_capture != nullptr
-	                                ? spv::ExecutionModelGLCompute
-	                                : ExecutionModelForStage(state.program.stage),
-	                            state.main_func, "main", state.interface_variables);
+	state.builder.AddEntryPoint(ExecutionModelForStage(state.program.stage), state.main_func,
+	                            "main", state.interface_variables);
 
 	return state.builder.Build();
 }

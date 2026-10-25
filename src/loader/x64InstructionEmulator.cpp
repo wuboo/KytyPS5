@@ -1443,4 +1443,10 @@ bool TryEmulate(void* native_context) {
 	return done(Path::IllUnhandled);
 }
 
+void SkipLoad(void* native_context, size_t length) {
+	Context context {static_cast<decltype(Context::native)>(native_context)};
+	context.Gpr(0) = 0;
+	context.Advance(length);
+}
+
 } // namespace Loader::X64InstructionEmulator

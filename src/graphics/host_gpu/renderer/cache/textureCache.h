@@ -218,6 +218,12 @@ private:
 	// Caller holds m_lock. Volume layer ranges select depth slices.
 	void ClearImage(CommandBuffer& command, ImageId id, vk::Format format,
 	                const vk::ImageSubresourceRange& range, const vk::ClearValue& clear);
+	// Caller holds m_lock and ends rendering. Begins rendering `layers` layers of one color mip
+	// through a `format` view, clearing them or, when `clear` is null, loading them; returns the
+	// render area.
+	vk::Rect2D BeginColorRendering(Image& image, vk::Format format, uint32_t level,
+	                               uint32_t layer, uint32_t layers, const vk::ClearValue* clear,
+	                               vk::CommandBuffer command);
 	void PrepareImageCopy(Image& image);
 	void RefreshCopySource(ImageId id);
 	[[nodiscard]] bool CopyD16(Image& destination, Image& source);
@@ -249,8 +255,8 @@ private:
 	uint64_t                                          m_pressure_gc_memory = 1536ull * 1024 * 1024;
 	uint64_t         m_critical_gc_memory     = 3ull * 1024 * 1024 * 1024;
 	uint64_t         m_gc_tick                = 0;
-	mutable uint32_t m_image_query_epoch      = 0;
 	bool             m_readback_linear_images = false;
+	bool             m_readback_tiled_images  = false;
 	// Exact matches found by FindImage. The match depends on the images registered on the
 	// pages of the request and on fields fixed at their creation, so an entry holds until a
 	// registration on one of those pages changes.
@@ -261,6 +267,7 @@ private:
 	friend struct TextureCacheTestAccess;
 	friend class BufferCache;
 	friend class RenderExecutor;
+	friend class ImageHeap;
 	friend bool BcAlias::Matches(const ImageInfo&, const ImageInfo&);
 	friend bool BcAlias::Publish(TextureCache&, Image&);
 	friend void BcAlias::Resolve(TextureCache&, ImageId, ImageId);

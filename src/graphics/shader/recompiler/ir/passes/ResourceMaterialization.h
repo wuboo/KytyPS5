@@ -1,7 +1,6 @@
 #ifndef EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_RESOURCEMATERIALIZATION_H_
 #define EMULATOR_INCLUDE_EMULATOR_GRAPHICS_SHADER_RECOMPILER_RESOURCEMATERIALIZATION_H_
 
-#include "graphics/shader/minLodShift.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
@@ -32,7 +31,7 @@ struct ResourceSpecialization {
 		uint32_t                      indirect_search_iterations = 0;
 		bool                          cube                       = false;
 		bool                          fmask                      = false;
-		Libs::Graphics::MinLodResinfo min_lod_resinfo;
+		bool                          heap                       = false;
 		bool                          operator==(const Image&) const = default;
 	};
 
@@ -54,15 +53,24 @@ struct ResourceSpecialization {
 // its values and is independent of the translated shader CFG.
 ResourcePlan ExtractResourcePlan(const Program& program);
 
+// Shader cache record of a plan; loading it into a default-constructed plan rebuilds the walker
+// and scratch state like extraction. A failed load leaves a plan that must not be used.
+std::vector<uint8_t> SaveResourcePlan(const ResourcePlan& plan);
+bool                 LoadResourcePlan(std::span<const uint8_t> bytes, ResourcePlan& plan);
+
 // Refreshes cached resources and specialization in place. A failed refresh must not be used.
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization);
 
-// S406 (DIAG): bit i = the plan reads user_data[i] (GetUserData of register user_data_base + i), i < 64.
-uint64_t PlanUsedUserDataMask(const ResourcePlan& plan);
-
 // Applies an already-derived specialization to native IR before layout and emission.
 void ApplyResourceSpecialization(Program& program, const ResourceSpecialization& specialization);
+
+// Kind of an image heap entry as root sees it, or 0 (and a zeroed value) when root reads it as
+// null. Entries of one kind specialize identically.
+uint32_t ImageHeapKind(const ImageResource& root, DescriptorValue& value);
+// The sampled resource that root resolves entries of kind as; kind 0 gives the identity of
+// root's view of a heap.
+ImageResource ImageHeapResource(const ImageResource& root, uint32_t kind);
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
 

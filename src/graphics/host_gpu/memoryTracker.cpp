@@ -67,25 +67,6 @@ RegionManager* MemoryTracker::GetOrCreateRegion(uint64_t index) {
 	return ptr;
 }
 
-void MemoryTracker::QueueBdaSync(uint64_t vaddr, uint64_t size) {
-	const auto begin = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
-	const auto end   = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
-	std::lock_guard lock(m_bda_sync_mutex);
-	m_bda_sync.Add(begin, end - begin);
-}
-
-RangeSet MemoryTracker::TakeBdaSync() {
-	RangeSet taken;
-	{
-		std::lock_guard lock(m_bda_sync_mutex);
-		taken = std::exchange(m_bda_sync, RangeSet {});
-	}
-	if (HotPages::CurrentMode() == HotPages::Mode::On || FlipUnprotect::CurrentMode() == HotPages::Mode::On) {
-		AddHotPages(taken);
-	}
-	return taken;
-}
-
 void MemoryTracker::AddHotPages(RangeSet& set) {
 	std::vector<RegionManager*> managers;
 	{
@@ -143,7 +124,6 @@ void MemoryTracker::MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size) {
 		manager->ChangeState<DirtySource::Cpu, true>(manager->GetCpuAddr() + offset, bytes);
 		manager->InvalidateHashes(manager->GetCpuAddr() + offset, bytes);
 	});
-	QueueBdaSync(vaddr, size);
 }
 
 void MemoryTracker::MarkRegionAsGpuModified(uint64_t vaddr, uint64_t size) {
@@ -186,8 +166,6 @@ void MemoryTracker::UntrackMemory(uint64_t vaddr, uint64_t size) {
 		manager->ChangeState<DirtySource::Cpu, true>(manager->GetCpuAddr() + offset, bytes);
 		manager->InvalidateHashes(manager->GetCpuAddr() + offset, bytes);
 	});
-	locks.clear();
-	QueueBdaSync(vaddr, size);
 }
 
 } // namespace Libs::Graphics

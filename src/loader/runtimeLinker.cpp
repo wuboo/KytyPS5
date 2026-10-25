@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/renderer/gfDiag.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
+#include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
@@ -940,6 +941,11 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 			return true;
 		}
 		Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultUnhandled);
+		if (const auto length =
+		        Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(info->exception_address)) {
+			Loader::X64InstructionEmulator::SkipLoad(info->native_context, length);
+			return true;
+		}
 	}
 	// Report whatever guest context can be read safely before terminating: which guest thread
 	// faulted, the register file, the faulting code bytes and the top of its stack.

@@ -37,10 +37,6 @@ public:
 	void               MarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	void               UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	void               UntrackMemory(uint64_t vaddr, uint64_t size);
-	// Queue after changing ownership; a concurrent drain must not consume an event
-	// before the dirty pages it describes become visible.
-	void                   QueueBdaSync(uint64_t vaddr, uint64_t size);
-	[[nodiscard]] RangeSet TakeBdaSync();
 	// S440: pages the tracker no longer protects (HotPages) raise no fault; this adds them to `set`.
 	void AddHotPages(RangeSet& set);
 	// Removes protection from a range and flushes GPU-owned data when required.
@@ -66,7 +62,6 @@ public:
 				on_flush();
 			}
 		});
-		QueueBdaSync(vaddr, size);
 	}
 #if KYTY_BUILD == KYTY_BUILD_DEBUG
 	void ValidateGpuDirtyPages(const RangeSet& dirty, uint64_t vaddr, uint64_t size,
@@ -173,8 +168,6 @@ private:
 	std::unique_ptr<std::atomic<RegionManager*>[]> m_regions;
 	std::vector<std::unique_ptr<RegionManager>>    m_region_storage;
 	std::mutex                                     m_region_mutex;
-	std::mutex                                     m_bda_sync_mutex;
-	RangeSet                                       m_bda_sync;
 	PageManager&                                   m_page_manager;
 };
 

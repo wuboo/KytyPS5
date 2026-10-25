@@ -138,8 +138,14 @@ void CommandBuffer::BeginRendering(const RenderState& wanted) const {
 		    Handle(), GpuLabel::Class::GuestRp, [&] { Handle().beginRendering(rendering); }, "G.rp.%ux%u.%u.%u", state.width, state.height,
 		    state.num_color_attachments, pass_id.fetch_add(1, std::memory_order_relaxed));
 	}
+	// The open pass holds the cleared contents, so a later clear begins a new pass.
 	m_render_state = state;
-	m_rendering    = true;
+	for (auto& color: m_render_state.color_attachments) {
+		color.is_clear = false;
+	}
+	m_render_state.depth_stencil_attachment.depth_clear   = false;
+	m_render_state.depth_stencil_attachment.stencil_clear = false;
+	m_rendering                                           = true;
 }
 
 void CommandBuffer::EndRendering() const {

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <utility>
 #include <vector>
+#include <cstddef>
 
 namespace Loader::X64InstructionEmulator {
 
@@ -30,6 +31,8 @@ bool RestoreWideStoreTrap(uint64_t site, uint64_t trampoline);
 // trampoline_end, which must be within +/-2 GiB of the code.
 WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* cursor,
                                      uint64_t trampoline_end);
+// Completes a faulting load into EAX as a zero read and resumes after it.
+void SkipLoad(void* native_context, size_t length);
 
 } // namespace Loader::X64InstructionEmulator
 

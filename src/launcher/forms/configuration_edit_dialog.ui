@@ -141,6 +141,7 @@
               <property name="value"><number>60</number></property>
              </widget>
             </item>
+            <!--
             <item row="3" column="0">
              <widget class="QLabel" name="label_shader_optimization">
               <property name="text"><string>Shader optimization:</string></property>
@@ -151,6 +152,7 @@
               <property name="toolTip"><string>Optimize shaders for code size or performance</string></property>
              </widget>
             </item>
+            -->
             <item row="4" column="0">
              <widget class="QLabel" name="label_gpu">
               <property name="text"><string>GPU:</string></property>
@@ -168,15 +170,33 @@
              </widget>
             </item>
             <item row="6" column="1">
+             <widget class="QCheckBox" name="checkBox_readback_tiled">
+              <property name="toolTip"><string>Read back small writable tiled images</string></property>
+              <property name="text"><string>Enable tiled readback</string></property>
+             </widget>
+            </item>
+            <item row="7" column="1">
              <widget class="QCheckBox" name="checkBox_tessellation">
               <property name="toolTip"><string>Draw tessellated geometry. Disabled by default; unsupported tessellation may cause crashes.</string></property>
               <property name="text"><string>Enable tessellation support (experimental)</string></property>
              </widget>
             </item>
-            <item row="7" column="1">
+            <item row="8" column="1">
+             <widget class="QCheckBox" name="checkBox_occlusion_queries">
+              <property name="toolTip"><string>Count the samples of occlusion queries on the GPU, so hidden lights and objects stay hidden. Costs some performance.</string></property>
+              <property name="text"><string>Enable occlusion queries</string></property>
+             </widget>
+            </item>
+            <item row="9" column="1">
              <widget class="QCheckBox" name="checkBox_hdr">
               <property name="toolTip"><string>Enable HDR10 output for supported games. Requires HDR enabled on the host display.</string></property>
               <property name="text"><string>Enable HDR display support</string></property>
+             </widget>
+            </item>
+            <item row="10" column="1">
+             <widget class="QCheckBox" name="checkBox_shader_cache">
+              <property name="toolTip"><string>Save compiled shaders and pipelines per game and load them at startup.</string></property>
+              <property name="text"><string>Cache shaders</string></property>
              </widget>
             </item>
            </layout>
@@ -491,12 +511,6 @@
            <widget class="QCheckBox" name="checkBox_sync_raw_image_buffers">
             <property name="toolTip"><string>Can fix missing textures and incorrect transparency (Resident Evil 2).</string></property>
             <property name="text"><string>Accurate texture synchronization</string></property>
-           </widget>
-          </item>
-          <item>
-           <widget class="QCheckBox" name="checkBox_support_zmask">
-            <property name="toolTip"><string>Can restore missing geometry (High on Life 2).</string></property>
-            <property name="text"><string>Support ZMask</string></property>
            </widget>
           </item>
          </layout>

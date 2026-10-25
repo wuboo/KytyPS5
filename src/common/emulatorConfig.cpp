@@ -138,6 +138,10 @@ bool ShaderValidationEnabled() {
 	return g_config->shader_validation_enabled;
 }
 
+bool ShaderCacheEnabled() {
+	return g_config->shader_cache_enabled;
+}
+
 ShaderOptimizationType GetShaderOptimizationType() {
 	return g_config->shader_optimization_type;
 }
@@ -190,16 +194,20 @@ bool ReadbackLinearImagesEnabled() {
 	return g_config->readback_linear_images;
 }
 
+bool ReadbackTiledImagesEnabled() {
+	return g_config->readback_tiled_images;
+}
+
 bool SyncRawImageBuffersEnabled() {
 	return g_config->sync_raw_image_buffers;
 }
 
-bool SupportZmaskEnabled() {
-	return g_config->support_zmask;
-}
-
 bool TessellationEnabled() {
 	return g_config->tessellation_enabled;
+}
+
+bool OcclusionQueriesEnabled() {
+	return g_config->occlusion_queries_enabled;
 }
 
 bool TrophyEnabled() {

@@ -140,7 +140,7 @@ void BufferCache::ChangeRegister(BufferId id) {
 		}
 		WriteDataBuffer(m_bda_pagetable_buffer, table_offset,
 		                addresses.data(), addresses.size() * sizeof(vk::DeviceAddress));
-		m_memory_tracker.QueueBdaSync(buffer.CpuAddress(), buffer.Size());
+		QueueBdaSync(buffer.CpuAddress(), buffer.Size());
 	} else {
 		const auto found = m_buffers.find(buffer.CpuAddress());
 		EXIT_IF(found == m_buffers.end() || found->second != id);
@@ -279,6 +279,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		    if (DccFillPublish::EnvMode() != DccFillPublish::Mode::Off) {
 			    m_write_ledger.Forget(address, bytes);
 		    }
+		    ForgetColorMetadataChecks(address, bytes);
 	    });
 	if (copies.empty()) {
 		return false;
@@ -401,6 +402,10 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 	m_gds_buffer.Flush(0, m_gds_buffer.Size());
 	SetVulkanObjectNameF(m_graphics.device, m_bda_pagetable_buffer.Handle(),
 	                     "BDA Page Table Buffer");
+	m_scheduler.BeginCommand();
+	for (auto* buffer: {&m_bda_pagetable_buffer, m_fault_manager.GetFaultBuffer()}) {
+		buffer->Fill(0, buffer->Size(), 0);
+	}
 	const auto null_id =
 	    m_slot_buffers.insert(m_graphics, m_scheduler, MemoryUsage::DeviceLocal, 0, AllFlags, 16);
 	EXIT_IF(null_id != NULL_BUFFER_ID);
@@ -447,6 +452,7 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	if (known) {
 		m_write_ledger.Forget(vaddr, size); // a CPU write: remembered fills of the range are stale
 	}
+	QueueBdaSync(vaddr, size);
 }
 
 namespace {
@@ -602,6 +608,7 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		}
 		if (is_write) {
 			m_memory_tracker.MarkRegionAsCpuModified(vaddr, size);
+			QueueBdaSync(vaddr, size);
 		}
 		if (census) {
 			if (probe.stale_fresh.size != 0 && probe.stale_fresh.ok) {
@@ -1160,6 +1167,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 			m_sync_seq.Note(vaddr, size, ++m_sync_seq_next);
 			m_sync_cmds.Note(vaddr, size, FrameTiming::Get(FrameTiming::Counter::Draws) + FrameTiming::Get(FrameTiming::Counter::Dispatches));
 		}
+		ForgetColorMetadataChecks(vaddr, size);
 	}
 	return {&buffer, buffer.Offset(vaddr)};
 }
@@ -1279,6 +1287,29 @@ bool BufferCache::IsRegionRegistered(uint64_t vaddr, uint64_t size) {
 	return address + m_slot_buffers[id].Size() > vaddr;
 }
 
+void BufferCache::MarkColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys) {
+	for (uint32_t slot = 0; slot < m_checked_color_metadata.size(); slot++) {
+		if ((keys & (1u << slot)) != 0) {
+			m_checked_color_metadata[slot].Add(vaddr, size);
+		}
+	}
+}
+
+bool BufferCache::IsColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys) const {
+	for (uint32_t slot = 0; slot < m_checked_color_metadata.size(); slot++) {
+		if ((keys & (1u << slot)) != 0 && !m_checked_color_metadata[slot].Contains(vaddr, size)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void BufferCache::ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size) {
+	for (auto& checked: m_checked_color_metadata) {
+		checked.Subtract(vaddr, size);
+	}
+}
+
 bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 	return m_memory_tracker.IsRegionGpuModified(vaddr, size);
 }
@@ -1388,14 +1419,23 @@ void BufferCache::ProcessFaultBuffer() {
 	m_fault_manager.ProcessFaultBuffer();
 }
 
-void BufferCache::SynchronizeBda(const RangeSet& mapped) {
-	// Take before walking: writes queued during synchronization remain pending.
-	const auto pending = m_memory_tracker.TakeBdaSync();
-	pending.ForEach([&](uint64_t begin, uint64_t end) {
-		mapped.ForEachInRange(begin, end - begin, [this](uint64_t start, uint64_t finish) {
-			SynchronizeBuffersInRange(start, finish - start);
-		});
-	});
+void BufferCache::QueueBdaSync(uint64_t vaddr, uint64_t size) {
+	const auto begin = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
+	const auto end   = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
+	std::lock_guard lock(m_bda_sync_mutex);
+	m_bda_sync.Add(begin, end - begin);
+}
+
+RangeSet BufferCache::TakeBdaSync() {
+	RangeSet taken;
+	{
+		std::lock_guard lock(m_bda_sync_mutex);
+		taken = std::exchange(m_bda_sync, {});
+	}
+	if (HotPages::CurrentMode() == HotPages::Mode::On || FlipUnprotect::CurrentMode() == HotPages::Mode::On) {
+		m_memory_tracker.AddHotPages(taken);
+	}
+	return taken;
 }
 
 void BufferCache::SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size) {
