@@ -63,14 +63,9 @@ inline bool UseCompiledWalker() {
 
 // Install the ordinary reader for checked. Leaves main and nojit on the memcpy/JIT path.
 inline void Apply(ShaderRecompiler::IR::SrtRuntime& runtime, ShaderRecompiler::IR::SrtMemoryReader reader) {
-#if !defined(KYTY_SRT_MUTANT_NO_CHECKED)
-	if (Current() == Mode::Checked && runtime.read_memory == nullptr) {
-		runtime.read_memory = reader;
-	}
-#else
+	// S487: the upstream walker has no ordinary reader to replace (SrtRuntime::read_memory is gone); KYTY_SRT_READER=checked has no effect.
 	(void)runtime;
 	(void)reader;
-#endif
 }
 
 // `read_backing` is TryReadBufferBacking, or a test stub. False, a null stub, or an address

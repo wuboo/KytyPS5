@@ -135,7 +135,7 @@ inline void Materialize(const ResourcePlan& plan, const SrtRuntime& runtime, Out
 	ShadowRunningRef() = true;
 	out.ok             = MaterializeResources(plan, runtime, out.snapshot, out.specialization);
 	ShadowRunningRef() = false;
-	out.active         = plan.scratch().active_sources;
+	out.active.clear(); // S487: the upstream plan keeps no per-run activity vector (DIAG only)
 }
 
 enum class Part : uint8_t { None, Failed, Specialization, Active, Flat, Buffers, Images, Samplers, UniformFill };
