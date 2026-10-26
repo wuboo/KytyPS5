@@ -822,9 +822,6 @@ bool PipelineCache::GraphicsProgramsImpl(const HW::Context& context, const HW::U
 		if (const auto* log = ScoutTableLog::Active(); log == nullptr || log->unsafe) return fail(5);
 	}
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
-	if constexpr (OffThread) {
-		if (mesh_active) return fail(3);
-	}
 	if (object_primitive_id) {
 		// CxObjectIdMode: register source plus a 32-bit pipelined primitive-ID addition.
 		EXIT_NOT_IMPLEMENTED(sh.m_paClObjprimIdCntl != 2u || mesh_active || tess_active ||
@@ -836,6 +833,9 @@ bool PipelineCache::GraphicsProgramsImpl(const HW::Context& context, const HW::U
 		                         .buffer_format != Prospero::BufferFormat::k32UInt);
 	}
 	if (mesh_active) {
+		if constexpr (OffThread) {
+			if (!m_graphics.mesh_shader_enabled) return fail(3);
+		}
 		EXIT_NOT_IMPLEMENTED(!m_graphics.mesh_shader_enabled);
 		auto& mesh              = vertex_info[0].mesh;
 		mesh.host_subgroup_size = m_graphics.subgroup_size;
@@ -849,6 +849,7 @@ bool PipelineCache::GraphicsProgramsImpl(const HW::Context& context, const HW::U
 		    mesh.max_vertices > limits.maxMeshOutputVertices ||
 		    mesh.max_primitives > limits.maxMeshOutputPrimitives ||
 		    mesh.lds_size_dwords * sizeof(uint32_t) > limits.maxMeshSharedMemorySize) {
+			if constexpr (OffThread) return fail(3);
 			EXIT("mesh shader exceeds host limits: threads=%u vertices=%u primitives=%u LDS=%u\n",
 			     host_threads, mesh.max_vertices, mesh.max_primitives, mesh.lds_size_dwords);
 		}
