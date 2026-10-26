@@ -299,10 +299,8 @@ void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const u
 		it.draw_indirect_base     = m_draw_indirect_args_base_addr;
 		it.dispatch_indirect_base = m_dispatch_indirect_args_base_addr;
 	}
-	// S487: upstream reads a draw's programs from the command buffer (PipelineCache::GetGraphicsPrograms(command, state)) and the program cache is not shared with
-	// other threads, so a worker has nothing to compute yet (RunGfpJob never answers). No job is created; the FIFO (front / recorder) still runs.
-	constexpr bool kWorkersPorted = false;
-	if (kWorkersPorted && cls == CpPipe::OpClass::Draw && CpPipe::IsGraphicsDraw(opcode) && EnvWorkers() != 0) {
+	// S490: a worker computes the draw's programs on the snapshot (PipelineCache::GetGraphicsProgramsOffThread: a lookup in the shared program cache); the recorder joins it.
+	if (cls == CpPipe::OpClass::Draw && CpPipe::IsGraphicsDraw(opcode) && EnvWorkers() != 0) {
 		it.job.cache     = &m_renderer.GetPipelineCache();
 		it.job.ctx_copy  = it.ctx;
 		it.job.sh_copy   = it.sh;

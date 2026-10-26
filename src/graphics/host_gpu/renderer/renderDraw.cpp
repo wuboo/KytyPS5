@@ -847,7 +847,21 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "GetGraphicsPrograms");
 	}
-	m_context.GetPipelineCache().GetGraphicsPrograms(buffer, state);
+	// S479 (KYTY_CP_PIPE): the programs of a deferred draw were computed by a worker on the registers the draw was parsed with (S490: kept only when they are all
+	// cached, the pages the worker read are not GPU-dirty and nothing was written into them since: CpPipe::JoinJob).
+	CpPipe::GfpJob* const job      = CpPipe::CurrentJob();
+	const bool            job_used = job != nullptr && CpPipe::JoinJob(*job);
+	if (job_used && CpPipe::EnvMode() == CpPipe::Mode::On) {
+		state.vertex_info[0] = job->out.vertex_info[0];
+		state.ps_input_info  = job->out.pixel_info;
+		state.ps_active      = job->out.ps_active;
+		state.mrt_mask       = job->out.mrt_mask;
+		FrameTiming::Add(FrameTiming::Counter::PipeUsedN);
+	} else {
+		if (job != nullptr && !job_used) FrameTiming::Add(FrameTiming::Counter::PipeFallbackN);
+		m_context.GetPipelineCache().GetGraphicsPrograms(buffer, state);
+		if (job_used) CompareWithJob(state, *job);
+	}
 	if (draw.IsIndexed()) {
 		LogDrawPhase(draw.Name(), "ResolveRenderColorTarget");
 	}
@@ -1340,13 +1354,104 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	}
 }
 
-// S479 (KYTY_CP_PIPE): the worker's GetGraphicsPrograms for a deferred draw. S487: upstream reads the draw's programs from the command buffer
-// (PipelineCache::GetGraphicsPrograms(command, state)), so a worker has nothing it can compute on the snapshot yet: the job is never answered and
-// the recorder computes the programs itself.
+// S479 (KYTY_CP_PIPE): the worker's GetGraphicsPrograms for a deferred draw, on the registers snapshotted with it. S490: upstream reads a draw's programs from the
+// command buffer, so the worker runs the same function on the snapshot (PipelineCache::GetGraphicsProgramsOffThread: lookup only, resources in the job's own
+// snapshot). Everything the walk read is logged as pages, which JoinJob checks against GPU-written bytes when the recorder asks for the result.
 void CpPipe::RunGfpJob(CpPipe::GfpJob& job) {
-	job.answered  = false;
-	job.fail      = 0;
-	job.worker_ns = 0;
+	const int64_t t0 = FrameTiming::SteadyNowNs();
+	CpPipe::WorkerScope worker_flag;
+	ShaderRecompiler::IR::SetScratchPerThread(true);
+	ShaderRecompiler::IR::SetSrtWalkerWorker(true);
+	job.answered = false;
+	job.out.fail = 0;
+	job.tables.reads.clear();
+	job.tables.words.clear();
+	job.tables.unsafe = false;
+	job.pages.clear();
+	job.write_seq = Libs::LibKernel::Memory::BackingWriteSeq(); // before the first read
+	ScoutTableLog::Active() = &job.tables;
+	Libs::LibKernel::Memory::SetWorkerReadLog(&job.pages);
+	bool answered = DrawHasValidVertexShader(*job.sh) && job.cache->GetGraphicsProgramsOffThread(*job.ctx, *job.ucfg, *job.sh, job.out);
+	Libs::LibKernel::Memory::SetWorkerReadLog(nullptr);
+	ScoutTableLog::Active() = nullptr;
+	// A guest load of the walker that faulted (a tracked page) was completed as zero: the walk is not the CP's.
+	answered = answered && !job.tables.unsafe && ShaderRecompiler::IR::SrtWalkerWorkerFaults() == 0;
+	ShaderRecompiler::IR::SetSrtWalkerWorker(false);
+	if (answered) {
+		// The pages the compiled walker and the specialization reads touched (the backing reads logged theirs already).
+		constexpr size_t kMaxPages = 4096;
+		const auto       add_reads = [&](const ShaderRecompiler::IR::ResourceSnapshot& res) {
+            for (const auto& [address, size]: res.specialization_reads) {
+                if (size == 0) continue;
+                if (size > kMaxPages * 4096u) {
+                    answered = false;
+                    return;
+                }
+                for (uint64_t page = address & ~uint64_t {4095}; page <= ((address + size - 1) & ~uint64_t {4095}); page += 4096) job.pages.push_back(page);
+            }
+		};
+		add_reads(job.out.vs_res);
+		if (job.out.ps_active) add_reads(job.out.ps_res);
+		std::sort(job.pages.begin(), job.pages.end());
+		job.pages.erase(std::unique(job.pages.begin(), job.pages.end()), job.pages.end());
+		if (job.pages.size() > kMaxPages) answered = false;
+	}
+	job.answered  = answered;
+	job.worker_ns = FrameTiming::SteadyNowNs() - t0;
+}
+
+// S479 shadow: the result the CP computed (state) against the worker's (job), field by field of everything the draw is built from.
+static void CompareWithJob(const DrawRenderState& state, const CpPipe::GfpJob& job) {
+	using C = FrameTiming::Counter;
+	FrameTiming::Add(C::PipeShadowN);
+	const auto& out   = job.out;
+	const bool  ne_vs = state.vertex_info[0].stage.module != out.vertex_info[0].stage.module;
+	const bool  ne_ps = state.ps_active != out.ps_active || (state.ps_active && state.ps_input_info.stage.module != out.pixel_info.stage.module) ||
+	                   state.mrt_mask != out.mrt_mask;
+	const auto  same_res = [](const ShaderStageRuntime& a, const ShaderStageRuntime& b) {
+        if (a.resources == nullptr || b.resources == nullptr) return a.resources == b.resources;
+        // specialization_reads are not compared: the worker records every load of its walk (capture_reads), the CP only what the plan asks for
+        return a.resources->flattened_srt == b.resources->flattened_srt && a.resources->buffers == b.resources->buffers && a.resources->images == b.resources->images &&
+               a.resources->samplers == b.resources->samplers && a.resources->uniform_fill == b.resources->uniform_fill;
+	};
+	const bool ne_res = !same_res(state.vertex_info[0].stage, out.vertex_info[0].stage) || (state.ps_active && !same_res(state.ps_input_info.stage, out.pixel_info.stage));
+	// The stage inputs: the static key decides the module, the rest of the fields the draw and its push data.
+	const auto same_vs = [](const ShaderVertexInputInfo& x, const ShaderVertexInputInfo& y) {
+		std::vector<uint32_t> kx, ky;
+		BuildStageStaticKey(x, kx);
+		BuildStageStaticKey(y, ky);
+		if (kx != ky || x.logical_stage != y.logical_stage || x.fetch_attrib_reg != y.fetch_attrib_reg || x.fetch_buffer_reg != y.fetch_buffer_reg ||
+		    x.buffers_num != y.buffers_num || x.fetch_external != y.fetch_external || x.fetch_embedded != y.fetch_embedded)
+			return false;
+		for (int i = 0; i < x.resources_num && i < ShaderVertexInputInfo::RES_MAX; i++) {
+			const auto &rx = x.resources_dst[i], &ry = y.resources_dst[i];
+			if (std::memcmp(x.resources[i].fields, y.resources[i].fields, sizeof(x.resources[i].fields)) != 0 || rx.register_start != ry.register_start ||
+			    rx.registers_num != ry.registers_num || rx.attr_id != ry.attr_id || rx.fetch_index != ry.fetch_index || rx.buffer_index != ry.buffer_index)
+				return false;
+		}
+		for (int i = 0; i < x.buffers_num && i < ShaderVertexInputInfo::RES_MAX; i++) {
+			if (x.buffers[i].addr != y.buffers[i].addr || x.buffers[i].stride != y.buffers[i].stride || x.buffers[i].num_records != y.buffers[i].num_records ||
+			    x.buffers[i].fetch_index != y.buffers[i].fetch_index)
+				return false;
+		}
+		return true;
+	};
+	const auto same_ps = [](const ShaderPixelInputInfo& x, const ShaderPixelInputInfo& y) {
+		std::vector<uint32_t> kx, ky;
+		BuildStageStaticKey(x, kx);
+		BuildStageStaticKey(y, ky);
+		return kx == ky && x.ps_sample_shading == y.ps_sample_shading && x.ps_execute_on_noop == y.ps_execute_on_noop && x.ps_single_sample == y.ps_single_sample &&
+		       x.parameter_mode == y.parameter_mode && x.dual_source_blending == y.dual_source_blending && x.alpha_blend_source == y.alpha_blend_source;
+	};
+	const bool ne_info = !same_vs(state.vertex_info[0], out.vertex_info[0]) || (state.ps_active && !same_ps(state.ps_input_info, out.pixel_info));
+	if (ne_vs || ne_ps || ne_res || ne_info) {
+		FrameTiming::Add(C::PipeShadowNeN);
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1) < 16) {
+			std::fprintf(stderr, "[cp-pipe] shadow ne: vs=%d ps=%d res=%d info=%d\n", ne_vs, ne_ps, ne_res, ne_info);
+			std::fflush(stderr);
+		}
+	}
 }
 
 // Vulkan offsets for a prepared draw, or nullopt when its indirect records need CPU counts, as

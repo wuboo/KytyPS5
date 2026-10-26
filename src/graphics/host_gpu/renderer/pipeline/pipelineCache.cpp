@@ -19,6 +19,7 @@
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
+#include "graphics/shader/scoutTableLog.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
 #include "loader/systemContent.h"
@@ -326,14 +327,27 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	const auto* stage = ShaderRecompiler::StageName(key.stage);
 	DumpShader(result.spirv, fmt::format("{}_{:016x}_{:016x}.spv", stage, key.hash, id));
 	ValidateShaderSpirv(stage, key.hash, result.spirv, profile.maintenance8);
-	auto& module = program.modules.emplace_back(ShaderModule {
+	ShaderModule compiled {
 	    .id             = id,
 	    .module         = CompileSPV(result.spirv, m_graphics.device),
 	    .info           = std::move(info),
 	    .specialization = program.specialization,
 	    .function_code  = {function_code.begin(), function_code.end()},
-	});
-	EXIT_IF(module.module == nullptr);
+	};
+	// S490: a vertex stage's formats and a rectangle-list PS' parameters are part of the module before a pipeline worker can find it.
+	if (key.stage == ShaderType::Vertex || key.stage == ShaderType::Local) {
+		compiled.vertex_formats = VertexInputFormats(*options.input_info.vertex, compiled.info);
+	} else if (key.stage == ShaderType::Pixel &&
+	           options.input_info.pixel->parameter_mode == ShaderPixelParameterMode::Rectangle) {
+		compiled.rect_parameters = RectListParameters(*options.input_info.pixel, compiled.info);
+	}
+	EXIT_IF(compiled.module == nullptr);
+	ShaderModule* added = nullptr;
+	{
+		const std::unique_lock lock(m_program_mutex);
+		added = &program.modules.emplace_back(std::move(compiled));
+	}
+	auto& module = *added;
 	m_compiled[static_cast<size_t>(key.stage)]++;
 	// Guest geometry shaders are compiled through the host mesh stage.
 	std::printf("Shaders: VS %u | PS %u | CS %u | GS %u | LS %u | HS %u | TES %u\n",
@@ -344,13 +358,6 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	            m_compiled[static_cast<size_t>(ShaderType::Local)],
 	            m_compiled[static_cast<size_t>(ShaderType::TessellationControl)],
 	            m_compiled[static_cast<size_t>(ShaderType::TessellationEvaluation)]);
-	// The inputs of these come from the stage's static key.
-	if (key.stage == ShaderType::Vertex || key.stage == ShaderType::Local) {
-		module.vertex_formats = VertexInputFormats(*options.input_info.vertex, module.info);
-	} else if (key.stage == ShaderType::Pixel &&
-	           options.input_info.pixel->parameter_mode == ShaderPixelParameterMode::Rectangle) {
-		module.rect_parameters = RectListParameters(*options.input_info.pixel, module.info);
-	}
 	// Programs with GPU-selected calls depend on their callees' current code.
 	if (program.call_source == nullptr) {
 		StoreModule(key, program, module, result.spirv);
@@ -427,7 +434,10 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 			PipelineCacheLog("!!! TEMPORARY COMPUTE DISPATCH SKIP !!! shader=0x{:016x} pc=0x{:08x} "
 			                 "reason=unsupported GPU-selected callable target; rendering is incomplete",
 			                 params.hash, source.unsupported_call_pc);
-			m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true});
+			{
+				const std::unique_lock lock(m_program_mutex);
+				m_program_cache.emplace(m_lookup_key, Program {.skip_dispatch = true});
+			}
 			return nullptr;
 		}
 	}
@@ -448,10 +458,14 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 		auto retained = !source.calls.empty()
 		                    ? std::make_unique<ShaderRecompiler::ShaderSource>(std::move(source))
 		                    : nullptr;
-		entry = m_program_cache.emplace(m_lookup_key, Program {
+		Program fresh {
 		    .call_source   = std::move(retained),
 		    .resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program),
-		}).first;
+		};
+		{
+			const std::unique_lock lock(m_program_mutex);
+			entry = m_program_cache.emplace(m_lookup_key, std::move(fresh)).first;
+		}
 		auto& program = entry->second;
 		EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
 		    program.resource_plan, runtime, program.resources, program.specialization));
@@ -463,6 +477,80 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	}
 	return bind(CompileModule(entry->second, entry->first, options, std::move(translated),
 	                          push_data_cursor));
+}
+
+namespace {
+
+// S490 (KYTY_CP_PIPE): the reads of a pipeline worker's walk come from the guest's backing (no fault, no drain), and the pages are logged for the CP (SetWorkerReadLog).
+bool ReadShaderGuestMemoryWorker(void*, uint64_t address, std::span<uint32_t> values) {
+	if (values.empty()) {
+		return false;
+	}
+	return Libs::LibKernel::Memory::TryReadBackingWorker(address, values.data(), values.size_bytes());
+}
+
+// The CP's image heap keeps a table resident (a CP-side resource); a worker has none, so a walk that asks for one is left to the CP.
+class WorkerImageHeap final: public ShaderRecompiler::IR::ImageHeapSource {
+public:
+	bool Acquire(const ShaderRecompiler::IR::ImageHeapRequest&, ShaderRecompiler::IR::ImageHeapView&) override {
+		asked = true;
+		return false;
+	}
+	bool asked = false;
+};
+
+} // namespace
+
+// S490 (KYTY_CP_PIPE): GetProgram for a pipeline worker. It answers only from what the CP has already translated: the program and one of its modules for the
+// resources the walk finds. It never writes the cached program (its resources and specialization are the caller's / local), never compiles and never adds an entry;
+// the table of programs is held shared for the lookups, so the CP's insertions (exclusive) never run under it.
+template <typename InputInfo>
+const ShaderModule* PipelineCache::GetProgramOffThread(const ShaderParams& params, InputInfo& input_info, uint32_t& push_data_cursor,
+                                                       ShaderRecompiler::IR::ResourceSnapshot& resources, uint32_t& fail) {
+	static_assert(!std::is_same_v<InputInfo, ShaderComputeInputInfo>);
+	static thread_local ProgramKey key;
+	key.stage           = std::is_same_v<InputInfo, ShaderVertexInputInfo> ? input_info.logical_stage : ShaderType::Pixel;
+	key.hash            = params.hash;
+	key.user_data_count = params.user_data_count;
+	BuildStageStaticKey(input_info, key.static_state);
+	Program* program = nullptr;
+	{
+		const std::shared_lock lock(m_program_mutex);
+		const auto             entry = m_program_cache.find(key);
+		if (entry == m_program_cache.end() || entry->second.call_source || entry->second.skip_dispatch) {
+			fail = 1;
+			return nullptr;
+		}
+		program = &entry->second; // nodes of the table stay where they are
+	}
+	const auto user_data = std::span(params.user_data).first(params.user_data_count);
+	WorkerImageHeap heap;
+	ShaderRecompiler::IR::SrtRuntime runtime {
+	    .user_data                  = user_data,
+	    .shader_base                = params.Base(),
+	    .read_specialization_memory = ReadShaderGuestMemoryWorker,
+	    .image_heap                 = &heap,
+	    .capture_reads              = true,
+	};
+	ShaderRecompiler::IR::ResourceSpecialization specialization;
+	if (!ShaderRecompiler::IR::MaterializeResources(program->resource_plan, runtime, resources, specialization) || heap.asked ||
+	    ShaderRecompiler::IR::SrtWalkerWorkerFaults() != 0) {
+		fail = 2;
+		return nullptr;
+	}
+	const std::shared_lock lock(m_program_mutex);
+	for (const auto& candidate: program->modules) {
+		const auto& layout = candidate.info.bindings;
+		if (layout.push_data_start_dword != ShaderRecompiler::IR::PushData::StartFor(push_data_cursor, layout.ShaderDataDwords()) ||
+		    candidate.specialization != specialization) {
+			continue;
+		}
+		input_info.stage = {.module = &candidate, .resources = &resources};
+		layout.AdvancePushData(push_data_cursor);
+		return &candidate;
+	}
+	fail = 1; // no module for this specialization yet
+	return nullptr;
 }
 
 PipelineCache::PipelineCache(GraphicContext&                         graphics,
@@ -645,14 +733,32 @@ void PipelineCache::Save() {
 }
 
 void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRenderState& state) {
-	const auto& context           = command.GetRegisters();
-	const auto& user_config       = command.GetUserConfig();
+	GraphicsProgramsImpl<false>(command.GetRegisters(), command.GetUserConfig(), command.GetShaders(), state.vertex_info, state.ps_input_info,
+	                            state.ps_active, state.mrt_mask, nullptr);
+}
+
+bool PipelineCache::GetGraphicsProgramsOffThread(const HW::Context& context, const HW::UserConfig& user_config, const HW::Shader& shaders,
+                                                 OffThreadPrograms& out) {
+	out.fail        = 0;
+	out.vertex_info = {};
+	out.pixel_info  = {};
+	out.ps_active   = false;
+	out.mrt_mask    = 0;
+	return GraphicsProgramsImpl<true>(context, user_config, shaders, out.vertex_info, out.pixel_info, out.ps_active, out.mrt_mask, &out);
+}
+
+template <bool OffThread>
+bool PipelineCache::GraphicsProgramsImpl(const HW::Context& context, const HW::UserConfig& user_config, const HW::Shader& shaders,
+                                         std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info,
+                                         bool& ps_active_out, uint32_t& mrt_mask, OffThreadPrograms* off_thread) {
 	const auto& sh                = context.GetShaderRegisters();
-	const auto& vertex_regs       = command.GetShaders().GetVs();
-	const auto& pixel_regs        = command.GetShaders().GetPs();
-	auto&       vertex_info       = state.vertex_info;
-	auto&       pixel_info        = state.ps_input_info;
+	const auto& vertex_regs       = shaders.GetVs();
+	const auto& pixel_regs        = shaders.GetPs();
 	const bool  object_primitive_id = context.HasObjectPrimitiveIdOutput();
+	const auto  fail = [&](uint32_t reason) {
+		off_thread->fail = reason;
+		return false;
+	};
 	const auto  write_mask          = context.GetRenderTargetMask() & sh.m_cbShaderMask;
 	uint32_t    color_output_mask   = object_primitive_id ? 1u << 7u : 0;
 	for (uint32_t index = 0; index < RENDER_COLOR_ATTACHMENTS_MAX; index++) {
@@ -671,8 +777,11 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	    (color_output_mask != 0 || db.shader_kill_enable || db.shader_z_export_enable ||
 	     db.shader_mask_export_enable || db.shader_dual_export_enable ||
 	     db.shader_execute_on_noop || sh.AlphaToMask());
-	state.ps_active = pixel_active;
+	ps_active_out = pixel_active;
 	const bool tess_active = user_config.GetPrimType() == Prospero::PrimitiveType::kPatch;
+	if constexpr (OffThread) {
+		if (tess_active || object_primitive_id) return fail(3); // shapes the CP handles
+	}
 	std::array<ShaderParams, 3> vertex_params;
 	if (tess_active) {
 		vertex_params = PrepareTessellationPrograms(vertex_regs, context, vertex_info);
@@ -693,7 +802,13 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	} else {
 		vertex_params[0] = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
 	}
+	if constexpr (OffThread) {
+		if (const auto* log = ScoutTableLog::Active(); log == nullptr || log->unsafe) return fail(5);
+	}
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
+	if constexpr (OffThread) {
+		if (mesh_active) return fail(3);
+	}
 	if (object_primitive_id) {
 		// CxObjectIdMode: register source plus a 32-bit pipelined primitive-ID addition.
 		EXIT_NOT_IMPLEMENTED(sh.m_paClObjprimIdCntl != 2u || mesh_active || tess_active ||
@@ -751,6 +866,7 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 			if (blend || (mapping.ApplyMask(target_mask) & 7u) != 7u ||
 			    (mapping.ApplyMask(shader_mask) & 7u) != 7u ||
 			    pixel_info.target_output_mode[export_index] != 9u) {
+				if constexpr (OffThread) return fail(3);
 				EXIT("unsupported packed UNorm render-target export: slot=%u export=%u mode=%u "
 				     "target_mask=0x%x shader_mask=0x%x mapping=0x%02x blend=%u\n",
 				     slot, export_index, pixel_info.target_output_mode[export_index], target_mask,
@@ -827,18 +943,30 @@ void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRender
 	uint32_t push_data_cursor = ShaderRecompiler::IR::PushData::GraphicsDrawDwords(
 	    mesh_active, object_primitive_id, last_stage.user_clip_planes);
 	if (pixel_active) {
-		const auto& pixel_module = *GetProgram(pixel_params, pixel_info, push_data_cursor);
+		const ShaderModule* pixel_program = nullptr;
+		if constexpr (OffThread) {
+			pixel_program = GetProgramOffThread(pixel_params, pixel_info, push_data_cursor, off_thread->ps_res, off_thread->fail);
+			if (pixel_program == nullptr) return false;
+		} else {
+			pixel_program = GetProgram(pixel_params, pixel_info, push_data_cursor);
+		}
+		const auto& pixel_module = *pixel_program;
 		for (const auto& output: pixel_module.info.info.outputs) {
 			if (output.kind == ShaderRecompiler::IR::StageOutputKind::Mrt ||
 			    output.kind == ShaderRecompiler::IR::StageOutputKind::ObjectPrimitiveId) {
-				state.mrt_mask |= 1u << output.location;
+				mrt_mask |= 1u << output.location;
 			}
 		}
-		state.mrt_mask &= color_output_mask;
+		mrt_mask &= color_output_mask;
 	}
-	for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
-		GetProgram(vertex_params[i], vertex_info[i], push_data_cursor);
+	if constexpr (OffThread) {
+		if (GetProgramOffThread(vertex_params[0], vertex_info[0], push_data_cursor, off_thread->vs_res, off_thread->fail) == nullptr) return false;
+	} else {
+		for (uint32_t i = 0; i < (tess_active ? 3u : 1u); i++) {
+			GetProgram(vertex_params[i], vertex_info[i], push_data_cursor);
+		}
 	}
+	return true;
 }
 
 const ShaderModule* PipelineCache::GetComputeProgram(const HW::ComputeShaderInfo& regs,

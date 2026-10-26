@@ -1,7 +1,7 @@
 #ifndef GRAPHICS_GUEST_GPU_COMMAND_PROCESSOR_CPPIPEJOB_H
 #define GRAPHICS_GUEST_GPU_COMMAND_PROCESSOR_CPPIPEJOB_H
 
-// S479 (KYTY_CP_PIPE): a GetGraphicsPrograms call for a deferred draw, run by a pipeline worker on the registers snapshotted with the draw. The recorder joins it
+// S479 (KYTY_CP_PIPE): a GetGraphicsPrograms call for a deferred draw, run by a pipeline worker on the registers snapshotted with the draw (S490: PipelineCache::GetGraphicsProgramsOffThread). The recorder joins it
 // when the draw is executed (RefreshShaders) and uses the result or, when the worker could not answer or a page it read has become GPU-dirty, computes the
 // programs itself as before.
 
@@ -32,13 +32,8 @@ struct GfpJob {
 	const HW::UserConfig* ucfg  = nullptr;
 
 	// outputs
-	bool                                   answered  = false; // the worker produced programs for every stage the draw needs
-	bool                                   ps_active = false;
-	uint32_t                               fail      = 0; // PipelineCache::OffThreadScope::FailReason() when not answered
-	std::array<ShaderVertexInputInfo, 3>   vertex_info {};
-	ShaderPixelInputInfo                   pixel_info {};
-	ShaderRecompiler::IR::ResourceSnapshot vs_res;
-	ShaderRecompiler::IR::ResourceSnapshot ps_res;
+	bool                                   answered = false; // the worker produced programs for every stage the draw needs (out.fail says why not)
+	PipelineCache::OffThreadPrograms       out;              // the stage inputs point at out.vs_res / out.ps_res
 	ScoutTableLog::Log                     tables;
 	std::vector<uint64_t>                  pages; // 4 KiB pages of guest memory the worker read, sorted and unique
 	int64_t                                worker_ns = 0;

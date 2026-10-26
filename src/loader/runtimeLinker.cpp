@@ -926,6 +926,11 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		}
 		GfEmuShadow gf_shadow;
 		if (access == GpuAccess::Read) {
+			// S490 (KYTY_CP_PIPE): the walker of a pipeline worker never drains a tracked page: the load completes as a zero read and the worker drops its result.
+			if (const auto length = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerWorkerFaultLength(info->exception_address)) {
+				Loader::X64InstructionEmulator::SkipLoad(info->native_context, length);
+				return true;
+			}
 			if (Libs::Graphics::GuestFault::Enabled() && !Libs::Graphics::GuestGpu::IsGpuThread()) {
 				GfEmuLogInstruction(info->native_context, info->access_violation_vaddr, info->exception_address);
 			}

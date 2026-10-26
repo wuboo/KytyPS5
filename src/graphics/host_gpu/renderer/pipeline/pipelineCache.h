@@ -17,10 +17,12 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstddef>
+#include <deque>
 #include <filesystem>
 #include <memory>
 #include <mutex>
 #include <queue>
+#include <shared_mutex>
 #include <span>
 #include <thread>
 #include <type_traits>
@@ -189,6 +191,20 @@ public:
 
 	// Reads the shaders and registers bound in `command` into the state's shader stages.
 	void GetGraphicsPrograms(const CommandBuffer& command, DrawRenderState& state);
+	// S490 (KYTY_CP_PIPE): what a pipeline worker computes for a draw from a snapshot of its registers, with GetGraphicsPrograms' results.
+	struct OffThreadPrograms {
+		std::array<ShaderVertexInputInfo, 3>   vertex_info {};
+		ShaderPixelInputInfo                   pixel_info {};
+		bool                                   ps_active = false;
+		uint32_t                               mrt_mask  = 0;
+		ShaderRecompiler::IR::ResourceSnapshot vs_res; // vertex_info[0].stage.resources / pixel_info.stage.resources point here when the call answered
+		ShaderRecompiler::IR::ResourceSnapshot ps_res;
+		uint32_t                               fail = 0; // 0 answered; 1 no program / module for it yet, 2 resources unusable here, 3 shape the CP handles, 5 vertex table unsafe
+	};
+	// GetGraphicsPrograms for a thread other than the CP: it never compiles, adds an entry or writes a cached program; a draw whose programs are not all in the cache
+	// (or whose resources would need the CP) is left to the CP (false, out.fail). The thread has to be marked (ResourcePlan SetScratchPerThread, SetSrtWalkerWorker),
+	// read guest memory only through Memory::TryReadBackingWorker, and have a ScoutTableLog active.
+	bool GetGraphicsProgramsOffThread(const HW::Context& context, const HW::UserConfig& user_config, const HW::Shader& shaders, OffThreadPrograms& out);
 	// Null skips the dispatch.
 	const ShaderModule* GetComputeProgram(const HW::ComputeShaderInfo& regs,
 	                                      ShaderComputeInputInfo&      input_info);
@@ -204,7 +220,8 @@ private:
 		ShaderRecompiler::IR::ResourcePlan           resource_plan;
 		ShaderRecompiler::IR::ResourceSnapshot       resources;
 		ShaderRecompiler::IR::ResourceSpecialization specialization;
-		std::vector<ShaderModule>                    modules;
+		// A deque: a module's address stays valid while the CP adds variants (a pipeline worker's result names modules the CP uses later).
+		std::deque<ShaderModule>                     modules;
 		bool                                         skip_dispatch = false;
 
 		[[nodiscard]] std::span<const uint32_t> FunctionCode() const;
@@ -240,6 +257,8 @@ private:
 	// Modules compiled per stage.
 	std::array<uint32_t, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1> m_compiled {};
 	ProgramKey                             m_lookup_key;
+	// S490: the CP adds programs and modules under the unique lock; a pipeline worker looks them up under the shared one.
+	mutable std::shared_mutex              m_program_mutex;
 	vk::PipelineCache             m_driver_cache = nullptr;
 	std::filesystem::path         m_driver_cache_path;
 	std::chrono::steady_clock::time_point m_next_driver_cache_save;
@@ -253,6 +272,13 @@ private:
 	template <typename InputInfo>
 	const ShaderModule* GetProgram(const ShaderParams& params, InputInfo& input_info,
 	                               uint32_t& push_data_cursor);
+	template <typename InputInfo>
+	const ShaderModule* GetProgramOffThread(const ShaderParams& params, InputInfo& input_info, uint32_t& push_data_cursor,
+	                                        ShaderRecompiler::IR::ResourceSnapshot& resources, uint32_t& fail);
+	template <bool OffThread>
+	bool GraphicsProgramsImpl(const HW::Context& context, const HW::UserConfig& user_config, const HW::Shader& shaders,
+	                          std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info, bool& ps_active_out,
+	                          uint32_t& mrt_mask, OffThreadPrograms* off_thread);
 	ShaderModule& CompileModule(Program& program, const ProgramKey& key,
 	                            ShaderRecompiler::CompileOptions  options,
 	                            ShaderRecompiler::TranslateResult translated,

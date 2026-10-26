@@ -45,6 +45,8 @@ struct SrtRuntime {
 	std::span<const uint32_t> workgroup_counts;
 	uint64_t                  indirect_args_address = 0;
 	ImageHeapSource*          image_heap            = nullptr;
+	// S490: record the range of every guest load of the walk in the snapshot's specialization_reads (a pipeline worker logs the pages it read).
+	bool                      capture_reads         = false;
 };
 
 class SrtReadCapture {
@@ -81,6 +83,12 @@ bool WalkedActive(const ResourcePlan& plan, uint32_t source);
 // Length of the guest load at rip if it belongs to the walker running on this thread, else 0.
 // The exception handler completes such a load as a zero read.
 uint32_t SrtWalkerLoadLength(uint64_t rip);
+// S490 (KYTY_CP_PIPE): a pipeline worker's walker must not take the fault handler's drain of a GPU-tracked page (that waits for the thread that waits for the
+// worker). On a thread marked here a faulting load of the walker is completed as a zero read at once (length as SrtWalkerLoadLength, 0 when it is not the
+// walker's) and counted; the caller then does not use the walk. SetSrtWalkerWorker resets the count.
+void     SetSrtWalkerWorker(bool on);
+uint32_t SrtWalkerWorkerFaultLength(uint64_t rip);
+uint32_t SrtWalkerWorkerFaults();
 
 // Nonnegative affine coefficients: element zero is constant, remaining elements are
 // caller-selected leaves. Runtime range proofs must additionally exclude U32 wrap.

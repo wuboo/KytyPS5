@@ -4,6 +4,7 @@
 
 #include <fmt/format.h>
 #include <xbyak/xbyak.h>
+#include <atomic>
 #include <map>
 #include <new>
 #include <unordered_map>
@@ -99,6 +100,35 @@ bool EquivalentValue(const ResourcePlan& program, Value left, Value right,
 }
 
 } // namespace
+
+namespace {
+thread_local bool t_scratch_per_thread = false;
+} // namespace
+
+void SetScratchPerThread(bool on) {
+	t_scratch_per_thread = on;
+}
+
+uint64_t ResourcePlan::NextScratchKey() {
+	static std::atomic<uint64_t> next {1};
+	return next.fetch_add(1, std::memory_order_relaxed);
+}
+
+ResourcePlan::ScratchRef ResourcePlan::scratch() const {
+	if (!t_scratch_per_thread) return {srt_scratch, material_keys, selector_keys};
+	struct Own {
+		std::vector<uint64_t>     srt;
+		std::vector<uint32_t>     material_keys;
+		std::vector<SelectorKeys> selector_keys;
+	};
+	static thread_local std::unordered_map<uint64_t, Own> scratches;
+	const auto [it, inserted] = scratches.try_emplace(scratch_key);
+	if (inserted) {
+		it->second.srt.assign(srt_scratch_words, 0u);
+		it->second.selector_keys.resize(selector_key_count);
+	}
+	return {it->second.srt, it->second.material_keys, it->second.selector_keys};
+}
 
 ResourcePlan::ResourcePlan() = default;
 ResourcePlan::ResourcePlan(ResourcePlan&&) noexcept = default;

@@ -692,7 +692,23 @@ struct ResourcePlan {
 	mutable std::vector<uint64_t>           srt_scratch;
 	mutable std::vector<uint32_t>           material_keys;
 	mutable std::vector<SelectorKeys>       selector_keys;
+	// S490 (KYTY_CP_PIPE): a pipeline worker walks the same plan while the CP does, so a thread marked with SetScratchPerThread gets a scratch of its own (scratch()).
+	// The sizes it starts with are fixed once the plan is derived (a walk only reads them).
+	uint32_t                                srt_scratch_words = 0;
+	uint32_t                                selector_key_count = 0;
+	uint64_t                                scratch_key       = NextScratchKey();
+
+	struct ScratchRef {
+		std::vector<uint64_t>&     srt;
+		std::vector<uint32_t>&     material_keys;
+		std::vector<SelectorKeys>& selector_keys;
+	};
+	[[nodiscard]] ScratchRef scratch() const;
+	static uint64_t          NextScratchKey();
 };
+
+// True on a thread whose walks must not share a plan's own scratch.
+void SetScratchPerThread(bool on);
 
 struct Program: ResourcePlan {
 	Program() = default;

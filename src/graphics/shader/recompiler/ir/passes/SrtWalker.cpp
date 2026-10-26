@@ -160,7 +160,7 @@ uint32_t OutputOffset(const ResourcePlan& plan) {
 }
 
 const uint8_t* Scratch(const ResourcePlan& plan) {
-	return reinterpret_cast<const uint8_t*>(plan.srt_scratch.data());
+	return reinterpret_cast<const uint8_t*>(plan.scratch().srt.data());
 }
 
 thread_local const Xbyak::CodeGenerator* t_running_walker = nullptr;
@@ -1331,6 +1331,7 @@ void WalkerCompiler::Compile(std::span<const Value> values) {
 		if (Thunk(index)) EmitNode(index);
 	}
 	m_plan.srt_scratch.assign(m_plan.srt_captures / 8u + m_captures, 0u);
+	m_plan.srt_scratch_words = static_cast<uint32_t>(m_plan.srt_scratch.size());
 	m_plan.srt_user_data = m_user_data;
 	c.readyRE();
 	EXIT_IF(Xbyak::GetError() != 0);
@@ -1348,13 +1349,14 @@ bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<ui
 	if (plan.srt_code == nullptr || runtime.user_data.size() < plan.srt_user_data) return false;
 	flat.assign(plan.srt_reads.size(), 0u);
 	using Walker = const uint64_t* KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*, uint64_t*, uint64_t);
+	auto& srt = plan.scratch().srt;
 	t_running_walker = plan.srt_code.get();
 	const auto* end = plan.srt_code->getCode<Walker>()(runtime.user_data.data(), flat.data(),
-	                                                     plan.srt_scratch.data(), runtime.shader_base);
+	                                                     srt.data(), runtime.shader_base);
 	t_running_walker = nullptr;
 	if (end == nullptr) return false;
 	if (reads != nullptr) {
-		for (auto* read = plan.srt_scratch.data() + plan.srt_captures / 8u; read != end; ++read)
+		for (auto* read = srt.data() + plan.srt_captures / 8u; read != end; ++read)
 			reads->emplace_back(*read, sizeof(uint32_t));
 	}
 	return true;
@@ -1397,6 +1399,27 @@ bool ValidateRuntimeValue(const ResourcePlan& program, Value value, RuntimeValue
 
 bool ValidateWaveUniformValue(const ResourcePlan& program, Value value) {
 	return RuntimeValidator(program, RuntimeValueType::Any, true).Run(value);
+}
+
+namespace {
+thread_local bool     t_walker_worker = false;
+thread_local uint32_t t_worker_faults = 0;
+} // namespace
+
+void SetSrtWalkerWorker(bool on) {
+	t_walker_worker = on;
+	t_worker_faults = 0;
+}
+
+uint32_t SrtWalkerWorkerFaults() {
+	return t_worker_faults;
+}
+
+uint32_t SrtWalkerWorkerFaultLength(uint64_t rip) {
+	if (!t_walker_worker) return 0;
+	const auto length = SrtWalkerLoadLength(rip);
+	if (length != 0) ++t_worker_faults;
+	return length;
 }
 
 uint32_t SrtWalkerLoadLength(uint64_t rip) {
