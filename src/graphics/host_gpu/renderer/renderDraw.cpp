@@ -31,6 +31,7 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/shader.h"
+#include "graphics/shader/shaderCompiler.h"
 #include "kernel/eventQueue.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
@@ -839,6 +840,8 @@ static bool ResolvePrimitiveRestart(const CommandBuffer& buffer,
 	}
 	return false;
 }
+
+static void CompareWithJob(const DrawRenderState& state, const CpPipe::GfpJob& job); // S479 shadow, below
 
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
                                             uint32_t            render_target_slice_offset,
