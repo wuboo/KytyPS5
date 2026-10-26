@@ -108,7 +108,8 @@ public:
 		// upload and change nothing, so it only runs the upload callback.
 		auto& memo = UploadMemoSlot(vaddr, size, is_written);
 		if (memo.tracker == m_id && memo.vaddr == vaddr && memo.size == size &&
-		    memo.written == is_written && memo.generations == RegionGenerations(vaddr, size)) {
+		    memo.written == is_written && memo.generations == RegionGenerations(vaddr, size) &&
+		    !RegionsHaveHotPages(vaddr, size)) { // S487: a hot page (KYTY_WF_*_UNPROTECT) changes without a fault: every upload must re-hash it
 			upload_func();
 			s_upload_owner = previous_upload_owner;
 			return;
@@ -182,6 +183,17 @@ private:
 			sum += manager->Generation();
 		}
 		return sum;
+	}
+
+	// True when one of the regions of the range keeps pages unprotected (HotPages): their writes raise no fault and no generation change.
+	[[nodiscard]] bool RegionsHaveHotPages(uint64_t vaddr, uint64_t size) const noexcept {
+		for (auto index = vaddr / TRACKER_REGION_SIZE; index <= (vaddr + size - 1) / TRACKER_REGION_SIZE; index++) {
+			const auto* manager = m_regions[index].load(std::memory_order_acquire);
+			if (manager != nullptr && manager->HotCountRelaxed() != 0) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	void CheckNotInUploadCallback() const noexcept {
