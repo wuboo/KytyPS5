@@ -6,6 +6,7 @@
 #include "common/common.h"
 #include "common/file.h"
 #include "common/uniqueFunction.h"
+#include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
