@@ -509,7 +509,11 @@ const ShaderModule* PipelineCache::GetProgramOffThread(const ShaderParams& param
                                                        ShaderRecompiler::IR::ResourceSnapshot& resources, uint32_t& fail) {
 	static_assert(!std::is_same_v<InputInfo, ShaderComputeInputInfo>);
 	static thread_local ProgramKey key;
-	key.stage           = std::is_same_v<InputInfo, ShaderVertexInputInfo> ? input_info.logical_stage : ShaderType::Pixel;
+	if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
+		key.stage = input_info.logical_stage;
+	} else {
+		key.stage = ShaderType::Pixel;
+	}
 	key.hash            = params.hash;
 	key.user_data_count = params.user_data_count;
 	BuildStageStaticKey(input_info, key.static_state);
