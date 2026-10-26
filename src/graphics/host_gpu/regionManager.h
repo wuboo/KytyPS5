@@ -499,8 +499,11 @@ private:
 
 	void SetHotCount(HotState& hs, uint32_t count) {
 		hs.count = count;
-		m_hot_count.store(count, std::memory_order_relaxed);
+		PublishHot(hs);
 	}
+
+	// Pages that change without a fault or generation bump: hot pages, and shadow candidates (hashed on every upload). Read lock-free by the upload memo.
+	void PublishHot(const HotState& hs) { m_hot_count.store(hs.count + hs.cand_n, std::memory_order_relaxed); }
 
 	// The second write fault of `page` in guest flip `epoch` (S443): keep the page unprotected until the flip ends (On) / remember it as a candidate (shadow).
 	void NoteFlipFault(HotState& hs, size_t page, uint32_t epoch, HotPages::Mode mode) {
@@ -535,6 +538,7 @@ private:
 			hs.cand_hash_valid.Unset(page);
 			hs.sticky_epoch[page] = epoch;
 			hs.cand_n++;
+			PublishHot(hs);
 			FlipUnprotect::GetStats().cand.fetch_add(1, std::memory_order_relaxed);
 		}
 	}
@@ -544,6 +548,7 @@ private:
 			hs.cand.Unset(page);
 			hs.cand_hash_valid.Unset(page);
 			hs.cand_n--;
+			PublishHot(hs);
 		}
 	}
 
