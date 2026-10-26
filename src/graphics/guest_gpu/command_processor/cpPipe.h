@@ -290,6 +290,23 @@ bool WriteCpMember(T& member, V value) {
 	return true;
 }
 
+// S490: the 4 KiB pages [address, address + size) touches, appended to `pages` (the pages a worker's walk read, which JoinJob checks for GPU-written bytes).
+// False when the range is empty-handed of an answer: it spans more than `max_pages` pages or wraps the address space (the job is then left to the CP).
+// Mutant KYTY_CPPIPE_MUTANT_PAGES_FIRST_ONLY: only the first page of a range is named.
+inline bool AppendPages(std::vector<uint64_t>& pages, uint64_t address, uint64_t size, size_t max_pages) {
+	if (size == 0) return true;
+	if (UINT64_MAX - address < size) return false;
+	const uint64_t first = address & ~uint64_t {4095};
+#ifdef KYTY_CPPIPE_MUTANT_PAGES_FIRST_ONLY
+	const uint64_t last = first;
+#else
+	const uint64_t last = (address + size - 1) & ~uint64_t {4095};
+#endif
+	if ((last - first) / 4096u >= max_pages) return false;
+	for (uint64_t page = first; page <= last; page += 4096u) pages.push_back(page);
+	return true;
+}
+
 // Signals: what an EOP/RELEASE_MEM packet writes to guest memory (the part WAIT_REG_MEM can be answered from). Mirrors WriteAtEndOfPipe in graphicsRun.cpp; when in
 // doubt the value is `known = false`, which makes a wait on the range drain the FIFO first (never a wrong answer, only a shorter window).
 struct SignalWrite {

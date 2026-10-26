@@ -183,7 +183,26 @@ void WorkerGateTests() {
 
 } // namespace
 
+void AppendPagesTests() {
+	using namespace Libs::Graphics::CpPipe;
+	std::vector<uint64_t> pages;
+	Check(AppendPages(pages, 0x1ff0, 0x20, 16) && pages == std::vector<uint64_t>({0x1000, 0x2000}), "a range across a page boundary names both pages");
+	pages.clear();
+	Check(AppendPages(pages, 0x3000, 0x1000, 16) && pages == std::vector<uint64_t>({0x3000}), "a whole page names itself only");
+	pages.clear();
+	Check(AppendPages(pages, 0x4001, 1, 16) && pages == std::vector<uint64_t>({0x4000}), "a byte names its page");
+	pages.clear();
+	Check(AppendPages(pages, 0x5000, 0, 16) && pages.empty(), "an empty range names nothing");
+	pages.clear();
+	Check(AppendPages(pages, 0x10000, 0x3001, 16) && pages == std::vector<uint64_t>({0x10000, 0x11000, 0x12000, 0x13000}), "three pages and a byte are four pages");
+	pages.clear();
+	Check(!AppendPages(pages, 0x10000, 0x20000, 16), "more pages than the cap: left to the CP");
+	pages.clear();
+	Check(!AppendPages(pages, UINT64_MAX - 3, 16, 16), "a range that wraps the address space: left to the CP");
+}
+
 int main() {
+	AppendPagesTests();
 	ClassifyTests();
 	WaitTests();
 	PendingWritesTests();

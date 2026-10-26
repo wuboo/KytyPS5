@@ -3,11 +3,13 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "SrtWalkerTestMemory.h"
 
+#include <atomic>
 #include <bit>
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <memory>
+#include <thread>
 
 namespace {
 
@@ -202,6 +204,55 @@ void TestWalkerLoadsBypassSpecializationReader() {
   Check(snapshot.flattened_srt.size() == 1 &&
             snapshot.flattened_srt[0] == dword,
         "walker did not load the mapped SRT DWORD");
+}
+
+// S490 (KYTY_CP_PIPE): a pipeline worker walks the plan the CP walks. A thread marked SetScratchPerThread keeps its walk results in a scratch of its own, so the CP's
+// results survive the worker's walk of other memory. Mutant KYTY_CPPIPE_MUTANT_SCRATCH_SHARED: the mark is ignored.
+void TestWorkerScratchIsPrivate() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  uint32_t cell = 0x11111111u;
+  auto plan = Extract(SrtProgram(reinterpret_cast<uint64_t>(&cell)));
+  std::vector<uint32_t> flat;
+  DescriptorValue value;
+  const SrtRuntime runtime{};
+  Check(WalkSrt(plan, runtime, flat, nullptr) && WalkedDescriptor(plan, 0, value) &&
+            value.dwords[0] == 0x11111111u,
+        "CP walk did not read its DWORD");
+  const auto cp_scratch = plan.srt_scratch;
+  bool worker_ok = false;
+  std::thread([&] {
+    SetScratchPerThread(true);
+    cell = 0x22222222u;
+    std::vector<uint32_t> worker_flat;
+    DescriptorValue worker_value;
+    worker_ok = WalkSrt(plan, runtime, worker_flat, nullptr) &&
+                WalkedDescriptor(plan, 0, worker_value) && worker_value.dwords[0] == 0x22222222u;
+    SetScratchPerThread(false);
+  }).join();
+  Check(worker_ok, "the worker's walk did not see its own result");
+  Check(plan.srt_scratch == cp_scratch, "a worker walk changed the CP's scratch");
+  Check(WalkedDescriptor(plan, 0, value) && value.dwords[0] == 0x11111111u,
+        "the CP's walk result changed after a worker walked the plan");
+}
+
+// A faulting load of a worker's walker is completed as zero and counted (the emulator's handler does not drain a tracked page for it); the CP's walk still reads the
+// memory. Mutant KYTY_CPPIPE_MUTANT_WORKER_FAULT_IGNORED: the handler does not recognise the worker.
+void TestWorkerWalkerFaultIsZeroAndCounted() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  const uint32_t dword = 0x5a5a5a5au;
+  auto           plan  = Extract(SrtProgram(reinterpret_cast<uint64_t>(&dword)));
+  std::vector<uint32_t> flat;
+  FakeGuestMemory guest; // the handler as the emulator's: worker first
+  const SrtRuntime runtime{};
+  Check(WalkSrt(plan, runtime, flat, nullptr) && flat.size() == 1u && flat[0] == dword, "plain walk reads the DWORD");
+  SetSrtWalkerWorker(true);
+  Check(SrtWalkerWorkerFaults() == 0, "count starts at zero");
+  // A walk of a worker over unmapped memory (the page a tracker protects): zero, one fault.
+  auto unmapped_plan = Extract(SrtProgram(0x1000u));
+  Check(WalkSrt(unmapped_plan, runtime, flat, nullptr) && flat.size() == 1u && flat[0] == 0u, "the worker's faulting load completes as zero");
+  Check(SrtWalkerWorkerFaults() == 1u, "the worker's faulting load is counted");
+  SetSrtWalkerWorker(false);
+  Check(SrtWalkerWorkerFaultLength(0) == 0, "a thread that is not a worker is not asked");
 }
 
 void TestNativeNestedSrtRefresh() {
@@ -1453,6 +1504,8 @@ int main() {
   TestSignedStorageSpecialization();
   for (const bool mixed : {false, true}) TestIndirectImageSamplerClasses(mixed);
   TestShaderCacheRecords();
+  TestWorkerScratchIsPrivate();
+  TestWorkerWalkerFaultIsZeroAndCounted();
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }

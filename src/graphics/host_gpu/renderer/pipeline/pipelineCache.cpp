@@ -521,8 +521,12 @@ const ShaderModule* PipelineCache::GetProgramOffThread(const ShaderParams& param
 	{
 		const std::shared_lock lock(m_program_mutex);
 		const auto             entry = m_program_cache.find(key);
-		if (entry == m_program_cache.end() || entry->second.call_source || entry->second.skip_dispatch) {
+		if (entry == m_program_cache.end()) {
 			fail = 1;
+			return nullptr;
+		}
+		if (entry->second.call_source || entry->second.skip_dispatch) {
+			fail = 8;
 			return nullptr;
 		}
 		program = &entry->second; // nodes of the table stay where they are
@@ -537,8 +541,16 @@ const ShaderModule* PipelineCache::GetProgramOffThread(const ShaderParams& param
 	    .capture_reads              = true,
 	};
 	ShaderRecompiler::IR::ResourceSpecialization specialization;
-	if (!ShaderRecompiler::IR::MaterializeResources(program->resource_plan, runtime, resources, specialization) || heap.asked ||
-	    ShaderRecompiler::IR::SrtWalkerWorkerFaults() != 0) {
+	const bool materialized = ShaderRecompiler::IR::MaterializeResources(program->resource_plan, runtime, resources, specialization);
+	if (ShaderRecompiler::IR::SrtWalkerWorkerFaults() != 0) {
+		fail = 7;
+		return nullptr;
+	}
+	if (heap.asked) {
+		fail = 6;
+		return nullptr;
+	}
+	if (!materialized) {
 		fail = 2;
 		return nullptr;
 	}
@@ -553,7 +565,7 @@ const ShaderModule* PipelineCache::GetProgramOffThread(const ShaderParams& param
 		layout.AdvancePushData(push_data_cursor);
 		return &candidate;
 	}
-	fail = 1; // no module for this specialization yet
+	fail = 9; // no module for this specialization yet
 	return nullptr;
 }
 

@@ -115,6 +115,9 @@ uint64_t ResourcePlan::NextScratchKey() {
 }
 
 ResourcePlan::ScratchRef ResourcePlan::scratch() const {
+#if defined(KYTY_CPPIPE_MUTANT_SCRATCH_SHARED)
+	return {srt_scratch, material_keys, selector_keys}; // mutant: the per-thread mark is ignored
+#endif
 	if (!t_scratch_per_thread) return {srt_scratch, material_keys, selector_keys};
 	struct Own {
 		std::vector<uint64_t>     srt;

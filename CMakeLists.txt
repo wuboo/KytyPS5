@@ -798,7 +798,7 @@ target_compile_definitions(eager_submit_mutant_lowwater_any_backlog_tests PRIVAT
 # caught, WILL_FAIL): signals run at parse, the virtual wait ignores the mask, an unknown opcode does not drain, a worker may write the CP, a retire forgets all.
 add_executable(cp_pipe_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPipeTests.cpp")
 target_include_directories(cp_pipe_tests PRIVATE ${inc_headers})
-foreach(mutant IN ITEMS SIGNAL_AT_PARSE VIRTUAL_WAIT_IGNORES_MASK DRAIN_SKIPS_UNKNOWN WORKER_WRITES_CP RETIRE_ALL OVERLAP_IGNORED GATE_IGNORED)
+foreach(mutant IN ITEMS SIGNAL_AT_PARSE VIRTUAL_WAIT_IGNORES_MASK DRAIN_SKIPS_UNKNOWN WORKER_WRITES_CP RETIRE_ALL OVERLAP_IGNORED GATE_IGNORED PAGES_FIRST_ONLY)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(cp_pipe_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPipeTests.cpp")
 	target_include_directories(cp_pipe_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
@@ -961,6 +961,22 @@ foreach(mutant IN ITEMS ADDR_ONLY NO_FAILED PAGE_ANY IGNORES_PLAN IGNORES_INDIRE
 	target_link_libraries(srt_memo_mutant_${mutant_lower}_tests fmt::fmt xbyak::xbyak)
 	target_include_directories(srt_memo_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(srt_memo_mutant_${mutant_lower}_tests PRIVATE KYTY_SRTMEMO_MUTANT_${mutant}=1)
+endforeach()
+
+# S490 (KYTY_CP_PIPE): a pipeline worker walks the plans the CP walks. Mutants (each must be caught, WILL_FAIL): the per-thread scratch is ignored; a worker's
+# faulting walker load is not recognised.
+foreach(mutant IN ITEMS SCRATCH_SHARED WORKER_FAULT_IGNORED)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(cp_pipe_walk_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/ResourceMaterializationTests.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
+	)
+	target_link_libraries(cp_pipe_walk_mutant_${mutant_lower}_tests fmt::fmt xbyak::xbyak)
+	target_include_directories(cp_pipe_walk_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_pipe_walk_mutant_${mutant_lower}_tests PRIVATE KYTY_CPPIPE_MUTANT_${mutant}=1)
 endforeach()
 
 # S451 (KYTY_PROGS_MEMO): the memo of the reachability loop. srt_cf_memo_tests: the key and the ways (header only); resource_materialization tests: the walker
@@ -1849,7 +1865,7 @@ if(BUILD_TESTING)
 		set_tests_properties(backing_write_log_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
 	add_test(NAME cp_pipe COMMAND $<TARGET_FILE:cp_pipe_tests>)
-	foreach(mutant IN ITEMS signal_at_parse virtual_wait_ignores_mask drain_skips_unknown worker_writes_cp retire_all overlap_ignored gate_ignored)
+	foreach(mutant IN ITEMS signal_at_parse virtual_wait_ignores_mask drain_skips_unknown worker_writes_cp retire_all overlap_ignored gate_ignored pages_first_only)
 		add_test(NAME cp_pipe_mutant_${mutant} COMMAND $<TARGET_FILE:cp_pipe_mutant_${mutant}_tests>)
 		set_tests_properties(cp_pipe_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
@@ -1867,6 +1883,10 @@ if(BUILD_TESTING)
 	add_test(NAME pad_script_parser COMMAND $<TARGET_FILE:pad_script_parser_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
+	foreach(mutant IN ITEMS scratch_shared worker_fault_ignored)
+		add_test(NAME cp_pipe_walk_mutant_${mutant} COMMAND $<TARGET_FILE:cp_pipe_walk_mutant_${mutant}_tests>)
+		set_tests_properties(cp_pipe_walk_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME srt_cf_memo COMMAND $<TARGET_FILE:srt_cf_memo_tests>)
 	foreach(mutant IN ITEMS no_failed ignores_base addr_only ignores_userdata node_value_ignored)
 		add_test(NAME srt_cf_memo_mutant_${mutant} COMMAND $<TARGET_FILE:srt_cf_memo_mutant_${mutant}_tests>)

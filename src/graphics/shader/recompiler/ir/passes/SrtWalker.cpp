@@ -1416,6 +1416,9 @@ uint32_t SrtWalkerWorkerFaults() {
 }
 
 uint32_t SrtWalkerWorkerFaultLength(uint64_t rip) {
+#if defined(KYTY_CPPIPE_MUTANT_WORKER_FAULT_IGNORED)
+	return 0; // mutant: a worker's faulting load is not recognised
+#endif
 	if (!t_walker_worker) return 0;
 	const auto length = SrtWalkerLoadLength(rip);
 	if (length != 0) ++t_worker_faults;

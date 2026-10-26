@@ -1374,30 +1374,38 @@ void CpPipe::RunGfpJob(CpPipe::GfpJob& job) {
 	job.write_seq = Libs::LibKernel::Memory::BackingWriteSeq(); // before the first read
 	ScoutTableLog::Active() = &job.tables;
 	Libs::LibKernel::Memory::SetWorkerReadLog(&job.pages);
-	bool answered = DrawHasValidVertexShader(*job.sh) && job.cache->GetGraphicsProgramsOffThread(*job.ctx, *job.ucfg, *job.sh, job.out);
+	bool answered = DrawHasValidVertexShader(*job.sh);
+	if (!answered) job.out.fail = 4;
+	answered = answered && job.cache->GetGraphicsProgramsOffThread(*job.ctx, *job.ucfg, *job.sh, job.out);
 	Libs::LibKernel::Memory::SetWorkerReadLog(nullptr);
 	ScoutTableLog::Active() = nullptr;
 	// A guest load of the walker that faulted (a tracked page) was completed as zero: the walk is not the CP's.
-	answered = answered && !job.tables.unsafe && ShaderRecompiler::IR::SrtWalkerWorkerFaults() == 0;
+	if (answered && job.tables.unsafe) {
+		answered     = false;
+		job.out.fail = 5;
+	}
+	if (answered && ShaderRecompiler::IR::SrtWalkerWorkerFaults() != 0) {
+		answered     = false;
+		job.out.fail = 7;
+	}
 	ShaderRecompiler::IR::SetSrtWalkerWorker(false);
 	if (answered) {
 		// The pages the compiled walker and the specialization reads touched (the backing reads logged theirs already).
 		constexpr size_t kMaxPages = 4096;
 		const auto       add_reads = [&](const ShaderRecompiler::IR::ResourceSnapshot& res) {
-            for (const auto& [address, size]: res.specialization_reads) {
-                if (size == 0) continue;
-                if (size > kMaxPages * 4096u) {
-                    answered = false;
-                    return;
-                }
-                for (uint64_t page = address & ~uint64_t {4095}; page <= ((address + size - 1) & ~uint64_t {4095}); page += 4096) job.pages.push_back(page);
-            }
+			for (const auto& [address, size]: res.specialization_reads) {
+				if (!CpPipe::AppendPages(job.pages, address, size, kMaxPages)) answered = false;
+			}
 		};
 		add_reads(job.out.vs_res);
 		if (job.out.ps_active) add_reads(job.out.ps_res);
 		std::sort(job.pages.begin(), job.pages.end());
 		job.pages.erase(std::unique(job.pages.begin(), job.pages.end()), job.pages.end());
 		if (job.pages.size() > kMaxPages) answered = false;
+	}
+	if (!answered) {
+		const uint32_t code = job.out.fail == 0 ? 10u : (job.out.fail > 11u ? 11u : job.out.fail);
+		FrameTiming::AddAlways(static_cast<FrameTiming::Counter>(static_cast<uint32_t>(FrameTiming::Counter::PipeFail1N) + code - 1u));
 	}
 	job.answered  = answered;
 	job.worker_ns = FrameTiming::SteadyNowNs() - t0;

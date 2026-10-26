@@ -200,7 +200,7 @@ public:
 		uint32_t                               mrt_mask  = 0;
 		ShaderRecompiler::IR::ResourceSnapshot vs_res; // vertex_info[0].stage.resources / pixel_info.stage.resources point here when the call answered
 		ShaderRecompiler::IR::ResourceSnapshot ps_res;
-		uint32_t                               fail = 0; // 0 answered; 1 no program / module for it yet, 2 resources unusable here, 3 shape the CP handles, 5 vertex table unsafe
+		uint32_t                               fail = 0; // 0 answered, else the code of FrameTiming::Counter::PipeFail1N..11N
 	};
 	// GetGraphicsPrograms for a thread other than the CP: it never compiles, adds an entry or writes a cached program; a draw whose programs are not all in the cache
 	// (or whose resources would need the CP) is left to the CP (false, out.fail). The thread has to be marked (ResourcePlan SetScratchPerThread, SetSrtWalkerWorker),

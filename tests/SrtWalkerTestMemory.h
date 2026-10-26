@@ -57,6 +57,13 @@ private:
 #if defined(__linux__)
   static void Handle(int, siginfo_t *, void *context) {
     auto &registers = static_cast<ucontext_t *>(context)->uc_mcontext.gregs;
+    // As the emulator's handler: a pipeline worker's walker completes a faulting load as zero at once.
+    if (const auto worker =
+            Libs::Graphics::ShaderRecompiler::IR::SrtWalkerWorkerFaultLength(registers[REG_RIP])) {
+      registers[REG_RAX] = 0;
+      registers[REG_RIP] += worker;
+      return;
+    }
     const auto length =
         Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(registers[REG_RIP]);
     if (length == 0) std::abort();
@@ -67,6 +74,15 @@ private:
 #elif defined(_WIN32)
   static LONG CALLBACK Handle(EXCEPTION_POINTERS *info) {
     auto &context = *info->ContextRecord;
+    if (info->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION) {
+      // As the emulator's handler: a pipeline worker's walker completes a faulting load as zero at once.
+      if (const auto worker =
+              Libs::Graphics::ShaderRecompiler::IR::SrtWalkerWorkerFaultLength(context.Rip)) {
+        context.Rax = 0;
+        context.Rip += worker;
+        return EXCEPTION_CONTINUE_EXECUTION;
+      }
+    }
     const auto length = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(context.Rip);
     if (info->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION || length == 0)
       return EXCEPTION_CONTINUE_SEARCH;
@@ -87,6 +103,7 @@ inline bool EvaluateSrtValue(Libs::Graphics::ShaderRecompiler::IR::ResourcePlan 
   const auto output = inst != nullptr ? inst->WalkOutput() : UINT32_MAX;
   auto code = std::move(plan.srt_code);
   auto scratch = std::move(plan.srt_scratch);
+  const auto scratch_words = plan.srt_scratch_words;
   const auto user_data = plan.srt_user_data;
   const auto captures = plan.srt_captures;
   CompileSrtWalker(plan, {&value, 1});
@@ -94,6 +111,7 @@ inline bool EvaluateSrtValue(Libs::Graphics::ShaderRecompiler::IR::ResourcePlan 
   const bool known = WalkSrt(plan, runtime, flat, nullptr) && WalkedValue(plan, value, result);
   plan.srt_code = std::move(code);
   plan.srt_scratch = std::move(scratch);
+  plan.srt_scratch_words = scratch_words;
   plan.srt_user_data = user_data;
   plan.srt_captures = captures;
   if (inst != nullptr) inst->SetWalkOutput(output);

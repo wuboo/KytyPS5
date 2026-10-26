@@ -423,6 +423,10 @@ enum class Counter : uint32_t {
 	// executing an item; jobs done / bailed (the worker could not answer) / computed by the recorder instead; shadow compares (n, not equal); results dropped because a page
 	// the worker read became GPU-dirty; draws that used a worker result.
 	PipeEnqN, PipeDrawN, PipeDispatchN, PipeOrderedN, PipeDrainClsN, PipeDrainWaitN, PipeDrainEndN, PipeFullN, PipeWaitVirtN, PipeLenMismatchN, PipeSnapshotNs, PipeStallNs, PipeJobN, PipeJobBailN, PipeFallbackN, PipeWorkerNs, PipeShadowN, PipeShadowNeN, PipeJoinDirtyN, PipeUsedN, PipeExecNs, PipeQueueNs, PipeWalkWaitNs, PipeWalkNs, PipeJobPsNs, PipeJobVsNs, PipeMemoHitN, PipeMemoMissN, PipeMemoHitNs, PipeMemoMissNs, PipeJoinPubN,
+	// S490: why a worker did not answer (PipelineCache::OffThreadPrograms::fail, one counter per code): 1 no program table entry, 2 resources not materialized, 3 shape the CP
+	// handles (tess, object id, mesh, packed unorm), 4 invalid vertex shader, 5 vertex table unsafe, 6 image heap asked, 7 walker load faulted, 8 call source / skipped,
+	// 9 no module for the specialization yet, 10 read ranges over the page cap, 11 other.
+	PipeFail1N, PipeFail2N, PipeFail3N, PipeFail4N, PipeFail5N, PipeFail6N, PipeFail7N, PipeFail8N, PipeFail9N, PipeFail10N, PipeFail11N,
 	Count,
 };
 
