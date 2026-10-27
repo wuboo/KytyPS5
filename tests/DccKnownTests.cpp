@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/cache/dccFillPublish.h"
 #include "graphics/host_gpu/renderer/cache/gpuWriteLedger.h"
+#include "graphics/host_gpu/renderer/computeMetaFill.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -181,6 +182,22 @@ void TestMaterializeAfterPublish() {
 	Check(CodeFromFill(0, &code) && code == 0, "zero is a code");
 }
 
+// S491: a write-only metadata clear that is also a uniform buffer fill must still record the fill.
+// Skipping it (the 05d25ef2 short-circuit) leaves the range with no valued ledger entry, so the
+// later read is no_fill and downloads. The mutant restores that short-circuit.
+void TestMetaClearKeepsFill() {
+	Check(RunUniformFillBesideMetaClear(true), "a matching metadata clear still runs the buffer fill");
+	Check(RunUniformFillBesideMetaClear(false), "a dispatch that is not a metadata clear still runs the fill");
+	GpuWriteLedger ledger;
+	if (RunUniformFillBesideMetaClear(true)) {
+		ledger.RecordFill(kBase, 0x1000, 0x2a2a2a2a);
+	}
+	const auto query = ledger.QueryFill(kBase, 0x1000);
+	Check(query.kind == FillKind::Known && query.value == 0x2a2a2a2a,
+	      "the bytes stay one known fill");
+	Check(Explain(query, false) != Why::NoFill, "the read does not fall back to no_fill");
+}
+
 void TestMode() {
 	Check(ParseMode(nullptr) == Mode::On, "on by default (variable unset)");
 	Check(ParseMode("0") == Mode::Off && ParseMode("") == Mode::Off, "0 turns it off");
@@ -201,6 +218,7 @@ int main() {
 	TestPublishPattern();
 	TestPartialPieceTakesOldPath();
 	TestMaterializeAfterPublish();
+	TestMetaClearKeepsFill();
 	TestMode();
 	return 0;
 }

@@ -13,6 +13,7 @@
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/gpuLabelsVk.h"
+#include "graphics/host_gpu/renderer/computeMetaFill.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -345,12 +346,18 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	const auto& program   = input_info.stage.module->info;
 	const auto& resources = *input_info.stage.resources;
-	if (resources.specialization_reads.empty() &&
-	    (TryConsumeComputeMetaClear(input_info, buffer) ||
-	     TryConsumeComputeFill(input_info, buffer, thread_group_x, thread_group_y,
-	                           thread_group_z, mode))) {
-		ResetBindings();
-		return;
+	if (resources.specialization_reads.empty()) {
+		// The clear must not skip the fill: the fill is what the ledger records (S491).
+		const bool meta = TryConsumeComputeMetaClear(input_info, buffer);
+		bool       fill = false;
+		if (RunUniformFillBesideMetaClear(meta)) {
+			fill = TryConsumeComputeFill(input_info, buffer, thread_group_x, thread_group_y,
+			                             thread_group_z, mode);
+		}
+		if (meta || fill) {
+			ResetBindings();
+			return;
+		}
 	}
 
 	if (use_thread_dimensions) {
