@@ -477,11 +477,102 @@ CommandBuffer& CommandScheduler::BeginCommand() {
 	return m_command;
 }
 
+namespace {
+// S492 DIAG (KYTY_DIAG_SYNC=1): submitted-but-not-finished lead at each Submit in the landing and desert windows.
+// The [sync] log keeps only the first 300 lines plus flips 6300-6310, so it cannot histogram 4400-5300.
+// Lead = (CurrentTick - 1) - KnownGpuTick after Refresh, same quantity as EagerQuery::backlog. One line per flip.
+int LeadPercentile(const uint32_t* hist, uint32_t n, int pct) {
+	if (n == 0) return 0;
+	uint32_t need = (n * static_cast<uint32_t>(pct) + 99u) / 100u;
+	if (need < 1) need = 1;
+	if (need > n) need = n;
+	uint32_t acc = 0;
+	for (int i = 0; i < 65; i++) {
+		acc += hist[i];
+		if (acc >= need) return i;
+	}
+	return 64;
+}
+
+struct LeadHist {
+	uint32_t n = 0;
+	uint32_t max = 0;
+	uint32_t hist[65] = {};
+	void Add(uint32_t lead) {
+		const uint32_t b = lead > 64 ? 64u : lead;
+		hist[b]++;
+		n++;
+		if (lead > max) max = lead;
+	}
+	void Log(const char* tag, uint64_t flip) const {
+		if (n == 0) return;
+		LOGF("[lead] %s flip=%" PRIu64 " n=%u p50=%d p95=%d max=%u\n", tag, flip, n, LeadPercentile(hist, n, 50),
+		     LeadPercentile(hist, n, 95), max);
+	}
+};
+
+void Absorb(LeadHist& dst, const LeadHist& src) {
+	for (int i = 0; i < 65; i++) dst.hist[i] += src.hist[i];
+	dst.n += src.n;
+	if (src.max > dst.max) dst.max = src.max;
+}
+
+void NoteSubmitLeadDiag(MasterSemaphore& master) {
+	static const bool on = FrameTiming::DiagFlagOn(std::getenv("KYTY_DIAG_SYNC"));
+	if (!on) return;
+	const uint64_t flip = FrameTiming::GuestFlips();
+	static uint64_t flip_open = ~0ull;
+	static LeadHist flip_h;
+	static LeadHist land;
+	static LeadHist desert;
+	static bool land_logged = false;
+	static bool desert_logged = false;
+	if (flip != flip_open) {
+		if (flip_h.n != 0) {
+			const bool was_land = flip_open >= 4400 && flip_open <= 5300;
+			const bool was_des  = flip_open >= 6300 && flip_open <= 6990;
+			if (was_land) {
+				flip_h.Log("land", flip_open);
+				Absorb(land, flip_h);
+			}
+			if (was_des) {
+				flip_h.Log("desert", flip_open);
+				Absorb(desert, flip_h);
+			}
+			flip_h = {};
+		}
+		if (!land_logged && flip > 5300 && land.n != 0) {
+			land.Log("land-sum", 4400);
+			land_logged = true;
+		}
+		if (!desert_logged && flip > 6990 && desert.n != 0) {
+			desert.Log("desert-sum", 6300);
+			desert_logged = true;
+		}
+		flip_open = flip;
+	}
+	const bool in_land = flip >= 4400 && flip <= 5300;
+	const bool in_des  = flip >= 6300 && flip <= 6990;
+	if (!in_land && !in_des) return;
+	// Refresh does not take the submit or queue mutex. The GPU thread can still retire work.
+	master.Refresh();
+	const uint64_t cur   = master.CurrentTick();
+	const uint64_t known = master.KnownGpuTick();
+	uint32_t       lead  = 0;
+	if (cur > known + 1) {
+		const uint64_t v = cur - 1 - known;
+		lead             = v > 100000u ? 100000u : static_cast<uint32_t>(v);
+	}
+	flip_h.Add(lead);
+}
+} // namespace
+
 uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	CpPhases::Scope phase(CpPhases::Phase::SubmitCpu); // encode runs on the submit thread, which is not bound
 	EXIT_IF(m_command.IsInvalid());
 	EXIT_IF(submit.num_wait_semaphores > SubmitInfo::MaxSemaphores ||
 	        submit.num_signal_semaphores >= SubmitInfo::MaxSemaphores);
+	NoteSubmitLeadDiag(m_master); // S492: no-op unless KYTY_DIAG_SYNC=1; runs before any submit lock
 
 	if (m_pre_submit && !m_in_pre_submit) {
 		m_in_pre_submit = true;
