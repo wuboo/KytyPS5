@@ -3,7 +3,6 @@
 #include "common/assert.h"
 #include "common/common.h"
 #include "common/debugCounters.h"
-#include "common/diagOut.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/logging/log.h"
@@ -1616,21 +1615,6 @@ bool RenderExecutor::DrawIndex(uint64_t submit_id, CommandBuffer& buffer,
 		                                                     first_stage.mesh.primitives_per_group, first_stage.mesh.fast_launch});
 		if (!mesh_gpu_ok) {
 			args.indirect_gpu->host_reason = IndirectGpu::Reason::Mesh;
-			const auto flip = FrameTiming::GuestFlips();
-			static std::atomic<uint32_t> logged {0};
-			if (logged.fetch_add(1, std::memory_order_relaxed) < 8 || (flip >= 6300 && flip <= 6302)) {
-				char line[192];
-				std::snprintf(line, sizeof(line),
-				              "[ig-decline] flip=%" PRIu64 " stage=%u mesh_can=%d prim=%u\n", flip,
-				              static_cast<unsigned>(first_stage.stage.module->info.stage),
-				              static_cast<int>(first_stage.stage.module->info.stage == ShaderType::Mesh &&
-				                               MeshIndirect::MeshCanGoGpu({first_stage.mesh.InputPrimitiveSize(),
-				                                                           first_stage.mesh.InputPrimitiveStep(),
-				                                                           first_stage.mesh.primitives_per_group,
-				                                                           first_stage.mesh.fast_launch})),
-				              static_cast<unsigned>(ucfg.GetPrimType()));
-				Common::DiagOut::Write(line);
-			}
 			return decline();
 		}
 		mesh_gpu_request = args.mesh_indirect;
