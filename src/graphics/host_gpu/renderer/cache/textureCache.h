@@ -112,6 +112,9 @@ public:
 	void UnmapMemory(uint64_t address, uint64_t size);
 	void ProcessDownloadImages();
 	void RunGarbageCollector();
+	[[nodiscard]] uint64_t RegistrationGeneration() const { return m_registration_generation; }
+	// S493: whether an image remembered for KYTY_BIND_DRAW_REPEAT is still safe to replay without ResolveTexture.
+	[[nodiscard]] bool ImageBindingStillFresh(ImageId id, uint64_t address, uint64_t size, uint64_t generation) const;
 
 private:
 	struct MetaDataInfo {
@@ -196,9 +199,6 @@ private:
 	void               TouchRegistrations(uint64_t address, uint64_t size);
 	[[nodiscard]] bool RegistrationsSince(uint64_t address, uint64_t size,
 	                                      uint64_t generation) const;
-	[[nodiscard]] uint64_t RegistrationGeneration() const { return m_registration_generation; }
-	// S493: whether an image remembered for KYTY_BIND_DRAW_REPEAT is still safe to replay without ResolveTexture.
-	[[nodiscard]] bool ImageBindingStillFresh(ImageId id, uint64_t address, uint64_t size, uint64_t generation) const;
 
 	// Caller holds m_lock; it also serializes the per-image query epoch.
 	[[nodiscard]] ImageIds      FindImagesInRegion(uint64_t address, uint64_t size,
