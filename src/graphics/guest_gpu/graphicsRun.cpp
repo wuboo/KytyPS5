@@ -1041,6 +1041,17 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	}
 
 	const uint32_t max_indices = m_index_buffer_size != 0 ? m_index_buffer_size : UINT32_MAX;
+	{
+		const auto flip = FrameTiming::GuestFlips();
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 8 || (flip >= 6300 && flip <= 6302)) {
+			char line[160];
+			std::snprintf(line, sizeof(line),
+			              "[ig-cpu] flip=%" PRIu64 " indexed=%d count=%u stride=%u idx_size=%u\n", flip,
+			              indexed ? 1 : 0, draw_count, stride_in_bytes, m_index_buffer_size);
+			Common::DiagOut::Write(line);
+		}
+	}
 	for (uint32_t i = 0; i < draw_count; i++) {
 		const auto addr = args_addr + static_cast<uint64_t>(i) * stride_in_bytes;
 		if (!indexed) {
