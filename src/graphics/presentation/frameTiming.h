@@ -423,6 +423,8 @@ enum class Counter : uint32_t {
 	// executing an item; jobs done / bailed (the worker could not answer) / computed by the recorder instead; shadow compares (n, not equal); results dropped because a page
 	// the worker read became GPU-dirty; draws that used a worker result.
 	PipeEnqN, PipeDrawN, PipeDispatchN, PipeOrderedN, PipeDrainClsN, PipeDrainWaitN, PipeDrainEndN, PipeFullN, PipeWaitVirtN, PipeLenMismatchN, PipeSnapshotNs, PipeStallNs, PipeJobN, PipeJobBailN, PipeFallbackN, PipeWorkerNs, PipeShadowN, PipeShadowNeN, PipeJoinDirtyN, PipeUsedN, PipeExecNs, PipeQueueNs, PipeWalkWaitNs, PipeWalkNs, PipeJobPsNs, PipeJobVsNs, PipeMemoHitN, PipeMemoMissN, PipeMemoHitNs, PipeMemoMissNs, PipeJoinPubN,
+	// S493 (KYTY_BIND_DRAW_REPEAT): PrepareBindings replay of the last result for the same program inputs and registration generation.
+	BindDrawRepeatHitN, BindDrawRepeatMissN, BindDrawRepeatStaleN, BindDrawRepeatNeN, BindDrawRepeatPredictedN, BindDrawRepeatStoreN,
 	Count,
 };
 

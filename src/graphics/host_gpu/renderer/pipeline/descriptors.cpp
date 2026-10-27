@@ -27,6 +27,8 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/minLodView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
+#include "graphics/host_gpu/renderer/pipeline/bindDrawRepeat.h"
+#include "graphics/host_gpu/renderer/pipeline/texResolveMemo.h"
 #include "graphics/host_gpu/renderer/pipeline/descAssert.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
@@ -1079,12 +1081,104 @@ void RenderExecutor::ResetBindings() {
 	m_bound_images.clear();
 }
 
+namespace {
+
+uint64_t BindDrawRepeatInputsHash(const ShaderRecompiler::IR::CompiledShaderInfo& program,
+                                  const ShaderRecompiler::IR::ResourceSnapshot& snapshot) {
+	BindDrawRepeat::InputsHash h;
+	h.Program(program.shader_hash, static_cast<uint32_t>(program.stage), static_cast<uint32_t>(program.info.images.size()),
+	          static_cast<uint32_t>(program.info.samplers.size()), program.bindings.ShaderDataDwords());
+	for (uint32_t i = 0; i < program.info.images.size(); i++) {
+		const auto& r = program.info.images[i];
+		const auto& d = snapshot.images[i];
+		h.ImageResource(static_cast<uint64_t>(r.resource_class) | static_cast<uint64_t>(r.numeric_class) << 8 | static_cast<uint64_t>(r.dimension) << 16 |
+		                    static_cast<uint64_t>(r.mip_mode) << 24 | static_cast<uint64_t>(r.mip_count) << 32,
+		                static_cast<uint64_t>(r.read) | static_cast<uint64_t>(r.written) << 1 | static_cast<uint64_t>(r.atomic) << 2 |
+		                    static_cast<uint64_t>(r.atomic64) << 3 | static_cast<uint64_t>(r.depth_compare) << 4 | static_cast<uint64_t>(r.cube) << 5 |
+		                    static_cast<uint64_t>(r.r128) << 6 | static_cast<uint64_t>(r.queries_size) << 7 | static_cast<uint64_t>(d.dword_count) << 16);
+		h.Image(d.dwords.data(), static_cast<uint32_t>(d.dwords.size()));
+	}
+	for (const auto& s: program.info.samplers) {
+		const auto& d = snapshot.samplers[s.snapshot_index];
+		h.Sampler(d.dwords.data(), static_cast<uint32_t>(d.dwords.size()),
+		          static_cast<uint32_t>(s.depth_compare) | static_cast<uint32_t>(s.force_point_filtering) << 1 | static_cast<uint32_t>(s.integer_border) << 2);
+	}
+	uint32_t index = 0;
+	for (const auto reg: program.info.user_data_registers) h.UserData(index++, snapshot.user_data[reg - program.user_data_base]);
+	return h.Digest();
+}
+
+struct DrawRepeatEntry {
+	std::vector<TextureBinding>                      images;
+	std::vector<BindDrawRepeat::ImageStamp<ImageId>> stamps;
+	std::vector<vk::Sampler>                         samplers;
+	std::vector<uint32_t>                            shader_data;
+};
+
+BindDrawRepeat::Table<DrawRepeatEntry>& DrawRepeatTable() {
+	static thread_local BindDrawRepeat::Table<DrawRepeatEntry> table;
+	return table;
+}
+
+bool DrawRepeatStillValid(TextureCache& texture_cache, const DrawRepeatEntry& entry) {
+	struct Hooks {
+		TextureCache& cache;
+		TexMemo::ImageState State(ImageId id) {
+			const auto* image = cache.m_slot_images.try_get(id);
+			if (image == nullptr) return {};
+			return {true, image->registered, image->binding.needs_rebind};
+		}
+		bool RegistrationsSince(uint64_t address, uint64_t size, uint64_t generation) {
+			return cache.RegistrationsSince(address, size, generation);
+		}
+	};
+	Hooks hooks {texture_cache};
+	for (const auto& stamp: entry.stamps) {
+		if (!BindDrawRepeat::ImageStillValid(stamp, hooks)) return false;
+	}
+	return true;
+}
+
+} // namespace
+
 void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
                                      PreparedBindings& prepared) {
 	KYTY_PROFILER_FUNCTION();
 	EXIT_IF(!runtime);
 	const auto& program  = *runtime.program;
 	const auto& snapshot = *runtime.resources;
+	auto&       texture_cache = m_context.GetTextureCache();
+	const auto  repeat_mode   = BindDrawRepeat::EnvMode();
+	static const bool repeat_logged = [] {
+		LOGF("[bind-draw-repeat] mode=%s\n", BindDrawRepeat::ModeName(BindDrawRepeat::EnvMode()));
+		return true;
+	}();
+	(void)repeat_logged;
+	const uint64_t reg_gen = texture_cache.RegistrationGeneration();
+	uint64_t       inputs  = 0;
+	if (repeat_mode != BindDrawRepeat::Mode::Off) inputs = BindDrawRepeatInputsHash(program, snapshot);
+	DrawRepeatEntry* repeat_entry =
+	    repeat_mode != BindDrawRepeat::Mode::Off ? DrawRepeatTable().Find(&program, inputs, reg_gen) : nullptr;
+	const bool repeat_predicted =
+	    repeat_entry != nullptr && repeat_mode == BindDrawRepeat::Mode::Shadow && DrawRepeatStillValid(texture_cache, *repeat_entry);
+	if (repeat_entry != nullptr && repeat_mode == BindDrawRepeat::Mode::On && DrawRepeatStillValid(texture_cache, *repeat_entry)) {
+		prepared.runtime     = &runtime;
+		prepared.gds         = {nullptr, 0, VK_WHOLE_SIZE};
+		prepared.flattened_srt = {};
+		prepared.shader_data_buffer = {};
+		prepared.shared_memory = {};
+		prepared.images      = repeat_entry->images;
+		prepared.samplers    = repeat_entry->samplers;
+		prepared.shader_data = repeat_entry->shader_data;
+		if (program.bindings.descriptor_counts[static_cast<size_t>(BindingKind::Gds)] != 0) {
+			prepared.gds.buffer = m_context.GetBufferCache().GetGdsBuffer()->Handle();
+		}
+		FrameTiming::Add(FrameTiming::Counter::BindDrawRepeatHitN);
+		return;
+	}
+	if (repeat_mode != BindDrawRepeat::Mode::Off) {
+		FrameTiming::Add(repeat_entry == nullptr ? FrameTiming::Counter::BindDrawRepeatMissN : FrameTiming::Counter::BindDrawRepeatStaleN);
+	}
 	prepared.runtime = &runtime;
 	prepared.gds = {nullptr, 0, VK_WHOLE_SIZE};
 	prepared.flattened_srt = {};
@@ -1125,6 +1219,33 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	if (program.bindings.descriptor_counts[static_cast<size_t>(BindingKind::Gds)] != 0) {
 		prepared.gds.buffer = m_context.GetBufferCache().GetGdsBuffer()->Handle();
 	}
+	if (repeat_mode == BindDrawRepeat::Mode::Off) return;
+	if (repeat_predicted) {
+		bool same = repeat_entry->images.size() == prepared.images.size() && repeat_entry->samplers == prepared.samplers &&
+		            repeat_entry->shader_data == prepared.shader_data;
+		for (uint32_t i = 0; same && i < repeat_entry->images.size(); i++) {
+			const auto& a = repeat_entry->images[i];
+			const auto& b = prepared.images[i];
+			same = a.image_id == b.image_id && a.image_view == b.image_view && a.layout == b.layout && a.desc.type == b.desc.type &&
+			       a.desc.view_info == b.desc.view_info && a.desc.info.data.address == b.desc.info.data.address &&
+			       a.desc.info.data.size == b.desc.info.data.size;
+		}
+		FrameTiming::Add(FrameTiming::Counter::BindDrawRepeatPredictedN);
+		if (!same) FrameTiming::Add(FrameTiming::Counter::BindDrawRepeatNeN);
+	}
+	DrawRepeatEntry stored;
+	stored.images      = prepared.images;
+	stored.samplers    = prepared.samplers;
+	stored.shader_data = prepared.shader_data;
+	stored.stamps.resize(prepared.images.size());
+	const uint64_t store_gen = texture_cache.RegistrationGeneration();
+	for (uint32_t i = 0; i < prepared.images.size(); i++) {
+		const auto& binding = prepared.images[i];
+		stored.stamps[i]    = {binding.image_id, binding.desc.info.data.address, binding.desc.info.data.size, store_gen,
+		                       binding.desc.type == TextureCache::BindingType::Storage};
+	}
+	DrawRepeatTable().Store(&program, inputs, reg_gen, std::move(stored));
+	FrameTiming::Add(FrameTiming::Counter::BindDrawRepeatStoreN);
 }
 
 void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {

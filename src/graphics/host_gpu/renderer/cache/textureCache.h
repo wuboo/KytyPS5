@@ -196,6 +196,7 @@ private:
 	void               TouchRegistrations(uint64_t address, uint64_t size);
 	[[nodiscard]] bool RegistrationsSince(uint64_t address, uint64_t size,
 	                                      uint64_t generation) const;
+	[[nodiscard]] uint64_t RegistrationGeneration() const { return m_registration_generation; }
 
 	// Caller holds m_lock; it also serializes the per-image query epoch.
 	[[nodiscard]] ImageIds      FindImagesInRegion(uint64_t address, uint64_t size,
