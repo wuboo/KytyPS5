@@ -8,6 +8,7 @@
 #include "graphics/presentation/cpPhaseScope.h"
 
 #include "common/assert.h"
+#include "common/diagOut.h"
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/presentation/frameTiming.h"
@@ -269,7 +270,7 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 				if (RfOp::CurrentStackBounds(&stack_lo, &stack_hi)) {
 					rf_event.bt_text = RfOp::FormatBacktrace(frames, RfOp::WalkFrames(ctx, stack_lo, stack_hi, frames));
 				}
-				LOGF("%s\n", RfOp::FormatLine(rf_event).c_str());
+				Common::DiagOut::Write((RfOp::FormatLine(rf_event) + "\n").c_str());
 			}
 		}
 		if (!downloaded && access != PageFaultAccess::Execute) {
