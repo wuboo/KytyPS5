@@ -293,6 +293,14 @@ bool TextureCache::RegistrationsSince(uint64_t address, uint64_t size, uint64_t 
 	return changed;
 }
 
+bool TextureCache::ImageBindingStillFresh(ImageId id, uint64_t address, uint64_t size, uint64_t generation) const {
+	const auto* image = m_slot_images.try_get(id);
+	if (image == nullptr || !image->registered || image->binding.needs_rebind) {
+		return false;
+	}
+	return !RegistrationsSince(address, size, generation);
+}
+
 void TextureCache::DeleteImage(ImageId id) {
 	auto* image = m_slot_images.try_get(id);
 	if (image == nullptr || !image->registered) {

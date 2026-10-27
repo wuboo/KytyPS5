@@ -28,7 +28,6 @@
 #include "graphics/host_gpu/renderer/image/minLodView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/pipeline/bindDrawRepeat.h"
-#include "graphics/host_gpu/renderer/pipeline/texResolveMemo.h"
 #include "graphics/host_gpu/renderer/pipeline/descAssert.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptorHeap.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
@@ -1121,20 +1120,8 @@ BindDrawRepeat::Table<DrawRepeatEntry>& DrawRepeatTable() {
 }
 
 bool DrawRepeatStillValid(TextureCache& texture_cache, const DrawRepeatEntry& entry) {
-	struct Hooks {
-		TextureCache& cache;
-		TexMemo::ImageState State(ImageId id) {
-			const auto* image = cache.m_slot_images.try_get(id);
-			if (image == nullptr) return {};
-			return {true, image->registered, image->binding.needs_rebind};
-		}
-		bool RegistrationsSince(uint64_t address, uint64_t size, uint64_t generation) {
-			return cache.RegistrationsSince(address, size, generation);
-		}
-	};
-	Hooks hooks {texture_cache};
 	for (const auto& stamp: entry.stamps) {
-		if (!BindDrawRepeat::ImageStillValid(stamp, hooks)) return false;
+		if (!texture_cache.ImageBindingStillFresh(stamp.image_id, stamp.address, stamp.size, stamp.reg_gen)) return false;
 	}
 	return true;
 }
