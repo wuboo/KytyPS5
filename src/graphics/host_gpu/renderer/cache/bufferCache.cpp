@@ -4,6 +4,7 @@
 #include "common/assert.h"
 #include "graphics/host_gpu/gpuLabelsVk.h"
 #include "common/debugCounters.h"
+#include "common/diagOut.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "graphics/guest_gpu/graphicsRun.h"
@@ -674,8 +675,12 @@ void BufferCache::LogDccFallback(uint64_t address, uint64_t size, DccFillPublish
 	if (n >= 300 && !(flip >= 6300 && flip <= 6310)) {
 		return;
 	}
-	LOGF("[dcc-fallback] flip=%" PRIu64 " addr=0x%016" PRIx64 " size=0x%" PRIx64 " why=%s\n", flip, address, size,
-	     DccFillPublish::WhyName(why));
+	char line[192];
+	std::snprintf(line, sizeof(line),
+	              "[dcc-fallback] flip=%" PRIu64 " addr=0x%016" PRIx64 " size=0x%" PRIx64 " why=%s site=%s\n", flip,
+	              address, size, DccFillPublish::WhyName(why),
+	              SyncCensus::SiteName(SyncCensus::CurrentSite()));
+	Common::DiagOut::Write(line);
 }
 
 void BufferCache::LogSyncReadback(SyncCensus::Site site, uint64_t vaddr, uint64_t size, uint64_t wait_ns,
