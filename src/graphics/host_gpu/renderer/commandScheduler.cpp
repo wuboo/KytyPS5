@@ -506,8 +506,10 @@ struct LeadHist {
 	}
 	void Log(const char* tag, uint64_t flip) const {
 		if (n == 0) return;
-		LOGF("[lead] %s flip=%" PRIu64 " n=%u p50=%d p95=%d max=%u\n", tag, flip, n, LeadPercentile(hist, n, 50),
-		     LeadPercentile(hist, n, 95), max);
+		// Bench runs with --printf-direction Silent, which drops LOGF. stdout is fully buffered when redirected.
+		std::printf("[lead] %s flip=%" PRIu64 " n=%u p50=%d p95=%d max=%u\n", tag, flip, n, LeadPercentile(hist, n, 50),
+		            LeadPercentile(hist, n, 95), max);
+		std::fflush(stdout);
 	}
 };
 
@@ -520,6 +522,12 @@ void Absorb(LeadHist& dst, const LeadHist& src) {
 void NoteSubmitLeadDiag(MasterSemaphore& master) {
 	static const bool on = FrameTiming::DiagFlagOn(std::getenv("KYTY_DIAG_SYNC"));
 	if (!on) return;
+	static bool announced = false;
+	if (!announced) {
+		announced = true;
+		std::printf("[lead] diag on\n");
+		std::fflush(stdout);
+	}
 	const uint64_t flip = FrameTiming::GuestFlips();
 	static uint64_t flip_open = ~0ull;
 	static LeadHist flip_h;
