@@ -18,6 +18,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/renderer/gfDiag.h"
+#include "graphics/host_gpu/renderer/cache/landSync.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "kernel/fileSystem.h"
@@ -773,7 +774,11 @@ struct GfEmuShadow {
 // True when the fault was served here (mode 1). In shadow mode the emulated bytes are kept in `shadow` and compared after the ordinary path.
 static bool TryGuestReadEmulation(const Common::HostException::ExceptionInfo* info, GfEmuShadow* shadow) {
 	using namespace Loader::GuestReadEmulator;
-	const auto mode = EnvMode();
+	auto       mode     = EnvMode();
+	const bool from_land = mode == Mode::Off && Libs::Graphics::LandSync::EnablesGuest(Libs::Graphics::LandSync::GuestMode());
+	if (from_land) {
+		mode = Libs::Graphics::LandSync::GuestMode() == Libs::Graphics::LandSync::Mode::Shadow ? Mode::Shadow : Mode::On;
+	}
 	if (mode == Mode::Off || Libs::Graphics::GuestGpu::IsGpuThread()) {
 		return false;
 	}
@@ -800,6 +805,9 @@ static bool TryGuestReadEmulation(const Common::HostException::ExceptionInfo* in
 	}
 	Commit(info->native_context, attempt.plan, attempt.bytes);
 	Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuN);
+	if (from_land) {
+		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::LandGuestEmuN);
+	}
 	GfEmuNotePage(attempt.plan.address);
 	return true;
 }

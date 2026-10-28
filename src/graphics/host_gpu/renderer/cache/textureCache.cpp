@@ -13,6 +13,7 @@
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/cache/landSync.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
@@ -1151,6 +1152,36 @@ bool TextureCache::DiagUploadTiles(ImageId id, std::vector<GpuTileInfo>& tiles) 
 	return false; // see GpuTileInfo in textureCache.h
 }
 
+vk::Rect2D TextureCache::BeginColorRendering(Image& image, vk::Format format, uint32_t level, uint32_t layer, uint32_t layers,
+                                             const vk::ClearValue* clear, vk::CommandBuffer command) {
+	ImageViewInfo view {};
+	view.format      = format;
+	view.type        = layers == 1 ? vk::ImageViewType::e2D : vk::ImageViewType::e2DArray;
+	view.base_level  = level;
+	view.base_layer  = layer;
+	view.layer_count = layers;
+	view.usage       = vk::ImageUsageFlagBits::eColorAttachment;
+	image.Transit(vk::ImageLayout::eColorAttachmentOptimal,
+	              vk::AccessFlagBits2::eColorAttachmentRead | vk::AccessFlagBits2::eColorAttachmentWrite, {}, command);
+	vk::RenderingAttachmentInfo attachment {};
+	attachment.imageView   = image.FindView(view);
+	attachment.imageLayout = vk::ImageLayout::eColorAttachmentOptimal;
+	attachment.loadOp      = vk::AttachmentLoadOp::eLoad;
+	attachment.storeOp     = vk::AttachmentStoreOp::eStore;
+	if (clear != nullptr) {
+		attachment.loadOp     = vk::AttachmentLoadOp::eClear;
+		attachment.clearValue = *clear;
+	}
+	vk::RenderingInfo rendering {};
+	rendering.renderArea.extent    = {std::max(image.info.extent.width >> level, 1u),
+	                                  std::max(image.info.extent.height >> level, 1u)};
+	rendering.layerCount           = layers;
+	rendering.colorAttachmentCount = 1;
+	rendering.pColorAttachments    = &attachment;
+	command.beginRendering(&rendering);
+	return rendering.renderArea;
+}
+
 void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
                                        uint32_t metadata_base_layer) {
 	if (desc.info.metadata.kind != ImageMetadataKind::Dcc &&
@@ -1209,6 +1240,65 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		}
 	}
 	const bool known = !known_values.empty();
+	const GuestRange viewed {range.address + slice_size * first, slice_size * count};
+	if (gpu_modified && !known && LandSync::DccGpu() &&
+	    m_buffer_cache.IsRegionGpuModified(viewed.address, viewed.size)) {
+		std::array<vk::ClearAttachment, TileManager::ColorClearSlots> clears {};
+		uint32_t keys = 0;
+		for (uint32_t key = 0; key < clears.size(); key++) {
+			clears[key].aspectMask = vk::ImageAspectFlagBits::eColor;
+			if (DecodeColorClear(desc, static_cast<uint8_t>(key << 5u), clears[key].clearValue.color)) {
+				keys |= 1u << key;
+			}
+		}
+		bool took_gpu = false;
+		if (keys != 0 && !m_buffer_cache.IsColorMetadataChecked(viewed.address, viewed.size, keys)) {
+			std::scoped_lock lock {m_lock};
+			auto&            image = m_slot_images[id];
+			const bool native_current = (image.usage.render_target || image.IsGpuModified()) && !image.IsBufferModified() &&
+			                            !image.IsCpuDirty();
+			if (m_graphics.conditional_rendering_enabled && image.backing.image_type != vk::ImageType::e1D &&
+			    count <= m_graphics.GetPhysicalDeviceProperties().limits.maxFramebufferLayers &&
+			    (image.backing.usage & vk::ImageUsageFlagBits::eColorAttachment) &&
+			    (m_graphics.GetFormatProperties(view.format).optimalTilingFeatures & vk::FormatFeatureFlagBits::eColorAttachment) &&
+			    (desc.info.metadata.compression == VideoOutCompression::Uncompressed || native_current)) {
+				InitializeImage(id);
+				const bool expand = desc.type != BindingType::VideoOut;
+				// Read, not a write: RecordWrite would hide a known fill of these bytes.
+				const auto [buffer, offset] =
+				    m_buffer_cache.ObtainBuffer(viewed.address, viewed.size, LandSync::DccMetadataObtainIsWrite());
+				const auto predicates = m_tiler.CheckColorClear({buffer->Handle(), offset, viewed.size}, count, keys, expand);
+				if (expand) {
+					m_buffer_cache.MarkColorMetadataChecked(viewed.address, viewed.size, keys);
+				}
+				const auto command = m_scheduler.Current().Handle();
+				const auto area    = BeginColorRendering(image, view.format, view.base_level, image_first, count, nullptr, command);
+				vk::ClearRect rect {.rect = area, .layerCount = 1};
+				for (uint32_t slice = 0; slice < count; slice++) {
+					rect.baseArrayLayer = slice;
+					for (uint32_t key = 0; key < clears.size(); key++) {
+						if ((keys & (1u << key)) != 0) {
+							const vk::ConditionalRenderingBeginInfoEXT predicate {
+							    .buffer = predicates, .offset = (slice * clears.size() + key) * sizeof(uint32_t)};
+							command.beginConditionalRenderingEXT(&predicate);
+							command.clearAttachments(1, &clears[key], 1, &rect);
+							command.endConditionalRenderingEXT();
+						}
+					}
+				}
+				command.endRendering();
+				CommitGpuWrite(image);
+				took_gpu = true;
+			}
+		} else if (keys != 0) {
+			took_gpu = true; // already checked: nothing to clear and nothing to wait for
+		}
+		if (took_gpu) {
+			FrameTiming::Add(FrameTiming::Counter::LandDccGpuN);
+			return;
+		}
+		FrameTiming::Add(FrameTiming::Counter::LandDccGpuMissN);
+	}
 	if (gpu_modified && !known) {
 		FrameTiming::Add(FrameTiming::Counter::ReadbackDcc);
 		const SyncCensus::SiteScope site_tag(SyncCensus::Site::Dcc);
@@ -2009,6 +2099,7 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uin
 		return false;
 	}
 	m_texture_cache.DownloadImage(image, buffer, buf_offset, copy_size, levels);
+	ForgetColorMetadataChecks(image.info.data.address, copy_size);
 	return true;
 }
 

@@ -275,6 +275,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			    copies.emplace_back(start - buffer_address, total_size, end - start);
 			    // Keep packed ranges on separate cache lines, as in shadPS4.
 			    total_size += Common::AlignUp(end - start, 64);
+			    ForgetColorMetadataChecks(start, end - start);
 		    });
 		    if (DccFillPublish::EnvMode() != DccFillPublish::Mode::Off) {
 			    m_write_ledger.Forget(address, bytes);
@@ -483,11 +484,11 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		                                          .count());
 		FrameTiming::Add(FrameTiming::Counter::ReadbackWaitNs, ns);
 		FrameTiming::Add(GuestGpu::IsGpuThread() ? FrameTiming::Counter::ReadbackWaitCpNs : FrameTiming::Counter::ReadbackWaitOtherNs, ns); // S441
-		if (census) {
-			FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncDccN, site));
-			FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncDccNs, site), ns);
-			if (site == SyncCensus::Site::Spec) FrameTiming::Add(SpecPurposeCounter(ShaderRecompiler::IR::SpecShadow::CurrentPurpose()));
-		}
+		// S495: the per-site totals are the acceptance metric, so they count on every run, not only under KYTY_DIAG_SYNC.
+		const auto tagged = SyncCensus::CurrentSite();
+		FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncDccN, tagged));
+		FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncDccNs, tagged), ns);
+		if (census && tagged == SyncCensus::Site::Spec) FrameTiming::Add(SpecPurposeCounter(ShaderRecompiler::IR::SpecShadow::CurrentPurpose()));
 		return ns;
 	};
 	SyncCensus::Probe probe;
@@ -1142,6 +1143,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	TouchBuffer(buffer);
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
+		ForgetColorMetadataChecks(vaddr, size);
 		m_gpu_modified_ranges.Add(vaddr, size);
 		if (DccFillPublish::EnvMode() != DccFillPublish::Mode::Off) {
 			// Any other GPU write hides a remembered fill of these bytes.
@@ -1281,6 +1283,29 @@ bool BufferCache::IsRegionRegistered(uint64_t vaddr, uint64_t size) {
 
 bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 	return m_memory_tracker.IsRegionGpuModified(vaddr, size);
+}
+
+void BufferCache::MarkColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys) {
+	for (uint32_t slot = 0; slot < m_checked_color_metadata.size(); slot++) {
+		if ((keys & (1u << slot)) != 0) {
+			m_checked_color_metadata[slot].Add(vaddr, size);
+		}
+	}
+}
+
+bool BufferCache::IsColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys) const {
+	for (uint32_t slot = 0; slot < m_checked_color_metadata.size(); slot++) {
+		if ((keys & (1u << slot)) != 0 && !m_checked_color_metadata[slot].Contains(vaddr, size)) {
+			return false;
+		}
+	}
+	return true;
+}
+
+void BufferCache::ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size) {
+	for (auto& checked: m_checked_color_metadata) {
+		checked.Subtract(vaddr, size);
+	}
 }
 
 MemoryTracker::PageGeneration BufferCache::QueryPageGeneration(uint64_t vaddr, uint64_t size) {

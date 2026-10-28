@@ -265,6 +265,7 @@ set(gpu_tiler_shader_names
 	promote_d16
 	demote_d16
 	color_transform
+	color_clear
 )
 file(GLOB gpu_tiler_shader_includes CONFIGURE_DEPENDS "${gpu_tiler_shader_dir}/gpu_tiler_*.inc")
 foreach(shader_name IN LISTS gpu_tiler_shader_names)
@@ -683,6 +684,16 @@ foreach(mutant IN ITEMS always_avoid never_protected note_when_avoiding no_scope
 	target_link_libraries(srt_prot_avoid_mutant_${mutant}_tests fmt::fmt xbyak::xbyak common)
 	target_include_directories(srt_prot_avoid_mutant_${mutant}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(srt_prot_avoid_mutant_${mutant}_tests PRIVATE KYTY_SRTPA_MUTANT_${mutant_upper}=1)
+endforeach()
+
+# S495: KYTY_LAND_SYNC. Mutants revert one part of the package (the test must fail).
+add_executable(land_sync_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/LandSyncTests.cpp")
+target_include_directories(land_sync_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS ignore_master guest_off obtain_writes)
+	string(TOUPPER ${mutant} mutant_upper)
+	add_executable(land_sync_mutant_${mutant}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/LandSyncTests.cpp")
+	target_include_directories(land_sync_mutant_${mutant}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(land_sync_mutant_${mutant}_tests PRIVATE KYTY_LANDSYNC_MUTANT_${mutant_upper}=1)
 endforeach()
 
 add_executable(guest_driver_memory_tests EXCLUDE_FROM_ALL
@@ -1912,6 +1923,11 @@ if(BUILD_TESTING)
 	foreach(mutant IN ITEMS always_avoid never_protected note_when_avoiding no_scope_check share_programs no_cap)
 		add_test(NAME srt_prot_avoid_mutant_${mutant} COMMAND $<TARGET_FILE:srt_prot_avoid_mutant_${mutant}_tests>)
 		set_tests_properties(srt_prot_avoid_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME land_sync COMMAND $<TARGET_FILE:land_sync_tests>)
+	foreach(mutant IN ITEMS ignore_master guest_off obtain_writes)
+		add_test(NAME land_sync_mutant_${mutant} COMMAND $<TARGET_FILE:land_sync_mutant_${mutant}_tests>)
+		set_tests_properties(land_sync_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
 	foreach(mutant IN ITEMS skip_memo_check no_fail_pos order_swap ignore_clean shadow_real_memo all_blocks)
 		add_test(NAME srt_slot_batch_mutant_${mutant} COMMAND $<TARGET_FILE:srt_slot_batch_mutant_${mutant}_tests>)

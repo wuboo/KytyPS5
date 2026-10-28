@@ -426,6 +426,8 @@ enum class Counter : uint32_t {
 	// S486 (KYTY_SRT_PROT_AVOID): walks that skipped the compiled loads / ordinary loads served by the strict reader / ones it could not answer (raw load) / shadow reads that differ /
 	// (program, page) pairs learned from faults
 	SrtPaWalkN, SrtPaReadN, SrtPaFallbackN, SrtPaShadowNeN, SrtPaFaultNoteN,
+	// S495 (KYTY_LAND_SYNC): DCC clears selected on the GPU / that attempt missed the capability check / guest reads served from the backing
+	LandDccGpuN, LandDccGpuMissN, LandGuestEmuN,
 	Count,
 };
 

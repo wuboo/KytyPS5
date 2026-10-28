@@ -12,12 +12,14 @@
 #include "graphics/host_gpu/renderer/cache/eagerPages.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
 #include "graphics/host_gpu/renderer/cache/gpuDirtyRanges.h"
+#include "graphics/host_gpu/renderer/cache/landSync.h"
 #include "graphics/host_gpu/renderer/cache/gpuWriteLedger.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
 
+#include <array>
 #include <map>
 #include <mutex>
 #include <span>
@@ -108,6 +110,9 @@ public:
 	[[nodiscard]] bool CanReadBacking(uint64_t vaddr, uint64_t size, int* reason = nullptr);
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
+	// Color metadata the GPU found free of the clear keys in `keys` (bits of code >> 5) stays so until a GPU write or download.
+	void               MarkColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys);
+	[[nodiscard]] bool IsColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys) const;
 	// S406 (KYTY_PV_RANGE_GEN): see MemoryTracker::QueryPageGeneration; `clean` also needs no GPU-dirty byte range.
 	[[nodiscard]] MemoryTracker::PageGeneration QueryPageGeneration(uint64_t vaddr, uint64_t size);
 	void               ProcessFaultBuffer();
@@ -157,6 +162,7 @@ private:
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	void               ForgetColorMetadataChecks(uint64_t vaddr, uint64_t size);
 
 	// Eager readback (KYTY_OPT_OFF=eager_readback disables). Guest threads that poll a small
 	// GPU-written value read-fault on every GPU write, and each fault used to queue behind the
@@ -199,6 +205,8 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	GpuDirtyRanges                                    m_gpu_modified_ranges;
+	// One per LandSync::kColorClearSlots key slot.
+	std::array<RangeSet, LandSync::kColorClearSlots> m_checked_color_metadata;
 	InflightRanges                                    m_inflight_download_ranges;
 	MemoryTracker                                     m_memory_tracker;
 	StreamBuffer                                      m_staging_buffer;

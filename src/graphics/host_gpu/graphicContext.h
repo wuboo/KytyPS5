@@ -42,6 +42,8 @@ struct GraphicContext {
 	bool                               draw_indirect_first_instance          = false;
 	bool                               provoking_vertex_last_enabled         = false;
 	bool                               maintenance8_enabled                  = false;
+	// VK_EXT_conditional_rendering: DCC clear keys are selected on the GPU (KYTY_LAND_SYNC).
+	bool                               conditional_rendering_enabled         = false;
 	// robustness2.nullDescriptor enabled: unbound textures bind VK_NULL_HANDLE; otherwise a 1x1 stand-in image.
 	bool                               null_descriptor_enabled               = false;
 	bool                               supports_block_texel_view              = false;

@@ -12,6 +12,8 @@
 // backing first and then the guest's mapping (whose fault drains as before); the two must be equal (srt_pa_shadow_ne_n stays 0).
 // Mutants (tests): KYTY_SRTPA_MUTANT_ALWAYS_AVOID, _NEVER_PROTECTED, _NOTE_WHEN_AVOIDING, _NO_SCOPE_CHECK, _SHARE_PROGRAMS, _NO_CAP.
 
+#include "graphics/host_gpu/renderer/cache/landSync.h"
+
 #include <array>
 #include <atomic>
 #include <cstddef>
@@ -40,8 +42,17 @@ inline std::atomic<int>& Override() {
 }
 
 inline Mode Current() {
-	static const Mode mode = Parse(std::getenv("KYTY_SRT_PROT_AVOID"));
-	const int         forced = Override().load(std::memory_order_relaxed);
+	// KYTY_SRT_PROT_AVOID still wins when set. Otherwise the landing package (KYTY_LAND_SYNC) turns the same walk on.
+	static const Mode mode = [] {
+		const Mode own = Parse(std::getenv("KYTY_SRT_PROT_AVOID"));
+		if (own != Mode::Off) return own;
+		switch (LandSync::RfMode()) {
+			case LandSync::Mode::On: return Mode::On;
+			case LandSync::Mode::Shadow: return Mode::Shadow;
+			default: return Mode::Off;
+		}
+	}();
+	const int forced = Override().load(std::memory_order_relaxed);
 	return forced >= 0 ? static_cast<Mode>(forced) : mode;
 }
 
