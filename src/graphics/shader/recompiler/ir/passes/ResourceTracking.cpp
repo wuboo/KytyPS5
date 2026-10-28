@@ -1,19 +1,25 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 
 #include "common/assert.h"
+#include "common/diagOut.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/DeadCodeElimination.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include <algorithm>
 #include <bit>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <fmt/format.h>
 #include <map>
+#include <mutex>
 #include <numeric>
 #include <optional>
 #include <span>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #define XXH_INLINE_ALL
 #include <xxhash.h>
@@ -4099,6 +4105,36 @@ private:
 	bool                                       m_shader_writes = false;
 };
 
+// S494 DIAG (KYTY_DIAG_SYNC=1, reverted with the diag): one line per compute shader that is one
+// buffer and at most one image, naming which RecognizePatternFill gate rejected it.
+void NotePatternFill(const Program& program, const ShaderComputeInputInfo* cs, const char* why, size_t words,
+                     uint64_t xxh) {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_DIAG_SYNC");
+		return value != nullptr && value[0] == '1' && value[1] == '\0';
+	}();
+	if (!on || program.stage != ShaderType::Compute) return;
+	if (std::strcmp(why, "ok") != 0 && (program.info.buffers.size() > 2 || program.info.images.size() > 1)) return;
+	static std::mutex                    mu;
+	static std::unordered_set<uint64_t> seen;
+	std::lock_guard lock(mu);
+	if (!seen.insert(program.shader_hash).second) return;
+	if (seen.size() > 800) return;
+	char line[320];
+	std::snprintf(line, sizeof(line),
+	              "[fill-pat] hash=%016llx why=%s words=%zu xxh=%016llx bufs=%zu imgs=%zu ud=%u wave=%u"
+	              " wgr=%d tids=%d gid=%d%d%d thr=%u,%u,%u fm=%02x td=%d\n",
+	              static_cast<unsigned long long>(program.shader_hash), why, words,
+	              static_cast<unsigned long long>(xxh), program.info.buffers.size(), program.info.images.size(),
+	              program.user_data_count, program.wave_size, cs != nullptr ? cs->workgroup_register : -1,
+	              cs != nullptr ? cs->thread_ids_num : -1, cs != nullptr && cs->group_id[0] ? 1 : 0,
+	              cs != nullptr && cs->group_id[1] ? 1 : 0, cs != nullptr && cs->group_id[2] ? 1 : 0,
+	              cs != nullptr ? cs->threads_num[0] : 0u, cs != nullptr ? cs->threads_num[1] : 0u,
+	              cs != nullptr ? cs->threads_num[2] : 0u, cs != nullptr ? cs->float_mode : 0,
+	              cs != nullptr && cs->dispatch_thread_dimensions ? 1 : 0);
+	Common::DiagOut::Write(line);
+}
+
 UniformFillPlan RecognizePatternFill(Program& program, const Decoder::Program& decoded,
                                    ShaderStageInputInfo input) {
 	struct Pattern {
@@ -4117,26 +4153,50 @@ UniformFillPlan RecognizePatternFill(Program& program, const Decoder::Program& d
 		// Dispatch thread dimensions, valid in both wave sizes.
 		Pattern {.code_words = 38, .hash = 0xacbda1a1ccdd4198ull, .wave_size_mask = 32 | 64, .bounded = false},
 	};
+	const auto* cs = program.stage == ShaderType::Compute ? input.compute : nullptr;
 	if (program.stage != ShaderType::Compute || decoded.instructions.empty() ||
 	    program.user_data_base != 0 || program.user_data_count < 10 ||
-	    program.info.buffers.size() != 1 || !program.info.images.empty()) return {};
-	const auto& cs = *input.compute;
-	const bool matching_inputs = cs.workgroup_register == 10 && cs.thread_ids_num == 1 &&
-	    cs.group_id[0] && !cs.group_id[1] && !cs.group_id[2] && cs.threads_num[0] == 64 &&
-	    cs.threads_num[1] == 1 && cs.threads_num[2] == 1 && cs.float_mode == 0xc0;
-	if (!matching_inputs) return {};
+	    program.info.buffers.size() != 1 || !program.info.images.empty()) {
+		const char* why = program.stage != ShaderType::Compute ? "stage"
+		                   : decoded.instructions.empty()      ? "empty"
+		                   : program.user_data_base != 0       ? "udbase"
+		                   : program.user_data_count < 10      ? "udcount"
+		                   : program.info.buffers.size() != 1  ? "bufs"
+		                                                        : "imgs";
+		NotePatternFill(program, cs, why, 0, 0);
+		return {};
+	}
+	const bool matching_inputs = cs->workgroup_register == 10 && cs->thread_ids_num == 1 &&
+	    cs->group_id[0] && !cs->group_id[1] && !cs->group_id[2] && cs->threads_num[0] == 64 &&
+	    cs->threads_num[1] == 1 && cs->threads_num[2] == 1 && cs->float_mode == 0xc0;
+	if (!matching_inputs) {
+		NotePatternFill(program, cs, "inputs", 0, 0);
+		return {};
+	}
 	const auto& last = decoded.instructions.back();
 	const size_t words = last.pc / sizeof(uint32_t) + last.word_count;
+	const uint64_t xxh = words <= decoded.code.size() && words != 0
+	                         ? XXH3_64bits(decoded.code.data(), words * sizeof(uint32_t))
+	                         : 0;
 	if (words > decoded.code.size() ||
-	    std::ranges::find(patterns, words, &Pattern::code_words) == patterns.end()) return {};
+	    std::ranges::find(patterns, words, &Pattern::code_words) == patterns.end()) {
+		NotePatternFill(program, cs, "words", words, xxh);
+		return {};
+	}
 	// Hash executable instructions through S_ENDPGM, excluding binary metadata.
 	// Verified variants implement Destination[id] = value[id % pattern_size].
-	const auto hash = XXH3_64bits(decoded.code.data(), words * sizeof(uint32_t));
+	const auto hash = xxh;
 	const auto pattern = std::ranges::find_if(patterns, [&](const Pattern& candidate) {
 		return candidate.code_words == words && candidate.hash == hash;
 	});
 	if (pattern == patterns.end() || (program.wave_size & pattern->wave_size_mask) == 0 ||
-	    cs.dispatch_thread_dimensions != !pattern->bounded) return {};
+	    cs->dispatch_thread_dimensions != !pattern->bounded) {
+		const char* why = pattern == patterns.end()                          ? "hash"
+		                  : (program.wave_size & pattern->wave_size_mask) == 0 ? "wave"
+		                                                                       : "td";
+		NotePatternFill(program, cs, why, words, xxh);
+		return {};
+	}
 	std::array<Value, 10> userdata;
 	for (auto* block: program.blocks) {
 		for (auto& inst: *block) {
@@ -4146,7 +4206,11 @@ UniformFillPlan RecognizePatternFill(Program& program, const Decoder::Program& d
 		}
 	}
 	for (uint32_t reg = 4; reg < 10; ++reg)
-		if ((reg != 8 || pattern->bounded) && userdata[reg].IsEmpty()) return {};
+		if ((reg != 8 || pattern->bounded) && userdata[reg].IsEmpty()) {
+			NotePatternFill(program, cs, "udreg", words, xxh);
+			return {};
+		}
+	NotePatternFill(program, cs, "ok", words, xxh);
 	UniformFillPlan result;
 	result.fill.kind = UniformFillKind::Buffer;
 	result.fill.words = 1;

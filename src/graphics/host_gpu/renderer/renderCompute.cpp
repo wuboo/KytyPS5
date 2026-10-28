@@ -1,5 +1,6 @@
 #include "common/assert.h"
 #include "common/common.h"
+#include "common/diagOut.h"
 #include "common/debugCounters.h"
 #include "common/emulatorConfig.h"
 #include "common/file.h"
@@ -33,6 +34,7 @@
 #include "libs/errno.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <optional>
 #include <array>
 #include <atomic>
@@ -267,6 +269,80 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 	bindings.shared_memory = {storage.Handle(), 0, size};
 }
 
+// S494 DIAG (KYTY_DIAG_SYNC=1): one line per compute shader at guest flip 6300.
+struct FillDispRow {
+	uint32_t n = 0, rep = 0, meta_n = 0, kind = 0, spec = 0, mode = 0;
+	uint32_t groups[3] {};
+	uint32_t threads[3] {};
+	uint64_t size = 0, addr = 0;
+	int      td = 0;
+};
+
+static void NoteFillDispatch(const ShaderComputeInputInfo& input, uint32_t gx, uint32_t gy, uint32_t gz, uint32_t mode,
+                             bool meta, bool replaced) {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_DIAG_SYNC");
+		return value != nullptr && value[0] == '1' && value[1] == '\0';
+	}();
+	if (!on || !input.stage) return;
+	const auto flip = FrameTiming::GuestFlips();
+	static std::mutex                              mu;
+	static std::unordered_map<uint64_t, FillDispRow> acc;
+	static bool                                    dumped = false;
+	std::lock_guard lock(mu);
+	if (!dumped && flip > 6300 && !acc.empty()) {
+		uint32_t rep_sum = 0, n_sum = 0;
+		for (const auto& [hash, row]: acc) {
+			rep_sum += row.rep;
+			n_sum += row.n;
+			char line[360];
+			std::snprintf(line, sizeof(line),
+			              "[fill-disp] hash=%016llx n=%u rep=%u meta=%u kind=%u spec=%u size=0x%llx addr=0x%llx"
+			              " groups=%u,%u,%u mode=%x threads=%u,%u,%u td=%d\n",
+			              static_cast<unsigned long long>(hash), row.n, row.rep, row.meta_n, row.kind, row.spec,
+			              static_cast<unsigned long long>(row.size), static_cast<unsigned long long>(row.addr), row.groups[0],
+			              row.groups[1], row.groups[2], row.mode, row.threads[0], row.threads[1], row.threads[2], row.td);
+			Common::DiagOut::Write(line);
+		}
+		char summary[96];
+		std::snprintf(summary, sizeof(summary), "[fill-disp] flip=6300 shaders=%zu dispatches=%u replaced=%u\n", acc.size(),
+		              n_sum, rep_sum);
+		Common::DiagOut::Write(summary);
+		dumped = true;
+	}
+	if (flip != 6300) return;
+	const auto& program   = input.stage.module->info;
+	const auto& resources = *input.stage.resources;
+	uint64_t    size = 0, addr = 0;
+	for (uint32_t i = 0; i < program.info.buffers.size() && i < resources.buffers.size(); ++i) {
+		if (!program.info.buffers[i].written) continue;
+		const auto descriptor = DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
+		const auto bytes      = descriptor.GetSize();
+		if (size == 0 || bytes == 0x18 || bytes == 0x20) {
+			size = bytes;
+			addr = descriptor.Base48();
+		}
+	}
+	auto& row = acc[program.shader_hash];
+	row.n++;
+	row.rep += replaced ? 1u : 0u;
+	row.meta_n += meta ? 1u : 0u;
+	row.kind = static_cast<uint32_t>(resources.uniform_fill.kind);
+	row.spec = static_cast<uint32_t>(resources.specialization_reads.size());
+	row.mode = mode;
+	row.groups[0] = gx;
+	row.groups[1] = gy;
+	row.groups[2] = gz;
+	row.threads[0] = input.threads_num[0];
+	row.threads[1] = input.threads_num[1];
+	row.threads[2] = input.threads_num[2];
+	row.td = input.dispatch_thread_dimensions ? 1 : 0;
+	if (row.size != 0x18 && row.size != 0x20) {
+		row.size = size;
+		row.addr = addr;
+	}
+}
+
 void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_x, uint32_t thread_group_y,
                                     uint32_t thread_group_z, uint32_t mode, bool async_compute) {
@@ -346,18 +422,19 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	const auto& program   = input_info.stage.module->info;
 	const auto& resources = *input_info.stage.resources;
+	bool        meta = false;
+	bool        fill = false;
 	if (resources.specialization_reads.empty()) {
 		// The clear must not skip the fill: the fill is what the ledger records (S491).
-		const bool meta = TryConsumeComputeMetaClear(input_info, buffer);
-		bool       fill = false;
+		meta = TryConsumeComputeMetaClear(input_info, buffer);
 		if (RunUniformFillBesideMetaClear(meta)) {
-			fill = TryConsumeComputeFill(input_info, buffer, thread_group_x, thread_group_y,
-			                             thread_group_z, mode);
+			fill = TryConsumeComputeFill(input_info, buffer, thread_group_x, thread_group_y, thread_group_z, mode);
 		}
-		if (meta || fill) {
-			ResetBindings();
-			return;
-		}
+	}
+	NoteFillDispatch(input_info, thread_group_x, thread_group_y, thread_group_z, mode, meta, fill);
+	if (resources.specialization_reads.empty() && (meta || fill)) {
+		ResetBindings();
+		return;
 	}
 
 	if (use_thread_dimensions) {
