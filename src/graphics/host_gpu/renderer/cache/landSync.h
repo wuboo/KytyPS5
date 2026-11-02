@@ -73,6 +73,19 @@ inline bool EnablesGuest(Mode mode) {
 #endif
 }
 
+// GuestReadEmulator::Mode as a number (Off=0, On=1, Shadow=2). KYTY_GF_EMULATE wins when it is
+// already on. Otherwise the landing package turns that same emulator on for this fault.
+inline uint8_t ResolveGuestEmu(uint8_t gf_mode, Mode land) {
+#if defined(KYTY_LANDSYNC_MUTANT_GUEST_GATE)
+	(void)land;
+	return gf_mode;
+#else
+	if (gf_mode != 0) return gf_mode;
+	if (!EnablesGuest(land)) return 0;
+	return land == Mode::Shadow ? 2 : 1;
+#endif
+}
+
 inline bool DccGpu() {
 	const auto mode = DccMode();
 	return mode == Mode::On || mode == Mode::Shadow;

@@ -10,6 +10,7 @@ using Libs::Graphics::LandSync::Effective;
 using Libs::Graphics::LandSync::EnablesGuest;
 using Libs::Graphics::LandSync::Mode;
 using Libs::Graphics::LandSync::Parse;
+using Libs::Graphics::LandSync::ResolveGuestEmu;
 
 // Release builds define NDEBUG, which strips assert(). The mutant must still
 // exit non-zero there, and the exit must be a normal failure (not abort):
@@ -39,6 +40,11 @@ int main() {
 	Check(EnablesGuest(Mode::On), "guest on");
 	Check(EnablesGuest(Mode::Shadow), "guest shadow");
 	Check(!EnablesGuest(Mode::Off), "guest off");
+	Check(ResolveGuestEmu(0, Mode::On) == 1, "land gate turns emulation on");
+	Check(ResolveGuestEmu(0, Mode::Shadow) == 2, "land shadow stays shadow");
+	Check(ResolveGuestEmu(0, Mode::Off) == 0, "land off leaves emulation off");
+	Check(ResolveGuestEmu(2, Mode::Off) == 2, "explicit gf emulate wins");
+	Check(ResolveGuestEmu(1, Mode::On) == 1, "explicit gf on wins");
 	Check(!DccMetadataObtainIsWrite(), "obtain is a read");
 
 	const uint32_t uniform = 0x20202020u;
