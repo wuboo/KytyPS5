@@ -695,10 +695,9 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 // have to use this: the backing read used to consult only KYTY_GF_EMULATE and then label every
 // clean byte as inflight, so the package never served a load.
 static Loader::GuestReadEmulator::Mode GuestFaultMode() {
-	using GE = Loader::GuestReadEmulator;
-	const auto resolved = Libs::Graphics::LandSync::ResolveGuestEmu(static_cast<uint8_t>(GE::EnvMode()),
+	const auto resolved = Libs::Graphics::LandSync::ResolveGuestEmu(static_cast<uint8_t>(Loader::GuestReadEmulator::EnvMode()),
 	                                                                Libs::Graphics::LandSync::GuestMode());
-	return static_cast<GE::Mode>(resolved);
+	return static_cast<Loader::GuestReadEmulator::Mode>(resolved);
 }
 
 static Loader::GuestReadEmulator::BackingResult GfEmuReadBacking(uint64_t address, uint64_t size, void* dst) {
