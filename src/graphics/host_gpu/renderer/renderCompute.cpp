@@ -288,8 +288,24 @@ static void NoteFillDispatch(const ShaderComputeInputInfo& input, uint32_t gx, u
 	const auto flip = FrameTiming::GuestFlips();
 	static std::mutex                              mu;
 	static std::unordered_map<uint64_t, FillDispRow> acc;
+	static std::unordered_map<uint64_t, FillDispRow> small;
 	static bool                                    dumped = false;
+	static bool                                    small_dumped = false;
 	std::lock_guard lock(mu);
+	if (!small_dumped && flip > 6900 && !small.empty()) {
+		for (const auto& [hash, row]: small) {
+			char line[360];
+			std::snprintf(line, sizeof(line),
+			              "[fill-small] hash=%016llx n=%u rep=%u meta=%u kind=%u spec=%u size=0x%llx addr=0x%llx"
+			              " groups=%u,%u,%u mode=%x threads=%u,%u,%u td=%d\n",
+			              static_cast<unsigned long long>(hash), row.n, row.rep, row.meta_n, row.kind, row.spec,
+			              static_cast<unsigned long long>(row.size), static_cast<unsigned long long>(row.addr),
+			              row.groups[0], row.groups[1], row.groups[2], row.mode, row.threads[0], row.threads[1],
+			              row.threads[2], row.td);
+			Common::DiagOut::Write(line);
+		}
+		small_dumped = true;
+	}
 	if (!dumped && flip > 6300 && !acc.empty()) {
 		uint32_t rep_sum = 0, n_sum = 0;
 		for (const auto& [hash, row]: acc) {
@@ -310,7 +326,6 @@ static void NoteFillDispatch(const ShaderComputeInputInfo& input, uint32_t gx, u
 		Common::DiagOut::Write(summary);
 		dumped = true;
 	}
-	if (flip != 6300) return;
 	const auto& program   = input.stage.module->info;
 	const auto& resources = *input.stage.resources;
 	uint64_t    size = 0, addr = 0;
@@ -323,6 +338,25 @@ static void NoteFillDispatch(const ShaderComputeInputInfo& input, uint32_t gx, u
 			addr = descriptor.Base48();
 		}
 	}
+	if (!small_dumped && (size == 0x18 || size == 0x20) && small.size() < 64) {
+		auto& row = small[program.shader_hash];
+		row.n++;
+		row.rep += replaced ? 1u : 0u;
+		row.meta_n += meta ? 1u : 0u;
+		row.kind = static_cast<uint32_t>(resources.uniform_fill.kind);
+		row.spec = static_cast<uint32_t>(resources.specialization_reads.size());
+		row.mode = mode;
+		row.groups[0] = gx;
+		row.groups[1] = gy;
+		row.groups[2] = gz;
+		row.threads[0] = input.threads_num[0];
+		row.threads[1] = input.threads_num[1];
+		row.threads[2] = input.threads_num[2];
+		row.td = input.dispatch_thread_dimensions ? 1 : 0;
+		row.size = size;
+		row.addr = addr;
+	}
+	if (flip != 6300) return;
 	auto& row = acc[program.shader_hash];
 	row.n++;
 	row.rep += replaced ? 1u : 0u;
