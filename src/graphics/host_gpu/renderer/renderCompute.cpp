@@ -288,12 +288,12 @@ static void NoteFillDispatch(const ShaderComputeInputInfo& input, uint32_t gx, u
 	const auto flip = FrameTiming::GuestFlips();
 	static std::mutex                              mu;
 	static std::unordered_map<uint64_t, FillDispRow> acc;
-	static std::unordered_map<uint64_t, FillDispRow> small;
+	static std::unordered_map<uint64_t, FillDispRow> narrow;
 	static bool                                    dumped = false;
-	static bool                                    small_dumped = false;
+	static bool                                    narrow_dumped = false;
 	std::lock_guard lock(mu);
-	if (!small_dumped && flip > 6900 && !small.empty()) {
-		for (const auto& [hash, row]: small) {
+	if (!narrow_dumped && flip > 6900 && !narrow.empty()) {
+		for (const auto& [hash, row]: narrow) {
 			char line[360];
 			std::snprintf(line, sizeof(line),
 			              "[fill-small] hash=%016llx n=%u rep=%u meta=%u kind=%u spec=%u size=0x%llx addr=0x%llx"
@@ -304,7 +304,7 @@ static void NoteFillDispatch(const ShaderComputeInputInfo& input, uint32_t gx, u
 			              row.threads[2], row.td);
 			Common::DiagOut::Write(line);
 		}
-		small_dumped = true;
+		narrow_dumped = true;
 	}
 	if (!dumped && flip > 6300 && !acc.empty()) {
 		uint32_t rep_sum = 0, n_sum = 0;
@@ -338,8 +338,8 @@ static void NoteFillDispatch(const ShaderComputeInputInfo& input, uint32_t gx, u
 			addr = descriptor.Base48();
 		}
 	}
-	if (!small_dumped && (size == 0x18 || size == 0x20) && small.size() < 64) {
-		auto& row = small[program.shader_hash];
+	if (!narrow_dumped && (size == 0x18 || size == 0x20) && narrow.size() < 64) {
+		auto& row = narrow[program.shader_hash];
 		row.n++;
 		row.rep += replaced ? 1u : 0u;
 		row.meta_n += meta ? 1u : 0u;
