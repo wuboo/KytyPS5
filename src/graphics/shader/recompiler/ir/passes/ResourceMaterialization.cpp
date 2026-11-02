@@ -1219,7 +1219,42 @@ static std::optional<std::array<uint64_t, 3>> FillIndex(Value value, uint32_t ax
 	    });
 }
 
+static void NoteMissedFillShape(const Program& program) {
+	static const bool on = [] {
+		const char* value = std::getenv("KYTY_DIAG_SYNC");
+		return value != nullptr && value[0] == '1' && value[1] == '\0';
+	}();
+	if (!on) return;
+	const auto hash = program.shader_hash;
+	if (hash != 0x8b5e4eced20058a4ull && hash != 0xe14b4c0b0d70a885ull && hash != 0x305afd0aa0f66b9aull) return;
+	uint32_t effects = 0, stores = 0, last_op = 0;
+	for (const auto* block: program.blocks) {
+		for (const auto& inst: *block) {
+			if (!inst.MayHaveSideEffects()) continue;
+			effects++;
+			last_op = static_cast<uint32_t>(inst.GetOpcode());
+			if (BufferAccessOf(inst.GetOpcode()) == BufferAccess::Write || inst.GetOpcode() == ValueOpcode::ImageWrite)
+				stores++;
+		}
+	}
+	uint32_t reads = 0, written = 0, scalar = 0;
+	for (const auto& buffer: program.info.buffers) {
+		reads += buffer.read ? 1u : 0u;
+		written += buffer.written ? 1u : 0u;
+		scalar += buffer.scalar ? 1u : 0u;
+	}
+	char line[240];
+	std::snprintf(line, sizeof(line),
+	              "[fill-shape] hash=%016llx blocks=%zu effects=%u stores=%u last=%u dma=%d samp=%zu bufs=%zu imgs=%zu"
+	              " rd=%u wr=%u sc=%u\n",
+	              static_cast<unsigned long long>(hash), program.blocks.size(), effects, stores, last_op,
+	              program.info.uses_dma ? 1 : 0, program.info.samplers.size(), program.info.buffers.size(),
+	              program.info.images.size(), reads, written, scalar);
+	Common::DiagOut::Write(line);
+}
+
 static UniformFillPlan AnalyzeUniformFill(const Program& program) {
+	NoteMissedFillShape(program);
 	if (program.stage != ShaderType::Compute || program.blocks.empty() || program.info.uses_dma ||
 	    !program.info.samplers.empty()) {
 		return {};
