@@ -1,7 +1,6 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 
 #include "common/assert.h"
-#include "common/diagOut.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
@@ -12,11 +11,8 @@
 #include <array>
 #include <bit>
 #include <cstdio>
-#include <cstdlib>
-#include <cstring>
 #include <fmt/format.h>
 #include <functional>
-#include <mutex>
 #include <numeric>
 #include <unordered_set>
 
@@ -1220,51 +1216,7 @@ static std::optional<std::array<uint64_t, 3>> FillIndex(Value value, uint32_t ax
 	    });
 }
 
-static void NoteMissedFillShape(const Program& program) {
-	static const bool on = [] {
-		const char* value = std::getenv("KYTY_DIAG_SYNC");
-		return value != nullptr && value[0] == '1' && value[1] == '\0';
-	}();
-	if (!on) return;
-	const auto hash = program.shader_hash;
-	if (hash != 0x8b5e4eced20058a4ull && hash != 0xe14b4c0b0d70a885ull && hash != 0x305afd0aa0f66b9aull) return;
-	char ops[160];
-	size_t used = 0;
-	ops[0] = '\0';
-	auto append = [&](std::string_view text) {
-		if (used + text.size() + 1 >= sizeof(ops)) return;
-		std::memcpy(ops + used, text.data(), text.size());
-		used += text.size();
-		ops[used++] = ',';
-		ops[used] = '\0';
-	};
-	uint32_t effects = 0, stores = 0;
-	for (const auto* block: program.blocks) {
-		append("B");
-		for (const auto& inst: *block) {
-			if (!inst.MayHaveSideEffects()) continue;
-			effects++;
-			if (BufferAccessOf(inst.GetOpcode()) == BufferAccess::Write || inst.GetOpcode() == ValueOpcode::ImageWrite)
-				stores++;
-			append(ValueOpcodeName(inst.GetOpcode()));
-		}
-	}
-	uint32_t reads = 0, written = 0, scalar = 0;
-	for (const auto& buffer: program.info.buffers) {
-		reads += buffer.read ? 1u : 0u;
-		written += buffer.written ? 1u : 0u;
-		scalar += buffer.scalar ? 1u : 0u;
-	}
-	char line[420];
-	std::snprintf(line, sizeof(line),
-	              "[fill-shape] hash=%016llx blocks=%zu effects=%u stores=%u dma=%d bufs=%zu rd=%u wr=%u sc=%u ops=%s\n",
-	              static_cast<unsigned long long>(hash), program.blocks.size(), effects, stores,
-	              program.info.uses_dma ? 1 : 0, program.info.buffers.size(), reads, written, scalar, ops);
-	Common::DiagOut::Write(line);
-}
-
 static UniformFillPlan AnalyzeUniformFill(const Program& program) {
-	NoteMissedFillShape(program);
 	if (program.stage != ShaderType::Compute || program.blocks.empty() || program.info.uses_dma ||
 	    !program.info.samplers.empty()) {
 		return {};
@@ -1558,24 +1510,6 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 	return plan;
 }
 
-// S494 DIAG (KYTY_DIAG_SYNC=1): a recognized fill whose walker did not produce the snapshot value.
-static void NoteFillWalk(uint64_t hash, uint32_t plan_words, uint32_t kind, bool snap, const char* step) {
-	static const bool on = [] {
-		const char* value = std::getenv("KYTY_DIAG_SYNC");
-		return value != nullptr && value[0] == '1' && value[1] == '\0';
-	}();
-	if (!on || plan_words == 0) return;
-	static std::mutex                    mu;
-	static std::unordered_set<uint64_t> seen;
-	std::lock_guard lock(mu);
-	if (!seen.insert(hash).second) return;
-	char line[160];
-	std::snprintf(line, sizeof(line),
-	              "[fill-walk] hash=%016llx plan_words=%u kind=%u snap=%d step=%s\n",
-	              static_cast<unsigned long long>(hash), plan_words, kind, snap ? 1 : 0, step);
-	Common::DiagOut::Write(line);
-}
-
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
 	for (auto& keys: program.scratch().selector_keys) keys.resolved = false;
@@ -1611,26 +1545,19 @@ bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime
 	auto words = fill.fill.words;
 	std::array<uint32_t, 4> stored {};
 	bool uniform_fill = words != 0;
-	const char* step = uniform_fill ? "ok" : "nowords";
-	if (uniform_fill && !fill.pattern_size.IsEmpty()) {
+	if (uniform_fill && !fill.pattern_size.IsEmpty())
 		uniform_fill = WalkedValue(program, fill.pattern_size, words) && words >= 1 && words <= 4;
-		if (!uniform_fill) step = "pattern";
-	}
 	uint32_t elements = 0;
-	if (uniform_fill && !fill.element_count.IsEmpty()) {
+	if (uniform_fill && !fill.element_count.IsEmpty())
 		uniform_fill = WalkedValue(program, fill.element_count, elements) && elements != 0;
-		if (!uniform_fill) step = "count";
-	}
 	for (uint32_t i = 0; i < words && uniform_fill; ++i) {
 		uniform_fill = WalkedValue(program, fill.values[i], stored[i]) && stored[i] == stored[0];
-		if (!uniform_fill) step = "value";
 	}
 	if (uniform_fill) {
 		snapshot.uniform_fill = fill.fill;
 		snapshot.uniform_fill.value = stored[0];
 		snapshot.uniform_fill.bounded_elements = elements;
 	}
-	NoteFillWalk(program.shader_hash, fill.fill.words, static_cast<uint32_t>(fill.fill.kind), uniform_fill, step);
 	const auto evaluate = [&](uint32_t source, DescriptorValue& value) {
 		if (source >= program.descriptor_sources.size()) {
 			return false;
