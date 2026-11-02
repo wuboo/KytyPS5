@@ -11,6 +11,8 @@
 #include <sys/ucontext.h>
 #elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 #include <ucontext.h>
+#elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+#include <windows.h>
 #endif
 
 namespace Loader::GuestReadEmulator {
@@ -160,6 +162,50 @@ struct Regs {
 	[[nodiscard]] bool  HasYmmh() const { return false; }
 	[[nodiscard]] void* Ymmh(uint8_t) const { return nullptr; }
 #endif
+};
+constexpr bool kHaveRegs = true;
+#elif KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+// The vectored handler passes the faulting thread's CONTEXT (hostException.cpp). Without it every
+// guest load was Why::NoContext and the landing package fell back into the rf_guest drain.
+struct Regs {
+	PCONTEXT native;
+
+	[[nodiscard]] bool Valid() const {
+#if defined(KYTY_GUESTREAD_MUTANT_WIN_NO_REGS)
+		return false;
+#else
+		return native != nullptr;
+#endif
+	}
+	[[nodiscard]] uint64_t Rip() const { return native->Rip; }
+	void                   Advance(uint64_t length) const { native->Rip += length; }
+	[[nodiscard]] uint64_t& Gpr(uint8_t index) const {
+		DWORD64* registers[] = {&native->Rax, &native->Rcx, &native->Rdx, &native->Rbx, &native->Rsp, &native->Rbp,
+		                        &native->Rsi, &native->Rdi, &native->R8,  &native->R9,  &native->R10, &native->R11,
+		                        &native->R12, &native->R13, &native->R14, &native->R15};
+		return *reinterpret_cast<uint64_t*>(registers[index]);
+	}
+	[[nodiscard]] void* Xmm(uint8_t index) const { return index < 16 ? &native->Xmm0 + index : nullptr; }
+	// Upper YMM halves are in the context only when the OS captured XSTATE_AVX. Otherwise a VEX.128
+	// load is Why::VexNoAvx and takes the ordinary drain (zeroing bits 128..255 would be a guess).
+	[[nodiscard]] bool HasYmmh() const {
+		if (!Valid() || (native->ContextFlags & CONTEXT_XSTATE) != CONTEXT_XSTATE) {
+			return false;
+		}
+		DWORD64 features = 0;
+		return GetXStateFeaturesMask(native, &features) && (features & XSTATE_MASK_AVX) != 0;
+	}
+	[[nodiscard]] void* Ymmh(uint8_t index) const {
+		if (!HasYmmh()) {
+			return nullptr;
+		}
+		DWORD size = 0;
+		auto* ymm  = static_cast<M128A*>(LocateXStateFeature(native, XSTATE_AVX, &size));
+		if (ymm == nullptr || size < (index + 1u) * sizeof(M128A)) {
+			return nullptr;
+		}
+		return &ymm[index];
+	}
 };
 constexpr bool kHaveRegs = true;
 #else
