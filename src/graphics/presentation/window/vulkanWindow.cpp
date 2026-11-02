@@ -1,4 +1,5 @@
 #include "common/assert.h"
+#include "common/diagOut.h"
 #include "graphics/host_gpu/renderer/indirectGpu.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
 #include "common/common.h"
@@ -97,10 +98,12 @@ static bool HasLayer(const std::vector<vk::LayerProperties>& layers, const char*
 	                   [name](const auto& layer) { return strcmp(layer.layerName, name) == 0; });
 }
 
-static void GetSurfaceCapabilities(vk::PhysicalDevice physical_device, vk::SurfaceKHR surface,
+static bool GetSurfaceCapabilities(vk::PhysicalDevice physical_device, vk::SurfaceKHR surface,
                                    SurfaceCapabilities& r) {
-	RequireVulkanSuccess(physical_device.getSurfaceCapabilitiesKHR(surface, &r.capabilities),
-	                     "vkGetPhysicalDeviceSurfaceCapabilitiesKHR");
+	const auto caps = physical_device.getSurfaceCapabilitiesKHR(surface, &r.capabilities);
+	if (caps != vk::Result::eSuccess) {
+		return false;
+	}
 
 	r.formats = EnumerateVulkan<vk::SurfaceFormatKHR>( // @suppress("Ambiguous problem")
 	    "vkGetPhysicalDeviceSurfaceFormatsKHR", [&](uint32_t* count, vk::SurfaceFormatKHR* values) {
@@ -114,6 +117,7 @@ static void GetSurfaceCapabilities(vk::PhysicalDevice physical_device, vk::Surfa
 		    return physical_device.getSurfacePresentModesKHR(surface, count, values);
 	    });
 	EXIT_NOT_IMPLEMENTED(r.present_modes.empty());
+	return true;
 }
 
 static bool CheckFormat(vk::PhysicalDevice device, vk::Format format, bool tile,
@@ -382,10 +386,22 @@ static void VulkanFindPhysicalDevice(vk::Instance instance, vk::SurfaceKHR surfa
 
 		SurfaceCapabilities candidate_capabilities;
 		if (!skip_device) {
-			GetSurfaceCapabilities(device, surface, candidate_capabilities);
+			vk::PhysicalDeviceProperties named {};
+			device.getProperties(&named);
+			char line[240];
+			if (!GetSurfaceCapabilities(device, surface, candidate_capabilities)) {
+				std::snprintf(line, sizeof(line), "[vk-surface] device=%s caps=fail\n",
+				              named.deviceName.data());
+				Common::DiagOut::Write(line);
+				reject("surface capabilities failed");
+			} else {
+				std::snprintf(line, sizeof(line), "[vk-surface] device=%s caps=ok\n",
+				              named.deviceName.data());
+				Common::DiagOut::Write(line);
+			}
 
-			if (!(candidate_capabilities.capabilities.supportedUsageFlags &
-			      vk::ImageUsageFlagBits::eTransferDst)) {
+			if (!skip_device && !(candidate_capabilities.capabilities.supportedUsageFlags &
+			                      vk::ImageUsageFlagBits::eTransferDst)) {
 				reject("Surface cannot be destination of blit");
 			}
 		}
@@ -1239,7 +1255,9 @@ void WindowContext::CreateVulkan() {
 
 void WindowContext::RefreshSurfaceCapabilities() {
 	EXIT_IF(graphic_ctx.physical_device == nullptr || surface == nullptr);
-	GetSurfaceCapabilities(graphic_ctx.physical_device, surface, surface_capabilities);
+	if (!GetSurfaceCapabilities(graphic_ctx.physical_device, surface, surface_capabilities)) {
+		EXIT("vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed\n");
+	}
 }
 
 void WindowContext::RecreateSurface() {
