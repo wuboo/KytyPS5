@@ -260,11 +260,13 @@ void CommandProcessor::BufferInit() {
 
 void CommandProcessor::BufferFlush() {
 	FrameTiming::Add(FrameTiming::Counter::CpFlushes);
+	m_renderer.GetBufferCache().PublishReadHot();
 	GetScheduler().RequestFlush();
 }
 
 void CommandProcessor::BufferFlushNow() {
 	FrameTiming::Add(FrameTiming::Counter::CpFlushes);
+	m_renderer.GetBufferCache().PublishReadHot();
 	GetScheduler().Flush();
 }
 
@@ -279,6 +281,7 @@ void CommandProcessor::FlushPending() {
 }
 
 void CommandProcessor::BufferFlushAndWait() {
+	m_renderer.GetBufferCache().PublishReadHot();
 	GetScheduler().FlushAndWait();
 }
 
@@ -1480,6 +1483,7 @@ void CommandProcessor::WriteAtEndOfPipe(uint32_t cache_policy, uint32_t event_wr
 
 	CpPhases::Scope eop_phase(CpPhases::Phase::Eop);
 	auto& command = CurrentBuffer();
+	m_renderer.GetBufferCache().PublishReadHot();
 
 	if (GraphicsRunDebugDumpEnabled()) {
 		const auto bits      = static_cast<unsigned>(sizeof(T) * 8u);
@@ -1790,6 +1794,8 @@ void CommandProcessor::Flip() {
 	if (GraphicsRunDebugDumpEnabled()) {
 		LOGF("CommandProcessor::Flip()\n");
 	}
+	m_renderer.GetBufferCache().DecayReadHot();
+	m_renderer.GetBufferCache().PublishReadHot();
 
 	auto& command = CurrentBuffer();
 	auto request = Sync::PrepareVideoOutFlip(command, m_flip.handle, m_flip.index, m_flip.flip_mode,
@@ -1802,6 +1808,8 @@ void CommandProcessor::Flip() {
 }
 
 void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
+	m_renderer.GetBufferCache().DecayReadHot();
+	m_renderer.GetBufferCache().PublishReadHot();
 	auto& command = CurrentBuffer();
 
 	if (GraphicsRunDebugDumpEnabled()) {
@@ -1824,6 +1832,8 @@ void CommandProcessor::Flip(void* dst_gpu_addr, uint32_t value) {
 
 void CommandProcessor::FlipWithInterrupt(uint32_t eop_event_type, uint32_t cache_action,
                                          void* dst_gpu_addr, uint32_t value) {
+	m_renderer.GetBufferCache().DecayReadHot();
+	m_renderer.GetBufferCache().PublishReadHot();
 	auto& command = CurrentBuffer();
 
 	if (GraphicsRunDebugDumpEnabled()) {
@@ -1863,6 +1873,8 @@ void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
 	};
 	ProcessorScope processor_scope(*this);
 
+	m_renderer.GetBufferCache().DecayReadHot();
+	m_renderer.GetBufferCache().PublishReadHot();
 	m_renderer.GetVideoOut().PrepareFlip(request_id, command);
 	GetScheduler().DeferPriorityOperation(
 	    [this, request_id] { m_renderer.GetVideoOut().CompleteFlip(request_id); });

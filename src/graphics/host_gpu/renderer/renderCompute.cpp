@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
+#include "graphics/host_gpu/renderer/cache/readHot.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -403,6 +404,9 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 		CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 		               std::span {&descriptor_stage, 1u});
 	}
+	if (ReadHot::Enabled() && program.has_address_writes) {
+		m_context.GetBufferCache().SupersedeAllPublishes();
+	}
 	disp_timer.reset();
 	KYTY_CP_SITE(DispRecord);
 	bool has_storage_writes = bindings.shared_memory.buffer != nullptr ||
@@ -555,6 +559,9 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 		KYTY_CP_SITE(DispDesc);
 		CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 		               std::span {&descriptor_stage, 1u});
+	}
+	if (ReadHot::Enabled() && program.has_address_writes) {
+		m_context.GetBufferCache().SupersedeAllPublishes();
 	}
 	disp_timer.reset();
 	KYTY_CP_SITE(DispRecord);

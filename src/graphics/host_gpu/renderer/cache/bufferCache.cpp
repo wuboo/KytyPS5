@@ -279,6 +279,9 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 		    if (DccFillPublish::EnvMode() != DccFillPublish::Mode::Off) {
 			    m_write_ledger.Forget(address, bytes);
 		    }
+		    if (ReadHot::Enabled()) {
+			    m_read_hot.Supersede(address, bytes);
+		    }
 	    });
 	if (copies.empty()) {
 		return false;
@@ -527,6 +530,7 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		(void)WaitEagerReadback(vaddr, size, eager_dcc);
 		if (!is_write) {
 			NoteReadbackFault(vaddr, size, eager_dcc);
+			NoteReadHot(vaddr, size);
 		}
 		if (is_write && !IsRegionRegistered(vaddr, size)) {
 			return;
@@ -1160,6 +1164,9 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 			m_sync_seq.Note(vaddr, size, ++m_sync_seq_next);
 			m_sync_cmds.Note(vaddr, size, FrameTiming::Get(FrameTiming::Counter::Draws) + FrameTiming::Get(FrameTiming::Counter::Dispatches));
 		}
+		if (ReadHot::Enabled()) {
+			m_read_hot.QueueWrite(vaddr, size);
+		}
 	}
 	return {&buffer, buffer.Offset(vaddr)};
 }
@@ -1412,6 +1419,188 @@ void BufferCache::SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size) {
 			(void)SynchronizeBuffer(buffer, start, finish - start, false, false);
 		}
 	}
+}
+
+static_assert(ReadHot::kPage == TRACKER_PAGE_SIZE);
+
+void BufferCache::NoteReadHot(uint64_t vaddr, uint64_t size) {
+	if (!ReadHot::Enabled()) {
+		return;
+	}
+	const auto noted = m_read_hot.Note(vaddr, size);
+	if (noted != 0) {
+		FrameTiming::Add(FrameTiming::Counter::ReadHotNoteN, noted);
+	}
+}
+
+void BufferCache::DecayReadHot() {
+	if (!ReadHot::Enabled()) {
+		return;
+	}
+	m_read_hot.Decay();
+}
+
+void BufferCache::SupersedeAllPublishes() {
+	if (!ReadHot::Enabled()) {
+		return;
+	}
+	m_read_hot.SupersedeAll();
+}
+
+void BufferCache::SupersedePublishes(uint64_t vaddr, uint64_t size) {
+	if (!ReadHot::Enabled()) {
+		return;
+	}
+	m_read_hot.Supersede(vaddr, size);
+}
+
+void BufferCache::ConfirmPublish(const std::shared_ptr<ReadHot::Batch>& batch) {
+	m_read_hot.Forget(batch);
+	for (const auto& entry: *batch) {
+		if (!ReadHot::Clears(entry)) {
+			// The recorded copy is older than a write that landed after it. The bytes are dirty again,
+			// so the next read downloads instead of trusting that copy.
+			m_gpu_modified_ranges.Add(entry.vaddr, entry.size);
+			continue;
+		}
+		const auto last = Common::AlignUp(entry.vaddr + entry.size, TRACKER_PAGE_SIZE);
+		for (auto page = Common::AlignDown(entry.vaddr, TRACKER_PAGE_SIZE); page < last; page += TRACKER_PAGE_SIZE) {
+			if (!m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE) &&
+			    m_memory_tracker.IsRegionGpuModified(page, TRACKER_PAGE_SIZE)) {
+				m_memory_tracker.UnmarkRegionAsGpuModified(page, TRACKER_PAGE_SIZE);
+				if (SyncCensus::Enabled()) {
+					m_sync_ticks.Forget(page, TRACKER_PAGE_SIZE);
+				}
+			}
+		}
+	}
+}
+
+void BufferCache::PublishReadHot() {
+	if (!ReadHot::Enabled() || m_read_hot.PublishEmpty()) {
+		return;
+	}
+	auto& command = m_scheduler.Current();
+	if (command.IsInvalid()) {
+		return;
+	}
+
+	struct Planned {
+		BufferId id;
+		uint64_t vaddr;
+		uint64_t size;
+		uint64_t dst;
+	};
+	std::vector<Planned> planned;
+	RangeSet             retained;
+	uint64_t             total = 0;
+	m_read_hot.BeginPlan();
+	m_read_hot.ForEachPublish([&](uint64_t start, uint64_t end) {
+		for (auto addr = start; addr < end;) {
+			const auto page_end  = (addr & ~(CACHING_PAGESIZE - 1)) + CACHING_PAGESIZE;
+			const auto slice_end = std::min(end, page_end);
+			const auto* owner    = m_page_table.Find(addr >> PageTable::kPageBits);
+			if (owner == nullptr || IsBufferInvalid(*owner) ||
+			    !m_slot_buffers[*owner].IsInBounds(addr, slice_end - addr)) {
+				addr = slice_end;
+				continue;
+			}
+			const auto id = *owner;
+			m_gpu_modified_ranges.ForEachInRange(addr, slice_end - addr, [&](uint64_t first, uint64_t last) {
+				const auto bytes = last - first;
+				const auto dst   = m_read_hot.Accept(first, bytes, &retained);
+				if (!dst) {
+					return;
+				}
+				planned.push_back({id, first, bytes, *dst});
+				total += Common::AlignUp(bytes, 64);
+			});
+			addr = slice_end;
+		}
+	});
+	if (planned.empty()) {
+		m_read_hot.FinishPlan(std::move(retained), true);
+		return;
+	}
+	auto [mapped, offset] = m_download_buffer.Map(total, 64);
+	if (mapped == nullptr) {
+		return;
+	}
+	m_read_hot.FinishPlan(std::move(retained), true);
+	m_download_buffer.Commit();
+
+	struct Target {
+		uint64_t vaddr;
+		uint64_t rel;
+		uint64_t size;
+	};
+	std::vector<std::pair<BufferId, std::vector<vk::BufferCopy>>> groups;
+	std::vector<Target>                                           targets;
+	auto batch = std::make_shared<ReadHot::Batch>();
+	uint64_t copied = 0;
+	for (const auto& piece: planned) {
+		batch->push_back({piece.vaddr, piece.size, false});
+		const auto buffer_address = m_slot_buffers[piece.id].CpuAddress();
+		m_gpu_modified_ranges.BeginDownloadCopy(
+		    m_inflight_download_ranges, piece.vaddr, piece.size, [&](uint64_t start, uint64_t finish) {
+			    if (groups.empty() || groups.back().first != piece.id) {
+				    groups.emplace_back(piece.id, std::vector<vk::BufferCopy> {});
+			    }
+			    const auto rel = piece.dst + (start - piece.vaddr);
+			    groups.back().second.emplace_back(start - buffer_address, offset + rel, finish - start);
+			    targets.push_back({start, rel, finish - start});
+			    copied += finish - start;
+		    });
+		if (DccFillPublish::EnvMode() != DccFillPublish::Mode::Off) {
+			m_write_ledger.Forget(piece.vaddr, piece.size);
+		}
+	}
+	if (groups.empty()) {
+		return;
+	}
+	auto&      recorded = m_scheduler.Current();
+	recorded.EndRendering();
+	const auto native = recorded.Handle();
+	for (auto& [id, list]: groups) {
+		auto&                   source = m_slot_buffers[id];
+		vk::BufferMemoryBarrier before {};
+		before.srcAccessMask       = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+		before.dstAccessMask       = vk::AccessFlagBits::eTransferRead;
+		before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+		before.buffer              = source.Handle();
+		before.offset              = 0;
+		before.size                = source.Size();
+		native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer, {}, 0,
+		                       nullptr, 1, &before, 0, nullptr);
+		GpuLabel::With(
+		    native, GpuLabel::Class::Readback,
+		    [&] {
+			    native.copyBuffer(source.Handle(), m_download_buffer.Handle(), static_cast<uint32_t>(list.size()),
+			                      list.data());
+		    },
+		    "I.rh.%ukb", static_cast<uint32_t>(source.Size() >> 10u));
+		auto after          = before;
+		after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+		after.dstAccessMask = vk::AccessFlagBits::eHostRead;
+		after.buffer        = m_download_buffer.Handle();
+		after.offset        = offset;
+		after.size          = total;
+		native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+		                       vk::PipelineStageFlagBits::eAllCommands | vk::PipelineStageFlagBits::eHost, {}, 0,
+		                       nullptr, 1, &after, 0, nullptr);
+	}
+	FrameTiming::Add(FrameTiming::Counter::ReadHotPublishN);
+	FrameTiming::Add(FrameTiming::Counter::ReadHotPublishBytes, copied);
+	m_read_hot.Remember(batch);
+	m_scheduler.DeferPriorityOperation([this, mapped, offset, total, targets = std::move(targets)] {
+		m_download_buffer.Invalidate(offset, total);
+		for (const auto& target: targets) {
+			Libs::LibKernel::Memory::WriteBacking(target.vaddr, mapped + target.rel, target.size);
+			m_inflight_download_ranges.Remove(target.vaddr, target.size);
+		}
+	});
+	m_scheduler.DeferOperation([this, batch] { ConfirmPublish(batch); });
 }
 
 } // namespace Libs::Graphics

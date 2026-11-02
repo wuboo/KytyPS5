@@ -1,3 +1,4 @@
+#include "graphics/host_gpu/renderer/cache/readHot.h"
 #include "graphics/host_gpu/renderer/renderDraw.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
 
@@ -2425,6 +2426,18 @@ void RenderExecutor::ExecutePreparedDraw(uint64_t submit_id, CommandBuffer& buff
 	{
 		CpPhases::Scope desc_phase(CpPhases::Phase::DrawDesc);
 		CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
+	}
+	if (ReadHot::Enabled()) {
+		const bool address_writes =
+		    std::any_of(vertex_stages.begin(), vertex_stages.end(),
+		                [](const auto& stage) {
+			                return stage.stage.program != nullptr && stage.stage.program->has_address_writes;
+		                }) ||
+		    (state.ps_active && state.ps_input_info.stage.program != nullptr &&
+		     state.ps_input_info.stage.program->has_address_writes);
+		if (address_writes) {
+			m_context.GetBufferCache().SupersedeAllPublishes();
+		}
 	}
 	if (!mesh_active) {
 		CommitIndexBuffer(vk_buffer, index_binding);

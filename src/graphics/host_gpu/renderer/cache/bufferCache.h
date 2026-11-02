@@ -13,12 +13,14 @@
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
 #include "graphics/host_gpu/renderer/cache/gpuDirtyRanges.h"
 #include "graphics/host_gpu/renderer/cache/gpuWriteLedger.h"
+#include "graphics/host_gpu/renderer/cache/readHot.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
 
 #include <map>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <unordered_map>
@@ -116,6 +118,11 @@ public:
 		m_memory_tracker.QueueBdaSync(vaddr, size);
 	}
 	void               RunGarbageCollector();
+	// S497 (KYTY_READ_HOT): no-ops unless the switch is on.
+	void               PublishReadHot();
+	void               DecayReadHot();
+	void               SupersedeAllPublishes();
+	void               SupersedePublishes(uint64_t vaddr, uint64_t size);
 	// S412 (KYTY_DIAG_RFOP)
 	[[nodiscard]] uint32_t RfOpWriter(uint64_t vaddr, uint64_t size) const { return m_rfop_writers.Find(vaddr, size); }
 
@@ -157,6 +164,8 @@ private:
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
 	[[nodiscard]] bool DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size);
+	void               NoteReadHot(uint64_t vaddr, uint64_t size);
+	void               ConfirmPublish(const std::shared_ptr<ReadHot::Batch>& batch);
 
 	// Eager readback (KYTY_OPT_OFF=eager_readback disables). Guest threads that poll a small
 	// GPU-written value read-fault on every GPU write, and each fault used to queue behind the
@@ -234,6 +243,7 @@ private:
 	uint64_t                  m_sync_seq_next = 0;
 	std::unordered_map<uint64_t, uint64_t> m_spec_last_seq; // S402: per spec-read range, the write sequence seen by the previous read
 	SyncCensus::RepeatTracker m_sync_repeat;
+	ReadHot::Book             m_read_hot; // S497, GPU thread
 };
 
 } // namespace Libs::Graphics
