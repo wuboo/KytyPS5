@@ -15,6 +15,9 @@
 #include <SDL3/SDL.h>
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <magic_enum.hpp>
 #include <vector>
@@ -415,6 +418,11 @@ bool Audio::QueueSdlAudio(PortOut* port, const void* data, bool blocking, float 
 		if (queued < static_cast<int>(prepared_size)) {
 			if (port->queue_primed) {
 				Common::DebugCounters::Add(Common::DebugCounters::Counter::AudioUnderruns);
+				static std::atomic<uint32_t> underruns {0};
+				const auto n = underruns.fetch_add(1, std::memory_order_relaxed) + 1;
+				if (n == 1 || (n % 50) == 0) {
+					std::fprintf(stderr, "[audio] underrun n=%u\n", n);
+				}
 			}
 			port->queue_primed = false;
 		}

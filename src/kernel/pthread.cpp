@@ -1,4 +1,5 @@
 #include "kernel/pthread.h"
+#include "kernel/pthreadPriority.h"
 #include "common/cpTuning.h"
 
 #include "common/assert.h"
@@ -21,6 +22,8 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <cstdio>
+#include <cstdlib>
 #include <chrono>
 #include <condition_variable>
 #include <cstring>
@@ -370,9 +373,9 @@ struct PthreadAttrPrivate {
 	bool           stack_user;
 	uint64_t       stack_map_addr;
 	size_t         stack_map_size;
-	int            policy;
-	int            guest_priority;
-	int            inherit_sched;
+	int              policy;
+	std::atomic<int> guest_priority; // PthreadSetprio writes, Getprio / kernel class read
+	int              inherit_sched;
 	int            solosched;
 	bool           detached;
 	pthread_attr_t p;
@@ -2138,6 +2141,32 @@ int KYTY_SYSV_ABI PthreadAttrSetinheritsched(PthreadAttr* attr, int inherit_sche
 	return OK;
 }
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+static bool HavokPrioOn() {
+	static const bool on = HavokPrioEnabled(std::getenv("KYTY_HAVOK_PRIO"));
+	return on;
+}
+
+static int WindowsHostPriority(int guest) {
+	const bool on   = HavokPrioOn();
+	const int  host = HostSchedPriority(guest, on);
+	static const int announce = [] {
+		std::fprintf(stderr, "[havok-prio] enabled=%d band=%d\n", HavokPrioOn() ? 1 : 0, HavokHostBand(HavokPrioOn()));
+		return 0;
+	}();
+	(void)announce;
+	// 461..478 is the Havok worker band that leaves +2 only when the switch is on.
+	if (guest >= 461 && guest <= 478) {
+		static std::atomic<int> hits {0};
+		const int n = hits.fetch_add(1, std::memory_order_relaxed) + 1;
+		if (n == 1 || n == 18) {
+			std::fprintf(stderr, "[havok-prio] guest=%d host=%d hits=%d\n", guest, host, n);
+		}
+	}
+	return host;
+}
+#endif
+
 int KYTY_SYSV_ABI PthreadAttrSetschedparam(PthreadAttr* attr, const KernelSchedParam* param) {
 	// PRINT_NAME();
 
@@ -2148,13 +2177,7 @@ int KYTY_SYSV_ABI PthreadAttrSetschedparam(PthreadAttr* attr, const KernelSchedP
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 	KernelSchedParam pparam {};
-	if (param->sched_priority <= 478) {
-		pparam.sched_priority = +2;
-	} else if (param->sched_priority >= 733) {
-		pparam.sched_priority = -2;
-	} else {
-		pparam.sched_priority = 0;
-	}
+	pparam.sched_priority = WindowsHostPriority(param->sched_priority);
 
 	if (pthread_attr_setschedparam(&attr_value->p, &pparam) != 0) {
 		return KERNEL_ERROR_EINVAL;
@@ -3140,6 +3163,14 @@ int PthreadGetPriorityForKernel(Pthread thread) {
 		return 700;
 	}
 
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+	// When the host band and the kernel class diverge (KYTY_HAVOK_PRIO), the native
+	// sched_priority no longer encodes class 256 for guest 461..478. Read the guest value.
+	if (HavokPrioOn() && thread->attr != nullptr) {
+		return KernelPriorityFromGuest(thread->attr->guest_priority.load(std::memory_order_relaxed));
+	}
+#endif
+
 	sched_param param {};
 	int         pol = 0;
 
@@ -3497,13 +3528,7 @@ int KYTY_SYSV_ABI PthreadSetprio(Pthread thread, int prio) {
 	}
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	if (prio <= 478) {
-		param.sched_priority = +2;
-	} else if (prio >= 733) {
-		param.sched_priority = -2;
-	} else {
-		param.sched_priority = 0;
-	}
+	param.sched_priority = WindowsHostPriority(prio);
 
 	if (pthread_setschedparam(thread->p, pol, &param) != 0) {
 		return KERNEL_ERROR_EINVAL;
