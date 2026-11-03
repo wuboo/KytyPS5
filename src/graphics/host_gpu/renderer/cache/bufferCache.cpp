@@ -596,8 +596,9 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		                                       HasGpuDirtyBytes(vaddr, size),
 		                                       HasInflightDownloadBytes(vaddr, size)) ==
 		               ReadHot::InflightRead::Wait) {
-			// The bytes are already in a publish copy. Wait until that copy lands and confirm
-			// unmarks the tracker (or puts a newer write back into the dirty set).
+			// The bytes left the dirty set for a publish copy, or that copy already landed and confirm
+			// has not unmarked the tracker yet. Wait for the copy and run confirm. A noop here
+			// refaults until flips stop.
 			WaitInflightDownloads();
 			m_scheduler.PopPendingOperations();
 			FrameTiming::Add(FrameTiming::Counter::ReadHotInflightWaitN);

@@ -101,10 +101,10 @@ int main() {
 
 	Check(ReadWhilePublished(true, false, true) == InflightRead::Wait,
 	      "a read of an in-flight publish waits instead of nooping");
+	Check(ReadWhilePublished(true, false, false) == InflightRead::Wait,
+	      "a read after the copy landed still waits for confirm");
 	Check(ReadWhilePublished(true, true, true) == InflightRead::Absent,
 	      "dirty bytes are still a download, not this wait");
-	Check(ReadWhilePublished(true, false, false) == InflightRead::Absent,
-	      "nothing in flight is not this wait");
 	Check(ReadWhilePublished(false, false, true) == InflightRead::Absent,
 	      "a clean tracker is not this wait");
 

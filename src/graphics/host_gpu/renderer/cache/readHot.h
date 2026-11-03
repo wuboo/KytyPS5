@@ -53,9 +53,10 @@ inline bool Clears(const Entry& entry) {
 #endif
 }
 
-// A publish copy has taken the bytes out of the dirty set, but the tracker stays GPU-modified
-// until that copy is confirmed. A read in that window finds nothing to download. Treating it as
-// a noop leaves the page protected, so the fault repeats and flips stop (S497 b2).
+// A publish copy takes the bytes out of the dirty set, and the priority callback drops the
+// in-flight mark when the copy lands. The tracker stays GPU-modified until confirm. A read in
+// either part of that window finds nothing to download. A noop leaves the page protected, so
+// the fault repeats and flips stop (S497 b2 at the copy, bp at confirm).
 enum class InflightRead { Absent, Wait };
 
 inline InflightRead ReadWhilePublished(bool tracker_gpu, bool dirty, bool inflight) {
@@ -65,7 +66,8 @@ inline InflightRead ReadWhilePublished(bool tracker_gpu, bool dirty, bool inflig
 	(void)inflight;
 	return InflightRead::Absent;
 #else
-	if (tracker_gpu && !dirty && inflight) {
+	(void)inflight;
+	if (tracker_gpu && !dirty) {
 		return InflightRead::Wait;
 	}
 	return InflightRead::Absent;
