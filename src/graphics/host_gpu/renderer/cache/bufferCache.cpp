@@ -591,17 +591,38 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 					probe.same        = repeat.same;
 				}
 			}
+		} else if (!is_write &&
+		           ReadHot::ReadWhilePublished(m_memory_tracker.IsRegionGpuModified(vaddr, size),
+		                                       HasGpuDirtyBytes(vaddr, size),
+		                                       HasInflightDownloadBytes(vaddr, size)) ==
+		               ReadHot::InflightRead::Wait) {
+			// The bytes are already in a publish copy. Wait until that copy lands and confirm
+			// unmarks the tracker (or puts a newer write back into the dirty set).
+			WaitInflightDownloads();
+			m_scheduler.PopPendingOperations();
+			FrameTiming::Add(FrameTiming::Counter::ReadHotInflightWaitN);
+			if (!m_memory_tracker.IsRegionGpuModified(vaddr, size)) {
+				downloaded = true;
+			} else if (DownloadBufferMemory<false>(buffer, vaddr, size)) {
+				FrameTiming::Add(FrameTiming::Counter::ReadbackDownloads);
+				m_memory_tracker.UnmarkRegionAsGpuModified(vaddr, size);
+				downloaded = true;
+			} else {
+				downloaded = false;
+			}
 		} else if (!is_write) {
 			// A read fault that downloads nothing leaves the page protected and faults again;
 			// the caller restores access.
 			downloaded = false;
+		}
+		if (!is_write && !downloaded) {
 			static std::atomic<uint64_t> noops {0};
 			const auto                   n = noops.fetch_add(1, std::memory_order_relaxed) + 1;
 			if ((n & (n - 1)) == 0) {
 				LOGF("[read-fault-noop] n=%" PRIu64 " addr=0x%016" PRIx64
-				     " tracker_gpu_modified=%d dirty_ranges=%d\n",
+				     " tracker_gpu_modified=%d dirty_ranges=%d inflight=%d\n",
 				     n, vaddr, IsRegionGpuModified(vaddr, 1) ? 1 : 0,
-				     HasGpuDirtyBytes(vaddr, 1) ? 1 : 0);
+				     HasGpuDirtyBytes(vaddr, 1) ? 1 : 0, HasInflightDownloadBytes(vaddr, 1) ? 1 : 0);
 			}
 		}
 		if (is_write) {

@@ -1299,11 +1299,12 @@ foreach(mutant IN ITEMS KEEP_ZERO OFF_BY_ONE)
 endforeach()
 
 # S497: KYTY_READ_HOT book. Mutants (each must be caught, WILL_FAIL): a guest read is forgotten;
-# a superseded copy still clears the page; a piece over the publish budget is dropped.
+# a superseded copy still clears the page; a piece over the publish budget is dropped;
+# a read of an in-flight publish is a noop.
 add_executable(read_hot_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ReadHotTests.cpp")
 target_link_libraries(read_hot_tests common fmt::fmt)
 target_include_directories(read_hot_tests PRIVATE ${inc_headers})
-foreach(mutant IN ITEMS NO_NOTE CONFIRM_SUPERSEDED DROP_OVER_BUDGET)
+foreach(mutant IN ITEMS NO_NOTE CONFIRM_SUPERSEDED DROP_OVER_BUDGET NOOP_INFLIGHT)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(read_hot_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ReadHotTests.cpp")
 	target_link_libraries(read_hot_mutant_${mutant_lower}_tests common fmt::fmt)
@@ -1947,7 +1948,7 @@ if(BUILD_TESTING)
 	add_test(NAME desc_assert COMMAND $<TARGET_FILE:desc_assert_tests>)
 	add_test(NAME frame_dump_flips COMMAND $<TARGET_FILE:frame_dump_flips_tests>)
 	add_test(NAME read_hot COMMAND $<TARGET_FILE:read_hot_tests>)
-	foreach(mutant IN ITEMS no_note confirm_superseded drop_over_budget)
+	foreach(mutant IN ITEMS no_note confirm_superseded drop_over_budget noop_inflight)
 		add_test(NAME read_hot_mutant_${mutant} COMMAND $<TARGET_FILE:read_hot_mutant_${mutant}_tests>)
 		set_tests_properties(read_hot_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()

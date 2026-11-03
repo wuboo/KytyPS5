@@ -2,6 +2,7 @@
 // NO_NOTE: a guest read is forgotten, so a later GPU write is not queued.
 // CONFIRM_SUPERSEDED: a copy superseded by a newer write is treated as current.
 // DROP_OVER_BUDGET: a piece that does not fit the batch is discarded instead of staying queued.
+// NOOP_INFLIGHT: a read of an in-flight publish is treated as nothing to download.
 
 #include "graphics/host_gpu/renderer/cache/readHot.h"
 
@@ -12,7 +13,9 @@ using Libs::Graphics::ReadHot::Book;
 using Libs::Graphics::ReadHot::Clears;
 using Libs::Graphics::ReadHot::Entry;
 using Libs::Graphics::ReadHot::EnvOn;
+using Libs::Graphics::ReadHot::InflightRead;
 using Libs::Graphics::ReadHot::kPage;
+using Libs::Graphics::ReadHot::ReadWhilePublished;
 
 static int g_fails = 0;
 
@@ -95,6 +98,15 @@ int main() {
 		book.SupersedeAll();
 		Check(!Clears((*batch)[0]), "an unknown address write supersedes every copy");
 	}
+
+	Check(ReadWhilePublished(true, false, true) == InflightRead::Wait,
+	      "a read of an in-flight publish waits instead of nooping");
+	Check(ReadWhilePublished(true, true, true) == InflightRead::Absent,
+	      "dirty bytes are still a download, not this wait");
+	Check(ReadWhilePublished(true, false, false) == InflightRead::Absent,
+	      "nothing in flight is not this wait");
+	Check(ReadWhilePublished(false, false, true) == InflightRead::Absent,
+	      "a clean tracker is not this wait");
 
 	return g_fails == 0 ? 0 : 1;
 }

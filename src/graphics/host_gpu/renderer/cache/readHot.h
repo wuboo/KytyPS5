@@ -53,6 +53,25 @@ inline bool Clears(const Entry& entry) {
 #endif
 }
 
+// A publish copy has taken the bytes out of the dirty set, but the tracker stays GPU-modified
+// until that copy is confirmed. A read in that window finds nothing to download. Treating it as
+// a noop leaves the page protected, so the fault repeats and flips stop (S497 b2).
+enum class InflightRead { Absent, Wait };
+
+inline InflightRead ReadWhilePublished(bool tracker_gpu, bool dirty, bool inflight) {
+#if defined(KYTY_READHOT_MUTANT_NOOP_INFLIGHT)
+	(void)tracker_gpu;
+	(void)dirty;
+	(void)inflight;
+	return InflightRead::Absent;
+#else
+	if (tracker_gpu && !dirty && inflight) {
+		return InflightRead::Wait;
+	}
+	return InflightRead::Absent;
+#endif
+}
+
 class Book {
 public:
 	// Pages of a guest read. A span wider than 16 pages is not a hot read and is ignored.

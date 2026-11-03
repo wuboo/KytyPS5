@@ -684,6 +684,7 @@ constexpr const char* kCounterNames[] = {
     "read_hot_note_n",
     "read_hot_publish_n",
     "read_hot_publish_bytes",
+    "read_hot_inflight_wait_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
