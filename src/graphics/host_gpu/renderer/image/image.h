@@ -84,9 +84,13 @@ public:
 			HeapChanged();
 		}
 	}
-	void ResolveMaybeCpuHash(uint64_t hash) {
+	[[nodiscard]] bool ResolveMaybeCpuHash(uint64_t hash) {
+		if (!m_maybe_cpu_dirty || m_cpu_dirty) {
+			EXIT("image cannot resolve maybe-dirty hash\n");
+		}
 		m_maybe_cpu_dirty = false;
-		m_cpu_dirty       = hash != m_maybe_cpu_hash;
+		m_cpu_dirty |= hash != m_maybe_cpu_hash;
+		return m_cpu_dirty;
 	}
 
 	void RefreshComplete() {
@@ -106,7 +110,7 @@ public:
 	void               ClearBufferModified() noexcept { m_buffer_modified = false; }
 
 	[[nodiscard]] bool Overlaps(uint64_t address, uint64_t size) const noexcept {
-		return info.data.address < address + size && address < info.data.End();
+		return ImageRangeOverlaps(info.data.address, info.data.size, address, size);
 	}
 	[[nodiscard]] bool SafeToDownload() const noexcept {
 		return IsGpuModified() && !IsBufferModified() && !IsCpuDirty();
