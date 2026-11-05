@@ -284,7 +284,7 @@ uint32_t LoadWordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& res
                           uint32_t index);
 
 uint32_t LoadSubwordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& resource,
-                             uint32_t address, uint32_t index, uint32_t bits);
+                             uint32_t address, uint32_t index, uint32_t bits, bool sign_extend = false);
 
 template <typename Fn>
 auto EmitBufferAccess(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo mem,
@@ -393,7 +393,7 @@ uint32_t LoadWord(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo me
 }
 
 uint32_t LoadSubwordPrepared(ValueEmitContext& ctx, const IR::Inst& inst, const IR::MemoryInfo& mem,
-                             const MemoryResourceAccess& resource, uint32_t bits) {
+                             const MemoryResourceAccess& resource, uint32_t bits, bool sign_extend) {
 	const auto address = ByteAddress(ctx, inst, mem, resource.byte_offset);
 	const auto index = Binary(
 	    ctx.state, spv::OpShiftRightLogical, TypeU32(ctx.state), address,
@@ -413,7 +413,7 @@ uint32_t LoadWordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& res
 }
 
 uint32_t LoadSubwordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& resource,
-                             uint32_t address, uint32_t index, uint32_t bits) {
+                             uint32_t address, uint32_t index, uint32_t bits, bool sign_extend) {
 	uint32_t value;
 	if (resource.element_bits < 32u) {
 		const auto loaded = ctx.state.builder.AllocateId();
@@ -432,14 +432,18 @@ uint32_t LoadSubwordInBounds(ValueEmitContext& ctx, const MemoryResourceAccess& 
 		               Binary(ctx.state, spv::OpShiftRightLogical, TypeU32(ctx.state), word, shift),
 		               ConstantU32(ctx.state, bits == 8u ? 0xffu : 0xffffu));
 	}
-	return value;
+	if (!sign_extend) return value;
+	const auto left = Binary(ctx.state, spv::OpShiftLeftLogical, TypeU32(ctx.state), value,
+	                         ConstantU32(ctx.state, 32u - bits));
+	return Binary(ctx.state, spv::OpShiftRightArithmetic, TypeU32(ctx.state), left,
+	              ConstantU32(ctx.state, 32u - bits));
 }
 
 uint32_t LoadSubword(ValueEmitContext& ctx, const IR::Inst& inst, IR::MemoryInfo mem,
-                     uint32_t bits) {
+                     uint32_t bits, bool sign_extend = false) {
 	return EmitValueOrZeroIfCondition(ctx.state, ctx.Arg(inst, inst.NumArgs() - 1), [&]() {
 		const auto resource = PrepareMemoryResourceAccess(ctx.state, mem);
-		return LoadSubwordPrepared(ctx, inst, mem, resource, bits);
+		return LoadSubwordPrepared(ctx, inst, mem, resource, bits, sign_extend);
 	});
 }
 

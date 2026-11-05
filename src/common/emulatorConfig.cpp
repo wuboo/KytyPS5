@@ -120,6 +120,7 @@ Common::AmdCpuMode GetAmdCpuMode() {
 
 uint32_t GetAmdPatchKinds() {
 	return Common::ResolveAmdPatchKinds(std::getenv("KYTY_AMD_PATCH"), Common::IsRunningUnderRosetta());
+}
 
 bool Ps5ProEnabled() {
 	return g_config->pro_enabled;

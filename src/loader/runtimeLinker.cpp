@@ -2099,7 +2099,6 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 #else
 	const bool protect_memory_faults = false;
 #endif
-	const bool patch_guest_instructions = protect_memory_faults || emulate_amd;
 #if defined(__APPLE__)
 	// Rosetta aborts the process on some 256-bit stores (see SplitWideStoresEnabled).
 	const bool split_wide_stores = SplitWideStoresEnabled();
@@ -2298,7 +2297,8 @@ void RuntimeLinker::LoadProgramToMemory(Program* program) {
 				for (const auto& [segment_addr, segment_size]: executable_segments) {
 					const auto result = PatchGuestInstructions(
 					    segment_addr, segment_size, function_starts, protect_memory_faults,
-					    emulate_amd, GetGuestInstructionHostFeatures(), Config::GetAmdPatchKinds());
+					    emulate_amd, GetGuestInstructionHostFeatures(), Config::GetAmdPatchKinds(),
+					    tsc_multiplier);
 					totals.reciprocal_sqrt += result.reciprocal_sqrt;
 					totals.extrq += result.extrq;
 					totals.insertq += result.insertq;

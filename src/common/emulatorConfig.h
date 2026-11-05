@@ -72,7 +72,6 @@ struct ConfigOptions {
 	bool                   pro_enabled                 = false;
 	bool                   amd_cpu_enabled             = false;
 	bool                   guest_tsc_enabled           = false;
-	bool                   network_connected           = false;
 	bool                   psn_emulation_enabled       = false;
 	uint32_t               vblank_frequency            = 60;
 	uint32_t               console_language            = DEFAULT_CONSOLE_LANGUAGE;
@@ -140,7 +139,6 @@ uint32_t           GetAmdPatchKinds(); // Common::AmdPatchKind mask from KYTY_AM
 bool     Ps5ProEnabled();
 bool     AmdCpuEnabled();
 bool     GuestTscEnabled();
-bool     IsNetworkConnected();
 bool     PsnEmulationEnabled();
 uint32_t GetVblankFrequency();
 uint32_t GetConsoleLanguage();

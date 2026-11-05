@@ -67,19 +67,13 @@ uint64_t GetGuestInstructionTrampolineBytesUsed(void* module_ptr);
 // Sets the used size of the module's trampoline area, as left by a patch run restored from the S432 patch cache.
 void SetGuestInstructionTrampolineBytesUsed(void* module_ptr, uint64_t bytes);
 
-// Apply enabled instruction fixes using native trampolines or safe trap fallbacks.
-GuestInstructionPatchResult PatchGuestInstructions(
-    uint64_t segment_addr, uint64_t segment_size, std::span<const uintptr_t> function_starts,
-    bool protect_memory, bool emulate_amd,
-    GuestInstructionHostFeatures host_features = GetGuestInstructionHostFeatures(),
-    uint32_t                     amd_kinds     = Common::AmdPatchAll);
-
 // Apply enabled instruction fixes using native trampolines or safe trap fallbacks. A nonzero
 // tsc_multiplier rewrites RDTSC/RDTSCP to return host TSC * tsc_multiplier >> 32.
 GuestInstructionPatchResult PatchGuestInstructions(
     uint64_t segment_addr, uint64_t segment_size, std::span<const uintptr_t> function_starts,
     bool protect_memory, bool emulate_amd,
     GuestInstructionHostFeatures host_features  = GetGuestInstructionHostFeatures(),
+    uint32_t                     amd_kinds      = Common::AmdPatchAll,
     uint64_t                     tsc_multiplier = 0);
 
 bool DecodeEhFrameFunctionStarts(uint64_t eh_frame_header_addr, uint64_t eh_frame_header_size,

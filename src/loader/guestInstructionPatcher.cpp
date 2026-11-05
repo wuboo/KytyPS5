@@ -1594,7 +1594,8 @@ GuestInstructionPatchResult PatchGuestInstructions(u64 segment_addr, u64 segment
                                                    std::span<const uintptr_t> function_starts,
                                                    bool protect_memory, bool emulate_amd,
                                                    GuestInstructionHostFeatures host_features,
-                                                   uint32_t                     amd_kinds) {
+                                                   uint32_t                     amd_kinds,
+                                                   uint64_t                     tsc_multiplier) {
 	GuestInstructionPatchResult result {};
 	const bool                  tsc_only = !protect_memory && !emulate_amd;
 	if (tsc_only && tsc_multiplier == 0) {
