@@ -21,10 +21,7 @@ inline QStringList EnumToList() {
 	auto        me    = QMetaEnum::fromType<T>();
 	int         count = me.keyCount();
 	for (int i = 0; i < count; i++) {
-		auto key = QString(me.key(i));
-		ret << (key.startsWith('R') && key.size() > 2 && key.at(1).isDigit()
-		            ? key.remove('R').toLower()
-		            : key);
+		ret << QString(me.key(i));
 	}
 	return ret;
 }
@@ -32,16 +29,12 @@ inline QStringList EnumToList() {
 template <class T>
 T TextToEnum(const QString& text) {
 	auto me = QMetaEnum::fromType<T>();
-	return static_cast<T>(me.keyToValue(
-	    ((text.size() > 1 && text.at(0).isDigit()) ? 'R' + text.toUpper() : text).toUtf8().data()));
+	return static_cast<T>(me.keyToValue(text.toUtf8().constData()));
 }
 
 template <class T>
 QString EnumToText(T value) {
-	auto me  = QMetaEnum::fromType<T>();
-	auto key = QString(me.valueToKey(static_cast<int>(value)));
-	return (key.startsWith('R') && key.size() > 2 && key.at(1).isDigit() ? key.remove('R').toLower()
-	                                                                     : key);
+	return QString(QMetaEnum::fromType<T>().valueToKey(static_cast<int>(value)));
 }
 
 struct ControllerSettings {
@@ -80,16 +73,10 @@ public:
 	static constexpr int DEFAULT_CONSOLE_LANGUAGE = 1;
 	static constexpr int MAX_CONSOLE_LANGUAGE     = 29;
 
-	enum class Resolution {
-		R1280X720,
-		R1920X1080,
-		R2560X1440,
-		R3840X2160,
-	};
-	Q_ENUM(Resolution)
+	static constexpr int MIN_SCREEN_SIZE = 320;
+	static constexpr int MAX_SCREEN_SIZE = 16384;
 
-	enum class ShaderOptimizationType { None, Size, Performance };
-	Q_ENUM(ShaderOptimizationType)
+	static QString NormalizeResolution(const QString& text);
 
 	enum class PresentMode { Fifo, Mailbox, Immediate };
 	Q_ENUM(PresentMode)
@@ -111,13 +98,14 @@ public:
 	QString     addons_dir;  /* Global setting; not saved per game. */
 	QStringList addcont;     /* User add-ons ("LABEL" or "LABEL=DIR"), saved by title ID. */
 	bool        custom_settings = false;
+	bool        pro_supported   = false; /* attribute3 bit 22 from sce_sys/param.json */
 	GameStatus  game_status     = GameStatus::Unknown;
 	QString     game_comment;
 
 	// Controller preferences always come from the global configuration.
 	ControllerSettings controller;
 
-	Resolution             screen_resolution           = Resolution::R1280X720;
+	QString                screen_resolution           = QStringLiteral("1280x720");
 	QString                user_name                   = "Kyty";
 	int                    user_id                     = Config::DEFAULT_USER_ID;
 	QString                audio_input_device;
@@ -126,6 +114,7 @@ public:
 	bool                   fullscreen_enabled          = false;
 	bool                   hdr_enabled                 = false;
 	bool                   hide_cursor_enabled         = false;
+	bool                   stretch_enabled             = false;
 	bool                   readback_linear_images      = false;
 	bool                   readback_tiled_images       = false;
 	bool                   sync_raw_image_buffers      = false;
@@ -137,11 +126,11 @@ public:
 	bool                   perf_overlay_enabled        = false;
 	bool                   skip_notice_screen          = false;
 	bool                   network_connected           = false;
+	bool                   psn_emulation_enabled       = false;
 	int                    vblank_frequency            = 60;
 	int                    console_language            = DEFAULT_CONSOLE_LANGUAGE;
 	bool                   vulkan_validation_enabled   = false;
 	bool                   shader_validation_enabled   = false;
-	ShaderOptimizationType shader_optimization_type    = ShaderOptimizationType::Performance;
 	LogDirection           shader_log_direction        = LogDirection::Silent;
 	QString                shader_log_folder           = "_Shaders";
 	bool                   command_buffer_dump_enabled = false;
@@ -151,6 +140,10 @@ public:
 	bool                   profiler_enabled            = false;
 	bool                   renderdoc_enabled           = false;
 	Common::AmdCpuMode     amd_cpu_mode                = Common::AmdCpuMode::Auto;
+
+	bool                   pro_enabled                 = false;
+	bool                   amd_cpu_enabled             = false;
+	bool                   guest_tsc_enabled           = false;
 #if defined(_WIN32)
 	bool red_zone_protection_enabled = false;
 #endif
@@ -168,6 +161,7 @@ public:
 		fullscreen_enabled          = other.fullscreen_enabled;
 		hdr_enabled                 = other.hdr_enabled;
 		hide_cursor_enabled         = other.hide_cursor_enabled;
+		stretch_enabled             = other.stretch_enabled;
 		readback_linear_images      = other.readback_linear_images;
 		readback_tiled_images       = other.readback_tiled_images;
 		sync_raw_image_buffers      = other.sync_raw_image_buffers;
@@ -179,11 +173,11 @@ public:
 		perf_overlay_enabled        = other.perf_overlay_enabled;
 		skip_notice_screen          = other.skip_notice_screen;
 		network_connected           = other.network_connected;
+		psn_emulation_enabled       = other.psn_emulation_enabled;
 		vblank_frequency            = other.vblank_frequency;
 		console_language            = other.console_language;
 		vulkan_validation_enabled   = other.vulkan_validation_enabled;
 		shader_validation_enabled   = other.shader_validation_enabled;
-		shader_optimization_type    = other.shader_optimization_type;
 		shader_log_direction        = other.shader_log_direction;
 		shader_log_folder           = other.shader_log_folder;
 		command_buffer_dump_enabled = other.command_buffer_dump_enabled;
@@ -193,6 +187,10 @@ public:
 		profiler_enabled            = other.profiler_enabled;
 		renderdoc_enabled           = other.renderdoc_enabled;
 		amd_cpu_mode                = other.amd_cpu_mode;
+
+		pro_enabled                 = other.pro_enabled;
+		amd_cpu_enabled             = other.amd_cpu_enabled;
+		guest_tsc_enabled           = other.guest_tsc_enabled;
 #if defined(_WIN32)
 		red_zone_protection_enabled = other.red_zone_protection_enabled;
 #endif
@@ -207,6 +205,7 @@ public:
 		basedir         = other.basedir;
 		game_path       = other.game_path;
 		custom_settings = other.custom_settings;
+		pro_supported   = other.pro_supported;
 		game_status     = other.game_status;
 		game_comment    = other.game_comment;
 	}

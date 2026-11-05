@@ -27,7 +27,6 @@
 #include "loader/additionalContent.h"
 #include "loader/runtimeLinker.h"
 #include "loader/systemContent.h"
-#include "loader/timer.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -133,17 +132,12 @@ static void Init(const Config::ConfigOptions& cfg, const std::filesystem::path& 
 
 	if (Common::File::IsFileExisting(param_json)) {
 		Loader::SystemContentLoadParamSfo(param_json);
-		if (const auto flexible_memory_size = Loader::SystemContentGetFlexibleMemorySize();
-		    flexible_memory_size != 0) {
-			Libs::LibKernel::Memory::SetFlexibleMemorySize(flexible_memory_size);
-		}
 	}
 	if (cfg.splash_enabled) {
 		Libs::Graphics::InitializeSplashScreen(param_json.parent_path());
 	}
 
 	// Initialization order is explicit; destruction is automatic and reversed.
-	subsystems.Initialize<Loader::Timer::Lifecycle>();
 	subsystems.Initialize<Libs::LibKernel::PthreadLifecycle>();
 	subsystems.Initialize<Profiler::Lifecycle>();
 	subsystems.Initialize<Libs::Network::Lifecycle>();
@@ -172,13 +166,9 @@ static void LoadElf(const std::filesystem::path& elf, bool dbg_print_reloc = fal
 }
 
 static void Execute(const std::filesystem::path& game_patch) {
-	auto           patch_path = game_patch;
-	Common::Thread guest_thread(
-	    [](void* param) {
-		    auto* rt = Common::Singleton<Loader::RuntimeLinker>::Instance();
-		    rt->Execute(*static_cast<const std::filesystem::path*>(param));
-	    },
-	    &patch_path);
+	std::thread([game_patch] {
+		Common::Singleton<Loader::RuntimeLinker>::Instance()->Execute(game_patch);
+	}).detach();
 	Libs::Graphics::WindowRun();
 	std::quick_exit(0);
 }

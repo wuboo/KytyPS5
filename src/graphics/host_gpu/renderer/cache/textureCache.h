@@ -16,7 +16,6 @@
 
 #include <bitset>
 #include <map>
-#include <type_traits>
 #include <unordered_set>
 #include <vector>
 
@@ -62,6 +61,7 @@ public:
 		ImageInfo     info;
 		ImageViewInfo view_info;
 		BindingType   type = BindingType::Texture;
+		bool          heap = false; // PS5: resolved for a resident image heap.
 	};
 
 	TextureCache(GraphicContext& graphics, CommandScheduler& scheduler, PageManager& page_manager,
@@ -156,20 +156,12 @@ private:
 	    MultiLevelPageTable<uint64_t, ImagePageTable::kPageBits, ImagePageTable::kAddressSpaceBits,
 	                        ImagePageTable::kFirstLevelBits>;
 
-	// Callers have validated the nonempty 44-bit range with TryGetPageRange.
+	// Callers pass a nonempty, valid guest range.
 	template <typename Func>
 	static void ForEachPage(uint64_t address, size_t size, Func&& func) {
-		using FuncReturn = typename std::invoke_result<Func, uint64_t>::type;
-		static constexpr bool RETURNS_BOOL = std::is_same_v<FuncReturn, bool>;
 		const uint64_t page_end = (address + size - 1) >> ImagePageTable::kPageBits;
 		for (uint64_t page = address >> ImagePageTable::kPageBits; page <= page_end; ++page) {
-			if constexpr (RETURNS_BOOL) {
-				if (func(page)) {
-					break;
-				}
-			} else {
-				func(page);
-			}
+			func(page);
 		}
 	}
 
@@ -224,7 +216,6 @@ private:
 	vk::Rect2D BeginColorRendering(Image& image, vk::Format format, uint32_t level,
 	                               uint32_t layer, uint32_t layers, const vk::ClearValue* clear,
 	                               vk::CommandBuffer command);
-	void PrepareImageCopy(Image& image);
 	void RefreshCopySource(ImageId id);
 	[[nodiscard]] bool CopyD16(Image& destination, Image& source);
 	void               CopyImage(ImageId destination, ImageId source);
@@ -232,7 +223,6 @@ private:
 	void CopyImageMip(ImageId destination, ImageId source, uint32_t mip, uint32_t layer);
 	void ValidateImageDesc(const ImageDesc& desc) const;
 
-	void               InvalidateCpuAliases(uint64_t address, uint64_t size);
 	[[nodiscard]] bool DownloadImageMemory(ImageId id);
 
 	GraphicContext&                                   m_graphics;

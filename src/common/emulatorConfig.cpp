@@ -106,6 +106,10 @@ bool HideCursorEnabled() {
 	return g_config->hide_cursor_enabled;
 }
 
+bool StretchEnabled() {
+	return g_config->stretch_enabled;
+}
+
 bool VrEnabled() {
 	return g_config->vr_enabled;
 }
@@ -116,6 +120,17 @@ Common::AmdCpuMode GetAmdCpuMode() {
 
 uint32_t GetAmdPatchKinds() {
 	return Common::ResolveAmdPatchKinds(std::getenv("KYTY_AMD_PATCH"), Common::IsRunningUnderRosetta());
+
+bool Ps5ProEnabled() {
+	return g_config->pro_enabled;
+}
+
+bool AmdCpuEnabled() {
+	return g_config->amd_cpu_enabled;
+}
+
+bool GuestTscEnabled() {
+	return g_config->guest_tsc_enabled;
 }
 
 uint32_t GetVblankFrequency() {
@@ -134,16 +149,16 @@ bool IsNetworkConnected() {
 	return g_config->network_connected;
 }
 
+bool PsnEmulationEnabled() {
+	return g_config->psn_emulation_enabled;
+}
+
 bool ShaderValidationEnabled() {
 	return g_config->shader_validation_enabled;
 }
 
 bool ShaderCacheEnabled() {
 	return g_config->shader_cache_enabled;
-}
-
-ShaderOptimizationType GetShaderOptimizationType() {
-	return g_config->shader_optimization_type;
 }
 
 LogDirection GetShaderLogDirection() {
@@ -208,6 +223,10 @@ bool TessellationEnabled() {
 
 bool OcclusionQueriesEnabled() {
 	return g_config->occlusion_queries_enabled;
+}
+
+bool LodStatsEnabled() {
+	return g_config->lod_stats_enabled;
 }
 
 bool TrophyEnabled() {

@@ -467,6 +467,7 @@ Decoder::Program DecodeFusedProgram(std::span<const uint32_t> front, std::span<c
 void PrepareCallTargets(ShaderSource& source, const CompileOptions& options) {
 	using namespace IR;
 	EXIT_NOT_IMPLEMENTED(options.stage != ShaderType::Compute);
+	source.wave_size = options.wave_size;
 	for (uint32_t i = 0; i < source.decoded.instructions.size(); ++i) {
 		if (source.decoded.instructions[i].opcode != Decoder::Opcode::S_SWAPPC_B64) continue;
 		source.calls.push_back({.instruction = i});
@@ -503,7 +504,11 @@ void PrepareCallTargets(ShaderSource& source, const CompileOptions& options) {
 	};
 	Register = [&](uint32_t before, uint32_t code) -> Value {
 		std::vector<uint32_t> crossed_calls;
-		const auto index = CFG::FindScalarDefinition(source.decoded, graph, before, code, crossed_calls);
+		const auto definition = CFG::FindScalarDefinition(source.decoded, graph, before, code,
+		                                                  source.wave_size, crossed_calls);
+		// Several reaching definitions select the value on the GPU, so no SRT walk evaluates it.
+		if (!definition) return Value(&block.AppendNewInst(ValueOpcode::UndefU32));
+		const auto index = *definition;
 		for (const auto crossed: crossed_calls) {
 			std::ranges::find(source.calls, crossed, &ShaderSource::Call::instruction)->preserved_registers.set(code);
 		}
@@ -702,10 +707,11 @@ const Decoder::Program& RefreshShaderSource(ShaderSource& source, const IR::SrtR
 		EXIT_IF(function_pc > UINT32_MAX - function_size);
 		const auto function_offset = static_cast<uint32_t>(linked.code.size());
 		for (auto inst: function) {
-			EXIT_IF(CFG::MayWriteScalarRegister(inst, call.dst.reg) ||
-			        CFG::MayWriteScalarRegister(inst, call.dst.reg + 1u));
+			EXIT_IF(CFG::MayWriteScalarRegister(inst, call.dst.reg, source.wave_size) ||
+			        CFG::MayWriteScalarRegister(inst, call.dst.reg + 1u, source.wave_size));
 			for (uint32_t code = 0; code < site.preserved_registers.size(); ++code) {
-				if (site.preserved_registers[code] && CFG::MayWriteScalarRegister(inst, code))
+				if (site.preserved_registers[code] &&
+				    CFG::MayWriteScalarRegister(inst, code, source.wave_size))
 					EXIT("shader call at pc 0x%08x clobbers scalar target dependency s%u", call.pc, code);
 			}
 			linked.code.insert(linked.code.end(), inst.raw, inst.raw + inst.word_count);
@@ -751,13 +757,6 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 			if (inst.opcode == Decoder::Opcode::S_SWAPPC_B64 && inst.branch_target == UINT32_MAX)
 				EXIT("shader call at pc 0x%08x must be linked before translation", inst.pc);
 		}
-	}
-	if (options.stage != ShaderType::Compute && options.stage != ShaderType::Vertex &&
-	    options.stage != ShaderType::Pixel && options.stage != ShaderType::Mesh &&
-	    options.stage != ShaderType::Local && options.stage != ShaderType::TessellationControl &&
-	    options.stage != ShaderType::TessellationEvaluation) {
-		EXIT("shader recompiler received unsupported stage %u\n",
-		     static_cast<unsigned>(options.stage));
 	}
 
 	const auto* stage        = StageName(options.stage);
@@ -811,7 +810,7 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 	const auto& cfg = *selected_cfg;
 	Frontend::EmbeddedFetchPlan embedded_fetch;
 	if ((options.stage == ShaderType::Vertex || options.stage == ShaderType::Local) &&
-	    options.input_info.vertex->fetch_embedded) {
+	    options.input_info.vertex->has_dynamic_vertex_fetch) {
 		embedded_fetch = DetectEmbeddedVertexFetch(
 		    decoded, *options.input_info.vertex, options.user_data_base,
 		    static_cast<uint32_t>(options.user_data.size()), options.wave_size);

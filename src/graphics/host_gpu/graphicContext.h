@@ -29,7 +29,6 @@ struct GraphicContext {
 	VmaAllocator                       allocator                             = nullptr;
 	bool                               memory_budget_ext_enabled             = false;
 	bool                               compute_subgroup_size_control_enabled = false;
-	bool                               sample_rate_shading_enabled           = false;
 	bool                               shader_image_int64_atomics_enabled    = false;
 	// VK_EXT_image_view_min_lod enabled with its feature: the T# MinLod clamp goes to the image view natively.
 	bool                               has_view_min_lod                      = false;
@@ -44,7 +43,12 @@ struct GraphicContext {
 	bool                               maintenance8_enabled                  = false;
 	// robustness2.nullDescriptor enabled: unbound textures bind VK_NULL_HANDLE; otherwise a 1x1 stand-in image.
 	bool                               null_descriptor_enabled               = false;
+
+	bool                               robust_buffer_access_enabled          = false;
+	bool                               r8_srgb_views                         = false;
+	bool                               r8g8_srgb_views                       = false;
 	bool                               conditional_rendering_enabled         = false;
+	bool                               sampler_filter_minmax_enabled         = false;
 	bool                               occlusion_queries_enabled             = false;
 	bool                               occlusion_query_precise_enabled       = false;
 	bool                               supports_block_texel_view              = false;
@@ -56,18 +60,12 @@ struct GraphicContext {
 	uint32_t                           max_push_descriptors                  = 0;
 	uint32_t                           device_clock_period_ps                = 0;
 	vk::DescriptorSetLayout            image_heap_layout                     = nullptr;
-	vk::ShaderStageFlags               required_subgroup_size_stages         = {};
 	Common::Mutex                      queue_mutex;
 	uint32_t                           queue_family = static_cast<uint32_t>(-1);
 	vk::Queue                          queue        = nullptr;
 
 	[[nodiscard]] const vk::PhysicalDeviceProperties& GetPhysicalDeviceProperties() const {
 		return physical_device_properties;
-	}
-
-	[[nodiscard]] const vk::PhysicalDeviceMemoryProperties&
-	GetPhysicalDeviceMemoryProperties() const {
-		return physical_device_memory_properties;
 	}
 
 	[[nodiscard]] vk::FormatProperties GetFormatProperties(vk::Format format) const {
@@ -77,6 +75,14 @@ struct GraphicContext {
 			physical_device.getFormatProperties(format, &it->second);
 		}
 		return it->second;
+	}
+
+	// Sampled views of format filter linearly, as guest samplers may.
+	[[nodiscard]] bool SamplesFiltered(vk::Format format) const {
+		constexpr vk::FormatFeatureFlags features =
+		    vk::FormatFeatureFlagBits::eSampledImage |
+		    vk::FormatFeatureFlagBits::eSampledImageFilterLinear;
+		return (GetFormatProperties(format).optimalTilingFeatures & features) == features;
 	}
 
 	[[nodiscard]] vk::Result GetImageFormatProperties(vk::Format format, vk::ImageType type,

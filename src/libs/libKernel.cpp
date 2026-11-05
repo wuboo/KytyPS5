@@ -4,6 +4,8 @@
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/signalCensus.h"
+
+#include "common/hostException.h"
 #include "common/logging/log.h"
 #include "common/singleton.h"
 #include "common/stringUtils.h"
@@ -21,6 +23,7 @@
 #include "libs/network.h"
 #include "loader/elf.h"
 #include "loader/runtimeLinker.h"
+#include "loader/systemContent.h"
 #include "loader/symbolDatabase.h"
 
 #include <algorithm>
@@ -38,9 +41,6 @@
 #include <vector>
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-#ifndef NOMINMAX
-#define NOMINMAX
-#endif
 #include <windows.h>
 #elif defined(__APPLE__)
 #include <csignal>
@@ -966,6 +966,8 @@ static int SignalDispatchHostSignal() {
 }
 
 static void HostSignalDispatchHandler(int host_signal, siginfo_t* /*info*/,
+
+static void HostSignalDispatchHandler(int /*host_signal*/, siginfo_t* /*info*/,
                                       void* native_context) {
 	Common::SignalCensus::OnSignal(Common::SignalCensus::SigFromHostSignal(host_signal));
 	Pthread current = PthreadSelfOrNull();
@@ -1003,7 +1005,8 @@ static bool EnsureHostSignalDispatchInstalled() {
 		action.sa_sigaction = HostSignalDispatchHandler;
 		sigemptyset(&action.sa_mask);
 		action.sa_flags = SA_SIGINFO | SA_RESTART;
-		return ::sigaction(SignalDispatchHostSignal(), &action, nullptr) == 0;
+		const int signal_number = Common::HostException::GuestSignalDispatchSignal();
+		return ::sigaction(signal_number, &action, nullptr) == 0;
 	}();
 	return installed;
 }
@@ -1185,7 +1188,7 @@ static int KYTY_SYSV_ABI KernelRaiseException(Pthread thread, int signum) {
 		}
 
 		PthreadQueuePendingSignal(thread, signum);
-		if (!PthreadKillHost(thread, SignalDispatchHostSignal())) {
+		if (!PthreadKillHost(thread, Common::HostException::GuestSignalDispatchSignal())) {
 			PthreadTakePendingSignal(thread, signum);
 			LOGF("\t pthread_kill failed for target thread\n");
 			return KERNEL_ERROR_EINVAL;
@@ -1323,23 +1326,12 @@ static void* KYTY_SYSV_ABI KernelGetProcParam() {
 }
 
 static int KYTY_SYSV_ABI KernelIsTrinityMode() {
-	static std::atomic_uint32_t call_count {0};
-
-	auto count = call_count.fetch_add(1, std::memory_order_relaxed);
-	if (count < 8 || (count % 1024) == 0) {
-		PRINT_NAME();
-		LOGF("\tcall = %u, return = 0 (base PS5 mode)\n", count + 1);
-	}
-
-	return 0;
+	return Loader::SystemContentIsTrinityMode() ? 1 : 0;
 }
 
 static int KYTY_SYSV_ABI KernelGetOperationMode(int* mode, int* submode) {
-	PRINT_NAME();
-
-	*mode    = 2; // PS5 Base
+	*mode    = Loader::SystemContentIsTrinityMode() ? 3 : 2;
 	*submode = 0; // None
-	LOGF("\t mode = %d, submode = %d\n", *mode, *submode);
 	return OK;
 }
 
@@ -3178,6 +3170,7 @@ LIB_DEFINE(InitLibKernel_1_Equeue) {
 	LIB_FUNC("F6e0kwo4cnk", EventQueue::KernelTriggerUserEvent);
 	LIB_FUNC("LJDwdSNTnDg", EventQueue::KernelDeleteUserEvent);
 	LIB_FUNC("57ZK+ODEXWY", EventQueue::KernelAddTimerEvent);
+	LIB_FUNC("YWQFUyXIVdU", EventQueue::KernelDeleteTimerEvent);
 	LIB_FUNC("R74tt43xP6k", EventQueue::KernelAddHRTimerEvent);
 	LIB_FUNC("J+LF6LwObXU", EventQueue::KernelDeleteHRTimerEvent);
 	LIB_FUNC("bBfz7kMF2Ho", EventQueue::KernelAddAmprEvent);
@@ -3254,6 +3247,7 @@ LIB_DEFINE(InitLibKernel_1_Pthread) {
 	LIB_FUNC("8+s5BzZjxSg", LibKernel::PthreadAttrGetaffinity);
 	LIB_FUNC("nsYoNRywwNg", LibKernel::PthreadAttrInit);
 	LIB_FUNC("JaRMy+QcpeU", LibKernel::PthreadAttrGetdetachstate);
+	LIB_FUNC("lpMP8HhkBbg", LibKernel::PthreadAttrGetinheritsched);
 	LIB_FUNC("-quPa4SEJUw", LibKernel::PthreadAttrGetstack);
 	LIB_FUNC("Ru36fiTtJzA", LibKernel::PthreadAttrGetstackaddr);
 	LIB_FUNC("-fA+7ZlGDQs", LibKernel::PthreadAttrGetstacksize);

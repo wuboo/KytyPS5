@@ -8,7 +8,6 @@
 #include "graphics/host_gpu/regionDefinitions.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
-#include <algorithm>
 #include <array>
 #include <bit>
 #include <cmath>
@@ -17,16 +16,21 @@
 
 namespace Libs::Graphics {
 
-enum class ColorTransform : uint32_t { None, SwapBgra16, Reverse10_11_11 };
+enum class ColorTransform : uint32_t { None, SwapBgra16, Reverse10_11_11, Rotate2_10_10_10 };
 
-enum class VideoOutCompression : uint8_t { Uncompressed, Dcc256_256_0, Dcc256_64_64, Unsupported };
+enum class VideoOutCompression : uint8_t {
+	Uncompressed,
+	Dcc256_256_0,
+	Dcc256_64_64,
+	Dcc128_128_128,
+	Unsupported
+};
 
 enum class ImageMetadataKind : uint8_t { None, Htile, Dcc, Cmask };
 
 struct ImageMetadataInfo {
 	GuestRange          range;
 	ImageMetadataKind   kind                 = ImageMetadataKind::None;
-	uint32_t            control              = 0;
 	uint64_t            clear_word           = 0;
 	VideoOutCompression compression          = VideoOutCompression::Uncompressed;
 	bool                stencil_compressed   = false;
@@ -99,6 +103,8 @@ struct ImageInfo {
 		switch (guest_format) {
 			case Prospero::BufferFormat::k10_11_11Float:
 				return ColorTransform::Reverse10_11_11;
+			case Prospero::BufferFormat::k2_10_10_10UNorm:
+				return ColorTransform::Rotate2_10_10_10;
 			default: return ColorTransform::None;
 		}
 	}
@@ -152,14 +158,7 @@ struct ImageViewInfo {
 	vk::ComponentMapping mapping     = {};
 	vk::ImageUsageFlags  usage       = vk::ImageUsageFlagBits::eSampled;
 
-	[[nodiscard]] bool operator==(const ImageViewInfo& rhs) const noexcept {
-		return format == rhs.format && type == rhs.type && aspect == rhs.aspect &&
-		       base_level == rhs.base_level && level_count == rhs.level_count &&
-		       min_lod == rhs.min_lod && base_layer == rhs.base_layer &&
-		       layer_count == rhs.layer_count && mapping.r == rhs.mapping.r &&
-		       mapping.g == rhs.mapping.g && mapping.b == rhs.mapping.b &&
-		       mapping.a == rhs.mapping.a && usage == rhs.usage;
-	}
+	[[nodiscard]] bool operator==(const ImageViewInfo&) const noexcept = default;
 };
 
 struct DepthFormatPolicy {
@@ -218,19 +217,6 @@ FindGuestDepthFormatPolicy(Prospero::BufferFormat guest_format) noexcept {
 	return has_stencil ? policy.stencil_attachment_formats.front() : policy.depth_attachment_format;
 }
 
-[[nodiscard]] inline constexpr vk::Format
-DepthAttachmentFormat(Prospero::DepthFormat   depth_format,
-                      Prospero::StencilFormat stencil_format) noexcept {
-	bool has_stencil = false;
-	switch (stencil_format) {
-		case Prospero::StencilFormat::kInvalid: break;
-		case Prospero::StencilFormat::k8UInt: has_stencil = true; break;
-		default: return vk::Format::eUndefined;
-	}
-	const auto* policy = FindDepthFormatPolicy(depth_format);
-	return policy == nullptr ? vk::Format::eUndefined : DepthAttachmentFormat(*policy, has_stencil);
-}
-
 [[nodiscard]] inline constexpr vk::ImageUsageFlags DepthTargetImageUsage() noexcept {
 	return vk::ImageUsageFlagBits::eDepthStencilAttachment | vk::ImageUsageFlagBits::eSampled |
 	       vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
@@ -260,14 +246,6 @@ inline bool ImageInfo::IsDepth() const noexcept {
 	}
 }
 
-[[nodiscard]] inline constexpr uint32_t EncodeD16AsD24(uint16_t value) noexcept {
-	return static_cast<uint32_t>((static_cast<uint64_t>(value) * 0x00ffffffu + 0x7fffu) / 0xffffu);
-}
-
-[[nodiscard]] inline uint32_t EncodeD16AsD32(uint16_t value) noexcept {
-	return std::bit_cast<uint32_t>(static_cast<float>(value) / 65535.0f);
-}
-
 [[nodiscard]] inline constexpr bool IsSupportedDepthTargetFormat(const ImageInfo& info) {
 	const auto* policy = FindGuestDepthFormatPolicy(info.guest_format);
 	return policy != nullptr && info.bytes_per_block == policy->bytes_per_element &&
@@ -287,8 +265,9 @@ inline bool ImageInfo::IsDepth() const noexcept {
 [[nodiscard]] inline VideoOutCompression
 ClassifyVideoOutCompression(bool compressed, uint64_t metadata_address, uint32_t dcc_control,
                             uint64_t dcc_clear_color) noexcept {
-	constexpr uint32_t DCC_256_256_0 = 0x00000048u;
-	constexpr uint32_t DCC_256_64_64 = 0x00000208u;
+	constexpr uint32_t DCC_256_256_0   = 0x00000048u;
+	constexpr uint32_t DCC_256_64_64   = 0x00000208u;
+	constexpr uint32_t DCC_128_128_128 = 0x00100024u;
 	if (!compressed) {
 		return metadata_address == 0 && dcc_control == 0 && dcc_clear_color == 0
 		           ? VideoOutCompression::Uncompressed
@@ -300,6 +279,7 @@ ClassifyVideoOutCompression(bool compressed, uint64_t metadata_address, uint32_t
 	switch (dcc_control) {
 		case DCC_256_256_0: return VideoOutCompression::Dcc256_256_0;
 		case DCC_256_64_64: return VideoOutCompression::Dcc256_64_64;
+		case DCC_128_128_128: return VideoOutCompression::Dcc128_128_128;
 		default: return VideoOutCompression::Unsupported;
 	}
 }
@@ -318,16 +298,22 @@ struct VideoOutFormatPolicy {
 
 inline constexpr uint64_t VIDEO_OUT_PIXEL_FORMAT_R10_G10_B10_A2_BT2100_PQ = 0x8100070422000000ull;
 inline constexpr uint64_t VIDEO_OUT_PIXEL_FORMAT_B10_G10_R10_A2_BT2100_PQ = 0x8100070400000000ull;
+inline constexpr uint64_t VIDEO_OUT_PIXEL_FORMAT_R16_G16_B16_A16_FLOAT_FOR_BT2100_PQ =
+    0xc001070722000000ull;
+inline constexpr uint64_t VIDEO_OUT_PIXEL_FORMAT_B16_G16_R16_A16_FLOAT_FOR_BT2100_PQ =
+    0xc001070700000000ull;
 
 [[nodiscard]] constexpr bool IsHdrVideoOutPixelFormat(uint64_t format) {
 	switch (format) {
 		case VIDEO_OUT_PIXEL_FORMAT_R10_G10_B10_A2_BT2100_PQ:
-		case VIDEO_OUT_PIXEL_FORMAT_B10_G10_R10_A2_BT2100_PQ: return true;
+		case VIDEO_OUT_PIXEL_FORMAT_B10_G10_R10_A2_BT2100_PQ:
+		case VIDEO_OUT_PIXEL_FORMAT_R16_G16_B16_A16_FLOAT_FOR_BT2100_PQ:
+		case VIDEO_OUT_PIXEL_FORMAT_B16_G16_R16_A16_FLOAT_FOR_BT2100_PQ: return true;
 		default: return false;
 	}
 }
 
-inline constexpr std::array<VideoOutFormatPolicy, 8> VIDEO_OUT_FORMAT_POLICIES {{
+inline constexpr std::array<VideoOutFormatPolicy, 10> VIDEO_OUT_FORMAT_POLICIES {{
     {0x8000000022000000ull,
      {vk::Format::eR8G8B8A8Srgb, Prospero::BufferFormat::k8_8_8_8Srgb, 4, false}},
     {0x8000000000000000ull,
@@ -343,6 +329,10 @@ inline constexpr std::array<VideoOutFormatPolicy, 8> VIDEO_OUT_FORMAT_POLICIES {
     {0xc001000622000000ull,
      {vk::Format::eR16G16B16A16Sfloat, Prospero::BufferFormat::k16_16_16_16Float, 8, false}},
     {0xc001000600000000ull,
+     {vk::Format::eR16G16B16A16Sfloat, Prospero::BufferFormat::k16_16_16_16Float, 8, true}},
+    {VIDEO_OUT_PIXEL_FORMAT_R16_G16_B16_A16_FLOAT_FOR_BT2100_PQ,
+     {vk::Format::eR16G16B16A16Sfloat, Prospero::BufferFormat::k16_16_16_16Float, 8, false}},
+    {VIDEO_OUT_PIXEL_FORMAT_B16_G16_R16_A16_FLOAT_FOR_BT2100_PQ,
      {vk::Format::eR16G16B16A16Sfloat, Prospero::BufferFormat::k16_16_16_16Float, 8, true}},
 }};
 
@@ -378,6 +368,9 @@ inline constexpr std::array<VideoOutFormatPolicy, 8> VIDEO_OUT_FORMAT_POLICIES {
 		const auto encoded = static_cast<float>(value & 0xffu) / 255.0f;
 		return encoded <= 0.04045f ? encoded / 12.92f : std::pow((encoded + 0.055f) / 1.055f, 2.4f);
 	};
+	const auto unorm16 = [](uint64_t value) {
+		return static_cast<float>(value & 0xffffu) / 65535.0f;
+	};
 	const auto float16 = [](uint32_t value) {
 		const auto sign = (value & 0x8000u) << 16u;
 		const auto exponent = (value >> 10u) & 0x1fu;
@@ -403,19 +396,35 @@ inline constexpr std::array<VideoOutFormatPolicy, 8> VIDEO_OUT_FORMAT_POLICIES {
 			next.float32[1] = float16(packed >> 16u);
 			[[fallthrough]];
 		case vk::Format::eR16Sfloat: next.float32[0] = float16(packed); break;
-		case vk::Format::eR16G16Unorm:
-			next.float32[1] = static_cast<float>(packed >> 16u) / 65535.0f;
+		case vk::Format::eR16G16B16A16Unorm:
+			next.float32[2] = unorm16(clear_words >> 32u);
+			next.float32[3] = unorm16(clear_words >> 48u);
 			[[fallthrough]];
-		case vk::Format::eR16Unorm:
-			next.float32[0] = static_cast<float>(packed & 0xffffu) / 65535.0f;
+		case vk::Format::eR16G16Unorm:
+			next.float32[1] = unorm16(packed >> 16u);
+			[[fallthrough]];
+		case vk::Format::eR16Unorm: next.float32[0] = unorm16(packed); break;
+		case vk::Format::eR16G16B16A16Uint:
+			for (uint32_t i = 0; i < 4; i++) {
+				next.uint32[i] = static_cast<uint16_t>(clear_words >> (16u * i));
+			}
 			break;
-		// Each clear register stores one raw 32-bit float channel.
+		case vk::Format::eR16G16B16A16Sint:
+			for (uint32_t i = 0; i < 4; i++) {
+				next.int32[i] = static_cast<int16_t>(clear_words >> (16u * i));
+			}
+			break;
+		// Each clear register stores one raw 32-bit channel.
 		case vk::Format::eR32G32Sfloat:
 			next.float32[1] = std::bit_cast<float>(static_cast<uint32_t>(clear_words >> 32u));
 			[[fallthrough]];
 		case vk::Format::eR32Sfloat: next.float32[0] = std::bit_cast<float>(packed); break;
-		case vk::Format::eR32Uint: next.uint32[0] = packed; break;
-		case vk::Format::eR32Sint: next.int32[0] = static_cast<int32_t>(packed); break;
+		case vk::Format::eR32G32Uint:
+		case vk::Format::eR32G32Sint:
+			next.uint32[1] = static_cast<uint32_t>(clear_words >> 32u);
+			[[fallthrough]];
+		case vk::Format::eR32Uint:
+		case vk::Format::eR32Sint: next.uint32[0] = packed; break;
 		// Narrow targets hold their channels in the low bits of the first word. UFC 6 (PPSA23566)
 		// fast-clears an R8_UINT map through CMASK every frame and then writes only part of it;
 		// without these the clear was dropped and old contents piled up.
@@ -528,23 +537,6 @@ inline constexpr std::array<VideoOutFormatPolicy, 8> VIDEO_OUT_FORMAT_POLICIES {
 
 [[nodiscard]] inline bool ImageRangeOverlaps(GuestRange left, GuestRange right) {
 	return ImageRangeOverlaps(left.address, left.size, right.address, right.size);
-}
-
-[[nodiscard]] inline bool ImagePageRangesOverlap(uint64_t left, uint64_t left_size, uint64_t right,
-                                                 uint64_t right_size) {
-	if (left_size == 0 || right_size == 0 || left > UINT64_MAX - left_size ||
-	    right > UINT64_MAX - right_size) {
-		EXIT("invalid image page-overlap range\n");
-	}
-	const auto left_first  = left / TRACKER_PAGE_SIZE;
-	const auto left_last   = (left + left_size - 1) / TRACKER_PAGE_SIZE;
-	const auto right_first = right / TRACKER_PAGE_SIZE;
-	const auto right_last  = (right + right_size - 1) / TRACKER_PAGE_SIZE;
-	return left_first <= right_last && right_first <= left_last;
-}
-
-[[nodiscard]] inline bool ImagePageRangesOverlap(GuestRange left, GuestRange right) {
-	return ImagePageRangesOverlap(left.address, left.size, right.address, right.size);
 }
 
 } // namespace Libs::Graphics

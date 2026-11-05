@@ -6,7 +6,6 @@
 #include "common/assert.h"
 #include "common/debugCounters.h"
 #include "common/diagOut.h"
-#include "common/emulatorConfig.h"
 #include "common/memEvents.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
@@ -19,8 +18,8 @@
 #include "graphics/guest_gpu/pm4Hist.h"
 #include "graphics/host_gpu/renderer/pipeline/rdHazard.h"
 #include "graphics/host_gpu/renderer/gpuKeepWarm.h"
-#include "graphics/host_gpu/gpuLabels.h"
 #include "graphics/host_gpu/renderer/indirectGpu.h"
+#include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -30,7 +29,6 @@
 #include "graphics/presentation/window.h"
 #include "graphics/shader/shader.h"
 #include "kernel/memory.h"
-#include "libs/agc.h"
 #include "libs/errno.h"
 
 #include <algorithm>
@@ -45,27 +43,17 @@
 #include <mutex>
 #include <semaphore>
 #include <thread>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace Libs::Graphics {
 
-static thread_local CommandProcessor* g_current_processor = nullptr;
-static thread_local Pm4Execution*     g_current_execution = nullptr;
-static thread_local bool              g_gpu_thread        = false;
-static thread_local GuestGpu*         g_gpu_state         = nullptr;
-
-static bool GraphicsRunDebugDumpEnabled() {
-	return Config::GraphicsDebugDumpEnabled() &&
-	       Config::GetPrintfDirection() != Config::LogDirection::Silent;
-}
+static thread_local Pm4Execution* g_current_execution = nullptr;
+static thread_local GuestGpu*     g_gpu_state         = nullptr;
 
 GuestGpu::GuestGpu(RenderContext& renderer): m_renderer(renderer) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
-	GraphicsInitJmpTables();
 	m_gfx_cp = std::make_unique<CommandProcessor>(renderer, 0);
-	m_gfx_cp->Reset();
 	m_thread = std::jthread(ThreadRun, this);
 }
 
@@ -108,14 +96,7 @@ void GuestGpu::SendCommand(Common::UniqueFunction<void>&& command) {
 	m_work_available.Signal();
 }
 
-void GuestGpu::Wake() {
-	Common::LockGuard lock(m_queue_mutex);
-	m_wake_pending = true;
-	m_work_available.Signal();
-}
-
 void GuestGpu::ProcessCommands() {
-	EXIT_IF(!IsGpuThread());
 	while (m_pending_commands.load(std::memory_order_acquire) != 0) {
 		Common::UniqueFunction<void> command;
 		{
@@ -148,7 +129,7 @@ void GuestGpu::Submit(std::span<const uint32_t> commands) {
 		return;
 	}
 	Submission submission;
-	submission.type     = SubmissionType::Graphics;
+	submission.type     = SubmissionType::Commands;
 	submission.queue_id = 0;
 	submission.commands = commands;
 	Enqueue(std::move(submission));
@@ -161,7 +142,7 @@ void GuestGpu::SubmitCompute(uint32_t queue, std::span<const uint32_t> commands)
 
 	const auto compute_queue = queue - ComputeQueueBase;
 	Submission submission;
-	submission.type     = SubmissionType::Compute;
+	submission.type     = SubmissionType::Commands;
 	submission.queue_id = 1 + compute_queue;
 	submission.commands = commands;
 	Enqueue(std::move(submission));
@@ -191,7 +172,6 @@ int GuestGpu::GetFrameNum() const {
 }
 
 CommandProcessor& GuestGpu::GetProcessor(uint32_t queue_id) {
-	EXIT_IF(queue_id >= QueueCount);
 	if (queue_id == 0) {
 		return *m_gfx_cp;
 	}
@@ -206,8 +186,7 @@ void CommandProcessor::Reset() {
 	m_sh_ctx.Reset();
 	m_ucfg.Reset();
 	m_ctx.Reset();
-	m_saved_ctx.Reset();
-	m_context_state_pushed             = false;
+	m_saved_ctx.reset();
 	m_index_type_and_size              = 0;
 	m_index_buffer_size                = 0;
 	m_index_base_addr                  = 0;
@@ -222,23 +201,19 @@ void CommandProcessor::ApplyContextStateOperation(ContextStateOperation operatio
 	switch (operation) {
 		case ContextStateOperation::Clear: m_ctx.Reset(); break;
 		case ContextStateOperation::Push:
-			EXIT_IF(m_context_state_pushed);
-			m_saved_ctx            = m_ctx;
-			m_context_state_pushed = true;
+			EXIT_IF(m_saved_ctx.has_value());
+			m_saved_ctx.emplace(m_ctx);
 			break;
 		case ContextStateOperation::Pop:
-			EXIT_IF(!m_context_state_pushed);
-			m_ctx                  = m_saved_ctx;
-			m_saved_ctx            = {};
-			m_context_state_pushed = false;
+			EXIT_IF(!m_saved_ctx.has_value());
+			m_ctx = *m_saved_ctx;
+			m_saved_ctx.reset();
 			break;
 		case ContextStateOperation::PushClear:
-			EXIT_IF(m_context_state_pushed);
-			m_saved_ctx            = m_ctx;
-			m_context_state_pushed = true;
+			EXIT_IF(m_saved_ctx.has_value());
+			m_saved_ctx.emplace(m_ctx);
 			m_ctx.Reset();
 			break;
-		default: EXIT("unknown context state operation: %u\n", static_cast<uint32_t>(operation));
 	}
 }
 
@@ -299,14 +274,12 @@ bool TestWaitRegMemValue(uint64_t value, uint64_t ref, uint64_t mask, uint32_t f
 }
 
 template <typename T>
-void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, uint32_t poll,
-                                  uint32_t wait_op) {
+void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, uint32_t wait_op) {
 	EXIT_IF(addr == nullptr);
 	if ((wait_op & ~1u) != 0) {
 		EXIT("unsupported wait_reg_mem operation: 0x%08" PRIx32 "\n", wait_op);
 	}
 
-	(void)poll;
 	if (m_pipe != nullptr) { // S479: the writes still in the FIFO are what the memory will hold when the wait is reached
 		bool virtual_satisfied = false;
 		if (PipeWaitVirtual(reinterpret_cast<uint64_t>(addr), sizeof(T), func, ref, mask, &virtual_satisfied) && virtual_satisfied) return;
@@ -319,9 +292,19 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 }
 
 template void CommandProcessor::WaitRegMem<uint32_t>(uint32_t, const uint32_t*, uint32_t, uint32_t,
-                                                     uint32_t, uint32_t);
+                                                     uint32_t);
 template void CommandProcessor::WaitRegMem<uint64_t>(uint32_t, const uint64_t*, uint64_t, uint64_t,
-                                                     uint32_t, uint32_t);
+                                                     uint32_t);
+
+void CommandProcessor::MemSemaphore(uint64_t* counter, bool signal, bool write) {
+	if (signal) {
+		*counter = write ? 1u : *counter + 1u;
+	} else if (*counter == 0) {
+		SuspendPm4();
+	} else {
+		(*counter)--;
+	}
+}
 
 void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw_num,
                                  uint32_t write_control) {
@@ -366,22 +349,30 @@ void CommandProcessor::WriteReferenceClock(uint64_t dst_address, uint32_t num_by
 	}
 }
 
-void CommandProcessor::DmaData(uint8_t engine, uint8_t dst_sel, uint8_t dst_cache_policy,
-                               uint64_t dst_address_or_offset, uint8_t src_sel,
-                               uint8_t  src_cache_policy,
-                               uint64_t src_address_or_offset_or_immediate, uint32_t num_bytes,
-                               uint8_t wait_for_previous, uint8_t write_confirm,
-                               uint8_t block_engine) {
-	EXIT_NOT_IMPLEMENTED(engine > 1);
-	if (num_bytes == 0) {
-		return;
+void CommandProcessor::GetLodStats(volatile uint32_t* dst, uint32_t size, bool reset) {
+	auto& counters = m_renderer.GetRenderExecutor().m_mip_stats;
+	// Each of up to 256 2-dword slots after the 16-dword header holds the clamped sample count
+	// (dword 0 bits 0-23), the slot id (bits 24-31), the unclamped sample count (dword 1 bits 0-23)
+	// and the finest mip sampled (bits 24-27, 15 for none). A non-zero header dword 0 then marks
+	// the report complete.
+	if (dst != nullptr && size >= 64) {
+		const auto slots = std::min((size - 64) / 8, 256u);
+		for (uint32_t slot = 0; slot < slots; slot++) {
+			const auto& counter = counters[slot];
+			dst[16 + slot * 2]  = (slot << 24u) | uint32_t {counter.clamped};
+			dst[16 + slot * 2 + 1] =
+			    (uint32_t {counter.finest_level} << 24u) | uint32_t {counter.unclamped};
+		}
+		dst[0] = 1;
 	}
-	EXIT_NOT_IMPLEMENTED(dst_cache_policy > 3);
-	EXIT_NOT_IMPLEMENTED(src_cache_policy > 3);
-	EXIT_NOT_IMPLEMENTED(wait_for_previous > 1);
-	EXIT_NOT_IMPLEMENTED(write_confirm > 1);
-	EXIT_NOT_IMPLEMENTED(block_engine > 1);
-	if (static_cast<uint32_t>(dst_address_or_offset) == 0x3022cu) {
+	if (reset) {
+		counters = {};
+	}
+}
+
+void CommandProcessor::DmaData(uint8_t dst_sel, uint64_t dst_address_or_offset, uint8_t src_sel,
+                               uint64_t src_address_or_offset_or_immediate, uint32_t num_bytes) {
+	if (num_bytes == 0 || static_cast<uint32_t>(dst_address_or_offset) == 0x3022cu) {
 		return;
 	}
 	auto decode_gds = [](uint8_t selector, bool& is_gds) {
@@ -448,8 +439,7 @@ void GuestGpu::ThreadRun(void* data) {
 	auto* gpu = static_cast<GuestGpu*>(data);
 	EXIT_IF(gpu == nullptr);
 	KYTY_PROFILER_THREAD("Thread_Gpu");
-	g_gpu_thread = true;
-	g_gpu_state  = gpu;
+	g_gpu_state = gpu;
 	CpPhases::BindCpThread();
 	CpPhases::NameCurrentThread("Thread_Gpu");
 	Common::CpTuning::ApplyToCpThread();
@@ -472,8 +462,7 @@ void GuestGpu::ThreadRun(void* data) {
 		}
 		Submission                   submission;
 		Common::UniqueFunction<void> command;
-		bool                         has_submission = false;
-		bool                         should_stop    = false;
+		bool                         should_stop = false;
 		{
 			Common::LockGuard lock(gpu->m_queue_mutex);
 			while (gpu->m_commands.empty() && gpu->m_submission_count == 0 && !gpu->m_stopping) {
@@ -502,8 +491,7 @@ void GuestGpu::ThreadRun(void* data) {
 				}
 				if (selected_queue < 0) {
 					gpu->m_processing = false;
-					// A wake that came before this wait must not be lost.
-					if (!std::exchange(gpu->m_wake_pending, false)) {
+					{
 						FrameTiming::ScopedCounterNs wait(FrameTiming::Counter::CpWaitGuestNs);
 						gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
 					}
@@ -520,30 +508,31 @@ void GuestGpu::ThreadRun(void* data) {
 				gpu->m_submission_count--;
 				gpu->m_next_queue = (static_cast<uint32_t>(selected_queue) + 1) % QueueCount;
 				gpu->m_processing = true;
-				has_submission    = true;
 				FrameTiming::NoteGuestLead(FrameTiming::ElapsedNs(submission.enqueue_ns, FrameTiming::SteadyNowNs())); // S441
 			}
 		}
 		if (should_stop) {
 			gpu->m_gfx_cp->BufferWait();
-			g_gpu_state  = nullptr;
-			g_gpu_thread = false;
+			g_gpu_state = nullptr;
 			return;
 		}
 
 		if (command) {
-			EXIT_IF(g_current_processor != nullptr);
-			const auto busy_begin = std::chrono::steady_clock::now();
 			{
-				CpPhases::Scope phase(CpPhases::Phase::Cmds);
-				command();
+				Common::DebugCounters::ScopedTimer busy(
+				    Common::DebugCounters::Counter::GpuThreadBusyNs);
+				const auto busy_begin = std::chrono::steady_clock::now();
+				{
+					CpPhases::Scope phase(CpPhases::Phase::Cmds);
+					command();
+				}
+				const auto busy_ns = static_cast<uint64_t>(
+				    std::chrono::duration_cast<std::chrono::nanoseconds>(
+				        std::chrono::steady_clock::now() - busy_begin)
+				        .count());
+				FrameTiming::AddGpuBusy(busy_ns);
+				FrameTiming::Add(FrameTiming::Counter::CpBusyNs, busy_ns);
 			}
-			const auto busy_ns = static_cast<uint64_t>(
-			    std::chrono::duration_cast<std::chrono::nanoseconds>(
-			        std::chrono::steady_clock::now() - busy_begin)
-			        .count());
-			FrameTiming::AddGpuBusy(busy_ns);
-			FrameTiming::Add(FrameTiming::Counter::CpBusyNs, busy_ns);
 
 			Common::LockGuard lock(gpu->m_queue_mutex);
 			gpu->m_processing = false;
@@ -553,15 +542,19 @@ void GuestGpu::ThreadRun(void* data) {
 			continue;
 		}
 
-		EXIT_IF(!has_submission);
-		const auto busy_begin = std::chrono::steady_clock::now();
-		const bool complete   = gpu->Process(submission);
-		const auto busy_ns    = static_cast<uint64_t>(
-            std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
-                                                                 busy_begin)
-                .count());
-		FrameTiming::AddGpuBusy(busy_ns);
-		FrameTiming::Add(FrameTiming::Counter::CpBusyNs, busy_ns);
+		const bool complete = [&] {
+			Common::DebugCounters::ScopedTimer busy(
+			    Common::DebugCounters::Counter::GpuThreadBusyNs);
+			const auto busy_begin = std::chrono::steady_clock::now();
+			const bool done       = gpu->Process(submission);
+			const auto busy_ns    = static_cast<uint64_t>(
+			    std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() -
+			                                                         busy_begin)
+			        .count());
+			FrameTiming::AddGpuBusy(busy_ns);
+			FrameTiming::Add(FrameTiming::Counter::CpBusyNs, busy_ns);
+			return done;
+		}();
 
 		Common::LockGuard lock(gpu->m_queue_mutex);
 		if (!complete) {
@@ -583,34 +576,13 @@ void GuestGpu::ThreadRun(void* data) {
 }
 
 bool GuestGpu::Process(Submission& submission) {
-	const bool first_slice = !submission.started;
-	auto&      cp          = GetProcessor(submission.queue_id);
-
-	if (first_slice) {
-		submission.started = true;
-		cp.SetSubmitId(++m_submit_id);
-	}
+	auto& cp = GetProcessor(submission.queue_id);
 
 	cp.BufferInit();
 	bool complete = true;
 
 	switch (submission.type) {
-		case SubmissionType::Compute:
-			if (first_slice) {
-				const auto      num_dw = static_cast<uint32_t>(submission.commands.size());
-				const auto*     buffer = submission.commands.data();
-				static uint32_t compute_batch_log_count = 0;
-				if (num_dw <= 128 && compute_batch_log_count++ < 32) {
-					LOGF("compute direct batch: data=0x%016" PRIx64 ", num_dw=%" PRIu32 "\n",
-					     reinterpret_cast<uint64_t>(buffer), num_dw);
-					for (uint32_t i = 0; i < std::min<uint32_t>(num_dw, 16); i++) {
-						LOGF("\t compute[%02" PRIu32 "] = 0x%08" PRIx32 "\n", i, buffer[i]);
-					}
-				}
-				GraphicsDbgDumpDcb("cc", num_dw, buffer);
-			}
-			[[fallthrough]];
-		case SubmissionType::Graphics:
+		case SubmissionType::Commands:
 			complete =
 			    cp.Process(submission.execution, submission.commands) == Pm4ProcessResult::Complete;
 			if (submission.execution.MadeProgress()) {
@@ -650,19 +622,9 @@ Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
 	execution.m_made_progress = false;
 
 	struct ExecutionScope {
-		ExecutionScope(CommandProcessor& processor, Pm4Execution& execution)
-		    : previous_processor(g_current_processor), previous_execution(g_current_execution) {
-			g_current_processor = &processor;
-			g_current_execution = &execution;
-		}
-		~ExecutionScope() {
-			g_current_processor = previous_processor;
-			g_current_execution = previous_execution;
-		}
-
-		CommandProcessor* previous_processor;
-		Pm4Execution*     previous_execution;
-	} execution_scope(*this, execution);
+		explicit ExecutionScope(Pm4Execution& execution) { g_current_execution = &execution; }
+		~ExecutionScope() { g_current_execution = nullptr; }
+	} execution_scope(execution);
 
 	if (m_pipe == nullptr) PipeInit(); // S479 (KYTY_CP_PIPE)
 	ProcessPm4(execution);
@@ -689,6 +651,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		Pm4Hist::MaybeDump(FrameTiming::GuestFlips(), [](const char* l) { Common::DiagOut::Write(l); });
 	}
 	if (RdHazard::Enabled()) RdHazard::MaybeDump(FrameTiming::GuestFlips()); // S477 D2 DIAG
+	const bool debug_dump = graphics_debug_dump_enabled();
 	while (!execution.m_buffer_stack.empty()) {
 		if (g_gpu_state != nullptr) {
 			// S479: a command from a guest thread (a fault readback, an unmap) must see every draw parsed before it, as it did when draws ran where they were parsed.
@@ -697,7 +660,6 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			g_gpu_state->ProcessCommands();
 		}
 		auto& cursor = execution.m_buffer_stack.back();
-		EXIT_IF(cursor.offset_dw > cursor.commands.size());
 		if (cursor.offset_dw == cursor.commands.size()) {
 			execution.m_buffer_stack.pop_back();
 			continue;
@@ -708,7 +670,6 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		const auto        remaining_dw  = total_dw - cursor.offset_dw;
 		const auto        packet_header = packet[0];
 		const auto        opcode        = (packet_header >> 8u) & 0xffu;
-		EXIT_NOT_IMPLEMENTED(remaining_dw > total_dw);
 
 		if (packet_header == 0x80000000u || Pm4::PacketSizeDw(packet_header) == 1u) {
 			cursor.offset_dw++;
@@ -718,22 +679,15 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 
 		EXIT_NOT_IMPLEMENTED(remaining_dw < 2);
 
-		if (GraphicsRunDebugDumpEnabled()) {
+		if (debug_dump) {
 			LOGF("CP packet: offset=0x%05" PRIx32 " cmd_id=0x%08" PRIx32 " op=0x%02" PRIx32
 			     " len=%" PRIu32 "\n",
-			     total_dw - remaining_dw, packet_header, opcode, KYTY_PM4_LEN(packet_header));
+			     cursor.offset_dw, packet_header, opcode, KYTY_PM4_LEN(packet_header));
 		}
 
 		if ((packet_header & 1u) != 0 && ShouldSkipPredicatedPackets()) {
 			auto packet_dw = KYTY_PM4_LEN(packet_header);
-			EXIT_NOT_IMPLEMENTED(packet_dw == 0 || packet_dw > remaining_dw);
-			static std::atomic<uint32_t> skip_log_count {0};
-			if (skip_log_count.fetch_add(1) < 2048) {
-				LOGF("\t predicated skip: op=0x%02" PRIx32 ", r=0x%02" PRIx32 ", len=%" PRIu32
-				     ", packet=0x%016" PRIx64 ", cmd_id=0x%08" PRIx32 "\n",
-				     opcode, KYTY_PM4_R(packet_header), packet_dw,
-				     reinterpret_cast<uint64_t>(packet), packet_header);
-			}
+			EXIT_NOT_IMPLEMENTED(packet_dw > remaining_dw);
 			cursor.offset_dw += packet_dw;
 			execution.m_made_progress = true;
 			continue;
@@ -742,7 +696,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		auto handler = g_cp_op_func[opcode];
 
 		if (handler == nullptr) {
-			const auto offset = total_dw - remaining_dw;
+			const auto offset = cursor.offset_dw;
 			LOGF("unknown PM4 packet: data=0x%016" PRIx64 ", num_dw=%" PRIu32
 			     ", offset=0x%05" PRIx32 ", current=0x%016" PRIx64 "\n",
 			     reinterpret_cast<uint64_t>(packet - offset), total_dw, offset,
@@ -753,8 +707,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			for (uint32_t i = dump_begin; i < dump_end; i++) {
 				LOGF("\t%05" PRIx32 "%s %08" PRIx32 "\n", i, (i == offset ? ":" : " "), base[i]);
 			}
-			EXIT("unknown op\n\t%05" PRIx32 ":\n\tcmd_id = %08" PRIx32 "\n",
-			     total_dw - remaining_dw, packet_header);
+			EXIT("unknown op\n\t%05" PRIx32 ":\n\tcmd_id = %08" PRIx32 "\n", offset, packet_header);
 		}
 
 		// S479 (KYTY_CP_PIPE): draws, dispatches, signals and CPU writes wait in the FIFO; the rest runs here as before, after a drain when it is not known to be harmless.
@@ -878,8 +831,7 @@ uint32_t CommandProcessor::NumInstances() {
 }
 
 void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t wait_op,
-                                      const volatile void* address, uint32_t count_in_dwords) {
-	(void)count_in_dwords;
+                                      const volatile void* address) {
 	uint64_t value = 0;
 
 	switch (op) {
@@ -918,15 +870,6 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 		case 0x01: m_predicate_skip = (value == 0); break;
 		default: EXIT("unknown predication condition: 0x%08" PRIx32 "\n", condition);
 	}
-	if (op == 0x03) {
-		static std::atomic<uint32_t> log_count {0};
-		if (log_count.fetch_add(1) < 128) {
-			LOGF("\t bool predication: addr=0x%016" PRIx64 ", value=0x%016" PRIx64
-			     ", condition=%" PRIu32 ", skip=%u, wait_op=%" PRIu32 "\n",
-			     reinterpret_cast<uint64_t>(address), value, condition,
-			     m_predicate_skip ? 1u : 0u, wait_op);
-		}
-	}
 }
 
 void CommandProcessor::DrawIndex(DrawIndexArgs args) {
@@ -934,7 +877,7 @@ void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 	if (args.instance_count == 0) {
 		args.instance_count = NumInstances();
 	}
-	m_renderer.GetRenderExecutor().DrawIndex(m_submit_id, CurrentBuffer(), args);
+	m_renderer.GetRenderExecutor().DrawIndex(CurrentBuffer(), args);
 }
 
 const void* CommandProcessor::IndexAddress(uint32_t first_index) const {
@@ -954,7 +897,7 @@ void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_cou
 
 static void PatchIndirectDrawOffsets(CommandProcessor& cp, IndirectDrawRegisters registers,
                                      uint32_t vertex_offset, uint32_t instance_offset,
-                                     uint32_t first_index) {
+                                     uint32_t first_index, uint32_t draw_index) {
 	const auto write = [&](uint32_t location, uint32_t value) {
 		if (location == Pm4::SH_NOP) {
 			return;
@@ -966,6 +909,28 @@ static void PatchIndirectDrawOffsets(CommandProcessor& cp, IndirectDrawRegisters
 	write(registers.vertex_offset, vertex_offset);
 	write(registers.instance_offset, instance_offset);
 	write(registers.index_offset, first_index);
+	write(registers.draw_index, draw_index);
+}
+
+// Writes the GS user-data slots the packet patches; false when the shaders cannot read the
+// offsets from GPU records: a first-index or subdraw-index destination, or another stage's
+// user data.
+static bool IndirectDrawOffsets(IndirectDrawRegisters registers, ShaderIndirectOffsets& offsets) {
+	if (registers.index_offset != Pm4::SH_NOP || registers.draw_index != Pm4::SH_NOP) {
+		return false;
+	}
+	for (const auto [location, slot]: {std::pair {registers.vertex_offset, &offsets.vertex},
+	                                   std::pair {registers.instance_offset, &offsets.instance}}) {
+		if (location == Pm4::SH_NOP) {
+			continue;
+		}
+		const uint32_t index = location - Pm4::SPI_SHADER_USER_DATA_GS_0;
+		if (index >= HW::UserSgprInfo::SGPRS_MAX) {
+			return false;
+		}
+		*slot = static_cast<uint8_t>(index);
+	}
+	return true;
 }
 
 
@@ -1025,19 +990,20 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 			return;
 		}
 	}
-	// With no SGPRs to patch, the GPU reads the records if the shaders allow. Shaders apply
-	// the records' offsets only through those SGPRs; Vulkan applies them, which matches
-	// while they are zero.
-	const DrawIndirectArgs records {args_addr, draw_count, stride_in_bytes};
-	if (registers.vertex_offset == Pm4::SH_NOP && registers.instance_offset == Pm4::SH_NOP &&
-	    registers.index_offset == Pm4::SH_NOP && (!indexed || m_index_buffer_size != 0) &&
-	    (indexed ? executor.DrawIndex(m_submit_id, CurrentBuffer(),
-	                                  {.index_count         = m_index_buffer_size,
-	                                   .index_addr          = IndexAddress(0),
-	                                   .index_type_and_size = m_index_type_and_size,
-	                                   .indirect            = records})
-	             : executor.DrawAuto(m_submit_id, CurrentBuffer(), {.indirect = records}))) {
-		return;
+	// The GPU reads the records if the shaders allow; the VS prolog removes Vulkan's bases
+	// from the index VGPRs and copies them only to the user SGPRs the packet patches.
+	DrawIndirectArgs records {args_addr, draw_count, stride_in_bytes};
+	if (IndirectDrawOffsets(registers, records.offsets)) {
+		if (!indexed && executor.DrawAuto(CurrentBuffer(), {.indirect = records})) {
+			return;
+		}
+		if (indexed && m_index_buffer_size != 0 &&
+		    executor.DrawIndex(CurrentBuffer(), {.index_count         = m_index_buffer_size,
+		                                         .index_addr          = IndexAddress(0),
+		                                         .index_type_and_size = m_index_type_and_size,
+		                                         .indirect            = records})) {
+			return;
+		}
 	}
 
 	const uint32_t max_indices = m_index_buffer_size != 0 ? m_index_buffer_size : UINT32_MAX;
@@ -1045,59 +1011,38 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		const auto addr = args_addr + static_cast<uint64_t>(i) * stride_in_bytes;
 		if (!indexed) {
 			const auto& args = *reinterpret_cast<const vk::DrawIndirectCommand*>(addr);
-			PatchIndirectDrawOffsets(*this, registers, args.firstVertex, args.firstInstance, 0);
-			executor.DrawAuto(m_submit_id, CurrentBuffer(),
-			                  {.vertex_count   = args.vertexCount,
-			                   .instance_count = args.instanceCount,
-			                   .first_vertex   = args.firstVertex,
-			                   .first_instance = args.firstInstance,
-			                   .offset_source  = DrawOffsetSource::IndirectArgs});
+			PatchIndirectDrawOffsets(*this, registers, args.firstVertex, args.firstInstance, 0, i);
+			executor.DrawAuto(CurrentBuffer(), {.vertex_count   = args.vertexCount,
+			                                    .instance_count = args.instanceCount,
+			                                    .first_vertex   = args.firstVertex,
+			                                    .first_instance = args.firstInstance,
+			                                    .offset_source  = DrawOffsetSource::IndirectArgs});
 			continue;
 		}
 
 		const auto& args = *reinterpret_cast<const vk::DrawIndexedIndirectCommand*>(addr);
 		PatchIndirectDrawOffsets(*this, registers, static_cast<uint32_t>(args.vertexOffset),
-		                         args.firstInstance, args.firstIndex);
-		executor.DrawIndex(m_submit_id, CurrentBuffer(),
-		                   {.index_count         = std::min(args.indexCount, max_indices),
-		                    .index_addr          = IndexAddress(args.firstIndex),
-		                    .instance_count      = args.instanceCount,
-		                    .index_type_and_size = m_index_type_and_size,
-		                    .base_vertex         = args.vertexOffset,
-		                    .first_instance      = args.firstInstance,
-		                    .offset_source       = DrawOffsetSource::IndirectArgs});
+		                         args.firstInstance, args.firstIndex, i);
+		executor.DrawIndex(CurrentBuffer(), {.index_count = std::min(args.indexCount, max_indices),
+		                                     .index_addr  = IndexAddress(args.firstIndex),
+		                                     .instance_count      = args.instanceCount,
+		                                     .index_type_and_size = m_index_type_and_size,
+		                                     .base_vertex         = args.vertexOffset,
+		                                     .first_instance      = args.firstInstance,
+		                                     .offset_source = DrawOffsetSource::IndirectArgs});
 	}
 }
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
                                       uint32_t thread_group_z, uint32_t mode) {
 	ExecSh().SetCsWaveSize(Pm4::ComputeWaveSize(mode));
+	m_renderer.GetRenderExecutor().DispatchDirect(CurrentBuffer(), thread_group_x, thread_group_y,
+	                                              thread_group_z, mode, IsAsyncComputeQueue());
+}
 
-	uint32_t frame_num = 0;
-
-	{
-		frame_num = m_renderer.GetGpu().GetFrameNum();
-		if (GraphicsRunDebugDumpEnabled()) {
-			static std::atomic<uint32_t> log_count {0};
-			if (log_count.fetch_add(1, std::memory_order_relaxed) < 1024) {
-				const auto& cs = ExecSh().GetCs().cs_regs;
-				const auto& oa = ExecUcfg().GetGdsOaCounter(ExecUcfg().GetGdsOaState().GetIndex());
-				LOGF("QueuePoint DispatchDirect: frame=%u submit=%" PRIu64
-				     " groups=%ux%ux%u local=%ux%ux%u mode=0x%08" PRIx32 " wave=%u cs=0x%016" PRIx64
-				     " oa_index=%u oa_enabled=%s oa_addr=0x%04" PRIx32 " oa_space=0x%08" PRIx32
-				     "\n",
-				     frame_num, m_submit_id, thread_group_x, thread_group_y, thread_group_z,
-				     std::max(cs.num_thread_x, 1u), std::max(cs.num_thread_y, 1u),
-				     std::max(cs.num_thread_z, 1u), mode, static_cast<uint32_t>(cs.wave_size),
-				     cs.data_addr, ExecUcfg().GetGdsOaState().GetIndex(),
-				     oa.IsCounterEnabled() ? "true" : "false", oa.GetAddressBytes(),
-				     oa.GetSpaceAvailable());
-			}
-		}
-
-		m_renderer.GetRenderExecutor().DispatchDirect(m_submit_id, CurrentBuffer(), thread_group_x,
-		                                              thread_group_y, thread_group_z, mode, IsAsyncComputeQueue());
-	}
+void CommandProcessor::ProcessPssr(const Pssr::Request& request) {
+	EXIT_NOT_IMPLEMENTED(IsAsyncComputeQueue());
+	m_renderer.GetRenderExecutor().ProcessPssr(CurrentBuffer(), request);
 }
 
 void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
@@ -1108,7 +1053,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 		return;
 	}
 	ExecSh().SetCsWaveSize(Pm4::ComputeWaveSize(mode));
-	m_renderer.GetRenderExecutor().DispatchIndirect(m_submit_id, CurrentBuffer(), args_addr, mode,
+	m_renderer.GetRenderExecutor().DispatchIndirect(CurrentBuffer(), args_addr, mode,
 	                                                IsAsyncComputeQueue());
 }
 
@@ -1116,20 +1061,19 @@ void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 	if (args.instance_count == 0) {
 		args.instance_count = NumInstances();
 	}
-	m_renderer.GetRenderExecutor().DrawAuto(m_submit_id, CurrentBuffer(), args);
+	m_renderer.GetRenderExecutor().DrawAuto(CurrentBuffer(), args);
 }
 
 void CommandProcessor::WaitFlipDone(uint32_t video_out_handle, uint32_t display_buffer_index) {
-	// Stall only this command processor, not the host command lane or other queues.
-	if (!m_renderer.GetVideoOut().IsSafeForRendering(static_cast<int>(video_out_handle),
-	                                                 static_cast<int>(display_buffer_index))) {
-		SuspendPm4();
-	}
+	BufferFlush();
+
+	m_renderer.GetVideoOut().WaitFlipDone(static_cast<int>(video_out_handle),
+	                                      static_cast<int>(display_buffer_index));
 }
 
 void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector, void* address,
                                   uint64_t data, uint32_t interrupt_context_id) {
-	if (GraphicsRunDebugDumpEnabled()) {
+	if (graphics_debug_dump_enabled()) {
 		LOGF("CommandProcessor::ReleaseMem()\n"
 		     "\t data_sel           = %" PRIu32 "\n"
 		     "\t interrupt_selector = %" PRIu32 "\n"
@@ -1155,16 +1099,28 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 	// Dumped occlusion counters are written before any end-of-pipe signal reaches the guest.
 	m_renderer.GetOcclusionQueries().Publish();
 
+	// A label beside GPU-written bytes goes to the backing store, so they are not downloaded.
+	// Other labels go through the guest mapping: its fault keeps a clean cached copy current and
+	// downloads GPU-written bytes under the label before the store.
+	const auto write_label = [this, address](const void* value, uint64_t size) {
+		const auto vaddr   = reinterpret_cast<uint64_t>(address);
+		auto&      buffers = m_renderer.GetBufferCache();
+		if (!GuestRange {vaddr, size}.Valid() || !buffers.IsRegionGpuModified(vaddr, size) ||
+		    buffers.HasGpuDirtyBytes(vaddr, size) ||
+		    !LibKernel::Memory::TryWriteBacking(vaddr, value, size)) {
+			std::memcpy(address, value, size);
+		}
+	};
 	// EndOfPipeData: kNone, kImmediate32b, kImmediate64b, kRefClk; 5 reads GDS.
 	switch (data_sel) {
 		case 0: break;
 		case 1: {
 			const auto value = static_cast<uint32_t>(data);
-			std::memcpy(address, &value, sizeof(value));
+			write_label(&value, sizeof(value));
 			break;
 		}
 		case 3: data = Sync::ReadReferenceClock(); [[fallthrough]];
-		case 2: std::memcpy(address, &data, sizeof(data)); break;
+		case 2: write_label(&data, sizeof(data)); break;
 		case 5: {
 			GetScheduler().Finish();
 			const auto gds = static_cast<uint32_t>(data);
@@ -1186,7 +1142,7 @@ void CommandProcessor::ReleaseMem(uint32_t data_sel, uint32_t interrupt_selector
 
 void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
                                     uint64_t event_address) {
-	if (GraphicsRunDebugDumpEnabled()) {
+	if (graphics_debug_dump_enabled()) {
 		LOGF("CommandProcessor::TriggerEvent()\n"
 		     "\t event_type  = 0x%08" PRIx32 "\n"
 		     "\t event_index = 0x%08" PRIx32 "\n"
@@ -1263,14 +1219,13 @@ void CommandProcessor::TriggerEvent(uint32_t event_type, uint32_t event_index,
 }
 
 void CommandProcessor::Flip(int handle, int index, int flip_mode, int64_t flip_arg) {
-	if (GraphicsRunDebugDumpEnabled()) {
+	if (graphics_debug_dump_enabled()) {
 		LOGF("CommandProcessor::Flip()\n");
 	}
 	m_renderer.GetOcclusionQueries().Publish();
 
 	auto& command = CurrentBuffer();
 	auto  request = Sync::PrepareVideoOutFlip(command, handle, index, flip_mode, flip_arg);
-	(void)command.Handle();
 	GetScheduler().DeferPriorityOperation(
 	    [&renderer = m_renderer, request] { renderer.GetVideoOut().CompleteFlip(request); });
 	GetScheduler().SetSubmitReason(GpuDone::SubmitReason::Flip); // S410
@@ -1279,15 +1234,6 @@ void CommandProcessor::Flip(int handle, int index, int flip_mode, int64_t flip_a
 
 void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
 	auto& command = CurrentBuffer();
-	if (g_current_processor != nullptr) {
-		EXIT("invalid graphics-thread CPU flip preparation\n");
-	}
-	struct ProcessorScope {
-		explicit ProcessorScope(CommandProcessor& processor) { g_current_processor = &processor; }
-		~ProcessorScope() { g_current_processor = nullptr; }
-	};
-	ProcessorScope processor_scope(*this);
-
 	m_renderer.GetVideoOut().PrepareFlip(request_id, command);
 	GetScheduler().DeferPriorityOperation(
 	    [this, request_id] { m_renderer.GetVideoOut().CompleteFlip(request_id); });
@@ -1296,7 +1242,7 @@ void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
 }
 
 bool GuestGpu::IsGpuThread() noexcept {
-	return g_gpu_thread;
+	return g_gpu_state != nullptr;
 }
 
 } // namespace Libs::Graphics

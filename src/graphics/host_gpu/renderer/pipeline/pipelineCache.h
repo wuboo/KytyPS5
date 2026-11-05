@@ -57,15 +57,12 @@ struct PipelineStaticParameters {
 	bool                       depth_clip_enable        = true;
 	vk::PrimitiveTopology      topology                 = vk::PrimitiveTopology::ePointList;
 	// 0 without tessellation, 3 for a rectangle list, else the input control points.
-	uint8_t                    patch_control_points     = 0;
+	uint32_t                   patch_control_points     = 0;
 	bool                       primitive_restart_enable = false;
 	uint32_t                   samples                  = 1;
 	bool                       sample_shading_enable    = false;
 	bool                       alpha_to_coverage_enable = false;
 	uint32_t                   color_mask[RENDER_COLOR_ATTACHMENTS_MAX]           = {};
-	bool                       cull_front                                         = false;
-	bool                       cull_back                                          = false;
-	bool                       face                                               = false;
 	bool                       provoking_vtx_last                                 = false;
 	vk::PolygonMode            polygon_mode                                       = vk::PolygonMode::eFill;
 	uint8_t                    color_srcblend[RENDER_COLOR_ATTACHMENTS_MAX]       = {};
@@ -129,6 +126,8 @@ struct ShaderModule {
 	std::vector<vk::Format>                      vertex_formats;
 	// Rectangle-list PS: the parameters it reads.
 	std::vector<RectListParameter>               rect_parameters;
+	// Indirect mesh draw: a task shader reads the records and launches the groups.
+	bool                                         mesh_task = false;
 };
 
 // A draw's topology, shader stages (from PipelineCache::GetGraphicsPrograms) and targets.
@@ -143,6 +142,9 @@ struct DrawRenderState {
 	bool                                 ps_active                                = false;
 	std::array<ShaderVertexInputInfo, 3> vertex_info;
 	ShaderPixelInputInfo                 ps_input_info;
+	// Input: the user-data slots a GPU-read indirect draw patches.
+	ShaderIndirectOffsets                indirect_offsets;
+	bool                                 indirect_draw = false;
 
 	[[nodiscard]] std::span<const ShaderVertexInputInfo> VertexStages() const {
 		return {vertex_info.data(), vertex_info[1].stage ? 3u : 1u};
@@ -152,17 +154,19 @@ struct DrawRenderState {
 // Writes the shader store on its own thread, running jobs in the order they were posted.
 class ShaderStoreWriter {
 public:
-	// Keeps the first `kept` bytes of the store at `path`, or starts it over with `header`. The
-	// thread runs only if that succeeded.
+	ShaderStoreWriter();
+	// Keeps the first `kept` bytes of the store at `path`, or starts it over with `header`.
 	void Open(const std::filesystem::path& path, std::span<const uint8_t> header, uint64_t kept);
-	explicit operator bool() const { return m_thread.joinable(); }
+	// Whether the store is open.
+	explicit operator bool() const { return !m_file.IsInvalid(); }
 	// Compresses `record` and appends it on the store thread, in call order.
 	void Append(std::vector<uint8_t>&& record);
+	void Post(Common::UniqueFunction<void>&& job);
+	// Runs the queued jobs and stops the thread; jobs posted later never run. Safe to call again.
+	void Finish() { m_thread = {}; }
 
 private:
 	friend struct PipelineCacheTestAccess;
-
-	void Post(Common::UniqueFunction<void>&& job);
 
 	Common::File                             m_file;
 	std::mutex                               m_mutex;
@@ -180,12 +184,16 @@ public:
 	              const std::filesystem::path& shader_store = {});
 	~PipelineCache();
 	KYTY_CLASS_NO_COPY(PipelineCache);
+	// Finishes the queued writes and stops the store thread, then writes the driver cache if it
+	// changed.
 	void Save();
 
 	struct Pipeline {
 		vk::PipelineLayout      pipeline_layout       = nullptr;
 		vk::Pipeline            pipeline              = nullptr;
 		vk::DescriptorSetLayout descriptor_set_layout = nullptr;
+		// The push constant range's stages, which every update names.
+		vk::ShaderStageFlags    push_stages;
 		bool                    uses_push_descriptors = false;
 		bool                    uses_image_heap       = false;
 	};
@@ -267,7 +275,7 @@ private:
 	std::unordered_map<GraphicsPipelineKey, Pipeline, GraphicsPipelineKeyHash> m_graphics_pipelines;
 	std::unordered_map<uint64_t, Pipeline>                                     m_compute_pipelines;
 	std::unordered_map<uint64_t, ShaderTessellationInputInfo>                  m_tess_layouts;
-	// Records everything first created; closed without a shader store.
+	// Records everything first created if a shader store is open, and writes the driver cache.
 	ShaderStoreWriter m_store;
 
 	template <typename InputInfo>
@@ -285,11 +293,13 @@ private:
 	                            ShaderRecompiler::TranslateResult translated,
 	                            uint32_t                          push_data_cursor);
 	void InitializeDriverCache();
+	// Marks the driver cache changed and, once per interval, has the store thread write it.
 	void CheckpointDriverCache();
+	void WriteDriverCache() const;
 
 	// pipelineSerialization.cpp
 	void WarmUp(const std::filesystem::path& path);
-	bool LoadRecord(std::span<const uint8_t>& records, std::vector<GraphicsPipelineKey>& pipelines);
+	bool LoadRecord(std::span<const uint8_t>& records);
 	void StoreModule(const ProgramKey& key, const Program& program, const ShaderModule& module,
 	                 const std::vector<uint32_t>& spirv);
 	void StorePipeline(const GraphicsPipelineKey& key);

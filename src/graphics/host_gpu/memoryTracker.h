@@ -12,7 +12,6 @@
 #include <memory>
 #include <mutex>
 #include <type_traits>
-#include <utility>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -35,7 +34,6 @@ public:
 	};
 	[[nodiscard]] PageGeneration QueryPageGeneration(uint64_t vaddr, uint64_t size);
 	void               MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size);
-	void               MarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	void               UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	void               UntrackMemory(uint64_t vaddr, uint64_t size);
 	// S440: pages the tracker no longer protects (HotPages) raise no fault; this adds them to `set`.
@@ -44,8 +42,6 @@ public:
 	template <typename Flush>
 	void InvalidateRegion(uint64_t vaddr, uint64_t size, Flush&& on_flush) noexcept {
 		static_assert(std::is_invocable_v<Flush&>);
-		CheckNotInUploadCallback();
-
 		Iterate<false>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 			const bool should_flush = [&] {
 				// Perform both the GPU modification check and CPU state change with the lock in
@@ -77,13 +73,11 @@ public:
 	template <bool clear, typename Func>
 	void ForEachDownloadRange(uint64_t vaddr, uint64_t size, Func&& func) {
 		static_assert(std::is_nothrow_invocable_v<Func&, uint64_t, uint64_t>);
-		CheckNotInUploadCallback();
 		Iterate<false>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 			std::scoped_lock lock(manager->lock);
-			const auto       address = manager->GetCpuAddr() + offset;
-			manager->template ForEachModifiedRange<DirtySource::Gpu, false>(address, bytes, func);
+			manager->ForEachModifiedRange<DirtySource::Gpu, false>(offset, bytes, func);
 			if constexpr (clear) {
-				manager->template ChangeState<DirtySource::Gpu, false>(address, bytes);
+				manager->ChangeState<DirtySource::Gpu, false>(offset, bytes);
 			}
 		});
 	}

@@ -134,7 +134,8 @@ void MainDialogPrivate::Setup(MainDialog* main_dialog) {
 	m_ui->close_terminal->setVisible(false); // The emulator runs without a terminal.
 #endif
 
-	main_dialog->setWindowFlags(Qt::Dialog /*| Qt::MSWindowsFixedSizeDialogHint*/);
+	main_dialog->setWindowFlags(Qt::Dialog | Qt::WindowMinMaxButtonsHint |
+	                            Qt::WindowCloseButtonHint);
 
 	connect(main_dialog, &MainDialog::Start, this, &MainDialogPrivate::FindInterpreter,
 	        Qt::QueuedConnection);
@@ -240,7 +241,7 @@ static void AddFlag(QStringList& args, bool enabled, const char* name) {
 
 static QStringList CreateEmulatorArgs(const Configuration& info) {
 	QStringList args;
-	auto        r = EnumToText(info.screen_resolution).split('x');
+	auto        r = Configuration::NormalizeResolution(info.screen_resolution).split('x');
 
 	if (r.size() != 2) {
 		return {};
@@ -266,6 +267,7 @@ static QStringList CreateEmulatorArgs(const Configuration& info) {
 	AddFlag(args, info.fullscreen_enabled, "--fullscreen");
 	AddFlag(args, info.hdr_enabled, "--hdr");
 	AddFlag(args, info.hide_cursor_enabled, "--hide-cursor");
+	AddFlag(args, info.stretch_enabled, "--stretch");
 	AddFlag(args, info.readback_linear_images, "--readback-linear-images");
 	AddFlag(args, info.readback_tiled_images, "--readback-tiled-images");
 	AddFlag(args, info.sync_raw_image_buffers, "--sync-raw-image-buffers");
@@ -274,6 +276,7 @@ static QStringList CreateEmulatorArgs(const Configuration& info) {
 	AddFlag(args, info.perf_overlay_enabled, "--perf-overlay");
 	AddFlag(args, info.skip_notice_screen, "--skip-notice-screen");
 	AddFlag(args, info.network_connected, "--network-connected");
+	AddFlag(args, info.psn_emulation_enabled, "--emulate-psn");
 	AddFlag(args, info.tessellation_enabled, "--tessellation");
 	AddFlag(args, info.occlusion_queries_enabled, "--occlusion-queries");
 	AddFlag(args, info.shader_cache_enabled, "--shader-cache");
@@ -281,7 +284,6 @@ static QStringList CreateEmulatorArgs(const Configuration& info) {
 	args << "--console-language" << QString::number(info.console_language);
 	AddFlag(args, info.vulkan_validation_enabled, "--vulkan-validation");
 	AddFlag(args, info.shader_validation_enabled, "--shader-validation");
-	args << "--shader-optimization-type" << EnumToText(info.shader_optimization_type);
 	args << "--shader-log-direction" << EnumToText(info.shader_log_direction);
 	args << "--shader-log-folder" << info.shader_log_folder;
 	AddFlag(args, info.command_buffer_dump_enabled, "--command-buffer-dump");
@@ -294,6 +296,10 @@ static QStringList CreateEmulatorArgs(const Configuration& info) {
 	} else if (info.amd_cpu_mode == Common::AmdCpuMode::Off) {
 		args << "--no-amd-cpu";
 	}
+
+	AddFlag(args, info.pro_enabled, "--trinity");
+	AddFlag(args, info.amd_cpu_enabled, "--amd-cpu");
+	AddFlag(args, info.guest_tsc_enabled, "--guest-tsc");
 #if defined(_WIN32)
 	AddFlag(args, info.red_zone_protection_enabled, "--redzone");
 #endif

@@ -8,7 +8,6 @@
 #include "graphics/presentation/cpPhaseScope.h"
 
 #include "common/assert.h"
-#include "common/logging/log.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/presentation/videoOut.h"
@@ -356,10 +355,6 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 }
 
 void RenderContext::PrepareBda() {
-	if (!m_bda_logged) {
-		Log::WriteToConsoleAndLog("GPU: using buffer device address (BDA) shader memory access.\n");
-		m_bda_logged = true;
-	}
 	std::shared_lock lock(m_mapped_ranges_mutex);
 	m_buffer_cache.TakeBdaSync().ForEach([this](uint64_t begin, uint64_t end) {
 		m_mapped_ranges.ForEachInRange(begin, end - begin, [this](uint64_t start, uint64_t finish) {
@@ -375,6 +370,7 @@ void RenderContext::RunGarbageCollector() {
 		m_fault_process_pending = false;
 		m_buffer_cache.ProcessFaultBuffer();
 	}
+	m_image_heap.RunGarbageCollector();
 	m_texture_cache.ProcessDownloadImages();
 	m_texture_cache.RunGarbageCollector();
 	m_buffer_cache.RunGarbageCollector();
