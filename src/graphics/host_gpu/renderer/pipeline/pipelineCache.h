@@ -287,7 +287,7 @@ private:
 	template <bool OffThread>
 	bool GraphicsProgramsImpl(const HW::Context& context, const HW::UserConfig& user_config, const HW::Shader& shaders,
 	                          std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info, bool& ps_active_out,
-	                          uint32_t& mrt_mask, OffThreadPrograms* off_thread);
+	                          uint32_t& mrt_mask, OffThreadPrograms* off_thread, DrawRenderState* draw_state);
 	ShaderModule& CompileModule(Program& program, const ProgramKey& key,
 	                            ShaderRecompiler::CompileOptions  options,
 	                            ShaderRecompiler::TranslateResult translated,

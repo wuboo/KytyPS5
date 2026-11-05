@@ -758,7 +758,7 @@ void PipelineCache::WriteDriverCache() const {
 
 void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRenderState& state) {
 	GraphicsProgramsImpl<false>(command.GetRegisters(), command.GetUserConfig(), command.GetShaders(), state.vertex_info, state.ps_input_info,
-	                            state.ps_active, state.mrt_mask, nullptr);
+	                            state.ps_active, state.mrt_mask, nullptr, &state);
 }
 
 bool PipelineCache::GetGraphicsProgramsOffThread(const HW::Context& context, const HW::UserConfig& user_config, const HW::Shader& shaders,
@@ -768,13 +768,15 @@ bool PipelineCache::GetGraphicsProgramsOffThread(const HW::Context& context, con
 	out.pixel_info  = {};
 	out.ps_active   = false;
 	out.mrt_mask    = 0;
-	return GraphicsProgramsImpl<true>(context, user_config, shaders, out.vertex_info, out.pixel_info, out.ps_active, out.mrt_mask, &out);
+	return GraphicsProgramsImpl<true>(context, user_config, shaders, out.vertex_info, out.pixel_info, out.ps_active, out.mrt_mask, &out,
+	                                  nullptr);
 }
 
 template <bool OffThread>
 bool PipelineCache::GraphicsProgramsImpl(const HW::Context& context, const HW::UserConfig& user_config, const HW::Shader& shaders,
                                          std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info,
-                                         bool& ps_active_out, uint32_t& mrt_mask, OffThreadPrograms* off_thread) {
+                                         bool& ps_active_out, uint32_t& mrt_mask, OffThreadPrograms* off_thread,
+                                         DrawRenderState* draw_state) {
 	const auto& sh                = context.GetShaderRegisters();
 	const auto& vertex_regs       = shaders.GetVs();
 	const auto& pixel_regs        = shaders.GetPs();
@@ -830,9 +832,9 @@ bool PipelineCache::GraphicsProgramsImpl(const HW::Context& context, const HW::U
 		if (const auto* log = ScoutTableLog::Active(); log == nullptr || log->unsafe) return fail(5);
 	}
 	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
-	if (!tess_active && !mesh_active) {
-		vertex_info[0].indirect_offsets = state.indirect_offsets;
-		vertex_info[0].indirect_draw    = state.indirect_draw;
+	if (draw_state != nullptr && !tess_active && !mesh_active) {
+		vertex_info[0].indirect_offsets = draw_state->indirect_offsets;
+		vertex_info[0].indirect_draw    = draw_state->indirect_draw;
 	}
 	if (object_primitive_id) {
 		// PA_CL_OBJPRIM_ID_CNTL = 2: VGT_OBJECT_ID plus the pipelined 32-bit primitive ID.
@@ -868,16 +870,16 @@ bool PipelineCache::GraphicsProgramsImpl(const HW::Context& context, const HW::U
 				    "Warning: dropping mesh draws the host does not support (shader 0x{:016x}).\n",
 				    vertex_params[0].hash));
 			}
-			return;
+			return false;
 		}
 		// A task shader launches each record's groups and passes its draw parameters in a
 		// payload beside the LDS, the allocation pair and the Layer array; without room for
 		// it, the CPU reads the records.
-		if (state.indirect_draw &&
+		if (draw_state != nullptr && draw_state->indirect_draw &&
 		    (mesh.lds_size_dwords + 2u + mesh.max_vertices +
 		     ShaderRecompiler::IR::PushData::MeshTaskPayloadDwordCount) * sizeof(uint32_t) <=
 		        limits.maxMeshPayloadAndSharedMemorySize) {
-			vertex_info[0].indirect_offsets = state.indirect_offsets;
+			vertex_info[0].indirect_offsets = draw_state->indirect_offsets;
 			vertex_info[0].indirect_draw    = true;
 		}
 	}
