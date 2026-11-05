@@ -345,8 +345,6 @@ Format::ComponentType VertexParameterScalarKind(const EmitterState& state, uint3
 
 uint32_t VertexParameterComponentCount(const InputBinding& input);
 
-uint32_t VertexParameterScalarType(EmitterState& state, VertexInputScalarKind kind);
-
 uint32_t VertexParameterScalarType(EmitterState& state, Format::ComponentType kind);
 
 uint32_t OutputVariableForExport(const EmitterState& state, const IR::ExportInfo& exp);
