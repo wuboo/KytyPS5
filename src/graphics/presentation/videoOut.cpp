@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/performanceOverlay.h"
 #include "graphics/presentation/presenter.h"
+#include "graphics/presentation/benchFrameLog.h"
 #include "graphics/presentation/renderDoc.h"
 #include "kernel/pthread.h"
 #include "libs/errno.h"
@@ -1163,6 +1164,7 @@ bool FlipQueue::Flip() {
 		requests[i - 1].cfg->mutex.Unlock();
 	}
 	if (due) {
+		Graphics::BenchNoteGuestFlip();
 		Graphics::RenderDocOnGuestFlip(m_presenter.Renderer());
 		if (Config::GraphicsDebugDumpEnabled() &&
 		    Config::GetPrintfDirection() != Config::LogDirection::Silent) {
