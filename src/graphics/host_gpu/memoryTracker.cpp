@@ -108,7 +108,7 @@ MemoryTracker::PageGeneration MemoryTracker::QueryPageGeneration(uint64_t vaddr,
 		if (manager->IsModified<DirtySource::Cpu>(offset, bytes) || manager->IsModified<DirtySource::Gpu>(offset, bytes)) {
 			result.clean = false;
 		}
-		result.max_stamp = std::max(result.max_stamp, manager->MaxStamp(manager->GetCpuAddr() + offset, bytes));
+		result.max_stamp = std::max(result.max_stamp, manager->MaxStamp(offset, bytes));
 	});
 	result.registered = covered == size;
 	result.clean      = result.clean && result.registered;
@@ -118,8 +118,8 @@ MemoryTracker::PageGeneration MemoryTracker::QueryPageGeneration(uint64_t vaddr,
 void MemoryTracker::MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size) {
 	Iterate<false>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 		std::scoped_lock lock(manager->lock);
-		manager->ChangeState<DirtySource::Cpu, true>(manager->GetCpuAddr() + offset, bytes);
-		manager->InvalidateHashes(manager->GetCpuAddr() + offset, bytes);
+		manager->ChangeState<DirtySource::Cpu, true>(offset, bytes);
+		manager->InvalidateHashes(offset, bytes);
 	});
 }
 
@@ -127,15 +127,15 @@ void MemoryTracker::MarkRegionAsGpuModified(uint64_t vaddr, uint64_t size) {
 	CheckNotInUploadCallback();
 	Iterate<true>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 		std::scoped_lock lock(manager->lock);
-		manager->ReleaseHot(manager->GetCpuAddr() + offset, bytes);
-		manager->ChangeState<DirtySource::Gpu, true>(manager->GetCpuAddr() + offset, bytes);
+		manager->ReleaseHot(offset, bytes);
+		manager->ChangeState<DirtySource::Gpu, true>(offset, bytes);
 	});
 }
 
 void MemoryTracker::UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size) {
 	Iterate<false>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 		std::scoped_lock lock(manager->lock);
-		manager->ChangeState<DirtySource::Gpu, false>(manager->GetCpuAddr() + offset, bytes);
+		manager->ChangeState<DirtySource::Gpu, false>(offset, bytes);
 	});
 }
 
@@ -159,8 +159,8 @@ void MemoryTracker::UntrackMemory(uint64_t vaddr, uint64_t size) {
 		EXIT("cannot untrack GPU-dirty memory\n");
 	}
 	Iterate<false>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
-		manager->ChangeState<DirtySource::Cpu, true>(manager->GetCpuAddr() + offset, bytes);
-		manager->InvalidateHashes(manager->GetCpuAddr() + offset, bytes);
+		manager->ChangeState<DirtySource::Cpu, true>(offset, bytes);
+		manager->InvalidateHashes(offset, bytes);
 	});
 }
 

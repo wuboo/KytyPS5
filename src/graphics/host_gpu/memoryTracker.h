@@ -34,6 +34,7 @@ public:
 	};
 	[[nodiscard]] PageGeneration QueryPageGeneration(uint64_t vaddr, uint64_t size);
 	void               MarkRegionAsCpuModified(uint64_t vaddr, uint64_t size);
+	void               MarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	void               UnmarkRegionAsGpuModified(uint64_t vaddr, uint64_t size);
 	void               UntrackMemory(uint64_t vaddr, uint64_t size);
 	// S440: pages the tracker no longer protects (HotPages) raise no fault; this adds them to `set`.
@@ -51,8 +52,8 @@ public:
 				if (manager->IsModified<DirtySource::Gpu>(offset, bytes)) {
 					return true;
 				}
-				manager->ChangeState<DirtySource::Cpu, true>(manager->GetCpuAddr() + offset, bytes);
-				manager->NoteWriteFault(manager->GetCpuAddr() + offset, bytes); // S440: a page written in many flips in a row goes hot
+				manager->ChangeState<DirtySource::Cpu, true>(offset, bytes);
+				manager->NoteWriteFault(offset, bytes); // S440: a page written in many flips in a row goes hot
 				return false;
 			}();
 			if (should_flush) {
@@ -112,9 +113,9 @@ public:
 		uint64_t generations = 0;
 		Iterate<true>(vaddr, size, [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 			manager->lock.lock();
-			manager->ShadowCheckClean(manager->GetCpuAddr() + offset, bytes);
-			manager->ShadowCheckFlip(manager->GetCpuAddr() + offset, bytes);
-			manager->ConsumeCpuDirty(manager->GetCpuAddr() + offset, bytes, !is_written, observed_range);
+			manager->ShadowCheckClean(offset, bytes);
+			manager->ShadowCheckFlip(offset, bytes);
+			manager->ConsumeCpuDirty(offset, bytes, !is_written, observed_range);
 			if (!is_written) {
 				generations += manager->Generation();
 				manager->lock.unlock();
@@ -125,7 +126,7 @@ public:
 			Iterate<false>(vaddr, size,
 			               [&](RegionManager* manager, uint64_t offset, uint64_t bytes) {
 				               manager->template ChangeState<DirtySource::Gpu, true>(
-				                   manager->GetCpuAddr() + offset, bytes);
+				                   offset, bytes);
 				               generations += manager->Generation();
 				               manager->lock.unlock();
 			               });

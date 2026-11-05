@@ -1366,7 +1366,6 @@ void BufferCache::RunGarbageCollector() {
 			return false;
 		}
 		m_memory_tracker.ValidateGpuDirtyOwnership(m_gpu_modified_ranges.Set(), buffer.CpuAddress(),
-		m_memory_tracker.ValidateGpuDirtyOwnership(m_gpu_modified_ranges, buffer.CpuAddress(),
 		                                           buffer.Size(), "garbage collection");
 		const bool dirty = m_memory_tracker.IsRegionGpuModified(buffer.CpuAddress(), buffer.Size());
 		if (dirty && !aggressive) {

@@ -204,8 +204,6 @@ private:
 	// One per LandSync::kColorClearSlots key slot.
 	std::array<RangeSet, LandSync::kColorClearSlots> m_checked_color_metadata;
 	InflightRanges                                    m_inflight_download_ranges;
-	// One per TileManager::ColorClearSlots key slot.
-	std::array<RangeSet, 8>                           m_checked_color_metadata;
 	MemoryTracker                                     m_memory_tracker;
 	std::mutex                                        m_bda_sync_mutex;
 	RangeSet                                          m_bda_sync;

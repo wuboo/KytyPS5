@@ -2,6 +2,7 @@
 
 #include "common/alignment.h"
 #include "common/virtualMemory.h"
+#include "graphics/host_gpu/hostMemory.h"
 #include "graphics/host_gpu/hotPages.h"
 #include "graphics/host_gpu/protectRing.h"
 #include "graphics/host_gpu/regionDefinitions.h"

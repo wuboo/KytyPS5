@@ -119,7 +119,7 @@ public:
 			}
 		}
 		if constexpr (source == DirtySource::Gpu && enable) {
-			if (RegionBits(m_cpu_dirty, start, end).Any()) {
+			if (!RegionBits(m_cpu_dirty, start, end).None()) {
 				EXIT("GPU dirty state conflicts with CPU dirty state\n");
 			}
 		}
