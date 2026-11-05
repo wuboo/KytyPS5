@@ -476,9 +476,9 @@ void Image::CopyImage(Image& source) {
 	    command, GpuLabel::Class::Tex,
 	    [&] {
 		    command.copyImage(source.backing.image, vk::ImageLayout::eTransferSrcOptimal, backing.image,
-		                      vk::ImageLayout::eTransferDstOptimal, static_cast<uint32_t>(copies.size()), copies.data());
+		                      vk::ImageLayout::eTransferDstOptimal, levels, copies.data());
 	    },
-	    "I.tex.copy.n%u", static_cast<uint32_t>(copies.size()));
+	    "I.tex.copy.n%u", levels);
 	Transit(vk::ImageLayout::eGeneral,
 	        vk::AccessFlagBits2::eShaderRead | vk::AccessFlagBits2::eTransferRead, {}, command);
 }
