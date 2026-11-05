@@ -23,6 +23,39 @@ void Replace(Inst& inst, Value value) {
 	inst.ReplaceUsesWith(value.Resolve());
 }
 
+bool IsShiftCountBounded0To31(Value shift) {
+	const auto bounded = [](Value value) {
+		return IsImmediate(value, Type::U32) && value.U32() < 32u;
+	};
+	if (bounded(shift)) {
+		return true;
+	}
+	auto* producer = shift.TryInstruction();
+	return producer != nullptr && producer->GetOpcode() == ValueOpcode::BitwiseAnd32 &&
+	       (bounded(Arg(*producer, 0)) || bounded(Arg(*producer, 1)));
+}
+
+// Folds ((word >> shift) & 1) when the constant word is all zeros or all ones.
+bool FoldU32ShiftedBitTest(Inst& inst) {
+	const auto test = [&inst](Value bit, Value shifted) {
+		if (!IsImmediate(bit, Type::U32) || bit.U32() != 1u) {
+			return false;
+		}
+		auto* producer = shifted.TryInstruction();
+		if (producer == nullptr || producer->GetOpcode() != ValueOpcode::ShiftRightLogical32 ||
+		    !IsShiftCountBounded0To31(Arg(*producer, 1))) {
+			return false;
+		}
+		const auto word = Arg(*producer, 0);
+		if (!IsImmediate(word, Type::U32) || (word.U32() != 0u && word.U32() != UINT32_MAX)) {
+			return false;
+		}
+		Replace(inst, Value(word.U32() == 0u ? 0u : 1u));
+		return true;
+	};
+	return test(Arg(inst, 0), Arg(inst, 1)) || test(Arg(inst, 1), Arg(inst, 0));
+}
+
 bool HasOneUse(const Inst& inst) {
 	// Replacement aliases preserve external Values but emit no additional operation.
 	return std::ranges::count_if(inst.Uses(), [](const Use& use) {
