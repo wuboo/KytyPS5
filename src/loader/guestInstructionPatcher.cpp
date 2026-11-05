@@ -126,6 +126,7 @@ enum class InstructionReplacement {
 	InsertQ,
 	ReadProcessorId,
 	CacheLineWriteBack,
+	ReadTimeStampCounter,
 	RosettaCompare
 };
 
@@ -143,14 +144,16 @@ InstructionPatchCounts& ReplacementCounts(GuestInstructionPatchResult& result,
 		case InstructionReplacement::ExtractQ: return result.extrq;
 		case InstructionReplacement::InsertQ: return result.insertq;
 		case InstructionReplacement::ReadProcessorId: return result.rdpid;
+		case InstructionReplacement::ReadTimeStampCounter: return result.rdtsc;
 		case InstructionReplacement::RosettaCompare: return result.rosettacmp;
 		default: return result.clwb;
 	}
 }
 
 bool UsesInstructionTrap(InstructionReplacement replacement, bool trap_replacements) {
-	// The Rosetta compare fix is native only: there is nothing to trap, an unrelocatable site stays as it is.
+	// RDTSC does not fault, and the Rosetta compare fix is native only.
 	return replacement != InstructionReplacement::None &&
+	       replacement != InstructionReplacement::ReadTimeStampCounter &&
 	       replacement != InstructionReplacement::RosettaCompare &&
 	       (trap_replacements || replacement == InstructionReplacement::InsertQ ||
 	        replacement == InstructionReplacement::ReadProcessorId);
