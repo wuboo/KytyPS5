@@ -874,8 +874,6 @@ void EmitProgram(EmitterState& state) {
 	}
 	InitializeVertexCapture(state);
 	InitializePvStore(state);
-	EmitMemoryOffsets(state);
-
 	EmitMemoryBindings(state);
 	if (program.blocks.empty()) {
 		EmitReturn(ctx);
