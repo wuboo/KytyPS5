@@ -7,8 +7,10 @@
 #include "common/logging/log.h"
 #include "common/profiler.h"
 #include "common/threads.h"
+#include "graphics/guest_gpu/command_processor/cpPipe.h"
 #include "graphics/guest_gpu/gpu_format.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
@@ -33,6 +35,7 @@
 #include <fmt/format.h>
 #include <limits>
 #include <ranges>
+#include <shared_mutex>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
 #include <utility>
@@ -358,6 +361,8 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 template <typename InputInfo>
 const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputInfo& input_info,
                                               uint32_t& push_data_cursor) {
+	std::unique_lock<std::shared_mutex> program_lock;
+	if (CpPipe::Enabled()) program_lock = std::unique_lock(m_program_mutex);
 	const auto user_data = std::span(params.user_data).first(params.user_data_count);
 	ShaderRecompiler::IR::SrtRuntime runtime {
 	    .user_data                  = user_data,
@@ -642,6 +647,246 @@ void PipelineCache::WriteDriverCache() const {
 	PipelineCacheLog("Vulkan pipeline cache: saved {:.2f} MB to {}",
 	                 static_cast<double>(payload.size()) / 1'000'000.0,
 	                 Common::PathToString(m_driver_cache_path));
+}
+
+namespace {
+
+bool ReadShaderGuestMemoryWorker(void*, uint64_t address, std::span<uint32_t> values) {
+	return !values.empty() &&
+	       Libs::LibKernel::Memory::TryReadBackingWorker(address, values.data(), values.size_bytes());
+}
+
+class WorkerImageHeap final: public ShaderRecompiler::IR::ImageHeapSource {
+public:
+	bool Acquire(const ShaderRecompiler::IR::ImageHeapRequest&,
+	             ShaderRecompiler::IR::ImageHeapView&) override {
+		asked = true;
+		return false;
+	}
+	bool asked = false;
+};
+
+} // namespace
+
+template <typename InputInfo>
+const ShaderModule* PipelineCache::GetProgramOffThread(const ShaderParams& params, InputInfo& input_info,
+                                                       uint32_t& push_data_cursor,
+                                                       ShaderRecompiler::IR::ResourceSnapshot& resources,
+                                                       uint32_t& fail) {
+	static_assert(!std::is_same_v<InputInfo, ShaderComputeInputInfo>);
+	static thread_local ProgramKey key;
+	if constexpr (std::is_same_v<InputInfo, ShaderVertexInputInfo>) {
+		key.stage = input_info.logical_stage;
+	} else {
+		key.stage = ShaderType::Pixel;
+	}
+	key.hash            = params.hash;
+	key.user_data_count = params.user_data_count;
+	BuildStageStaticKey(input_info, key.static_state);
+	Program* program = nullptr;
+	{
+		const std::shared_lock lock(m_program_mutex);
+		const auto             entry = m_program_cache.find(key);
+		if (entry == m_program_cache.end() || entry->second.call_source || entry->second.skip_dispatch) {
+			fail = 1;
+			return nullptr;
+		}
+		program = &entry->second;
+	}
+	const auto user_data = std::span(params.user_data).first(params.user_data_count);
+	WorkerImageHeap heap;
+	ShaderRecompiler::IR::SrtRuntime runtime {
+	    .user_data                  = user_data,
+	    .shader_base                = params.Base(),
+	    .read_specialization_memory = ReadShaderGuestMemoryWorker,
+	    .image_heap                 = &heap,
+	};
+	ShaderRecompiler::IR::ResourceSpecialization specialization;
+	const bool materialized =
+	    ShaderRecompiler::IR::MaterializeResources(program->resource_plan, runtime, resources, specialization);
+	if (ShaderRecompiler::IR::SrtWalkerWorkerFaults() != 0 || heap.asked || !materialized) {
+		fail = 2;
+		return nullptr;
+	}
+	const std::shared_lock lock(m_program_mutex);
+	for (const auto& candidate: program->modules) {
+		const auto& layout = candidate.info.bindings;
+		if (layout.push_data_start_dword !=
+		        ShaderRecompiler::IR::PushData::StartFor(push_data_cursor, layout.ShaderDataDwords()) ||
+		    candidate.specialization != specialization) {
+			continue;
+		}
+		input_info.stage = {.module = &candidate, .resources = &resources};
+		layout.AdvancePushData(push_data_cursor);
+		return &candidate;
+	}
+	fail = 3;
+	return nullptr;
+}
+
+bool PipelineCache::GetGraphicsProgramsOffThread(const HW::Context& context, const HW::UserConfig& user_config,
+                                                 const HW::Shader& shaders, OffThreadPrograms& out) {
+	out = {};
+	if (user_config.GetPrimType() == Prospero::PrimitiveType::kPatch || context.HasObjectPrimitiveIdOutput()) {
+		out.fail = 3;
+		return false;
+	}
+	const auto& sh          = context.GetShaderRegisters();
+	const auto& vertex_regs = shaders.GetVs();
+	const auto& pixel_regs  = shaders.GetPs();
+	auto&       vertex_info = out.vertex_info;
+	auto&       pixel_info  = out.pixel_info;
+	const auto  write_mask  = context.GetRenderTargetMask() & sh.m_cbShaderMask;
+	uint32_t    color_output_mask = 0;
+	for (uint32_t index = 0; index < RENDER_COLOR_ATTACHMENTS_MAX; index++) {
+		const auto slot = ShaderPixelExportTarget(sh.m_cbShaderMask, index);
+		if (slot >= RENDER_COLOR_ATTACHMENTS_MAX) break;
+		if (sh.target_output_mode[index] != 0 && render_target_mask_slot(write_mask, slot) != 0) {
+			color_output_mask |= 1u << slot;
+		}
+	}
+	const auto& db = sh.db_shader_control;
+	const bool pixel_active =
+	    pixel_regs.ps_regs.data_addr != 0 &&
+	    (color_output_mask != 0 || db.shader_kill_enable || db.shader_z_export_enable ||
+	     db.shader_mask_export_enable || db.shader_dual_export_enable || db.shader_execute_on_noop ||
+	     sh.AlphaToMask());
+	out.ps_active = pixel_active;
+	auto vertex_params = PrepareProgram(vertex_regs, context, user_config, vertex_info[0]);
+	if (vertex_params.hash == 0) {
+		out.fail = 3;
+		return false;
+	}
+	const bool mesh_active = vertex_info[0].logical_stage == ShaderType::Mesh;
+	if (mesh_active) {
+		if (!m_graphics.mesh_shader_enabled) {
+			out.fail = 3;
+			return false;
+		}
+		auto& mesh              = vertex_info[0].mesh;
+		mesh.host_subgroup_size = m_graphics.subgroup_size;
+		const auto& limits      = m_graphics.mesh_shader_properties;
+		const auto  logical_threads = mesh.threads_num[0] * mesh.threads_num[1] * mesh.threads_num[2];
+		const auto host_threads = ((logical_threads + mesh.wave_size - 1u) / mesh.wave_size) *
+		                          std::min(mesh.host_subgroup_size, mesh.wave_size);
+		if (host_threads > limits.maxMeshWorkGroupInvocations || host_threads > limits.maxMeshWorkGroupSize[0] ||
+		    mesh.max_vertices > limits.maxMeshOutputVertices || mesh.max_primitives > limits.maxMeshOutputPrimitives ||
+		    mesh.lds_size_dwords * sizeof(uint32_t) > limits.maxMeshSharedMemorySize) {
+			out.fail = 3;
+			return false;
+		}
+	}
+	ShaderParams pixel_params;
+	if (pixel_active) {
+		std::array<Prospero::ColorComponentMapping, RENDER_COLOR_ATTACHMENTS_MAX> target_export_mapping {};
+		for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
+			const auto& rt = context.GetRenderTarget(slot);
+			if ((color_output_mask & (1u << slot)) != 0 && rt.base.addr != 0) {
+				target_export_mapping[slot] =
+				    TextureGetRenderTargetFormat(rt.info.format, rt.info.channel_type, rt.info.channel_order)
+				        .export_mapping;
+			}
+		}
+		pixel_params = PrepareProgram(pixel_regs, sh, target_export_mapping, pixel_info);
+		if (!mesh_active && Prospero::IsRectList(user_config.GetPrimType())) {
+			pixel_info.parameter_mode = ShaderPixelParameterMode::Rectangle;
+		} else if (context.GetModeControl().provoking_vtx_last) {
+			pixel_info.parameter_mode = ShaderPixelParameterMode::LastVertex;
+		} else {
+			pixel_info.parameter_mode = ShaderPixelParameterMode::FirstVertex;
+		}
+		for (uint32_t export_index = 0; export_index < 8u; export_index++) {
+			const auto slot = ShaderPixelExportTarget(pixel_info.target_shader_mask, export_index);
+			if (slot >= 8u || pixel_info.target_output_mode[export_index] == 0u) continue;
+			const auto& rt = context.GetRenderTarget(slot);
+			const auto target_mask = render_target_mask_slot(context.GetRenderTargetMask(), slot);
+			if (rt.base.addr == 0 || target_mask == 0u) continue;
+			if (rt.info.channel_type == Prospero::ChannelType::kUInt) pixel_info.target_uint_mask |= 1u << export_index;
+			else if (rt.info.channel_type == Prospero::ChannelType::kSInt) pixel_info.target_sint_mask |= 1u << export_index;
+			const auto format = Prospero::ResolveRenderTargetFormat(rt.info.format, rt.info.channel_type);
+			if (format.buffer_format != Prospero::BufferFormat::k11_11_10UNorm) continue;
+			const auto mapping = pixel_info.target_export_mapping[export_index];
+			const auto shader_mask = render_target_mask_slot(pixel_info.target_shader_mask, slot);
+			const bool blend = context.GetBlendControl(slot).enable && !rt.info.blend_bypass;
+			if (blend || (mapping.ApplyMask(target_mask) & 7u) != 7u || (mapping.ApplyMask(shader_mask) & 7u) != 7u ||
+			    pixel_info.target_output_mode[export_index] != 9u) {
+				out.fail = 3;
+				return false;
+			}
+			pixel_info.target_packed_unorm_mask |= 1u << export_index;
+			pixel_info.target_round_mode |= static_cast<uint8_t>(rt.info.round_mode) << export_index;
+		}
+		const auto& blend0 = context.GetBlendControl(0);
+		pixel_info.dual_source_blending =
+		    blend0.enable && !context.GetRenderTarget(0).info.blend_bypass &&
+		    (BlendFactorIsDualSource(blend0.color_srcblend) || BlendFactorIsDualSource(blend0.color_destblend) ||
+		     (blend0.separate_alpha_blend && (BlendFactorIsDualSource(blend0.alpha_srcblend) ||
+		                                      BlendFactorIsDualSource(blend0.alpha_destblend))));
+		if (pixel_info.dual_source_blending) {
+			pixel_info.target_output_mode[1]    = pixel_info.target_output_mode[0];
+			pixel_info.target_export_mapping[1] = pixel_info.target_export_mapping[0];
+			pixel_info.target_uint_mask &= ~2u;
+			pixel_info.target_sint_mask &= ~2u;
+		} else if (blend0.enable && !context.GetRenderTarget(0).info.blend_bypass &&
+		           pixel_info.target_output_mode[0] != 0 && pixel_info.target_output_mode[0] != 7 &&
+		           std::all_of(std::begin(pixel_info.target_output_mode) + 1, std::end(pixel_info.target_output_mode),
+		                       [](uint8_t mode) { return mode == 0; })) {
+			switch (ClassifyBlendMapping(blend0, pixel_info.target_export_mapping[0])) {
+				case BlendMappingSupport::SourceAlpha:
+					pixel_info.alpha_blend_source = ShaderAlphaBlendSource::SourceAlpha;
+					break;
+				case BlendMappingSupport::SourceAlphaOne:
+					pixel_info.alpha_blend_source = ShaderAlphaBlendSource::SourceAlphaOne;
+					break;
+				case BlendMappingSupport::SourceAlphaZero:
+					pixel_info.alpha_blend_source = ShaderAlphaBlendSource::SourceAlphaZero;
+					break;
+				default: break;
+			}
+			if (pixel_info.alpha_blend_source != ShaderAlphaBlendSource::None) {
+				pixel_info.dual_source_blending     = true;
+				pixel_info.target_output_mode[1]    = pixel_info.target_output_mode[0];
+				pixel_info.target_export_mapping[1] = {};
+			}
+		}
+	}
+	auto& last_stage = vertex_info[0];
+	const auto& clip_control = context.GetClipControl();
+	if (clip_control.clip_disable) {
+		const auto& viewport = context.GetScreenViewport().viewports[0];
+		const auto& limits   = m_graphics.GetPhysicalDeviceProperties().limits;
+		auto&       clip     = last_stage.clip_space;
+		clip.scale[0] = viewport.xscale;
+		clip.scale[1] = viewport.yscale;
+		clip.offset[0] = viewport.xoffset;
+		clip.offset[1] = viewport.yoffset;
+		clip.half_extent[0] = static_cast<float>(std::min(limits.maxViewportDimensions[0], 16384u)) * 0.5f;
+		clip.half_extent[1] = static_cast<float>(std::min(limits.maxViewportDimensions[1], 16384u)) * 0.5f;
+		clip.enabled = true;
+	} else if (clip_control.user_clip_planes != 0) {
+		if ((last_stage.pa_cl_vs_out_cntl & 0xffffu) != 0 || Prospero::IsRectList(user_config.GetPrimType())) {
+			out.fail = 3;
+			return false;
+		}
+		last_stage.user_clip_planes = clip_control.user_clip_planes;
+	}
+	uint32_t push_data_cursor = ShaderRecompiler::IR::PushData::GraphicsDrawDwords(
+	    mesh_active, false, last_stage.user_clip_planes);
+	if (pixel_active) {
+		const auto* pixel_module = GetProgramOffThread(pixel_params, pixel_info, push_data_cursor, out.ps_res, out.fail);
+		if (pixel_module == nullptr) return false;
+		for (const auto& output: pixel_module->info.info.outputs) {
+			if (output.kind == ShaderRecompiler::IR::StageOutputKind::Mrt ||
+			    output.kind == ShaderRecompiler::IR::StageOutputKind::ObjectPrimitiveId) {
+				out.mrt_mask |= 1u << output.location;
+			}
+		}
+		out.mrt_mask &= color_output_mask;
+	}
+	if (GetProgramOffThread(vertex_params, vertex_info[0], push_data_cursor, out.vs_res, out.fail) == nullptr) {
+		return false;
+	}
+	return true;
 }
 
 void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRenderState& state) {

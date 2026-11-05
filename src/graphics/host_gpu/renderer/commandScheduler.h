@@ -22,6 +22,9 @@ public:
 	KYTY_CLASS_NO_COPY(CommandScheduler);
 
 	void           Begin(HW::Context& registers, HW::UserConfig& user_config, HW::Shader& shaders);
+	void           Rebind(HW::Context& registers, HW::UserConfig& user_config, HW::Shader& shaders) {
+		m_command.Bind(registers, user_config, shaders);
+	}
 	void           EndRendering() { m_command.EndRendering(); }
 	void           Flush();
 	void           Flush(SubmitInfo& submit);

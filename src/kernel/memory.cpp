@@ -1,3 +1,4 @@
+#include "kernel/backingWriteLog.h"
 #include "kernel/memory.h"
 
 #include "common/assert.h"
@@ -840,12 +841,66 @@ static uint64_t FindGuestFreeRange(uint64_t search_addr, uint64_t size, uint64_t
 	return addr;
 }
 
+namespace {
+BackingWriteLog        g_backing_writes;
+std::atomic<bool>      g_log_backing_writes {false};
+thread_local std::vector<uint64_t>* t_worker_pages = nullptr;
+struct WorkerPage {
+	uint64_t page = ~uint64_t {0};
+	uint8_t  bytes[4096] {};
+	bool     full = false;
+};
+thread_local WorkerPage t_worker_page;
+} // namespace
+
+void SetBackingWriteLogEnabled(bool on) { g_log_backing_writes.store(on, std::memory_order_release); }
+
+uint64_t BackingWriteSeq() { return g_backing_writes.Seq(); }
+
+bool BackingWrittenSince(uint64_t seq0, const uint64_t* pages, size_t count) {
+	return g_backing_writes.WrittenSince(seq0, pages, count);
+}
+
 bool TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size) {
-	return g_guest_address_space->TryWriteBacking(vaddr, data, size);
+	const bool                    log = g_log_backing_writes.load(std::memory_order_acquire);
+	const BackingWriteLog::Token token = log ? g_backing_writes.Begin(vaddr, size) : BackingWriteLog::Token {};
+	const bool                    result = g_guest_address_space->TryWriteBacking(vaddr, data, size);
+	if (log) g_backing_writes.End(token);
+	return result;
 }
 
 bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 	return g_guest_address_space->TryReadBacking(vaddr, data, size);
+}
+
+void SetWorkerReadLog(std::vector<uint64_t>* log) {
+	t_worker_pages     = log;
+	t_worker_page.full = false;
+	t_worker_page.page = ~uint64_t {0};
+}
+
+bool TryReadBackingWorker(uint64_t vaddr, void* data, uint64_t size) {
+	if (size == 0 || data == nullptr || UINT64_MAX - vaddr < size) return false;
+	auto*          out = static_cast<uint8_t*>(data);
+	const uint64_t end = vaddr + size;
+	for (uint64_t cur = vaddr; cur < end;) {
+		const uint64_t page = cur & ~uint64_t {4095};
+		const uint64_t n    = std::min(end, page + 4096) - cur;
+		if (t_worker_pages != nullptr && (t_worker_pages->empty() || t_worker_pages->back() != page)) {
+			t_worker_pages->push_back(page);
+		}
+		if (!t_worker_page.full || t_worker_page.page != page) {
+			t_worker_page.page = page;
+			t_worker_page.full = TryReadBacking(page, t_worker_page.bytes, sizeof(t_worker_page.bytes));
+		}
+		if (t_worker_page.full) {
+			std::memcpy(out + (cur - vaddr), t_worker_page.bytes + (cur - page), n);
+		} else if (!TryReadBacking(cur, out + (cur - vaddr), n)) {
+			return false;
+		}
+		cur += n;
+	}
+	return true;
 }
 
 bool TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size) {

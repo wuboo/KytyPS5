@@ -11,7 +11,9 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
+#include "kernel/memory.h"
 #include "graphics/shader/recompiler/frontend/decode/ShaderDecoder.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "graphics/shader/shaderVertexMetadata.h"
@@ -322,6 +324,36 @@ static bool ShaderGetStaticVertexInputInfo(uint64_t shader_addr, const HW::UserS
 			     shader_addr);
 			return false;
 		}
+		if (ShaderRecompiler::IR::SrtWalkerIsWorker()) {
+			uint32_t attrib_dwords = 0;
+			for (const auto& in: metadata.input_semantics) {
+				attrib_dwords = std::max<uint32_t>(attrib_dwords, in.semantic + 1u);
+			}
+			std::array<uint32_t, 256> attrib_copy {};
+			std::array<uint32_t, ShaderVertexInputInfo::RES_MAX * 4> buffer_copy {};
+			bool ok = attrib_dwords != 0 && attrib_dwords <= attrib_copy.size() &&
+			          Libs::LibKernel::Memory::TryReadBackingWorker(
+			              reinterpret_cast<uint64_t>(attrib), attrib_copy.data(),
+			              attrib_dwords * sizeof(uint32_t));
+			uint32_t buffer_dwords = 0;
+			if (ok) {
+				for (const auto& in: metadata.input_semantics) {
+					const uint32_t index = attrib_copy[in.semantic] & 0x1fu;
+					if (index < ShaderVertexInputInfo::RES_MAX) {
+						buffer_dwords = std::max(buffer_dwords, (index + 1u) * 4u);
+					}
+				}
+				ok = buffer_dwords != 0 && buffer_dwords <= buffer_copy.size() &&
+				     Libs::LibKernel::Memory::TryReadBackingWorker(
+				         reinterpret_cast<uint64_t>(buffer), buffer_copy.data(),
+				         buffer_dwords * sizeof(uint32_t));
+			}
+			if (!ok) return false;
+			ShaderApplyAttribSemantics(info, metadata.input_semantics, attrib_copy.data(),
+			                           buffer_copy.data());
+			ShaderDetectBuffers(info);
+			return true;
+		}
 		ShaderApplyAttribSemantics(info, metadata.input_semantics, attrib, buffer);
 		ShaderDetectBuffers(info);
 	}
@@ -543,6 +575,7 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 	if (!merged && !native_ngg) {
 		if (!ShaderGetStaticVertexInputInfo(regs.es_regs.data_addr, regs.gs_user_sgpr,
 		                                    regs.gs_regs.rsrc2.user_sgpr, sh, data, info)) {
+			if (ShaderRecompiler::IR::SrtWalkerIsWorker()) return {};
 			EXIT("failed to prepare vertex shader program\n");
 		}
 		info.wave_size = (context.GetShaderStages() & 0x00400000u) != 0 ? 32u : 64u;
@@ -551,6 +584,7 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 	}
 	// NGG user SGPRs start at s8; a separately compiled GS back half also receives
 	// its user-data pointer in s0:s1.
+	if (ShaderRecompiler::IR::SrtWalkerIsWorker()) return {};
 	info                     = {};
 	info.logical_stage       = ShaderType::Mesh;
 	info.pa_cl_vs_out_cntl   = sh.m_paClVsOutCntl;

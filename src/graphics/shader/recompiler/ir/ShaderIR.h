@@ -12,6 +12,7 @@
 #include "graphics/shader/shader.h"
 
 #include <array>
+#include <atomic>
 #include <bit>
 #include <list>
 #include <memory>
@@ -719,7 +720,21 @@ struct ResourcePlan {
 	mutable std::vector<uint64_t>           srt_scratch;
 	mutable std::vector<uint32_t>           material_keys;
 	mutable std::vector<SelectorKeys>       selector_keys;
+	// A worker walks the same plan while the CP does. SetScratchPerThread gives that thread its
+	// own copies. The sizes are fixed once the plan is derived.
+	uint32_t          srt_scratch_words  = 0;
+	uint32_t          selector_key_count = 0;
+	mutable uint64_t  scratch_key        = 0;
+
+	struct ScratchRef {
+		std::vector<uint64_t>&     srt;
+		std::vector<uint32_t>&     material_keys;
+		std::vector<SelectorKeys>& selector_keys;
+	};
+	[[nodiscard]] ScratchRef scratch() const;
 };
+
+void SetScratchPerThread(bool on);
 
 struct Program: ResourcePlan {
 	Program() = default;

@@ -83,6 +83,12 @@ bool WalkedImageActive(const ResourcePlan& plan, uint32_t image);
 // The exception handler completes such a load as a zero read.
 uint32_t SrtWalkerLoadLength(uint64_t rip);
 
+// A pipeline worker's walk reads the backing through `load` instead of the faulting mov.
+void     SetSrtWalkerWorker(bool on);
+[[nodiscard]] bool SrtWalkerIsWorker();
+void     SetSrtWorkerLoad(bool (*load)(uint64_t address, uint32_t* value));
+uint32_t SrtWalkerWorkerFaults();
+
 // Nonnegative affine coefficients: element zero is constant, remaining elements are
 // caller-selected leaves. Runtime range proofs must additionally exclude U32 wrap.
 template <size_t Size>

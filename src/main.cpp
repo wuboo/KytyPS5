@@ -4,6 +4,7 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "emulator.h"
+#include "graphics/guest_gpu/command_processor/cpPipe.h"
 #include "kytyGitVersion.h"
 
 #include <algorithm>
@@ -65,6 +66,7 @@ static void PrintUsage() {
 	         "                                       Implies --vulkan-validation; very slow.\n");
 	::printf("  --shader-validation                  Enable shader validation.\n");
 	::printf("  --shader-cache                       Keep compiled shaders and pipelines between boots.\n");
+	::printf("  --cp-pipe                            Look up a draw's shaders while the parser continues.\n");
 	::printf("  --tessellation                      Draw tessellation patches; skipped by default.\n");
 	::printf("  --occlusion-queries                  Count occlusion query samples on the GPU.\n");
 	::printf("  --lod-stats                          Report bound textures in mip statistics.\n");
@@ -195,6 +197,7 @@ static constexpr Flag FLAGS[] = {
     {"--gpu-assisted-validation", &ConfigOptions::gpu_assisted_validation_enabled},
     {"--shader-validation", &ConfigOptions::shader_validation_enabled},
     {"--shader-cache", &ConfigOptions::shader_cache_enabled},
+    {"--cp-pipe", &ConfigOptions::cp_pipe_enabled},
     {"--tessellation", &ConfigOptions::tessellation_enabled},
     {"--occlusion-queries", &ConfigOptions::occlusion_queries_enabled},
     {"--lod-stats", &ConfigOptions::lod_stats_enabled},
@@ -438,6 +441,9 @@ static int Main(int argc, char* argv[]) {
 		return 0;
 	}
 
+	if (options.config.cp_pipe_enabled) {
+		Libs::Graphics::CpPipe::EnableFromCommandLine();
+	}
 	Run(options);
 
 	return 0;

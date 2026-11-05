@@ -2,12 +2,14 @@
 #define GRAPHICS_GUEST_GPU_COMMAND_PROCESSOR_COMMAND_PROCESSOR_H
 
 #include "common/assert.h"
+#include "graphics/guest_gpu/command_processor/cpPipe.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pssr.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <span>
 #include <vector>
@@ -53,9 +55,8 @@ private:
 
 class CommandProcessor {
 public:
-	CommandProcessor(RenderContext& renderer, int interrupt_event_id)
-	    : m_renderer(renderer), m_interrupt_event_id(interrupt_event_id) {}
-	~CommandProcessor() = default;
+	CommandProcessor(RenderContext& renderer, int interrupt_event_id);
+	~CommandProcessor();
 
 	KYTY_CLASS_NO_COPY(CommandProcessor);
 
@@ -66,8 +67,9 @@ public:
 	void            BufferFlush();
 	void            BufferWait();
 	HW::Context&    GetCtx() { return m_ctx; }
-	HW::UserConfig& GetUcfg() { return m_ucfg; }
-	HW::Shader&     GetShCtx() { return m_sh_ctx; }
+	HW::UserConfig& GetUcfg() { return m_exec_ucfg != nullptr ? *m_exec_ucfg : m_ucfg; }
+	HW::Shader&     GetShCtx() { return m_exec_sh != nullptr ? *m_exec_sh : m_sh_ctx; }
+	HW::Shader&     ActiveShader() { return GetShCtx(); }
 
 	void SetIndexType(uint32_t index_type_and_size);
 	void SetIndexBaseAddress(uint64_t index_base_addr);
@@ -119,6 +121,13 @@ public:
 private:
 	void ProcessPm4(Pm4Execution& execution);
 	void SuspendPm4();
+	struct PipeState;
+	void PipeInit();
+	void PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const uint32_t* packet, uint32_t packet_dw);
+	void PipeExecuteFront();
+	void PipeDrain();
+	[[nodiscard]] bool PipeOverlaps(uint64_t address, uint64_t size) const;
+	bool PipeWaitVirtual(uint64_t address, uint64_t size, uint32_t func, uint64_t ref, uint64_t mask, bool* satisfied);
 	uint32_t            NumInstances();
 	const void*         IndexAddress(uint32_t first_index) const;
 	CommandScheduler&   GetScheduler() const { return m_renderer.GetCommandScheduler(); }
@@ -138,6 +147,10 @@ private:
 	// read only when a later draw inherits it.
 	uint32_t m_num_instances      = 1;
 	uint64_t m_num_instances_addr = 0;
+
+	std::unique_ptr<PipeState> m_pipe;
+	HW::Shader*                m_exec_sh   = nullptr;
+	HW::UserConfig*            m_exec_ucfg = nullptr;
 
 	const int m_interrupt_event_id;
 	uint64_t  m_synthetic_occlusion_counter = 0;

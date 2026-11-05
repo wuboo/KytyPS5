@@ -245,6 +245,13 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 		EXIT("unsupported wait_reg_mem operation: 0x%08" PRIx32 "\n", wait_op);
 	}
 
+	if (m_pipe != nullptr) {
+		bool virtual_satisfied = false;
+		if (PipeWaitVirtual(reinterpret_cast<uint64_t>(addr), sizeof(T), func, ref, mask, &virtual_satisfied) &&
+		    virtual_satisfied) {
+			return;
+		}
+	}
 	if (!TestWaitRegMemValue(*addr, ref, mask, func)) {
 		SuspendPm4();
 	}
@@ -530,6 +537,7 @@ Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
 		~ExecutionScope() { g_current_execution = nullptr; }
 	} execution_scope(execution);
 
+	if (m_pipe == nullptr) PipeInit();
 	ProcessPm4(execution);
 	return execution.m_buffer_stack.empty() ? Pm4ProcessResult::Complete
 	                                        : Pm4ProcessResult::Blocked;
@@ -551,6 +559,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	const bool debug_dump = graphics_debug_dump_enabled();
 	while (!execution.m_buffer_stack.empty()) {
 		if (g_gpu_state != nullptr) {
+			if (m_pipe != nullptr && g_gpu_state->HasPendingCommands()) PipeDrain();
 			g_gpu_state->ProcessCommands();
 		}
 		auto& cursor = execution.m_buffer_stack.back();
@@ -589,6 +598,27 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 
 		auto handler = g_cp_op_func[opcode];
 
+		if (m_pipe != nullptr) {
+			const auto pipe_dw  = KYTY_PM4_LEN(packet_header);
+			const auto pipe_cls = CpPipe::Classify(opcode, opcode == Pm4::IT_NOP ? KYTY_PM4_R(packet_header) : 0u,
+			                                       pipe_dw >= 2u ? packet[1] : 0u, pipe_dw);
+			if (pipe_cls == CpPipe::OpClass::Draw || pipe_cls == CpPipe::OpClass::Dispatch ||
+			    pipe_cls == CpPipe::OpClass::Ordered) {
+				EXIT_NOT_IMPLEMENTED(pipe_dw == 0 || pipe_dw > remaining_dw);
+				PipeEnqueue(pipe_cls, opcode, packet, pipe_dw);
+				cursor.offset_dw += pipe_dw;
+				execution.m_made_progress = true;
+				continue;
+			}
+			if (pipe_cls == CpPipe::OpClass::Inline && CpPipe::ReadsIndirectTable(opcode) && pipe_dw >= 5u) {
+				uint64_t table = 0, table_size = 0;
+				if (CpPipe::IndirectTableRange(packet + 1, &table, &table_size) && PipeOverlaps(table, table_size)) {
+					PipeDrain();
+				}
+			}
+			if (pipe_cls == CpPipe::OpClass::Drain) PipeDrain();
+		}
+
 		if (handler == nullptr) {
 			const auto offset = cursor.offset_dw;
 			LOGF("unknown PM4 packet: data=0x%016" PRIx64 ", num_dw=%" PRIu32
@@ -608,6 +638,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 		    handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
 		EXIT_IF(packet_dw > remaining_dw);
 		if (execution.m_suspended) {
+			PipeDrain();
 			return;
 		}
 		cursor.offset_dw += packet_dw;
@@ -622,27 +653,37 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			execution.m_next_buffer = {};
 		}
 	}
+	PipeDrain();
+}
+
+template <class T, class V>
+static void SetCp(T& member, V value) {
+	if (!CpPipe::Enabled()) {
+		member = static_cast<T>(value);
+		return;
+	}
+	EXIT_IF(!CpPipe::WriteCpMember(member, value));
 }
 
 void CommandProcessor::SetIndexType(uint32_t index_type_and_size) {
-	m_index_type_and_size = index_type_and_size & 0x3u;
+	SetCp(m_index_type_and_size, index_type_and_size & 0x3u);
 }
 
 void CommandProcessor::SetIndexBaseAddress(uint64_t index_base_addr) {
-	m_index_base_addr = index_base_addr;
+	SetCp(m_index_base_addr, index_base_addr);
 }
 
 void CommandProcessor::SetIndexBufferSize(uint32_t index_buffer_size) {
-	m_index_buffer_size = index_buffer_size;
+	SetCp(m_index_buffer_size, index_buffer_size);
 }
 
 void CommandProcessor::SetDrawIndirectArgsBaseAddress(uint64_t draw_indirect_args_base_addr) {
-	m_draw_indirect_args_base_addr = draw_indirect_args_base_addr;
+	SetCp(m_draw_indirect_args_base_addr, draw_indirect_args_base_addr);
 }
 
 void CommandProcessor::SetDispatchIndirectArgsBaseAddress(
     uint64_t dispatch_indirect_args_base_addr) {
-	m_dispatch_indirect_args_base_addr = dispatch_indirect_args_base_addr;
+	SetCp(m_dispatch_indirect_args_base_addr, dispatch_indirect_args_base_addr);
 }
 
 void CommandProcessor::SetNumInstances(uint32_t num_instances) {
@@ -650,8 +691,8 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances) {
 		num_instances = 1;
 	}
 
-	m_num_instances      = num_instances;
-	m_num_instances_addr = 0;
+	SetCp(m_num_instances, num_instances);
+	SetCp(m_num_instances_addr, uint64_t {0});
 }
 
 uint32_t CommandProcessor::NumInstances() {
@@ -841,7 +882,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 
 void CommandProcessor::DispatchDirect(uint32_t thread_group_x, uint32_t thread_group_y,
                                       uint32_t thread_group_z, uint32_t mode) {
-	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
+	ActiveShader().SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 	m_renderer.GetRenderExecutor().DispatchDirect(CurrentBuffer(), thread_group_x, thread_group_y,
 	                                              thread_group_z, mode, IsAsyncComputeQueue());
 }
@@ -858,7 +899,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 		DispatchDirect(args->x, args->y, args->z, mode);
 		return;
 	}
-	m_sh_ctx.SetCsWaveSize(Pm4::ComputeWaveSize(mode));
+	ActiveShader().SetCsWaveSize(Pm4::ComputeWaveSize(mode));
 	m_renderer.GetRenderExecutor().DispatchIndirect(CurrentBuffer(), args_addr, mode,
 	                                                IsAsyncComputeQueue());
 }

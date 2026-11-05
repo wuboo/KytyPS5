@@ -9,7 +9,11 @@
 #include "common/profiler.h"
 #include "common/stringUtils.h"
 #include "common/threads.h"
+#include "graphics/guest_gpu/command_processor/cpPipe.h"
+#include "graphics/guest_gpu/command_processor/cpPipeJob.h"
 #include "graphics/guest_gpu/gpu_defs.h"
+#include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
+#include "kernel/memory.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/tile.h"
@@ -837,7 +841,30 @@ static bool ResolvePrimitiveRestart(const CommandBuffer& buffer,
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
                                             DrawRenderState& state) {
 	m_context.GetImageHeap().BeginDraw();
-	m_context.GetPipelineCache().GetGraphicsPrograms(buffer, state);
+	if (auto* job = CpPipe::CurrentJob(); job != nullptr && CpPipe::JoinJob(*job)) {
+		bool dirty = false;
+		for (const auto page: job->pages) {
+			if (m_context.GetBufferCache().HasGpuDirtyBytes(page, 4096)) {
+				dirty = true;
+				break;
+			}
+		}
+		if (!dirty) {
+			state.vertex_info[0] = job->out.vertex_info[0];
+			state.ps_input_info  = job->out.pixel_info;
+			state.ps_active      = job->out.ps_active;
+			state.mrt_mask       = job->out.mrt_mask;
+			CpPipe::AcceptedJobs().fetch_add(1, std::memory_order_relaxed);
+			static std::atomic_flag logged = ATOMIC_FLAG_INIT;
+			if (!logged.test_and_set(std::memory_order_relaxed)) {
+				LOGF("cp pipe: using a worker program lookup\n");
+			}
+		} else {
+			m_context.GetPipelineCache().GetGraphicsPrograms(buffer, state);
+		}
+	} else {
+		m_context.GetPipelineCache().GetGraphicsPrograms(buffer, state);
+	}
 	// Vertex programs beyond the host mesh limits or with unsupported call targets are not
 	// compiled.
 	if (state.vertex_info[0].stage.module == nullptr) {
@@ -1454,6 +1481,36 @@ bool RenderExecutor::ResolveColorTargets(CommandBuffer& buffer) {
 	                    {src.desc.view_info.base_level, 1, src.desc.view_info.base_layer, 1},
 	                    {dst.desc.view_info.base_level, 1, dst.desc.view_info.base_layer, 1});
 	return true;
+}
+
+void CpPipe::RunGfpJob(CpPipe::GfpJob& job) {
+	WorkerScope worker_flag;
+	ShaderRecompiler::IR::SetScratchPerThread(true);
+	ShaderRecompiler::IR::SetSrtWalkerWorker(true);
+	job.answered = false;
+	job.pages.clear();
+	job.write_seq = Libs::LibKernel::Memory::BackingWriteSeq();
+	Libs::LibKernel::Memory::SetWorkerReadLog(&job.pages);
+	bool answered = DrawHasValidVertexShader(*job.sh);
+	answered = answered && job.cache->GetGraphicsProgramsOffThread(*job.ctx, *job.ucfg, *job.sh, job.out);
+	Libs::LibKernel::Memory::SetWorkerReadLog(nullptr);
+	if (answered && ShaderRecompiler::IR::SrtWalkerWorkerFaults() != 0) answered = false;
+	ShaderRecompiler::IR::SetSrtWalkerWorker(false);
+	ShaderRecompiler::IR::SetScratchPerThread(false);
+	if (answered) {
+		constexpr size_t kMaxPages = 4096;
+		const auto add_reads = [&](const ShaderRecompiler::IR::ResourceSnapshot& res) {
+			for (const auto& [address, size]: res.specialization_reads) {
+				if (!AppendPages(job.pages, address, size, kMaxPages)) answered = false;
+			}
+		};
+		add_reads(job.out.vs_res);
+		if (job.out.ps_active) add_reads(job.out.ps_res);
+		std::sort(job.pages.begin(), job.pages.end());
+		job.pages.erase(std::unique(job.pages.begin(), job.pages.end()), job.pages.end());
+		if (job.pages.size() > kMaxPages) answered = false;
+	}
+	job.answered = answered;
 }
 
 } // namespace Libs::Graphics

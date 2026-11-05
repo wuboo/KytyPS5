@@ -484,6 +484,29 @@ add_executable(resource_materialization_tests EXCLUDE_FROM_ALL
 target_link_libraries(resource_materialization_tests fmt::fmt xbyak::xbyak)
 target_include_directories(resource_materialization_tests PRIVATE ${inc_headers})
 
+add_executable(cp_pipe_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPipeTests.cpp")
+target_include_directories(cp_pipe_tests PRIVATE ${inc_headers})
+if(NOT WIN32)
+	target_link_libraries(cp_pipe_tests pthread)
+endif()
+foreach(mutant IN ITEMS SIGNAL_AT_PARSE VIRTUAL_WAIT_IGNORES_MASK DRAIN_SKIPS_UNKNOWN WORKER_WRITES_CP RETIRE_ALL OVERLAP_IGNORED GATE_IGNORED PAGES_FIRST_ONLY)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(cp_pipe_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPipeTests.cpp")
+	target_include_directories(cp_pipe_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_pipe_mutant_${mutant_lower}_tests PRIVATE KYTY_CPPIPE_MUTANT_${mutant}=1)
+	if(NOT WIN32)
+		target_link_libraries(cp_pipe_mutant_${mutant_lower}_tests pthread)
+	endif()
+endforeach()
+add_executable(backing_write_log_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BackingWriteLogTests.cpp")
+target_include_directories(backing_write_log_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS IGNORE_RUNNING NO_WRAP_GUARD ANY_RANGE NO_FAST_PATH_GUARD)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(backing_write_log_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BackingWriteLogTests.cpp")
+	target_include_directories(backing_write_log_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(backing_write_log_mutant_${mutant_lower}_tests PRIVATE KYTY_BWLOG_MUTANT_${mutant}=1)
+endforeach()
+
 add_executable(resource_tracking_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ResourceTrackingTests.cpp"
 	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
@@ -692,6 +715,16 @@ if(BUILD_TESTING)
 	add_test(NAME common COMMAND $<TARGET_FILE:common_tests>)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
+	add_test(NAME cp_pipe COMMAND $<TARGET_FILE:cp_pipe_tests>)
+	foreach(mutant IN ITEMS signal_at_parse virtual_wait_ignores_mask drain_skips_unknown worker_writes_cp retire_all overlap_ignored gate_ignored pages_first_only)
+		add_test(NAME cp_pipe_mutant_${mutant} COMMAND $<TARGET_FILE:cp_pipe_mutant_${mutant}_tests>)
+		set_tests_properties(cp_pipe_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME backing_write_log COMMAND $<TARGET_FILE:backing_write_log_tests>)
+	foreach(mutant IN ITEMS ignore_running no_wrap_guard any_range no_fast_path_guard)
+		add_test(NAME backing_write_log_mutant_${mutant} COMMAND $<TARGET_FILE:backing_write_log_mutant_${mutant}_tests>)
+		set_tests_properties(backing_write_log_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
 	add_test(NAME event_queue_lifetime COMMAND $<TARGET_FILE:event_queue_lifetime_tests>)
 	add_test(NAME kernel_file_system COMMAND $<TARGET_FILE:kernel_file_system_tests>)
@@ -807,6 +840,8 @@ if(BUILD_TESTING)
 		common_tests
 		shader_vertex_metadata_tests
 		resource_materialization_tests
+		cp_pipe_tests
+		backing_write_log_tests
 		resource_tracking_tests
 		event_queue_lifetime_tests
 		kernel_file_system_tests

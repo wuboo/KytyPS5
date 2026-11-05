@@ -40,6 +40,9 @@ public:
 	void SuspendPoint();
 	// Wait for guest command processing, including all compute queues (not native GPU completion).
 	void              WaitForIdle();
+	[[nodiscard]] bool HasPendingCommands() const noexcept {
+		return m_pending_commands.load(std::memory_order_acquire) != 0;
+	}
 	[[nodiscard]] int GetFrameNum() const;
 
 	[[nodiscard]] static bool IsGpuThread() noexcept;

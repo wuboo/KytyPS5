@@ -5,6 +5,10 @@
 #include "common/common.h"
 #include "common/virtualMemory.h"
 
+#include <cstddef>
+#include <cstdint>
+#include <vector>
+
 namespace Libs::Graphics {
 class RenderContext;
 enum class PageFaultAccess;
@@ -132,6 +136,13 @@ int MapAutomaticMemory(uint64_t vaddr, size_t size, int type, int prot);
 int UnmapAmmMemory(uint64_t vaddr, size_t size);
 bool                   TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size);
 bool                   TryReadBacking(uint64_t vaddr, void* data, uint64_t size);
+// Worker reads of the guest backing. Same bytes as TryReadBacking, cached per page on the calling
+// thread, and the 4 KiB pages are appended to the log set by SetWorkerReadLog.
+void                   SetWorkerReadLog(std::vector<uint64_t>* log);
+bool                   TryReadBackingWorker(uint64_t vaddr, void* data, uint64_t size);
+void                   SetBackingWriteLogEnabled(bool on);
+[[nodiscard]] uint64_t BackingWriteSeq();
+[[nodiscard]] bool     BackingWrittenSince(uint64_t seq0, const uint64_t* pages, size_t count);
 bool                   TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size);
 bool                   TryReadSparseBacking(uint64_t vaddr, void* data, uint64_t size);
 bool                   CopySparseMemory(uint64_t vaddr, void* data, uint64_t size);

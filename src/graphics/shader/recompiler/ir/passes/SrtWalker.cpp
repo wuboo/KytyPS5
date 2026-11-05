@@ -1,3 +1,4 @@
+#include "graphics/guest_gpu/command_processor/cpPipe.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 
 #include "common/abi.h"
@@ -163,15 +164,93 @@ uint32_t OutputOffset(const ResourcePlan& plan) {
 }
 
 const uint8_t* Scratch(const ResourcePlan& plan) {
-	return reinterpret_cast<const uint8_t*>(plan.srt_scratch.data());
+	return reinterpret_cast<const uint8_t*>(plan.scratch().srt.data());
 }
 
 thread_local const Xbyak::CodeGenerator* t_running_walker = nullptr;
+thread_local bool                        t_walker_worker  = false;
+thread_local uint32_t                    t_worker_faults  = 0;
 
-// Every guest load is mov eax, [r10] (41 8b 02), so a fault completes it as a zero read.
+using WorkerLoadFn = bool (*)(uint64_t address, uint32_t* value);
+WorkerLoadFn g_srt_worker_load = nullptr;
+
+extern "C" uint32_t KytySrtIsWorker() { return t_walker_worker ? 1u : 0u; }
+
+extern "C" uint32_t KytySrtLoadBacking(uint64_t address) {
+	uint32_t value = 0;
+	if (g_srt_worker_load == nullptr || !g_srt_worker_load(address, &value)) {
+		++t_worker_faults;
+		return 0;
+	}
+	return value;
+}
+
+// Every guest load on the CP thread is mov eax, [r10] (41 8b 02), so a fault completes it as a
+// zero read. A worker must not execute that mov: the fault handler would wait for the CP thread,
+// which is waiting for the worker. The worker calls KytySrtLoadBacking instead.
+void AlignCall(Xbyak::CodeGenerator& code) {
+	code.push(code.rbp);
+	code.mov(code.rbp, code.rsp);
+	code.and_(code.rsp, static_cast<int32_t>(-16));
+	code.sub(code.rsp, 0x20);
+}
+
+void EndCall(Xbyak::CodeGenerator& code) {
+	code.mov(code.rsp, code.rbp);
+	code.pop(code.rbp);
+}
+
 void LoadGuest(Xbyak::CodeGenerator& code, const Xbyak::RegExp& address) {
 	code.lea(code.r10, code.ptr[address]);
+	if (!CpPipe::Enabled()) {
+		code.mov(code.eax, code.dword[code.r10]);
+		return;
+	}
+	Xbyak::Label backing, done;
+	code.push(code.r8);
+	code.push(code.rcx);
+	code.push(code.rdx);
+	code.push(code.r9);
+	code.push(code.r11);
+	code.push(code.rdi);
+	code.push(code.rsi);
+	code.push(code.r10);
+	AlignCall(code);
+	code.mov(code.rax, reinterpret_cast<uint64_t>(&KytySrtIsWorker));
+	code.call(code.rax);
+	EndCall(code);
+	code.test(code.eax, code.eax);
+	code.jnz(backing);
+	code.pop(code.r10);
+	code.pop(code.rsi);
+	code.pop(code.rdi);
+	code.pop(code.r11);
+	code.pop(code.r9);
+	code.pop(code.rdx);
+	code.pop(code.rcx);
+	code.pop(code.r8);
 	code.mov(code.eax, code.dword[code.r10]);
+	code.jmp(done);
+	code.L(backing);
+	code.mov(code.r10, code.qword[code.rsp]);
+	AlignCall(code);
+#if defined(_WIN32)
+	code.mov(code.rcx, code.r10);
+#else
+	code.mov(code.rdi, code.r10);
+#endif
+	code.mov(code.rax, reinterpret_cast<uint64_t>(&KytySrtLoadBacking));
+	code.call(code.rax);
+	EndCall(code);
+	code.pop(code.r10);
+	code.pop(code.rsi);
+	code.pop(code.rdi);
+	code.pop(code.r11);
+	code.pop(code.r9);
+	code.pop(code.rdx);
+	code.pop(code.rcx);
+	code.pop(code.r8);
+	code.L(done);
 }
 
 class RuntimeValidator {
@@ -1358,6 +1437,7 @@ void WalkerCompiler::Compile(std::span<const Value> values) {
 		if (Thunk(index)) EmitNode(index);
 	}
 	m_plan.srt_scratch.assign(m_plan.srt_captures / 8u + m_captures, 0u);
+	m_plan.srt_scratch_words = static_cast<uint32_t>(m_plan.srt_scratch.size());
 	m_plan.srt_user_data = m_user_data;
 	c.readyRE();
 	EXIT_IF(Xbyak::GetError() != 0);
@@ -1376,12 +1456,13 @@ bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<ui
 	flat.assign(plan.srt_reads.size(), 0u);
 	using Walker = const uint64_t* KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*, uint64_t*, uint64_t);
 	t_running_walker = plan.srt_code.get();
+	auto&       srt  = plan.scratch().srt;
 	const auto* end = plan.srt_code->getCode<Walker>()(runtime.user_data.data(), flat.data(),
-	                                                     plan.srt_scratch.data(), runtime.shader_base);
+	                                                     srt.data(), runtime.shader_base);
 	t_running_walker = nullptr;
 	if (end == nullptr) return false;
 	if (reads != nullptr) {
-		for (auto* read = plan.srt_scratch.data() + plan.srt_captures / 8u; read != end; ++read)
+		for (auto* read = srt.data() + plan.srt_captures / 8u; read != end; ++read)
 			reads->emplace_back(*read, sizeof(uint32_t));
 	}
 	return true;
@@ -1429,6 +1510,17 @@ bool ValidateRuntimeValue(const ResourcePlan& program, Value value, RuntimeValue
 bool ValidateWaveUniformValue(const ResourcePlan& program, Value value) {
 	return RuntimeValidator(program, RuntimeValueType::Any, true).Run(value);
 }
+
+void SetSrtWalkerWorker(bool on) {
+	t_walker_worker = on;
+	t_worker_faults = 0;
+}
+
+bool SrtWalkerIsWorker() { return t_walker_worker; }
+
+void SetSrtWorkerLoad(bool (*load)(uint64_t address, uint32_t* value)) { g_srt_worker_load = load; }
+
+uint32_t SrtWalkerWorkerFaults() { return t_worker_faults; }
 
 uint32_t SrtWalkerLoadLength(uint64_t rip) {
 	if (t_running_walker == nullptr ||

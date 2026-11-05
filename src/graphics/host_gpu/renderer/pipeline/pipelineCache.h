@@ -4,6 +4,7 @@
 #include "common/abi.h"
 #include "common/assert.h"
 #include "common/common.h"
+#include "graphics/guest_gpu/hardwareContext.h"
 #include "common/file.h"
 #include "common/uniqueFunction.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
@@ -20,6 +21,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <shared_mutex>
 #include <queue>
 #include <span>
 #include <thread>
@@ -197,6 +199,19 @@ public:
 
 	// Reads the shaders and registers bound in `command` into the state's shader stages.
 	void GetGraphicsPrograms(const CommandBuffer& command, DrawRenderState& state);
+	// What a worker can answer from programs the CP has already compiled. A miss, a call shader,
+	// tessellation or an object-id draw is left to the CP.
+	struct OffThreadPrograms {
+		std::array<ShaderVertexInputInfo, 3> vertex_info {};
+		ShaderPixelInputInfo                 pixel_info {};
+		ShaderRecompiler::IR::ResourceSnapshot vs_res;
+		ShaderRecompiler::IR::ResourceSnapshot ps_res;
+		bool                                   ps_active = false;
+		uint32_t                               mrt_mask  = 0;
+		uint32_t                               fail      = 0;
+	};
+	bool GetGraphicsProgramsOffThread(const HW::Context& context, const HW::UserConfig& user_config,
+	                                  const HW::Shader& shaders, OffThreadPrograms& out);
 	// Null skips the dispatch.
 	const ShaderModule* GetComputeProgram(const HW::ComputeShaderInfo& regs,
 	                                      ShaderComputeInputInfo&      input_info);
@@ -245,6 +260,7 @@ private:
 	GraphicContext&                        m_graphics;
 	ShaderRecompiler::IR::ImageHeapSource* m_image_heap;
 	std::unordered_map<ProgramKey, Program, ProgramKeyHash> m_program_cache;
+	std::shared_mutex                          m_program_mutex;
 	// Modules compiled per stage.
 	std::array<uint32_t, static_cast<size_t>(ShaderType::TessellationEvaluation) + 1> m_compiled {};
 	ProgramKey                             m_lookup_key;
@@ -261,6 +277,11 @@ private:
 	template <typename InputInfo>
 	const ShaderModule* GetProgram(const ShaderParams& params, InputInfo& input_info,
 	                               uint32_t& push_data_cursor);
+	template <typename InputInfo>
+	const ShaderModule* GetProgramOffThread(const ShaderParams& params, InputInfo& input_info,
+	                                        uint32_t& push_data_cursor,
+	                                        ShaderRecompiler::IR::ResourceSnapshot& resources,
+	                                        uint32_t& fail);
 	ShaderModule& CompileModule(Program& program, const ProgramKey& key,
 	                            ShaderRecompiler::CompileOptions  options,
 	                            ShaderRecompiler::TranslateResult translated,

@@ -17,6 +17,33 @@
 #include <unordered_set>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
+
+namespace {
+thread_local bool t_scratch_per_thread = false;
+}
+
+void SetScratchPerThread(bool on) { t_scratch_per_thread = on; }
+
+ResourcePlan::ScratchRef ResourcePlan::scratch() const {
+	if (!t_scratch_per_thread) return {srt_scratch, material_keys, selector_keys};
+	struct Own {
+		std::vector<uint64_t>     srt;
+		std::vector<uint32_t>     material_keys;
+		std::vector<SelectorKeys> selector_keys;
+	};
+	static thread_local std::unordered_map<uint64_t, Own> scratches;
+	if (scratch_key == 0) {
+		static std::atomic<uint64_t> next {1};
+		scratch_key = next.fetch_add(1, std::memory_order_relaxed);
+	}
+	const auto [it, inserted] = scratches.try_emplace(scratch_key);
+	if (inserted) {
+		it->second.srt.assign(srt_scratch_words, 0u);
+		it->second.selector_keys.resize(selector_key_count);
+	}
+	return {it->second.srt, it->second.material_keys, it->second.selector_keys};
+}
+
 namespace {
 
 constexpr uint64_t AddressMask            = 0x0000ffffffffffffull;
@@ -551,14 +578,15 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
                                    std::vector<Specialization>&  specializations,
                                    Normalize&& normalize) {
 	const auto& indirect = *program.descriptor_sources[source_index].indirect_descriptor;
+	const auto  scratch  = program.scratch();
 	const auto  descriptor_bytes = read_dwords * sizeof(uint32_t);
 	const auto& sources = indirect.sources;
 	const auto* selector = indirect.selector ? &*indirect.selector : nullptr;
 	const bool byte_keys = IsBoundedDescriptorTable(program, indirect);
 	auto* selector_keys = selector != nullptr
-	    ? &program.selector_keys[program.selector_groups[source_index]] : nullptr;
-	auto& keys = selector_keys != nullptr ? selector_keys->values : program.material_keys;
-	auto& byte_offsets = program.material_keys;
+	    ? &scratch.selector_keys[program.selector_groups[source_index]] : nullptr;
+	auto& keys = selector_keys != nullptr ? selector_keys->values : scratch.material_keys;
+	auto& byte_offsets = scratch.material_keys;
 	const auto children_begin = descriptors.size();
 	const auto root_resource = specializations[resource_index];
 	const auto intern_candidate = [&](const DescriptorValue& candidate) {
@@ -715,7 +743,7 @@ bool MaterializeIndirectDescriptor(const ResourcePlan&                         p
 				return failed("candidate count", fmt::format("rows={} limit={}", count, MaxIndirectDescriptorProbes));
 			// Affine SMEM offsets wrap in U32 before adding the aligned immediate.
 			// Image heaps retain one bulk snapshot and their absolute byte-offset mapping.
-			auto& heap_words = program.material_keys;
+			auto& heap_words = scratch.material_keys;
 			if (image_heap) {
 				heap_words.resize(table_size / 4u);
 				if (!ReadScalarTable(table_base, table_size, 0u, runtime, heap_words))
@@ -1394,6 +1422,7 @@ static bool DerivePlanState(ResourcePlan& plan) {
 		if (group == plan.selector_keys.size()) plan.selector_keys.emplace_back();
 		if (group != UINT32_MAX && group >= plan.selector_keys.size()) return false;
 	}
+	plan.selector_key_count = static_cast<uint32_t>(plan.selector_keys.size());
 	if (plan.srt_plan_complete && plan.resource_tracking_complete) CompileSrtWalker(plan);
 	return true;
 }
@@ -1585,7 +1614,7 @@ ResourcePlan ExtractResourcePlan(const Program& program) {
 
 bool MaterializeResources(const ResourcePlan& program, const SrtRuntime& runtime,
                           ResourceSnapshot& snapshot, ResourceSpecialization& specialization) {
-	for (auto& keys: program.selector_keys) keys.resolved = false;
+	for (auto& keys: program.scratch().selector_keys) keys.resolved = false;
 	if (!program.resource_tracking_complete) return false;
 	const auto uses_workgroup_count = [](const DescriptorSource& source) {
 		return source.indirect_descriptor && source.indirect_descriptor->workgroup_axis != UINT32_MAX;
@@ -2135,7 +2164,8 @@ template <class S, class P> void IoPlan(S& io, P& plan) {
 	       selector_groups, control_flow, control_phis, srt_reads, source_reads, capture_specialization_reads,
 	       srt_plan_complete, resource_tracking_complete, info, uniform_fill,
 	       // Derived on load.
-	       srt_code, srt_user_data, srt_captures, srt_scratch, material_keys, selector_keys] = plan;
+	       srt_code, srt_user_data, srt_captures, srt_scratch, material_keys, selector_keys,
+	       srt_scratch_words, selector_key_count, scratch_key] = plan;
 	IoValues(io, values, control_phis);
 	IoAll(io, stage, shader_hash, user_data_base, user_data_count, memory_info, descriptor_sources,
 	      selector_groups, control_flow, srt_reads, source_reads, capture_specialization_reads,
