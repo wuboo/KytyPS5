@@ -1549,12 +1549,15 @@ uint32_t EmitAppendConsume(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto count = Binary(state, spv::OpIAdd, TypeU32(state),
 	                          Unary(state, spv::OpBitCount, TypeU32(state), low),
 	                          Unary(state, spv::OpBitCount, TypeU32(state), high));
+	// The guest EXEC words are already the ballot. Ballot() wants a boolean predicate.
+	const auto ballot = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpCompositeConstruct, TypeU32Vector(state, 4), ballot, low, high,
+	                          ConstantU32(state, 0), ConstantU32(state, 0));
 	// A pixel wave's exec holds live pixels only, but the host subgroup also runs helper
 	// invocations, and their atomics do nothing and return undefined values. If the first lane
 	// is a helper, the counter would not move and the whole subgroup would reuse indices (guest
 	// linked lists built with these indices then get cycles). The count keeps the helpers so
 	// that it matches V_MBCNT over the same exec.
-	const auto ballot = ctx.Ballot(inst.Arg(1));
 	auto live_ballot = ballot;
 	if (state.program.stage == ShaderType::Pixel && state.lane_count == 1) {
 		const auto helper     = EmitHelperInvocation(state);

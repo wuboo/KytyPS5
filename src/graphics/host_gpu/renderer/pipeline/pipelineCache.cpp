@@ -28,7 +28,6 @@
 #include <array>
 #include <atomic>
 #include <cctype>
-#include <cstdio>
 #include <chrono>
 #include <cstdio>
 #include <cstring>
@@ -167,10 +166,7 @@ void ValidateShaderSpirv(const char* stage, uint64_t shader_hash,
 	                             static_cast<uint32_t>(SPV_BINARY_TO_TEXT_OPTION_COMMENT) |
 	                             static_cast<uint32_t>(SPV_BINARY_TO_TEXT_OPTION_INDENT) |
 	                             static_cast<uint32_t>(SPV_BINARY_TO_TEXT_OPTION_COLOR));
-	if (FILE* out = std::fopen("s500-fail.spvasm", "wb")) {
-		std::fwrite(text.data(), 1, text.size(), out);
-		std::fclose(out);
-	}
+	LOGF("%s\n", text.c_str());
 	EXIT("ShaderRecompiler %s SPIR-V validation failed hash=0x%016" PRIx64 ":\n%s", stage,
 	     shader_hash, messages.c_str());
 }

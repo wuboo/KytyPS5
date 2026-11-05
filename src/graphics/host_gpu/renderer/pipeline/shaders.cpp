@@ -18,7 +18,6 @@
 #include <algorithm>
 #include <array>
 #include <bit>
-#include <cstdio>
 #include <span>
 #include <vector>
 
@@ -393,14 +392,6 @@ void CreatePipelineInternal(GraphicContext& graphics, PipelineCache::Pipeline& p
 
 	const auto result =
 	    graphics.device.createComputePipelines(driver_cache, 1, &info, nullptr, &pipeline.pipeline);
-	if (result != vk::Result::eSuccess) {
-		std::fprintf(stderr, "compute pipeline result=%d spirv_words=%zu\n", static_cast<int>(result),
-		             module.function_code.size());
-		if (FILE* out = std::fopen("s500-fail.spv", "wb")) {
-			std::fwrite(module.function_code.data(), sizeof(uint32_t), module.function_code.size(), out);
-			std::fclose(out);
-		}
-	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 }
 
