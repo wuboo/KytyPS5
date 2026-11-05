@@ -267,6 +267,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 			    copies.emplace_back(start - buffer_address, total_size, end - start);
 			    // Start each packed range on its own 64-byte cache line.
 			    total_size += Common::AlignUp(end - start, 64);
+			    ForgetColorMetadataChecks(start, end - start);
 		    });
 		    if (DccFillPublish::EnvMode() != DccFillPublish::Mode::Off) {
 			    m_write_ledger.Forget(address, bytes);
@@ -480,11 +481,11 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 		                                          .count());
 		FrameTiming::Add(FrameTiming::Counter::ReadbackWaitNs, ns);
 		FrameTiming::Add(GuestGpu::IsGpuThread() ? FrameTiming::Counter::ReadbackWaitCpNs : FrameTiming::Counter::ReadbackWaitOtherNs, ns); // S441
-		if (census) {
-			FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncDccN, site));
-			FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncDccNs, site), ns);
-			if (site == SyncCensus::Site::Spec) FrameTiming::Add(SpecPurposeCounter(ShaderRecompiler::IR::SpecShadow::CurrentPurpose()));
-		}
+		// S495: the per-site totals are the acceptance metric, so they count on every run, not only under KYTY_DIAG_SYNC.
+		const auto tagged = SyncCensus::CurrentSite();
+		FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncDccN, tagged));
+		FrameTiming::Add(SyncCounter(FrameTiming::Counter::SyncDccNs, tagged), ns);
+		if (census && tagged == SyncCensus::Site::Spec) FrameTiming::Add(SpecPurposeCounter(ShaderRecompiler::IR::SpecShadow::CurrentPurpose()));
 		return ns;
 	};
 	SyncCensus::Probe probe;
@@ -1137,6 +1138,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	TouchBuffer(buffer);
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
+		ForgetColorMetadataChecks(vaddr, size);
 		m_gpu_modified_ranges.Add(vaddr, size);
 		if (DccFillPublish::EnvMode() != DccFillPublish::Mode::Off) {
 			// Any other GPU write hides a remembered fill of these bytes.

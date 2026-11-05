@@ -676,6 +676,50 @@ foreach(mutant IN ITEMS skip_memo_check no_fail_pos order_swap ignore_clean shad
 	target_compile_definitions(srt_slot_batch_mutant_${mutant}_tests PRIVATE KYTY_SRTBATCH_MUTANT_${mutant_upper}=1)
 endforeach()
 
+# S486: KYTY_SRT_PROT_AVOID (srtProtAvoid.h). Mutants: ALWAYS_AVOID, NEVER_PROTECTED, NOTE_WHEN_AVOIDING, NO_SCOPE_CHECK, SHARE_PROGRAMS, NO_CAP.
+set(SRT_PROT_AVOID_TEST_SOURCES
+	"${KYTY_TESTS_DIR}/SrtProtAvoidTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
+)
+add_executable(srt_prot_avoid_tests EXCLUDE_FROM_ALL ${SRT_PROT_AVOID_TEST_SOURCES})
+target_link_libraries(srt_prot_avoid_tests fmt::fmt xbyak::xbyak common)
+target_include_directories(srt_prot_avoid_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS always_avoid never_protected note_when_avoiding no_scope_check share_programs no_cap)
+	string(TOUPPER ${mutant} mutant_upper)
+	add_executable(srt_prot_avoid_mutant_${mutant}_tests EXCLUDE_FROM_ALL ${SRT_PROT_AVOID_TEST_SOURCES})
+	target_link_libraries(srt_prot_avoid_mutant_${mutant}_tests fmt::fmt xbyak::xbyak common)
+	target_include_directories(srt_prot_avoid_mutant_${mutant}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(srt_prot_avoid_mutant_${mutant}_tests PRIVATE KYTY_SRTPA_MUTANT_${mutant_upper}=1)
+endforeach()
+
+# S495: KYTY_LAND_SYNC. Mutants revert one part of the package (the test must fail).
+add_executable(land_sync_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/LandSyncTests.cpp")
+target_include_directories(land_sync_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS ignore_master guest_off obtain_writes guest_gate)
+	string(TOUPPER ${mutant} mutant_upper)
+	add_executable(land_sync_mutant_${mutant}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/LandSyncTests.cpp")
+	target_include_directories(land_sync_mutant_${mutant}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(land_sync_mutant_${mutant}_tests PRIVATE KYTY_LANDSYNC_MUTANT_${mutant_upper}=1)
+endforeach()
+
+# S495: Windows CONTEXT for the guest-read half of KYTY_LAND_SYNC. Mutant WIN_NO_REGS restores the stub.
+if(WIN32)
+	add_executable(land_guest_win_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/LandGuestWinTests.cpp"
+		"${KYTY_SOURCE_DIR}/loader/guestReadEmulator.cpp")
+	target_link_libraries(land_guest_win_tests common fmt::fmt Zydis::Zydis)
+	target_include_directories(land_guest_win_tests PRIVATE ${inc_headers})
+	add_executable(land_guest_win_mutant_win_no_regs_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/LandGuestWinTests.cpp"
+		"${KYTY_SOURCE_DIR}/loader/guestReadEmulator.cpp")
+	target_link_libraries(land_guest_win_mutant_win_no_regs_tests common fmt::fmt Zydis::Zydis)
+	target_include_directories(land_guest_win_mutant_win_no_regs_tests PRIVATE ${inc_headers})
+	target_compile_definitions(land_guest_win_mutant_win_no_regs_tests PRIVATE KYTY_GUESTREAD_MUTANT_WIN_NO_REGS=1)
+endif()
+
 add_executable(guest_driver_memory_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/GuestDriverMemoryTests.cpp"
 )
@@ -1978,6 +2022,22 @@ if(BUILD_TESTING)
 	add_test(NAME srt_tree_reject_mutant_all_one_row COMMAND $<TARGET_FILE:srt_tree_reject_mutant_all_one_row_tests>)
 	set_tests_properties(srt_tree_reject_mutant_all_one_row PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME srt_slot_batch COMMAND $<TARGET_FILE:srt_slot_batch_tests>)
+	add_test(NAME srt_prot_avoid COMMAND $<TARGET_FILE:srt_prot_avoid_tests>)
+	foreach(mutant IN ITEMS always_avoid never_protected note_when_avoiding no_scope_check share_programs no_cap)
+		add_test(NAME srt_prot_avoid_mutant_${mutant} COMMAND $<TARGET_FILE:srt_prot_avoid_mutant_${mutant}_tests>)
+		set_tests_properties(srt_prot_avoid_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME land_sync COMMAND $<TARGET_FILE:land_sync_tests>)
+	foreach(mutant IN ITEMS ignore_master guest_off obtain_writes guest_gate)
+		add_test(NAME land_sync_mutant_${mutant} COMMAND $<TARGET_FILE:land_sync_mutant_${mutant}_tests>)
+		set_tests_properties(land_sync_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	if(WIN32)
+		add_test(NAME land_guest_win COMMAND $<TARGET_FILE:land_guest_win_tests>)
+		set_tests_properties(land_guest_win PROPERTIES TIMEOUT 30)
+		add_test(NAME land_guest_win_mutant_win_no_regs COMMAND $<TARGET_FILE:land_guest_win_mutant_win_no_regs_tests>)
+		set_tests_properties(land_guest_win_mutant_win_no_regs PROPERTIES TIMEOUT 30 WILL_FAIL TRUE)
+	endif()
 	foreach(mutant IN ITEMS skip_memo_check no_fail_pos order_swap ignore_clean shadow_real_memo all_blocks)
 		add_test(NAME srt_slot_batch_mutant_${mutant} COMMAND $<TARGET_FILE:srt_slot_batch_mutant_${mutant}_tests>)
 		set_tests_properties(srt_slot_batch_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)

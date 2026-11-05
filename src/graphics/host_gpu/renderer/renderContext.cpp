@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/renderer/gfDiag.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
 #include "kernel/memory.h"
+#include "graphics/shader/recompiler/ir/passes/srtProtAvoid.h"
 #include "graphics/presentation/cpPhaseScope.h"
 
 #include "common/assert.h"
@@ -32,6 +33,7 @@ RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::pa
       m_texture_cache(graphics, m_command_scheduler, m_page_manager, m_buffer_cache),
       m_image_heap(*this, m_page_manager), m_occlusion_queries(graphics, m_command_scheduler) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
+	LandSync::Announce(); // S495
 	m_command_scheduler.EnableAsyncSubmit();
 	m_command_scheduler.EnableStarveDiag(); // S410
 }
@@ -189,6 +191,7 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		FrameTiming::Add(on_gpu_thread ? FrameTiming::Counter::ReadbackReadFaultGpu
 		                               : FrameTiming::Counter::ReadbackReadFault);
 		const SyncCensus::SiteScope site_tag(on_gpu_thread ? SyncCensus::Site::RfGpu : SyncCensus::Site::RfGuest);
+		if (on_gpu_thread) ShaderRecompiler::IR::SrtProtAvoid::NoteFault(fault_vaddr); // S486 (KYTY_SRT_PROT_AVOID): the page is hot for the running walk
 		// S412 (KYTY_DIAG_RFOP): who on the command processor thread reads the page, and what it would have seen before the drain.
 		const bool rf_op = on_gpu_thread && RfOp::Enabled();
 		RfOp::Event rf_event;

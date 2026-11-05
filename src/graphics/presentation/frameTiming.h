@@ -427,6 +427,9 @@ enum class Counter : uint32_t {
 	// handles (tess, object id, mesh, packed unorm), 4 invalid vertex shader, 5 vertex table unsafe, 6 image heap asked, 7 walker load faulted, 8 call source / skipped,
 	// 9 no module for the specialization yet, 10 read ranges over the page cap, 11 other.
 	PipeFail1N, PipeFail2N, PipeFail3N, PipeFail4N, PipeFail5N, PipeFail6N, PipeFail7N, PipeFail8N, PipeFail9N, PipeFail10N, PipeFail11N,
+	// S486 (KYTY_SRT_PROT_AVOID) and S495 (KYTY_LAND_SYNC). The upstream walker has no compiled-load site for the avoid hook; the counters stay so the landing guest path can record.
+	SrtPaWalkN, SrtPaReadN, SrtPaFallbackN, SrtPaShadowNeN, SrtPaFaultNoteN,
+	LandDccGpuN, LandDccGpuMissN, LandGuestEmuN,
 	Count,
 };
 

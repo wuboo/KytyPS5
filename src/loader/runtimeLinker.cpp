@@ -18,6 +18,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/renderer/gfDiag.h"
+#include "graphics/host_gpu/renderer/cache/landSync.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
@@ -688,6 +689,15 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 
 // S426 (KYTY_GF_EMULATE=0|1|shadow): the backing read the emulated load is served from. The gate looks at the bytes the instruction reads, not at the
 // fault byte: GPU-dirty or in-flight bytes keep the ordinary drain.
+// KYTY_GF_EMULATE when it is set, otherwise the landing package (KYTY_LAND_SYNC). Both call sites
+// have to use this: the backing read used to consult only KYTY_GF_EMULATE and then label every
+// clean byte as inflight, so the package never served a load.
+static Loader::GuestReadEmulator::Mode GuestFaultMode() {
+	const auto resolved = Libs::Graphics::LandSync::ResolveGuestEmu(static_cast<uint8_t>(Loader::GuestReadEmulator::EnvMode()),
+	                                                                Libs::Graphics::LandSync::GuestMode());
+	return static_cast<Loader::GuestReadEmulator::Mode>(resolved);
+}
+
 static Loader::GuestReadEmulator::BackingResult GfEmuReadBacking(uint64_t address, uint64_t size, void* dst) {
 	using Loader::GuestReadEmulator::BackingResult;
 	bool dirty    = false;
@@ -696,9 +706,11 @@ static Loader::GuestReadEmulator::BackingResult GfEmuReadBacking(uint64_t addres
 	if (!Libs::LibKernel::Memory::QueryGuestFaultBytes(address, size, &dirty, &inflight, &busy)) {
 		return busy ? BackingResult::LockBusy : BackingResult::Unavailable; // S428: busy = the command processor holds the lock, never wait here
 	}
-	const Loader::GuestReadEmulator::Gate gate {Loader::GuestReadEmulator::EnvMode(), true, false, dirty, inflight};
+	const Loader::GuestReadEmulator::Gate gate {GuestFaultMode(), true, false, dirty, inflight};
 	if (!Loader::GuestReadEmulator::MayEmulate(gate)) {
-		return dirty ? BackingResult::Dirty : BackingResult::Inflight;
+		if (dirty) return BackingResult::Dirty;
+		if (inflight) return BackingResult::Inflight;
+		return BackingResult::Unavailable;
 	}
 	return Libs::LibKernel::Memory::TryReadBacking(address, dst, size) ? BackingResult::Ok : BackingResult::Unavailable;
 }
@@ -771,7 +783,8 @@ struct GfEmuShadow {
 // True when the fault was served here (mode 1). In shadow mode the emulated bytes are kept in `shadow` and compared after the ordinary path.
 static bool TryGuestReadEmulation(const Common::HostException::ExceptionInfo* info, GfEmuShadow* shadow) {
 	using namespace Loader::GuestReadEmulator;
-	const auto mode = EnvMode();
+	const bool from_land = EnvMode() == Mode::Off && Libs::Graphics::LandSync::EnablesGuest(Libs::Graphics::LandSync::GuestMode());
+	auto       mode      = GuestFaultMode();
 	if (mode == Mode::Off || Libs::Graphics::GuestGpu::IsGpuThread()) {
 		return false;
 	}
@@ -798,6 +811,9 @@ static bool TryGuestReadEmulation(const Common::HostException::ExceptionInfo* in
 	}
 	Commit(info->native_context, attempt.plan, attempt.bytes);
 	Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuN);
+	if (from_land) {
+		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::LandGuestEmuN);
+	}
 	GfEmuNotePage(attempt.plan.address);
 	return true;
 }

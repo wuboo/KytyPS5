@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/cache/eagerPages.h"
 #include "graphics/host_gpu/renderer/cache/faultManager.h"
 #include "graphics/host_gpu/renderer/cache/gpuDirtyRanges.h"
+#include "graphics/host_gpu/renderer/cache/landSync.h"
 #include "graphics/host_gpu/renderer/cache/gpuWriteLedger.h"
 #include "graphics/host_gpu/renderer/cache/multiLevelPageTable.h"
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
@@ -109,12 +110,11 @@ public:
 	[[nodiscard]] bool CanReadBacking(uint64_t vaddr, uint64_t size, int* reason = nullptr);
 	[[nodiscard]] bool IsRegionCpuModified(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] bool IsRegionGpuModified(uint64_t vaddr, uint64_t size);
-	// S406 (KYTY_PV_RANGE_GEN): see MemoryTracker::QueryPageGeneration; `clean` also needs no GPU-dirty byte range.
-	[[nodiscard]] MemoryTracker::PageGeneration QueryPageGeneration(uint64_t vaddr, uint64_t size);
-	// Color metadata the GPU found free of the clear keys in `keys` (bits of code >> 5) stays so
-	// until a GPU write or download.
+	// Color metadata the GPU found free of the clear keys in `keys` (bits of code >> 5) stays so until a GPU write or download.
 	void               MarkColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys);
 	[[nodiscard]] bool IsColorMetadataChecked(uint64_t vaddr, uint64_t size, uint32_t keys) const;
+	// S406 (KYTY_PV_RANGE_GEN): see MemoryTracker::QueryPageGeneration; `clean` also needs no GPU-dirty byte range.
+	[[nodiscard]] MemoryTracker::PageGeneration QueryPageGeneration(uint64_t vaddr, uint64_t size);
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
 	// Queue after the range's state change becomes visible, or a drain could consume it first.
@@ -201,6 +201,8 @@ private:
 	BufferMap                                         m_buffers;
 	PageTable                                         m_page_table;
 	GpuDirtyRanges                                    m_gpu_modified_ranges;
+	// One per LandSync::kColorClearSlots key slot.
+	std::array<RangeSet, LandSync::kColorClearSlots> m_checked_color_metadata;
 	InflightRanges                                    m_inflight_download_ranges;
 	// One per TileManager::ColorClearSlots key slot.
 	std::array<RangeSet, 8>                           m_checked_color_metadata;
