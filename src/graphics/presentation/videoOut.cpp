@@ -1722,7 +1722,7 @@ KYTY_SYSV_ABI int VideoOutGetOutputStatus(int handle, VideoOutOutputStatus* stat
 	ctx->mutex.Lock();
 	// Primary output reports 4K unless param.json Video-out Info enables resolution detection.
 	status->resolution =
-	    ((attribute3 & 4) != 0 && ctx->width < 3840 && ctx->height < 2160 ? 1u : 2u);
+	    ((attribute3 & 4) != 0 && Config::GetScreenWidth() < 3840 && Config::GetScreenHeight() < 2160 ? 1u : 2u);
 	status->dynamicRange = hdr_allowed && DriverState().IsHdrSupported() ? 2u : 1u;
 	if (const char* d = std::getenv("KYTY_DIAG_S458_DR")) {
 		status->dynamicRange = static_cast<uint32_t>(std::atoi(d));
