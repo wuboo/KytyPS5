@@ -64,10 +64,6 @@ void SysFileReadEx(void* data, uint32_t size, sys_file_t& f, uint32_t* bytes_rea
 	if (err != nullptr) {
 		*err = 0;
 	}
-	if (f.type != SYS_FILE_FILE) {
-		SysFileRead(data, size, f, bytes_read);
-		return;
-	}
 	static const bool fix  = EnvFlag("KYTY_FIX_WIN_READ_EFAULT");
 	static const bool diag = EnvFlag("KYTY_DIAG_READSHORT");
 	DWORD             w    = 0;

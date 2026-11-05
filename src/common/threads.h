@@ -22,35 +22,7 @@ bool IsMainThread();
 // Unique per thread; never reused by another thread.
 int GetThreadIdUnique();
 
-	void Join();
-	void Detach();
-
-	// Once a thread has finished, the id may be reused by another thread.
-	[[nodiscard]] std::string GetId() const;
-
-	// The id is unique and can't be reused by another thread.
-	[[nodiscard]] int GetUniqueId() const;
-
-	static void SleepMicro(uint32_t micros);
-	static void SleepNano(uint64_t nanos);
-	static bool IsMainThread();
-
-	// Get current thread id
-	// Once a thread has finished, the id may be reused by another thread.
-	static std::string GetThreadId();
-
-	// Get current thread id
-	// The id is unique and can't be reused by another thread.
-	static int GetThreadIdUnique();
-
-	// Get current process id across platforms.
-	[[nodiscard]] static int GetProcessId();
-
-	KYTY_CLASS_NO_COPY(Thread);
-
-private:
-	std::unique_ptr<ThreadPrivate> m_thread;
-};
+} // namespace Thread
 
 // Recursive.
 class Mutex {

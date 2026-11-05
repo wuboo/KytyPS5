@@ -4,17 +4,6 @@
 #include <cerrno>
 #include <chrono> // IWYU pragma: keep
 #include <ctime>
-#endif
-
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-#include <process.h>
-#else
-#include <unistd.h>
-#endif
-
-#include <sstream>
-#include <string>
-
 #include <memory>
 #include <thread>
 
@@ -160,14 +149,6 @@ bool CondVar::WaitFor(Mutex* mutex, uint32_t micros) {
 #else
 	return m_cv.wait_for(mutex->m_mutex, std::chrono::microseconds(micros)) ==
 	       std::cv_status::no_timeout;
-#endif
-}
-
-int Thread::GetProcessId() {
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-	return _getpid();
-#else
-	return static_cast<int>(getpid());
 #endif
 }
 
