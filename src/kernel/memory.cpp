@@ -3946,55 +3946,6 @@ static int PoolCommitInner(void* addr, size_t len, int type, int prot, int flags
 	return OK;
 }
 
-static int DecommitMemoryPoolRange(uint64_t vaddr, size_t len) {
-	VirtualRanges::Range old_range {};
-	if (!g_virtual_ranges->Query(vaddr, 0, &old_range)) {
-		return KERNEL_ERROR_EACCES;
-	}
-	const auto chunk_len = std::min<uint64_t>(len, old_range.size - (vaddr - old_range.start));
-	if (old_range.type == VirtualRangeType::PoolReserved) {
-		return chunk_len < len ? DecommitMemoryPoolRange(vaddr + chunk_len, len - chunk_len) : OK;
-	}
-	if (old_range.type != VirtualRangeType::Pooled) {
-		return KERNEL_ERROR_EACCES;
-	}
-	if (chunk_len < len) {
-		const int ret = DecommitMemoryPoolRange(vaddr, chunk_len);
-		return ret == OK ? DecommitMemoryPoolRange(vaddr + chunk_len, len - chunk_len) : ret;
-	}
-
-	std::vector<PooledMemory::Mapping> mappings;
-	if (!g_pooled_memory->Query(vaddr, len, &mappings)) {
-		return KERNEL_ERROR_EACCES;
-	}
-
-	VirtualMemory::Mode mode        = VirtualMemory::Mode::NoAccess;
-	GpuAccessMode       decoded_gpu = GpuAccessMode::NoAccess;
-	if (!DecodeMemoryProtection(old_range.protection, &mode, &decoded_gpu)) {
-		return KERNEL_ERROR_EACCES;
-	}
-	if (!UnmapPooledBackingTransactional(mappings, mode)) {
-		EXIT("pooled-memory backing transaction failed after GPU unmap: addr=0x%016" PRIx64
-		     " size=0x%016" PRIx64 "\n",
-		     vaddr, len);
-	}
-
-	GpuAccessMode gpu_mode = GpuAccessMode::NoAccess;
-	if (!g_pooled_memory->Release(vaddr, len, &gpu_mode)) {
-		EXIT("failed to release decommitted pooled-memory range\n");
-	}
-
-	g_virtual_ranges->Remove(vaddr, len);
-	g_virtual_ranges->Add(vaddr, len, 0, 0, 0, VirtualRangeType::PoolReserved, old_range.name);
-
-	if (g_free_callback != nullptr) {
-		g_free_callback(vaddr, len);
-	}
-
-	MemoryPoolSubtractCommitted(len);
-	return OK;
-}
-
 static int PoolDecommitInner(void* addr, size_t len, int flags);
 int KYTY_SYSV_ABI KernelMemoryPoolDecommit(void* addr, size_t len, int flags) {
 	PRINT_NAME();
@@ -4135,14 +4086,13 @@ std::vector<std::string> DiagDescribeRange(uint64_t addr, uint64_t len) {
 		              static_cast<unsigned>(range.protection), range.memory_type, static_cast<unsigned long long>(range.offset), range.name);
 		lines.emplace_back(buf);
 		if (IsPooledRangeType(range.type) && g_pooled_memory != nullptr) {
-			std::vector<PooledMemory::Mapping> mappings;
-			if (g_pooled_memory->Query(from, to - from, &mappings)) {
-				for (const auto& m: mappings) {
-					if (lines.size() >= 40) break;
-					std::snprintf(buf, sizeof(buf), "pool-map: vaddr=0x%llx size=0x%llx phys=0x%llx", static_cast<unsigned long long>(m.vaddr),
-					              static_cast<unsigned long long>(m.size), static_cast<unsigned long long>(m.phys_addr));
-					lines.emplace_back(buf);
-				}
+			for (const auto& [key, m]: g_pooled_memory->GetMappings()) {
+				(void)key;
+				if (lines.size() >= 40) break;
+				if (m.vaddr + m.size <= from || m.vaddr >= to) continue;
+				std::snprintf(buf, sizeof(buf), "pool-map: vaddr=0x%llx size=0x%llx phys=0x%llx", static_cast<unsigned long long>(m.vaddr),
+				              static_cast<unsigned long long>(m.size), static_cast<unsigned long long>(m.phys_addr));
+				lines.emplace_back(buf);
 			}
 		}
 		current = to;

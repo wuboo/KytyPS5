@@ -180,6 +180,20 @@ public:
 	// S430 (KYTY_SPEC_READ_FAST): the sequence of the mappings (odd while a change is under way) and the backing of a whole page that one mapping covers.
 	[[nodiscard]] uint64_t MapSeq() const { return m_map_seq.load(std::memory_order_acquire); }
 
+	[[nodiscard]] bool IsAvailable() const {
+#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
+		return m_handle != nullptr && m_backing_base != nullptr;
+#elif KYTY_PLATFORM == KYTY_PLATFORM_LINUX
+		return m_fd >= 0 && m_backing_base != nullptr;
+#else
+		return false;
+#endif
+	}
+
+	[[nodiscard]] bool RangeOk(uint64_t backing_offset, uint64_t size) const {
+		return size != 0 && backing_offset < m_size && size <= m_size - backing_offset;
+	}
+
 	bool TryResolveBackingPage(uint64_t page, const uint8_t** host, uint64_t* seq) {
 		if (!IsAvailable() || host == nullptr || seq == nullptr || UINT64_MAX - page < 4096) {
 			return false;
@@ -355,19 +369,11 @@ public:
 		{
 			std::lock_guard lock(m_mutex);
 			MapMutation     mutation(m_map_seq);
-			auto            next = m_maps.upper_bound(vaddr);
-			if (next != m_maps.begin()) {
-				auto entry = std::prev(next);
-				if (vaddr + size <= entry->second.vaddr + entry->second.size) {
-					old = entry->second;
-#if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
-					m_maps.erase(entry);
-#endif
-				}
-			}
+			old = m_maps.extract(std::prev(m_maps.upper_bound(vaddr))).mapped();
 		}
 		if (!UnmapViewPreservePlaceholder(reinterpret_cast<void*>(old.vaddr), old.size)) {
 			std::lock_guard lock(m_mutex);
+			MapMutation     mutation(m_map_seq);
 			m_maps.emplace(old.vaddr, old);
 			return false;
 		}
@@ -375,28 +381,33 @@ public:
 		const uint64_t left_size  = vaddr - old.vaddr;
 		const uint64_t right_addr = vaddr + size;
 		const uint64_t right_size = old.vaddr + old.size - right_addr;
-		const bool exact_unmap = (vaddr == old.vaddr && size == old.size);
-		if (exact_unmap) {
-			const bool unmapped =
-			    UnmapViewPreservePlaceholder(reinterpret_cast<void*>(old.vaddr), old.size);
-			if (!unmapped) {
-				std::lock_guard lock(m_mutex);
-				MapMutation     mutation(m_map_seq);
-				m_maps.emplace(old.vaddr, old);
-				return false;
-			}
-			if (placeholder_preserved != nullptr) {
-				*placeholder_preserved = true;
-			}
+		bool           ok         = true;
+		if (left_size != 0) {
+			ok = SplitPlaceholder(old.vaddr, left_size) && ok;
+		}
+		if (right_size != 0) {
+			ok = SplitPlaceholder(vaddr, size) && ok;
+		}
+		if (left_size != 0) {
+			ok = MapFixed(old.vaddr, left_size, old.backing_offset, old.mode) && ok;
+		}
+		if (right_size != 0) {
+			ok = MapFixed(right_addr, right_size, old.backing_offset + (right_addr - old.vaddr),
+			              old.mode) &&
+			     ok;
+		}
+		if (ok) {
 			return true;
 		}
 
 		if (left_size != 0 && Contains(old.vaddr, left_size)) {
 			EXIT_IF(!UnmapOne(old.vaddr, left_size));
 		}
-		std::lock_guard lock(m_mutex);
-		MapMutation     mutation(m_map_seq);
-		m_maps.emplace(old.vaddr, old);
+		if (right_size != 0 && Contains(right_addr, right_size)) {
+			EXIT_IF(!UnmapOne(right_addr, right_size));
+		}
+		EXIT_IF(!CoalescePlaceholders(old.vaddr, old.size));
+		EXIT_IF(!MapFixed(old.vaddr, old.size, old.backing_offset, old.mode));
 		return false;
 #else
 		// Replace only the requested range so concurrent accesses and GPU watch
