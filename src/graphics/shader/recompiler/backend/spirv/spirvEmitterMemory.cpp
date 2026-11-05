@@ -1554,6 +1554,7 @@ uint32_t EmitAppendConsume(ValueEmitContext& ctx, const IR::Inst& inst) {
 	// is a helper, the counter would not move and the whole subgroup would reuse indices (guest
 	// linked lists built with these indices then get cycles). The count keeps the helpers so
 	// that it matches V_MBCNT over the same exec.
+	const auto ballot = ctx.Ballot(inst.Arg(1));
 	auto live_ballot = ballot;
 	if (state.program.stage == ShaderType::Pixel && state.lane_count == 1) {
 		const auto helper     = EmitHelperInvocation(state);

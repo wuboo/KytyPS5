@@ -713,7 +713,7 @@ void EmitSetAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {
 			// S388: a PS that read a record outside the draw's range writes magenta (float MRTs only).
 			const bool packed_unorm = state.program.stage == ShaderType::Pixel && exp.kind == IR::ExportTargetKind::Mrt &&
 			                          (state.input_info.pixel->target_packed_unorm_mask & (1u << exp.index)) != 0u;
-			if (exp.kind == IR::ExportTargetKind::Mrt && !uint_output && !packed_unorm) value = PvGuardColor(state, value);
+			if (exp.kind == IR::ExportTargetKind::Mrt && vector_type == TypeF32Vector(state, 4) && !packed_unorm) value = PvGuardColor(state, value);
 			state.builder.AddFunction(spv::OpStore, variable, value);
 			if (state.pv_store != nullptr && exp.kind == IR::ExportTargetKind::Parameter) {
 				const auto output =
