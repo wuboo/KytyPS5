@@ -24,17 +24,6 @@ namespace Libs::Graphics {
 CommandBuffer::CommandBuffer(CommandScheduler& scheduler)
     : m_context(scheduler.Context()), m_graphics(scheduler.Graphics()) {}
 
-bool CommandBuffer::IsInvalid() const {
-	return m_buffer == nullptr;
-}
-
-vk::CommandBuffer CommandBuffer::Handle() const {
-	EXIT_IF(IsInvalid());
-	if (!m_recorded && GpuDone::g_starve_diag) m_t_first_rec = FrameTiming::SteadyNowNs(); // S410
-	m_recorded = true;
-	return m_buffer;
-}
-
 void CommandBuffer::Begin() {
 	EXIT_IF(m_rendering || IsInvalid());
 	auto buffer = Handle();
@@ -59,17 +48,6 @@ void CommandBuffer::End() const {
 	auto result = buffer.end();
 
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
-}
-
-void CommandBuffer::SetDebugInfo(uint32_t op, uint64_t submit_id, uint32_t arg0, uint32_t arg1,
-                                 uint32_t arg2, uint32_t arg3, uint64_t arg4) {
-	m_debug_op        = op;
-	m_debug_submit_id = submit_id;
-	m_debug_arg0      = arg0;
-	m_debug_arg1      = arg1;
-	m_debug_arg2      = arg2;
-	m_debug_arg3      = arg3;
-	m_debug_arg4      = arg4;
 }
 
 bool CommandBuffer::SamePass(const RenderState& state) const {
@@ -102,7 +80,9 @@ void CommandBuffer::BeginRendering(const RenderState& wanted) const {
 		const auto& attachment = state.color_attachments[i];
 		colors[i].imageView    = attachment.image_view;
 		colors[i].imageLayout  = attachment.image_layout;
-		colors[i].loadOp       = vk::AttachmentLoadOp::eLoad;
+		colors[i].loadOp       = attachment.is_clear ? vk::AttachmentLoadOp::eClear : vk::AttachmentLoadOp::eLoad;
+		colors[i].clearValue.color.uint32[0] = attachment.clear_value[0];
+		colors[i].clearValue.color.uint32[1] = attachment.clear_value[1];
 		colors[i].storeOp      = vk::AttachmentStoreOp::eStore;
 	}
 

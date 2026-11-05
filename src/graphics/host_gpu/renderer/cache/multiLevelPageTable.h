@@ -139,6 +139,16 @@ public:
 			std::copy_n(other.m_inline.begin(), m_inline_size, m_inline.begin());
 		}
 	}
+	InlinePageOwnerList& operator=(InlinePageOwnerList&& other) noexcept {
+		if (this != &other) {
+			m_overflow    = std::move(other.m_overflow);
+			m_inline_size = std::exchange(other.m_inline_size, 0);
+			if (m_overflow == nullptr) {
+				std::copy_n(other.m_inline.begin(), m_inline_size, m_inline.begin());
+			}
+		}
+		return *this;
+	}
 
 	[[nodiscard]] const_iterator begin() const noexcept { return {this, 0}; }
 	[[nodiscard]] const_iterator end() const noexcept { return {this, size()}; }

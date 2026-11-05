@@ -485,13 +485,6 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 
 	SubmitJob job;
 	job.buffer          = buffer;
-	job.debug_op        = m_command.m_debug_op;
-	job.debug_submit_id = m_command.m_debug_submit_id;
-	job.debug_args[0]   = m_command.m_debug_arg0;
-	job.debug_args[1]   = m_command.m_debug_arg1;
-	job.debug_args[2]   = m_command.m_debug_arg2;
-	job.debug_args[3]   = m_command.m_debug_arg3;
-	job.debug_arg4      = m_command.m_debug_arg4;
 	job.first_seg       = first_after_drain;
 	job.t_first_rec     = t_first_rec; // S410
 	const int32_t ts_slot = m_command.m_ts_slot; // S477 D3 DIAG
@@ -566,11 +559,6 @@ void CommandScheduler::QueueSubmitNow(SubmitJob& job) {
 		FrameTiming::Add(FrameTiming::Counter::FirstSubmitN);
 		FrameTiming::Add(FrameTiming::Counter::FirstSubmitEnqToVkNs, FrameTiming::ElapsedNs(job.queued_ns, vk_begin_ns));
 		FrameTiming::Add(FrameTiming::Counter::FirstSubmitEncodeNs, FrameTiming::ElapsedNs(vk_begin_ns, vk_end_ns));
-	}
-	if (result != vk::Result::eSuccess) {
-		ReportVulkanFatal("vkQueueSubmit", result, job.tick, job.debug_op, job.debug_submit_id,
-		                  job.debug_args[0], job.debug_args[1], job.debug_args[2],
-		                  job.debug_args[3], job.debug_arg4);
 	}
 	EXIT_NOT_IMPLEMENTED(result != vk::Result::eSuccess);
 	if (m_gpu_done) m_gpu_done->NoteSubmit(job.tick, job.t_first_rec, job.reason); // S406: the moment vkQueueSubmit returned

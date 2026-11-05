@@ -151,7 +151,10 @@ public:
 	}
 	void EndRendering() const;
 
-	[[nodiscard]] vk::CommandBuffer Handle() const noexcept { return m_buffer; }
+	[[nodiscard]] vk::CommandBuffer Handle() const noexcept {
+		m_recorded = true;
+		return m_buffer;
+	}
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }
 	[[nodiscard]] RenderContext&    GetContext() const noexcept { return m_context; }
 	[[nodiscard]] HW::Context&      GetRegisters() const noexcept { return *m_registers; }

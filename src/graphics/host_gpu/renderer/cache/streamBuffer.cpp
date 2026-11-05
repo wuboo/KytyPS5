@@ -196,10 +196,6 @@ void Buffer::Fill(uint64_t offset, uint64_t size, uint32_t value) {
 	                       vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
 	                       0, nullptr, 1, &before, 0, nullptr);
 	GpuLabel::With(native, GpuLabel::Class::Fill, [&] { native.fillBuffer(Handle(), offset, size, value); }, "G.fill.%ukb", static_cast<uint32_t>(size >> 10u));
-	const auto after = Barrier(offset, size, vk::AccessFlagBits::eTransferWrite,
-	                           vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite);
-
-	native.fillBuffer(Handle(), offset, size, value);
 	const auto after = Barrier(offset, size, vk::AccessFlagBits::eTransferWrite, MEMORY_ACCESS);
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
 	                       vk::PipelineStageFlagBits::eAllCommands,

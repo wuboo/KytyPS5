@@ -458,7 +458,8 @@ void TextureCache::TrackImageDownload(ImageId id, Image& image) {
 	}
 }
 
-TextureCache::ImageIds TextureCache::FindImagesInRegion(uint64_t address, uint64_t size) const {
+TextureCache::ImageIds TextureCache::FindImagesInRegion(uint64_t address, uint64_t size,
+                                                          bool page_overlap) const {
 	ImagePageTable::PageRange pages {};
 	if (!ImagePageTable::TryGetPageRange(address, size, pages)) {
 		return {};
@@ -472,7 +473,7 @@ TextureCache::ImageIds TextureCache::FindImagesInRegion(uint64_t address, uint64
 		}
 		owners->ForEach([&](ImageId id) {
 			const auto& image = m_slot_images[id];
-			if (image.picked || !image.Overlaps(address, size)) {
+			if (image.picked || (!page_overlap && !image.Overlaps(address, size))) {
 				return;
 			}
 			image.picked = true;

@@ -191,7 +191,8 @@ private:
 
 	// Caller holds m_lock; it also serializes the per-image query epoch.
 	[[nodiscard]] ImageIds      FindImagesInRegion(uint64_t address, uint64_t size,
-	                                               bool page_overlap) const;
+	                                               bool page_overlap = false) const;
+	void                        InvalidateCpuAliases(uint64_t address, uint64_t size);
 	[[nodiscard]] OverlapResult ResolveOverlap(const ImageInfo& requested, BindingType binding,
 	                                           ImageId cached, ImageId merged);
 	[[nodiscard]] ImageId       ResolveDepthOverlap(const ImageInfo& requested, BindingType binding,
