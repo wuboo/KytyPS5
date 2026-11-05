@@ -159,6 +159,8 @@ struct ShaderVertexInputInfo {
 	ShaderIndirectOffsets   indirect_offsets;
 	// GPU-read records add Vulkan bases even when the packet patches no user SGPRs.
 	bool                    indirect_draw       = false;
+	bool                    fetch_external      = false;
+	bool                    fetch_embedded      = false;
 	// Attribute-table metadata enables dynamic fetch detection; loads are matched later.
 	bool                    has_dynamic_vertex_fetch = false;
 };
@@ -220,6 +222,7 @@ struct ShaderPixelInputInfo {
 	// Export logical alpha or per-channel source factors through MRT1 after channel swizzling.
 	ShaderAlphaBlendSource                         alpha_blend_source = ShaderAlphaBlendSource::None;
 	bool                                           ps_early_z                   = false;
+	bool                                           ps_execute_on_noop           = false;
 	ShaderStageRuntime                             stage;
 
 	bool ps_single_sample = false;

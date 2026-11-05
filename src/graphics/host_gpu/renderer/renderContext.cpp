@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/regionDefinitions.h"
 #include "graphics/host_gpu/renderer/wfDiag.h"
 #include "graphics/host_gpu/protectRing.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
@@ -128,10 +129,10 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 			(void)ring_on;
 		const auto wf_begin = wf_diag ? FrameTiming::SteadyNowNs() : int64_t {0};
 		if (wf_diag) {
-			const auto page      = fault_vaddr & ~(m_page_manager.GetPageSize() - 1);
+			const auto page      = fault_vaddr & ~(TRACKER_PAGE_SIZE - 1);
 			uint64_t   image_size = 0;
 			const bool image     = m_texture_cache.DiagRegionOwner(page, &image_size);
-			const bool buffer    = !m_buffer_cache.IsRegionCpuModified(page, m_page_manager.GetPageSize());
+			const bool buffer    = !m_buffer_cache.IsRegionCpuModified(page, TRACKER_PAGE_SIZE);
 			const auto flip      = FrameTiming::GuestFlips();
 			WriteFault::Finished finished;
 			if (WriteFault::Pages().Note(page, flip, WriteFault::MakeOwner(buffer, image), image_size, &finished)) {
@@ -169,9 +170,9 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		static std::atomic<uint64_t> faults {0};
 		static std::atomic<uint64_t> released_pages {0};
 		const auto                   n = faults.fetch_add(1, std::memory_order_relaxed) + 1;
-		const auto released = released_pages.fetch_add(invalidate_size / m_page_manager.GetPageSize(),
+		const auto released = released_pages.fetch_add(invalidate_size / TRACKER_PAGE_SIZE,
 		                                         std::memory_order_relaxed) +
-		                   invalidate_size / m_page_manager.GetPageSize();
+		                   invalidate_size / TRACKER_PAGE_SIZE;
 		if ((n & (n - 1)) == 0) {
 			LOGF("[rosetta-release-ahead] write faults=%" PRIu64 " pages invalidated=%" PRIu64
 			     "\n",
@@ -283,7 +284,7 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 				static std::mutex                   mutex;
 				static std::unordered_set<uint64_t> logged;
 				std::lock_guard                     lock(mutex);
-				const auto page = fault_vaddr & ~(m_page_manager.GetPageSize() - 1);
+				const auto page = fault_vaddr & ~(TRACKER_PAGE_SIZE - 1);
 				if (logged.size() < 4096 && logged.insert(page).second) {
 					LOGF("[read-fault-restore] addr=0x%016" PRIx64 " host_prot=%d\n", page,
 					     host_protection);

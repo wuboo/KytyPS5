@@ -1471,6 +1471,18 @@ static std::optional<DrawEmitInfo> ResolveDrawEmit(const HW::UserConfig&        
 	return DrawEmitInfo {vertex_offset + first_vertex, instance_offset};
 }
 
+static bool PrimitiveRestartControlOn(const CommandBuffer& buffer) {
+	if ((buffer.GetUserConfig().GetPrimitiveResetControl() & 0x1u) == 0) {
+		return false;
+	}
+	switch (buffer.GetUserConfig().GetPrimType()) {
+		case Prospero::PrimitiveType::kLineStrip:
+		case Prospero::PrimitiveType::kTriFan:
+		case Prospero::PrimitiveType::kTriStrip: return true;
+		default: return false;
+	}
+}
+
 bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args) {
 	KYTY_PROFILER_FUNCTION();
 	FrameTiming::Add(FrameTiming::Counter::Draws);
