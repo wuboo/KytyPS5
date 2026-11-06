@@ -755,6 +755,7 @@ void BufferCache::NoteGpuWrite(uint64_t vaddr, uint64_t size) {
 			if (std::find(m_eager_pending.begin(), m_eager_pending.end(), page) == m_eager_pending.end()) {
 				m_eager_pending.push_back(page);
 				FrameTiming::Add(FrameTiming::Counter::RbWalkPrefetchN);
+				RbWalk::ArmPrefetch();
 			}
 		}
 	}

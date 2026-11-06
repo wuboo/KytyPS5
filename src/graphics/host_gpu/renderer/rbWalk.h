@@ -10,10 +10,10 @@
 //   shadow  the fault still runs; the backing dword is compared with the drained bytes (ne = 0)
 // A query that cannot answer (lock busy, range not tracked) stays on the fault. Dirty or
 // in-flight bytes stay on the fault: the backing would be stale.
-// A dirty dword is not served (the backing is stale). Mode 1 remembers the page and, on the next GPU
-// write of at most one tracker page, queues that page for the existing pre-submit download
-// (FlushEagerReadbacks). The copy is recorded with the write, so a later walker load in the frame
-// finds the bytes already published instead of draining the queue behind every draw since the write.
+// A dirty dword is not served (the backing is stale). Mode 1 remembers the page. The next GPU write of
+// at most one tracker page queues that page, and the writing dispatch submits the copy before later
+// dispatches run their walker. The read then finds the bytes published. A copy only at the frame's
+// last submit is too late: the read faults earlier in the same command buffer.
 // Mutants (tests/RbWalkTests.cpp): KYTY_RBWALK_MUTANT_SERVE_DIRTY, _SERVE_INFLIGHT, _SERVE_UNKNOWN,
 // _SHADOW_SKIPS_FAULT, _PREFETCH_ANY_SIZE.
 
@@ -74,6 +74,28 @@ constexpr bool PrefetchWrite(Mode mode, bool learned, uint64_t size) {
 #else
 	return size > 0 && size <= 4096;
 #endif
+}
+
+// The writing dispatch submits after it queues a prefetch, so the copy is not stuck behind the
+// draws recorded later in the frame. Shadow and off never arm it.
+constexpr bool SplitAfterWrite(Mode mode, bool armed) {
+	if (mode != Mode::On || !armed) return false;
+#if defined(KYTY_RBWALK_MUTANT_NO_SPLIT)
+	return false;
+#else
+	return true;
+#endif
+}
+
+inline bool& PrefetchArmedFlag() {
+	static thread_local bool armed = false;
+	return armed;
+}
+inline void ArmPrefetch() { PrefetchArmedFlag() = true; }
+inline bool TakePrefetch() {
+	const bool armed = PrefetchArmedFlag();
+	PrefetchArmedFlag() = false;
+	return armed;
 }
 
 // Pages whose walker load faulted on GPU-dirty bytes. The GPU thread only (the fault and the write).

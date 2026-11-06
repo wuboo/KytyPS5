@@ -44,6 +44,10 @@ int main() {
 	Check(PrefetchWrite(Mode::On, true, 4096), "on, learned, one page: prefetch");
 	Check(!PrefetchWrite(Mode::On, true, 8192), "on, learned, two pages: no prefetch");
 	Check(!PrefetchWrite(Mode::On, true, 0), "empty write: no prefetch");
+	Check(SplitAfterWrite(Mode::On, true), "on, armed: submit the copy");
+	Check(!SplitAfterWrite(Mode::On, false), "on, not armed: no submit");
+	Check(!SplitAfterWrite(Mode::Shadow, true), "shadow does not submit");
+	Check(!SplitAfterWrite(Mode::Off, true), "off does not submit");
 
 	LearnedPages learned;
 	Check(learned.Note(0x1000), "first page is new");

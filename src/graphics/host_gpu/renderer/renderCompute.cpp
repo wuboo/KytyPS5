@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/rbWalk.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -299,6 +300,17 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	FrameTiming::Add(FrameTiming::Counter::Dispatches);
 	m_context.GetCommandScheduler().MaybeEagerSplit();
 	m_context.GetCommandScheduler().PopPendingOperations();
+	// Destroyed after the context lock: a learned small write submits its copy before the next walker.
+	struct RbPrefetchSplit {
+		RenderContext& context;
+		~RbPrefetchSplit() {
+			if (!RbWalk::SplitAfterWrite(RbWalk::EnvMode(), RbWalk::TakePrefetch())) return;
+			auto& scheduler = context.GetCommandScheduler();
+			if (scheduler.RenderingOpen()) return;
+			scheduler.Flush();
+			FrameTiming::Add(FrameTiming::Counter::RbWalkSplitN);
+		}
+	} prefetch_split {m_context};
 	auto& sh_ctx = buffer.GetShaders();
 
 	if (thread_group_x == 0 || thread_group_y == 0 || thread_group_z == 0) {
@@ -516,6 +528,16 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	FrameTiming::Add(FrameTiming::Counter::Dispatches);
 	m_context.GetCommandScheduler().MaybeEagerSplit();
 	m_context.GetCommandScheduler().PopPendingOperations();
+	struct RbPrefetchSplit {
+		RenderContext& context;
+		~RbPrefetchSplit() {
+			if (!RbWalk::SplitAfterWrite(RbWalk::EnvMode(), RbWalk::TakePrefetch())) return;
+			auto& scheduler = context.GetCommandScheduler();
+			if (scheduler.RenderingOpen()) return;
+			scheduler.Flush();
+			FrameTiming::Add(FrameTiming::Counter::RbWalkSplitN);
+		}
+	} prefetch_split {m_context};
 	Common::LockGuard lock(m_context.GetMutex());
 	vk::DispatchIndirectCommand args {};
 	// S418: a copy of the args still in flight leaves the tracker clear and the backing stale (zeros from the previous use).
