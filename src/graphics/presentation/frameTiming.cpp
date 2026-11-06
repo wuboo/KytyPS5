@@ -700,6 +700,11 @@ constexpr const char* kCounterNames[] = {
     "land_dcc_gpu_n",
     "land_dcc_gpu_miss_n",
     "land_guest_emu_n",
+    "rb_walk_serve_n",
+    "rb_walk_dirty_n",
+    "rb_walk_busy_n",
+    "rb_walk_shadow_n",
+    "rb_walk_shadow_ne_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

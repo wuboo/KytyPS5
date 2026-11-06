@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/renderer/gfDiag.h"
 #include "graphics/host_gpu/renderer/cache/landSync.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/host_gpu/renderer/rbWalk.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "kernel/fileSystem.h"
@@ -913,6 +914,58 @@ static void S462DumpFaultContext(const Common::HostException::ExceptionInfo* inf
 	std::fflush(stdout);
 }
 
+// S502 (KYTY_RB_WALK): a faulting mov eax,[r10] of the SRT walker. Shadow stashes the backing dword and lets the fault drain.
+struct RbWalkShadow {
+	bool     pending = false;
+	uint64_t addr    = 0;
+	uint32_t word    = 0;
+};
+static thread_local RbWalkShadow t_rb_walk_shadow;
+
+static void RbWalkShadowClear() {
+	t_rb_walk_shadow.pending = false;
+}
+
+static void RbWalkShadowFinish() {
+	if (!t_rb_walk_shadow.pending) return;
+	const auto addr = t_rb_walk_shadow.addr;
+	const auto word = t_rb_walk_shadow.word;
+	t_rb_walk_shadow.pending = false;
+	if (!IsReadableRange(addr, sizeof(uint32_t))) return;
+	uint32_t fresh = 0;
+	std::memcpy(&fresh, reinterpret_cast<const void*>(addr), sizeof(fresh));
+	using C = Libs::Graphics::FrameTiming::Counter;
+	Libs::Graphics::FrameTiming::Add(C::RbWalkShadowN);
+	if (fresh != word) Libs::Graphics::FrameTiming::Add(C::RbWalkShadowNeN);
+}
+
+// True when the load was completed from the backing. Shadow and every unsafe case return false (the fault runs).
+static bool TryRbWalkServe(const Common::HostException::ExceptionInfo* info) {
+	using namespace Libs::Graphics::RbWalk;
+	const auto mode = EnvMode();
+	if (mode == Mode::Off) return false;
+	const auto length = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(info->exception_address);
+	if (length == 0) return false;
+	bool dirty = false, inflight = false, busy = false;
+	const bool known = Libs::LibKernel::Memory::QueryGuestFaultBytes(info->access_violation_vaddr, sizeof(uint32_t), &dirty, &inflight, &busy);
+	const auto source = Decide(mode, dirty, inflight, !known || busy);
+	using C = Libs::Graphics::FrameTiming::Counter;
+	if (source == Source::Fault) {
+		if (!known || busy) Libs::Graphics::FrameTiming::Add(C::RbWalkBusyN);
+		else if (dirty) Libs::Graphics::FrameTiming::Add(C::RbWalkDirtyN);
+		return false;
+	}
+	uint32_t word = 0;
+	if (!Libs::LibKernel::Memory::TryReadBacking(info->access_violation_vaddr, &word, sizeof(word))) return false;
+	if (source == Source::Shadow) {
+		t_rb_walk_shadow = {true, info->access_violation_vaddr, word};
+		return false;
+	}
+	Loader::X64InstructionEmulator::FinishEaxLoad(info->native_context, length, word);
+	Libs::Graphics::FrameTiming::Add(C::RbWalkServeN);
+	return true;
+}
+
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
@@ -944,15 +997,21 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 				Loader::X64InstructionEmulator::SkipLoad(info->native_context, length);
 				return true;
 			}
+			if (TryRbWalkServe(info)) {
+				Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultHandled);
+				return true;
+			}
 			if (Libs::Graphics::GuestFault::Enabled() && !Libs::Graphics::GuestGpu::IsGpuThread()) {
 				GfEmuLogInstruction(info->native_context, info->access_violation_vaddr, info->exception_address);
 			}
 			if (TryGuestReadEmulation(info, &gf_shadow)) {
+				RbWalkShadowClear();
 				Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultHandled);
 				return true;
 			}
 		}
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
+			RbWalkShadowFinish();
 			GfEmuShadowFinish(gf_shadow);
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
 			Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultHandled);

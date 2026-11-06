@@ -939,6 +939,16 @@ foreach(mutant IN ITEMS BACKING_IGNORES_DIRTY SHADOW_SKIPS_RAW FIRSTDIFF_SKIPS_L
 	target_compile_definitions(pv_index_backing_mutant_${mutant_lower}_tests PRIVATE KYTY_PVINDEXBACKING_MUTANT_${mutant}=1)
 endforeach()
 
+# S502: KYTY_RB_WALK decisions. Mutants: serve although the bytes are GPU-dirty / in flight / the tracker could not be queried; shadow skips the fault.
+add_executable(rb_walk_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RbWalkTests.cpp")
+target_include_directories(rb_walk_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS SERVE_DIRTY SERVE_INFLIGHT SERVE_UNKNOWN SHADOW_SKIPS_FAULT)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(rb_walk_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RbWalkTests.cpp")
+	target_include_directories(rb_walk_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(rb_walk_mutant_${mutant_lower}_tests PRIVATE KYTY_RBWALK_MUTANT_${mutant}=1)
+endforeach()
+
 # S419: KYTY_CP_READ_BACKING decisions. Mutants: the backing read although the bytes are GPU-dirty / a copy is in flight; shadow without the old read; a difference in the last byte missed.
 add_executable(cp_read_backing_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpReadBackingTests.cpp")
 target_include_directories(cp_read_backing_tests PRIVATE ${inc_headers})
@@ -1906,6 +1916,11 @@ if(BUILD_TESTING)
 		add_test(NAME pv_index_backing_mutant_${mutant} COMMAND $<TARGET_FILE:pv_index_backing_mutant_${mutant}_tests>)
 		set_tests_properties(pv_index_backing_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
+	add_test(NAME rb_walk COMMAND $<TARGET_FILE:rb_walk_tests>)
+	foreach(mutant IN ITEMS serve_dirty serve_inflight serve_unknown shadow_skips_fault)
+		add_test(NAME rb_walk_mutant_${mutant} COMMAND $<TARGET_FILE:rb_walk_mutant_${mutant}_tests>)
+		set_tests_properties(rb_walk_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME cp_read_backing COMMAND $<TARGET_FILE:cp_read_backing_tests>)
 	foreach(mutant IN ITEMS read_backing_ignores_dirty read_backing_ignores_inflight shadow_skips_raw firstdiff_skips_last)
 		add_test(NAME cp_read_backing_mutant_${mutant} COMMAND $<TARGET_FILE:cp_read_backing_mutant_${mutant}_tests>)
@@ -2290,6 +2305,11 @@ if(BUILD_TESTING)
 		pv_index_backing_mutant_backing_ignores_dirty_tests
 		pv_index_backing_mutant_shadow_skips_raw_tests
 		pv_index_backing_mutant_firstdiff_skips_last_tests
+		rb_walk_tests
+		rb_walk_mutant_serve_dirty_tests
+		rb_walk_mutant_serve_inflight_tests
+		rb_walk_mutant_serve_unknown_tests
+		rb_walk_mutant_shadow_skips_fault_tests
 		cp_read_backing_tests
 		cp_read_backing_mutant_read_backing_ignores_dirty_tests
 		cp_read_backing_mutant_read_backing_ignores_inflight_tests

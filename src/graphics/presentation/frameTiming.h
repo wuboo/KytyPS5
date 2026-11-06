@@ -430,6 +430,9 @@ enum class Counter : uint32_t {
 	// S486 (KYTY_SRT_PROT_AVOID) and S495 (KYTY_LAND_SYNC). The upstream walker has no compiled-load site for the avoid hook; the counters stay so the landing guest path can record.
 	SrtPaWalkN, SrtPaReadN, SrtPaFallbackN, SrtPaShadowNeN, SrtPaFaultNoteN,
 	LandDccGpuN, LandDccGpuMissN, LandGuestEmuN,
+	// S502 (KYTY_RB_WALK): walker loads completed from the backing / left on the fault because the
+	// dword is GPU-dirty / left because the tracker could not be queried / shadow compares / of those, not equal.
+	RbWalkServeN, RbWalkDirtyN, RbWalkBusyN, RbWalkShadowN, RbWalkShadowNeN,
 	Count,
 };
 
