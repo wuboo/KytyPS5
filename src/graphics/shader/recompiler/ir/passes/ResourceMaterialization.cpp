@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+#include "graphics/host_gpu/renderer/rbAdiag.h"
 
 #include "common/assert.h"
 #include "graphics/guest_gpu/gpu_format.h"
@@ -1561,6 +1562,7 @@ bool MemoDirectRead(void*, uint64_t address, std::span<uint32_t> values) {
 	if (address < kMemoGuestMemoryMin) {
 		std::ranges::fill(values, 0u);
 	} else {
+		Libs::Graphics::RbAdiag::BeginSpan(address, values.size_bytes(), Libs::Graphics::RbAdiag::Src::Memo);
 		std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
 	}
 	return true;

@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
+#include "graphics/host_gpu/renderer/rbAdiag.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
 #include "graphics/shader/recompiler/ir/passes/srtJitCover.h"
 #include "graphics/shader/recompiler/ir/passes/srtSlotBatch.h"
@@ -19,6 +20,7 @@
 #include <xbyak/xbyak.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <bit>
 #include <cmath>
 #include <cstdio>
@@ -31,9 +33,68 @@
 #include <unordered_map>
 #include <unordered_set>
 
+extern "C" Libs::Graphics::RbAdiag::WatchSlot kyty_adiag_watch[4] {};
+
+extern "C" void KytyAdiagPublish(int index, uint64_t base, uint64_t last) {
+	if (index < 0 || index >= 4) return;
+	kyty_adiag_watch[index].base = base;
+	kyty_adiag_watch[index].last = last;
+}
+
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
 namespace {
+
+// S502 DIAG: rax holds the guest address. r10 is scratch. On a hit, call the C++ note and restore
+// every register the compiled walk still needs (Windows x64 volatile set, plus rbp).
+static void AdiagJitLoad(uint64_t addr, int src) {
+	if (auto* fn = Libs::Graphics::RbAdiag::JitHook()) fn(addr, src);
+}
+
+void EmitAdiagHit(Xbyak::CodeGenerator& code, int src) {
+	code.push(code.rax);
+	code.push(code.rcx);
+	code.push(code.rdx);
+	code.push(code.r8);
+	code.push(code.r9);
+	code.push(code.r11);
+	code.push(code.rbp);
+	code.mov(code.rbp, code.rsp);
+	code.mov(code.r10, static_cast<uint64_t>(-16));
+	code.and_(code.rsp, code.r10);
+	code.sub(code.rsp, 32);
+	code.mov(code.rcx, code.qword[code.rbp + 48]);
+	code.mov(code.edx, src);
+	code.call(AdiagJitLoad);
+	code.mov(code.rsp, code.rbp);
+	code.pop(code.rbp);
+	code.pop(code.r11);
+	code.pop(code.r9);
+	code.pop(code.r8);
+	code.pop(code.rdx);
+	code.pop(code.rcx);
+	code.pop(code.rax);
+}
+
+void EmitAdiag(Xbyak::CodeGenerator& code, int src) {
+	if (!Libs::Graphics::RbAdiag::Enabled()) return;
+	Xbyak::Label done;
+	Xbyak::Label next[4];
+	for (int i = 0; i < 4; ++i) {
+		code.mov(code.r10, reinterpret_cast<uintptr_t>(&::kyty_adiag_watch[i].base));
+		code.mov(code.r10, code.qword[code.r10]);
+		code.cmp(code.rax, code.r10);
+		code.jb(next[i], Xbyak::CodeGenerator::T_NEAR);
+		code.mov(code.r10, reinterpret_cast<uintptr_t>(&::kyty_adiag_watch[i].last));
+		code.mov(code.r10, code.qword[code.r10]);
+		code.cmp(code.rax, code.r10);
+		code.ja(next[i], Xbyak::CodeGenerator::T_NEAR);
+		EmitAdiagHit(code, src);
+		code.jmp(done, Xbyak::CodeGenerator::T_NEAR);
+		code.L(next[i]);
+	}
+	code.L(done);
+}
 
 // Guest memory starts at HOST_SYSTEM_MANAGED_MIN (memoryAddressSpace.inc), so a table pointer or an
 // ordinary read below it comes from a null table pointer. The walker reaches such reads when it
@@ -44,20 +105,24 @@ constexpr uint64_t GUEST_MEMORY_MIN = 0x40000;
 // current (it drains for GPU-dirty / in-flight ones, as the fault of a raw load would); when it cannot answer the raw load is the old behaviour. shadow: the strict
 // read first, then the raw load (whose fault drains as before), the two must be equal, the raw bytes are the result.
 void AvoidFaultRead(const SrtRuntime& runtime, uint64_t address, std::span<uint32_t> values) {
+	Libs::Graphics::RbAdiag::BeginSpan(address, values.size_bytes(), Libs::Graphics::RbAdiag::Src::Prot);
 	const bool ok = runtime.read_specialization_memory(runtime.userdata, address, values);
 	if (SrtProtAvoid::Current() == SrtProtAvoid::Mode::Shadow) {
 		std::vector<uint32_t> raw(values.size());
 		std::memcpy(raw.data(), reinterpret_cast<const void*>(address), values.size_bytes());
 		if (ok && std::memcmp(raw.data(), values.data(), values.size_bytes()) != 0) SrtProtAvoid::Note(SrtProtAvoid::Cell::ShadowNe);
 		std::memcpy(values.data(), raw.data(), values.size_bytes());
+		Libs::Graphics::RbAdiag::CommitUsed(address, values.size_bytes(), values.data());
 		return;
 	}
 	if (ok) {
 		SrtProtAvoid::Note(SrtProtAvoid::Cell::ReadBacking);
+		Libs::Graphics::RbAdiag::CommitUsed(address, values.size_bytes(), values.data());
 		return;
 	}
 	SrtProtAvoid::Note(SrtProtAvoid::Cell::ReadFallback);
 	std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
+	Libs::Graphics::RbAdiag::CommitUsed(address, values.size_bytes(), values.data());
 }
 
 // S451 (KYTY_PROGS_MEMO): the memo that records the reachability loop in progress on this thread, or null.
@@ -108,6 +173,7 @@ bool SrtReadCapture::ReadOrdinary(void* userdata, uint64_t address, std::span<ui
 		AvoidFaultRead(capture.m_source, address, values);
 		NullDesc::NoteSrtRead(address, values, false);
 	} else {
+		Libs::Graphics::RbAdiag::BeginSpan(address, values.size_bytes(), Libs::Graphics::RbAdiag::Src::Interp);
 		std::memcpy(values.data(), reinterpret_cast<const void*>(address), values.size_bytes());
 		NullDesc::NoteSrtRead(address, values, false);
 	}
@@ -569,6 +635,7 @@ void EmitComputePath(Xbyak::CodeGenerator& code, const ResourcePlan& program, co
 		code.add(code.rax, code.r10);
 		code.mov(code.qword[code.r11], code.rax);
 		code.add(code.r11, sizeof(uint64_t));
+		EmitAdiag(code, static_cast<int>(Libs::Graphics::RbAdiag::Src::Mov));
 		code.mov(code.eax, code.dword[code.rax]);
 		code.jmp(store);
 		code.L(outside);
@@ -622,6 +689,7 @@ void EmitComputePath(Xbyak::CodeGenerator& code, const ResourcePlan& program, co
 	}
 	code.mov(code.qword[code.r11], code.rax);
 	code.add(code.r11, sizeof(uint64_t));
+	EmitAdiag(code, static_cast<int>(Libs::Graphics::RbAdiag::Src::Mov));
 	code.mov(code.eax, code.dword[code.rax]);
 	code.mov(code.qword[code.rdx + memo + offsetof(Entry, value)], code.rax);
 	code.mov(code.qword[code.rdx + memo + offsetof(Entry, generation)], code.rcx);
@@ -938,7 +1006,15 @@ void CompileTreeWalker(ResourcePlan& program) {
 			const auto index = read->value.ResolveInstruction()->EvaluationIndex(program.evaluation_value_count);
 			using Entry = ResourcePlan::EvaluationContext::Entry;
 			const auto slot = code.rdx + index * sizeof(Entry);
-			code.mov(code.r10d, code.dword[code.rdi + offset]);
+			if (Libs::Graphics::RbAdiag::Enabled()) {
+				code.push(code.rax);
+				code.lea(code.rax, code.ptr[code.rdi + offset]);
+				EmitAdiag(code, static_cast<int>(Libs::Graphics::RbAdiag::Src::Tree));
+				code.mov(code.r10d, code.dword[code.rax]);
+				code.pop(code.rax);
+			} else {
+				code.mov(code.r10d, code.dword[code.rdi + offset]);
+			}
 			code.mov(code.dword[code.rsi + read->flat_offset * sizeof(uint32_t)], code.r10d);
 			code.mov(code.qword[slot + offsetof(Entry, value)], code.r10);
 			code.mov(code.qword[slot + offsetof(Entry, generation)], code.rcx);

@@ -428,6 +428,16 @@ enum class Counter : uint32_t {
 	SrtPaWalkN, SrtPaReadN, SrtPaFallbackN, SrtPaShadowNeN, SrtPaFaultNoteN,
 	// S495 (KYTY_LAND_SYNC): DCC clears selected on the GPU / that attempt missed the capability check / guest reads served from the backing
 	LandDccGpuN, LandDccGpuMissN, LandGuestEmuN,
+	// S502 DIAG (KYTY_RB_ADIAG=1): dispatches of the three 24/32 B compute hashes / writes of that size /
+	// of those, known fills / tracked GPU writes / writes of any other size. Loads of a dword inside a
+	// watched range during dispatch / loads at base+0x1c / dword GPU-dirty / page dirty but the dword
+	// not / dword in flight / query could not answer. Which reader: compiled slot mov / compiled tree
+	// mov / SrtProtAvoid / PROGS_MEMO or SRT memo / interpreter memcpy. Shadow compares after the frame
+	// was submitted / of those, the dword the CPU used differed from the GPU copy.
+	AdCsN, AdWrN, AdWrKnownN, AdWrDirtyN, AdWrOtherN,
+	AdLdN, AdLd1cN, AdLdDirtyN, AdLdPageN, AdLdInflightN, AdLdUnknownN,
+	AdLdMovN, AdLdTreeN, AdLdProtN, AdLdMemoN, AdLdInterpN,
+	AdShN, AdShNeN,
 	Count,
 };
 

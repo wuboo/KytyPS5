@@ -23,6 +23,8 @@
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/cpSampler.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/host_gpu/renderer/rbAdiag.h"
+#include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/shader.h"
@@ -265,6 +267,10 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
                                     uint32_t thread_group_x, uint32_t thread_group_y,
                                     uint32_t thread_group_z, uint32_t mode, bool async_compute) {
+	RbAdiag::PullDue(+[](void* cache, uint64_t addr, uint32_t* out) {
+		return static_cast<BufferCache*>(cache)->DiagPullDword(addr, out);
+	}, &m_context.GetBufferCache());
+	RbAdiag::DispatchGuard adiag_dispatch;
 	CpPhases::Scope dispatch_phase(CpPhases::Phase::Dispatch);
 	EXIT_IF(buffer.IsInvalid());
 	FrameTiming::Add(FrameTiming::Counter::Dispatches);
@@ -344,6 +350,8 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 	const auto& program   = *input_info.stage.program;
 	const auto& resources = *input_info.stage.resources;
+	RbAdiag::ShaderGuard adiag_shader;
+	adiag_shader.Arm(program.shader_hash);
 	if (resources.specialization_reads.empty()) {
 		KYTY_CP_SITE(DispFillResolve);
 		// Cached metadata addresses can be reused as ordinary buffers; preserve their guest writes.
@@ -497,6 +505,10 @@ void RenderExecutor::DispatchDirect(uint64_t submit_id, CommandBuffer& buffer,
 
 void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
                                       uint64_t args_addr, uint32_t mode, bool async_compute) {
+	RbAdiag::PullDue(+[](void* cache, uint64_t addr, uint32_t* out) {
+		return static_cast<BufferCache*>(cache)->DiagPullDword(addr, out);
+	}, &m_context.GetBufferCache());
+	RbAdiag::DispatchGuard adiag_dispatch;
 	CpPhases::Scope dispatch_phase(CpPhases::Phase::Dispatch);
 	EXIT_IF(buffer.IsInvalid() || args_addr == 0 || (args_addr & 3u) != 0 ||
 	        (mode & Pm4::COMPUTE_DISPATCH_INITIATOR_USE_THREAD_DIMENSIONS) != 0);
@@ -529,6 +541,8 @@ void RenderExecutor::DispatchIndirect(uint64_t submit_id, CommandBuffer& buffer,
 	std::optional<CpPhases::SubTimer> disp_timer(std::in_place, FrameTiming::Counter::DispProgNs); // S463 DIAG
 	const auto compute_program = m_context.GetPipelineCache().GetComputeProgram(
 	    cs_regs, buffer.GetRegisters().GetShaderRegisters(), input_info);
+	RbAdiag::ShaderGuard adiag_shader;
+	if (input_info.stage.program != nullptr) adiag_shader.Arm(input_info.stage.program->shader_hash);
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info, compute_program);
 	disp_timer.emplace(FrameTiming::Counter::DispPrepNs);

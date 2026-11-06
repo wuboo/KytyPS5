@@ -12,6 +12,8 @@
 // (address and answer) and the user data words it was computed from are part of the key.
 // Off = loop runs; On = skip on a hit; Shadow = loop runs anyway and the memo's answer is compared with it.
 
+#include "graphics/host_gpu/renderer/rbAdiag.h"
+
 #include <algorithm>
 #include <array>
 #include <cstdint>
@@ -263,6 +265,7 @@ struct SrtCfMemo {
 			if (read.reader != nullptr) {
 				ok = read.reader(userdata, read.address, std::span<uint32_t>(&word, 1));
 			} else if (read.address >= kCfGuestMemoryMin) {
+				Libs::Graphics::RbAdiag::BeginSpan(read.address, sizeof(word), Libs::Graphics::RbAdiag::Src::Memo);
 				std::memcpy(&word, reinterpret_cast<const void*>(read.address), sizeof(word));
 			}
 			if (ok != read.ok) return false;

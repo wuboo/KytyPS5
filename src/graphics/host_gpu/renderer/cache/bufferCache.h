@@ -64,6 +64,8 @@ public:
 	void                   InvalidateMemory(uint64_t vaddr, uint64_t size);
 	// Returns false when a read fault found nothing to download.
 	bool                   ReadMemory(uint64_t vaddr, uint64_t size, bool is_write = false);
+	// S502 DIAG: copy one dword out of the GPU buffer after marking it modified. Does not run unless KYTY_RB_ADIAG=1.
+	bool                   DiagPullDword(uint64_t vaddr, uint32_t* out);
 	[[nodiscard]] Buffer&  GetBuffer(BufferId id) { return m_slot_buffers[id]; }
 	[[nodiscard]] BufferId FindBuffer(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] std::pair<Buffer*, uint64_t> ObtainBuffer(uint64_t vaddr, uint64_t size,

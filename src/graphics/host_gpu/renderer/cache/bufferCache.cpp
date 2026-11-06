@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/rbAdiag.h"
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -651,6 +652,14 @@ bool BufferCache::ReadMemory(uint64_t vaddr, uint64_t size, bool is_write) {
 	return downloaded;
 }
 
+bool BufferCache::DiagPullDword(uint64_t vaddr, uint32_t* out) {
+	if (out == nullptr || (vaddr & 3u) != 0) return false;
+	m_memory_tracker.MarkRegionAsGpuModified(vaddr, sizeof(uint32_t));
+	m_gpu_modified_ranges.Add(vaddr, sizeof(uint32_t));
+	if (!ReadMemory(vaddr, sizeof(uint32_t))) return false;
+	return LibKernel::Memory::TryReadBacking(vaddr, out, sizeof(uint32_t));
+}
+
 // S404: why a DCC piece took the old path, once per (addr, flip) inside the same log window as [sync].
 void BufferCache::LogDccFallback(uint64_t address, uint64_t size, DccFillPublish::Why why) {
 	static std::atomic<uint64_t> logged {0};
@@ -1144,6 +1153,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
 		ForgetColorMetadataChecks(vaddr, size);
+		RbAdiag::NoteTracked(vaddr, size);
 		m_gpu_modified_ranges.Add(vaddr, size);
 		if (DccFillPublish::EnvMode() != DccFillPublish::Mode::Off) {
 			// Any other GPU write hides a remembered fill of these bytes.
@@ -1217,6 +1227,7 @@ void BufferCache::FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool
 	m_texture_cache.InvalidateMemoryFromGPU(vaddr, size);
 	auto [dst, dst_offset] = ObtainBuffer(vaddr, size, true, true);
 	dst->Fill(dst_offset, size, value);
+	RbAdiag::NoteFill(vaddr, size);
 	if (DccFillPublish::EnvMode() == DccFillPublish::Mode::On) {
 		// Newest entry: the buffer cache now knows these bytes (DCC clear codes need no readback).
 		m_write_ledger.RecordFill(vaddr, size, value);
