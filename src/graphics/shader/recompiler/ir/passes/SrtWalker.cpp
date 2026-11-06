@@ -65,7 +65,10 @@ void EmitAdiagHit(Xbyak::CodeGenerator& code, int src) {
 	code.sub(code.rsp, 32);
 	code.mov(code.rcx, code.qword[code.rbp + 48]);
 	code.mov(code.edx, src);
-	code.call(AdiagJitLoad);
+	// call(function) is a rel32. AutoGrow resolves it in ready(), and that fails
+	// (ERR_OFFSET_IS_TOO_BIG) when the buffer is more than 2 GiB from this function.
+	code.mov(code.r10, reinterpret_cast<uint64_t>(AdiagJitLoad));
+	code.call(code.r10);
 	code.mov(code.rsp, code.rbp);
 	code.pop(code.rbp);
 	code.pop(code.r11);
