@@ -12,7 +12,7 @@ using namespace Libs::Controller::PadScript;
 void Check(bool value, const char *message) {
   if (!value) {
     std::fprintf(stderr, "PadScriptParserTests: failed: %s\n", message);
-    std::abort();
+    std::exit(1);
   }
 }
 
