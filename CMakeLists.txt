@@ -569,6 +569,14 @@ add_executable(pad_script_mutant_inclusive_end_tests EXCLUDE_FROM_ALL
 target_include_directories(pad_script_mutant_inclusive_end_tests PRIVATE ${inc_headers})
 target_compile_definitions(pad_script_mutant_inclusive_end_tests PRIVATE KYTY_PADSCRIPT_MUTANT_INCLUSIVE_END=1)
 
+add_executable(frame_dump_flips_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/FrameDumpFlipsTests.cpp")
+target_include_directories(frame_dump_flips_tests PRIVATE ${inc_headers})
+add_executable(frame_dump_flips_mutant_keep_zero_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/FrameDumpFlipsTests.cpp")
+target_include_directories(frame_dump_flips_mutant_keep_zero_tests PRIVATE ${inc_headers})
+target_compile_definitions(frame_dump_flips_mutant_keep_zero_tests PRIVATE KYTY_FRAMEDUMP_MUTANT_KEEP_ZERO=1)
+
 add_executable(save_data_memory_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/SaveDataMemoryTests.cpp"
 )
@@ -736,6 +744,9 @@ if(BUILD_TESTING)
 	add_test(NAME pad_script_parser COMMAND $<TARGET_FILE:pad_script_parser_tests>)
 	add_test(NAME pad_script_mutant_inclusive_end COMMAND $<TARGET_FILE:pad_script_mutant_inclusive_end_tests>)
 	set_tests_properties(pad_script_mutant_inclusive_end PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME frame_dump_flips COMMAND $<TARGET_FILE:frame_dump_flips_tests>)
+	add_test(NAME frame_dump_flips_mutant_keep_zero COMMAND $<TARGET_FILE:frame_dump_flips_mutant_keep_zero_tests>)
+	set_tests_properties(frame_dump_flips_mutant_keep_zero PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
 	add_test(NAME event_queue_lifetime COMMAND $<TARGET_FILE:event_queue_lifetime_tests>)
 	add_test(NAME kernel_file_system COMMAND $<TARGET_FILE:kernel_file_system_tests>)

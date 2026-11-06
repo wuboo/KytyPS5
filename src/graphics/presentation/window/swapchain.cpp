@@ -11,18 +11,24 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/host_gpu/renderer/cache/streamBuffer.h"
+#include "graphics/presentation/benchFrameLog.h"
 #include "graphics/presentation/openxrHeadset.h"
 #include "graphics/presentation/performanceOverlay.h"
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
+#include "graphics/presentation/window/frameDumpFlips.h"
 #include "graphics/presentation/window/windowInternal.h"
 
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstdio>
+#include <cstdlib>
 #include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 #include <vulkan/vk_platform.h>
 
@@ -1036,6 +1042,82 @@ void Presenter::ClearLayer(int bus) {
 	}
 }
 
+namespace {
+
+struct FrameDumpConfig {
+	std::string           dir;
+	std::vector<uint64_t> flips;
+};
+
+const FrameDumpConfig& GetFrameDumpConfig() {
+	static const FrameDumpConfig config = [] {
+		FrameDumpConfig c;
+		if (const char* dir = std::getenv("KYTY_FRAME_DUMP_DIR"); dir != nullptr) {
+			c.dir = dir;
+		}
+		c.flips = ParseFrameDumpFlips(std::getenv("KYTY_FRAME_DUMP_FLIPS"));
+		return c;
+	}();
+	return config;
+}
+
+// First present at or after a listed guest flip. The file name is that flip.
+bool FrameDumpCrossing(uint64_t previous, uint64_t guest, uint64_t* flip) {
+	const auto& config = GetFrameDumpConfig();
+	if (config.dir.empty()) {
+		return false;
+	}
+	for (const uint64_t wanted: config.flips) {
+		if (previous < wanted && guest >= wanted) {
+			*flip = wanted;
+			return true;
+		}
+	}
+	return false;
+}
+
+void WriteFrameDump(const uint8_t* pixels, uint32_t width, uint32_t height, vk::Format format,
+                    uint64_t flip) {
+	const auto path = GetFrameDumpConfig().dir + "/frame_flip_" + std::to_string(flip) + ".ppm";
+	FILE*      file = std::fopen(path.c_str(), "wb");
+	if (file == nullptr) {
+		std::printf("[frame-dump] cannot open %s\n", path.c_str());
+		std::fflush(stdout);
+		return;
+	}
+	std::fprintf(file, "P6\n%u %u\n255\n", width, height);
+	std::vector<uint8_t> row(static_cast<size_t>(width) * 3);
+	for (uint32_t y = 0; y < height; y++) {
+		const auto* src = reinterpret_cast<const uint32_t*>(pixels) + static_cast<size_t>(y) * width;
+		for (uint32_t x = 0; x < width; x++) {
+			const uint32_t v = src[x];
+			uint8_t        r = 0, g = 0, b = 0;
+			switch (format) {
+				case vk::Format::eB8G8R8A8Unorm:
+				case vk::Format::eB8G8R8A8Srgb:
+					b = v & 0xffu;
+					g = (v >> 8u) & 0xffu;
+					r = (v >> 16u) & 0xffu;
+					break;
+				default:
+					r = v & 0xffu;
+					g = (v >> 8u) & 0xffu;
+					b = (v >> 16u) & 0xffu;
+					break;
+			}
+			row[static_cast<size_t>(x) * 3]     = r;
+			row[static_cast<size_t>(x) * 3 + 1] = g;
+			row[static_cast<size_t>(x) * 3 + 2] = b;
+		}
+		std::fwrite(row.data(), 1, row.size(), file);
+	}
+	std::fclose(file);
+	std::printf("[frame-dump] %s (%ux%u)\n", path.c_str(), width, height);
+	std::fflush(stdout);
+}
+
+} // namespace
+
 void Presenter::Impl::Present() {
 	KYTY_PROFILER_FUNCTION();
 	using Common::DebugCounters::Counter;
@@ -1051,6 +1133,10 @@ void Presenter::Impl::Present() {
 	if (hdr_changed || swapchain.NeedsResize()) {
 		RecoverSwapchain(Swapchain::Status::Recreate);
 	}
+	std::unique_ptr<Buffer> dump;
+	vk::Extent3D            dump_extent {};
+	vk::Format              dump_format = vk::Format::eUndefined;
+	uint64_t                dump_flip   = 0;
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {
 		auto status = [&] {
 			ScopedTimer acquire_time(Counter::PresentAcquireNs);
@@ -1070,6 +1156,37 @@ void Presenter::Impl::Present() {
 		}();
 		swapchain.RecordPresentCommands(command, layers[0].frame, layers[1],
 		                                draw_system_overlay);
+		const uint64_t guest = BenchGuestFlips();
+		static uint64_t previous_guest = 0;
+		uint64_t        crossed        = 0;
+		if (dump == nullptr && layers[0].frame != nullptr &&
+		    layers[0].frame->image.state.layout == vk::ImageLayout::eTransferSrcOptimal &&
+		    layers[0].frame->image.extent.width * layers[0].frame->image.extent.height != 0 &&
+		    FrameDumpCrossing(previous_guest, guest, &crossed)) {
+			const auto& src  = layers[0].frame->image;
+			const auto  size = static_cast<uint64_t>(src.extent.width) * src.extent.height * 4;
+			dump = std::make_unique<Buffer>(window.graphic_ctx, present_scheduler, MemoryUsage::Download,
+			                                0, vk::BufferUsageFlagBits::eTransferDst, size);
+			dump_extent = src.extent;
+			dump_format = src.format;
+			dump_flip   = crossed;
+			vk::BufferImageCopy region {};
+			region.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+			region.imageSubresource.layerCount = 1;
+			region.imageExtent                 = vk::Extent3D {src.extent.width, src.extent.height, 1};
+			command.Handle().copyImageToBuffer(src.image, vk::ImageLayout::eTransferSrcOptimal,
+			                                   dump->Handle(), 1, &region);
+			vk::BufferMemoryBarrier to_host {};
+			to_host.srcAccessMask       = vk::AccessFlagBits::eTransferWrite;
+			to_host.dstAccessMask       = vk::AccessFlagBits::eHostRead;
+			to_host.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			to_host.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			to_host.buffer              = dump->Handle();
+			to_host.size                = size;
+			command.Handle().pipelineBarrier(vk::PipelineStageFlagBits::eTransfer,
+			                                 vk::PipelineStageFlagBits::eHost, {}, 0, nullptr, 1,
+			                                 &to_host, 0, nullptr);
+		}
 		const auto tick = swapchain.Submit(present_scheduler);
 		for (const auto& layer: layers) {
 			if (layer.frame != nullptr) {
@@ -1084,6 +1201,19 @@ void Presenter::Impl::Present() {
 
 		presented_overlay_revision.store(overlay_visual.revision, std::memory_order_release);
 		window.loop.presented_frames.fetch_add(1, std::memory_order_relaxed);
+		BenchNotePresented();
+		uint64_t ignored = 0;
+		if (dump != nullptr || !FrameDumpCrossing(previous_guest, guest, &ignored)) {
+			previous_guest = guest;
+		}
+		if (dump != nullptr) {
+			present_scheduler.Wait(layers[0].frame != nullptr ? layers[0].frame->present_tick : 0);
+			dump->Invalidate(0, dump->Size());
+			if (!dump->Mapped().empty()) {
+				WriteFrameDump(dump->Mapped().data(), dump_extent.width, dump_extent.height,
+				               dump_format, dump_flip);
+			}
+		}
 		return;
 	}
 	LOGF("Vulkan presentation retry exhausted; dropping frame\n");
