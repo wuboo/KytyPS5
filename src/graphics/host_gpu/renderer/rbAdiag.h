@@ -114,6 +114,8 @@ struct DispatchGuard {
 };
 
 struct ShaderGuard {
+	// A user-declared copy constructor suppresses the implicit default constructor.
+	ShaderGuard() = default;
 	void Arm(uint64_t hash) {
 		if (!Enabled() || armed) return;
 		EnterShader(hash);
