@@ -561,6 +561,14 @@ add_executable(host_input_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/HostInputTes
 target_link_libraries(host_input_tests common fmt::fmt SDL3::SDL3-static)
 target_include_directories(host_input_tests PRIVATE ${inc_headers})
 
+add_executable(pad_script_parser_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PadScriptParserTests.cpp")
+target_include_directories(pad_script_parser_tests PRIVATE ${inc_headers})
+add_executable(pad_script_mutant_inclusive_end_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/PadScriptParserTests.cpp")
+target_include_directories(pad_script_mutant_inclusive_end_tests PRIVATE ${inc_headers})
+target_compile_definitions(pad_script_mutant_inclusive_end_tests PRIVATE KYTY_PADSCRIPT_MUTANT_INCLUSIVE_END=1)
+
 add_executable(save_data_memory_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/SaveDataMemoryTests.cpp"
 )
@@ -725,6 +733,9 @@ if(BUILD_TESTING)
 		add_test(NAME backing_write_log_mutant_${mutant} COMMAND $<TARGET_FILE:backing_write_log_mutant_${mutant}_tests>)
 		set_tests_properties(backing_write_log_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
+	add_test(NAME pad_script_parser COMMAND $<TARGET_FILE:pad_script_parser_tests>)
+	add_test(NAME pad_script_mutant_inclusive_end COMMAND $<TARGET_FILE:pad_script_mutant_inclusive_end_tests>)
+	set_tests_properties(pad_script_mutant_inclusive_end PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME resource_tracking COMMAND $<TARGET_FILE:resource_tracking_tests>)
 	add_test(NAME event_queue_lifetime COMMAND $<TARGET_FILE:event_queue_lifetime_tests>)
 	add_test(NAME kernel_file_system COMMAND $<TARGET_FILE:kernel_file_system_tests>)

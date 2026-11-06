@@ -12,6 +12,7 @@
 #include "libs/errno.h"
 #include "libs/libs.h"
 #include "libs/padData.h"
+#include "libs/padScript.h"
 
 #include <algorithm>
 #include <array>
@@ -128,6 +129,7 @@ public:
 	void RightStick(int id, int x, int y);
 	void TouchPad(int id, int finger, bool down, float x, float y);
 	void Motion(int id, Sensor sensor, const float* data, uint64_t time_us);
+	void MotionPose(int id, const float* accel_g, const float* orientation);
 	void SetMotionSensorState(bool enable);
 	void ResetOrientation();
 	void ToggleGyroEmulation(int id);
@@ -466,9 +468,11 @@ void Initialize() {
 	}
 	g_keyboard_player = Config::GetKeyboardPlayer();
 	RefreshPlayers();
+	PadScript::Start();
 }
 
 void Shutdown() {
+	PadScript::Stop();
 	EmergencyShutdown();
 	g_players       = {};
 	g_special_ports = {};
@@ -734,6 +738,19 @@ void GameController::Motion(int id, Sensor sensor, const float* data, uint64_t t
 		}
 		m_gyro_time = time_us;
 	}
+	m_state.time = LibKernel::KernelGetProcessTime();
+	AddState();
+}
+
+void GameController::MotionPose(int id, const float* accel_g, const float* orientation) {
+	Common::LockGuard lock(m_mutex);
+	if ((id != m_active_id && id != HOST_INPUT_CONTROLLER_ID) || !m_motion_enabled) {
+		return;
+	}
+	std::copy_n(accel_g, 3, m_state.accel.begin());
+	std::copy_n(orientation, 4, m_state.orientation.begin());
+	m_state.gyro = {};
+	m_gyro_time  = 0;
 	m_state.time = LibKernel::KernelGetProcessTime();
 	AddState();
 }
@@ -1153,6 +1170,13 @@ void ToggleGyroEmulation(int id) {
 	}
 }
 
+void SetMotionPose(int id, const float* accel_g, const float* orientation) {
+	Common::LockGuard lock(g_router_mutex);
+	if (auto* player = PlayerForDevice(id)) {
+		player->MotionPose(id, accel_g, orientation);
+	}
+}
+
 void ResetInputState() {
 	for (const auto& player: g_players) {
 		if (player != nullptr) {
@@ -1400,6 +1424,7 @@ int KYTY_SYSV_ABI PadIsRemoteController(int handle, bool* is_remote) {
 
 int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 	PRINT_NAME();
+	PadScript::OnPadRead();
 
 	if (const auto error = PadCheckHandle(handle); error != OK) {
 		return error;
@@ -1421,6 +1446,7 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 
 int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 	PRINT_NAME();
+	PadScript::OnPadRead();
 
 	EXIT_NOT_IMPLEMENTED(num < 1 || num > 64);
 	if (const auto error = PadCheckHandle(handle); error != OK) {
