@@ -1099,6 +1099,16 @@ void WriteFrameDump(const uint8_t* pixels, uint32_t width, uint32_t height, vk::
 					g = (v >> 8u) & 0xffu;
 					r = (v >> 16u) & 0xffu;
 					break;
+				case vk::Format::eA2B10G10R10UnormPack32:
+					r = static_cast<uint8_t>((v & 0x3ffu) >> 2u);
+					g = static_cast<uint8_t>(((v >> 10u) & 0x3ffu) >> 2u);
+					b = static_cast<uint8_t>(((v >> 20u) & 0x3ffu) >> 2u);
+					break;
+				case vk::Format::eA2R10G10B10UnormPack32:
+					b = static_cast<uint8_t>((v & 0x3ffu) >> 2u);
+					g = static_cast<uint8_t>(((v >> 10u) & 0x3ffu) >> 2u);
+					r = static_cast<uint8_t>(((v >> 20u) & 0x3ffu) >> 2u);
+					break;
 				default:
 					r = v & 0xffu;
 					g = (v >> 8u) & 0xffu;
@@ -1112,7 +1122,8 @@ void WriteFrameDump(const uint8_t* pixels, uint32_t width, uint32_t height, vk::
 		std::fwrite(row.data(), 1, row.size(), file);
 	}
 	std::fclose(file);
-	std::printf("[frame-dump] %s (%ux%u)\n", path.c_str(), width, height);
+	std::printf("[frame-dump] %s (%ux%u format=%d)\n", path.c_str(), width, height,
+	            static_cast<int>(format));
 	std::fflush(stdout);
 }
 
