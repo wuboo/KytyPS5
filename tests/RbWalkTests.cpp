@@ -37,6 +37,23 @@ int main() {
 	Check(Decide(Mode::Shadow, false, true, false) == Source::Fault, "shadow, in flight: fault only");
 	Check(Decide(Mode::Shadow, false, false, true) == Source::Fault, "shadow, unknown: fault only");
 
+	Check(!PrefetchWrite(Mode::Off, true, 32), "off does not prefetch");
+	Check(!PrefetchWrite(Mode::Shadow, true, 32), "shadow does not prefetch");
+	Check(!PrefetchWrite(Mode::On, false, 32), "an unlearned page is not prefetched");
+	Check(PrefetchWrite(Mode::On, true, 32), "on, learned, 32 B: prefetch");
+	Check(PrefetchWrite(Mode::On, true, 4096), "on, learned, one page: prefetch");
+	Check(!PrefetchWrite(Mode::On, true, 8192), "on, learned, two pages: no prefetch");
+	Check(!PrefetchWrite(Mode::On, true, 0), "empty write: no prefetch");
+
+	LearnedPages learned;
+	Check(learned.Note(0x1000), "first page is new");
+	Check(!learned.Note(0x1000), "the same page is not new");
+	Check(learned.Contains(0x1000), "noted page is found");
+	Check(learned.Intersects(0x101c, 4), "a dword inside the page intersects");
+	Check(!learned.Intersects(0x2000, 4), "another page does not");
+	for (uint64_t i = 1; i < LearnedPages::kCap; ++i) Check(learned.Note(0x1000 + i * 0x1000), "fill");
+	Check(!learned.Note(0x9000), "the table stops at its cap");
+
 	if (g_failures != 0) {
 		std::fprintf(stderr, "RbWalkTests: %d failed\n", g_failures);
 		return 1;

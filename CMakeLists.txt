@@ -942,7 +942,7 @@ endforeach()
 # S502: KYTY_RB_WALK decisions. Mutants: serve although the bytes are GPU-dirty / in flight / the tracker could not be queried; shadow skips the fault.
 add_executable(rb_walk_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RbWalkTests.cpp")
 target_include_directories(rb_walk_tests PRIVATE ${inc_headers})
-foreach(mutant IN ITEMS SERVE_DIRTY SERVE_INFLIGHT SERVE_UNKNOWN SHADOW_SKIPS_FAULT)
+foreach(mutant IN ITEMS SERVE_DIRTY SERVE_INFLIGHT SERVE_UNKNOWN SHADOW_SKIPS_FAULT PREFETCH_ANY_SIZE)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(rb_walk_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RbWalkTests.cpp")
 	target_include_directories(rb_walk_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
@@ -1917,7 +1917,7 @@ if(BUILD_TESTING)
 		set_tests_properties(pv_index_backing_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
 	add_test(NAME rb_walk COMMAND $<TARGET_FILE:rb_walk_tests>)
-	foreach(mutant IN ITEMS serve_dirty serve_inflight serve_unknown shadow_skips_fault)
+	foreach(mutant IN ITEMS serve_dirty serve_inflight serve_unknown shadow_skips_fault prefetch_any_size)
 		add_test(NAME rb_walk_mutant_${mutant} COMMAND $<TARGET_FILE:rb_walk_mutant_${mutant}_tests>)
 		set_tests_properties(rb_walk_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
@@ -2310,6 +2310,7 @@ if(BUILD_TESTING)
 		rb_walk_mutant_serve_inflight_tests
 		rb_walk_mutant_serve_unknown_tests
 		rb_walk_mutant_shadow_skips_fault_tests
+		rb_walk_mutant_prefetch_any_size_tests
 		cp_read_backing_tests
 		cp_read_backing_mutant_read_backing_ignores_dirty_tests
 		cp_read_backing_mutant_read_backing_ignores_inflight_tests

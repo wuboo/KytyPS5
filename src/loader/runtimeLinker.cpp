@@ -952,7 +952,10 @@ static bool TryRbWalkServe(const Common::HostException::ExceptionInfo* info) {
 	using C = Libs::Graphics::FrameTiming::Counter;
 	if (source == Source::Fault) {
 		if (!known || busy) Libs::Graphics::FrameTiming::Add(C::RbWalkBusyN);
-		else if (dirty) Libs::Graphics::FrameTiming::Add(C::RbWalkDirtyN);
+		else if (dirty) {
+			Libs::Graphics::FrameTiming::Add(C::RbWalkDirtyN);
+			if (mode == Mode::On) Learned().Note(info->access_violation_vaddr & ~uint64_t {4095});
+		}
 		return false;
 	}
 	uint32_t word = 0;

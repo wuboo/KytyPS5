@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/cpWaitDiag.h"
+#include "graphics/host_gpu/renderer/rbWalk.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/wfDiag.h"
@@ -744,6 +745,19 @@ void BufferCache::NoteReadbackFault(uint64_t vaddr, uint64_t size, bool dcc) {
 }
 
 void BufferCache::NoteGpuWrite(uint64_t vaddr, uint64_t size) {
+	// S502: a small write on a page the walker already faulted is downloaded at the next submit,
+	// ahead of the draws that would otherwise sit in front of that fault.
+	if (RbWalk::PrefetchWrite(RbWalk::EnvMode(), RbWalk::Learned().Intersects(vaddr, size), size)) {
+		std::lock_guard lock(m_eager_mutex);
+		const auto end = vaddr + size;
+		for (auto page = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE); page < end; page += TRACKER_PAGE_SIZE) {
+			if (!RbWalk::Learned().Contains(page)) continue;
+			if (std::find(m_eager_pending.begin(), m_eager_pending.end(), page) == m_eager_pending.end()) {
+				m_eager_pending.push_back(page);
+				FrameTiming::Add(FrameTiming::Counter::RbWalkPrefetchN);
+			}
+		}
+	}
 	if (!EagerReadbackEnabled()) {
 		return;
 	}

@@ -10,7 +10,12 @@
 //   shadow  the fault still runs; the backing dword is compared with the drained bytes (ne = 0)
 // A query that cannot answer (lock busy, range not tracked) stays on the fault. Dirty or
 // in-flight bytes stay on the fault: the backing would be stale.
-// Mutants (tests/RbWalkTests.cpp): KYTY_RBWALK_MUTANT_SERVE_DIRTY, _SERVE_INFLIGHT, _SERVE_UNKNOWN, _SHADOW_SKIPS_FAULT.
+// A dirty dword is not served (the backing is stale). Mode 1 remembers the page and, on the next GPU
+// write of at most one tracker page, queues that page for the existing pre-submit download
+// (FlushEagerReadbacks). The copy is recorded with the write, so a later walker load in the frame
+// finds the bytes already published instead of draining the queue behind every draw since the write.
+// Mutants (tests/RbWalkTests.cpp): KYTY_RBWALK_MUTANT_SERVE_DIRTY, _SERVE_INFLIGHT, _SERVE_UNKNOWN,
+// _SHADOW_SKIPS_FAULT, _PREFETCH_ANY_SIZE.
 
 #include <cstdint>
 #include <cstdlib>
@@ -56,6 +61,56 @@ constexpr Source Decide(Mode mode, bool dirty, bool inflight, bool unknown) {
 #else
 	return mode == Mode::Shadow ? Source::Shadow : Source::Backing;
 #endif
+}
+
+// Queue a pre-submit download of a write that touches a page a walker load already faulted on.
+// Only mode 1. Shadow and off leave the fault path alone. Writes larger than one 4 KiB page stay
+// on the fault (a whole-buffer download is not this gap).
+constexpr bool PrefetchWrite(Mode mode, bool learned, uint64_t size) {
+	if (mode != Mode::On || !learned) return false;
+#if defined(KYTY_RBWALK_MUTANT_PREFETCH_ANY_SIZE)
+	(void)size;
+	return true;
+#else
+	return size > 0 && size <= 4096;
+#endif
+}
+
+// Pages whose walker load faulted on GPU-dirty bytes. The GPU thread only (the fault and the write).
+class LearnedPages {
+public:
+	static constexpr size_t kCap = 8;
+
+	bool Note(uint64_t page) {
+		if (page == 0 || Contains(page)) return false;
+		if (m_count >= kCap) return false;
+		m_pages[m_count++] = page;
+		return true;
+	}
+	bool Contains(uint64_t page) const {
+		for (size_t i = 0; i < m_count; ++i) {
+			if (m_pages[i] == page) return true;
+		}
+		return false;
+	}
+	bool Intersects(uint64_t address, uint64_t size) const {
+		if (size == 0 || m_count == 0 || address > ~uint64_t {0} - (size - 1)) return false;
+		const uint64_t last = address + size - 1;
+		for (size_t i = 0; i < m_count; ++i) {
+			const uint64_t page = m_pages[i];
+			if (address <= page + 4095 && page <= last) return true;
+		}
+		return false;
+	}
+
+private:
+	uint64_t m_pages[kCap] {};
+	size_t   m_count = 0;
+};
+
+inline LearnedPages& Learned() {
+	static LearnedPages pages;
+	return pages;
 }
 
 } // namespace Libs::Graphics::RbWalk
