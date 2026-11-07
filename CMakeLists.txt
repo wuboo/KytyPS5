@@ -696,6 +696,15 @@ foreach(mutant IN ITEMS always_avoid never_protected note_when_avoiding no_scope
 endforeach()
 
 # S495: KYTY_LAND_SYNC. Mutants revert one part of the package (the test must fail).
+# S503: image edge untrack stays inside the tracked interval. The mutant peels to the
+# page boundary even when that end is past the other one (the wrapped PageManager size).
+add_executable(texture_track_range_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/TextureTrackRangeTests.cpp")
+target_include_directories(texture_track_range_tests PRIVATE ${inc_headers})
+add_executable(texture_track_range_mutant_no_clamp_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/TextureTrackRangeTests.cpp")
+target_include_directories(texture_track_range_mutant_no_clamp_tests PRIVATE ${inc_headers})
+target_compile_definitions(texture_track_range_mutant_no_clamp_tests PRIVATE KYTY_TRACKEDGE_MUTANT_NO_CLAMP=1)
+
 add_executable(land_sync_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/LandSyncTests.cpp")
 target_include_directories(land_sync_tests PRIVATE ${inc_headers})
 foreach(mutant IN ITEMS ignore_master guest_off obtain_writes guest_gate)
@@ -2027,6 +2036,10 @@ if(BUILD_TESTING)
 		add_test(NAME srt_prot_avoid_mutant_${mutant} COMMAND $<TARGET_FILE:srt_prot_avoid_mutant_${mutant}_tests>)
 		set_tests_properties(srt_prot_avoid_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
+	add_test(NAME texture_track_range COMMAND $<TARGET_FILE:texture_track_range_tests>)
+	add_test(NAME texture_track_range_mutant_no_clamp
+	         COMMAND $<TARGET_FILE:texture_track_range_mutant_no_clamp_tests>)
+	set_tests_properties(texture_track_range_mutant_no_clamp PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME land_sync COMMAND $<TARGET_FILE:land_sync_tests>)
 	foreach(mutant IN ITEMS ignore_master guest_off obtain_writes guest_gate)
 		add_test(NAME land_sync_mutant_${mutant} COMMAND $<TARGET_FILE:land_sync_mutant_${mutant}_tests>)
