@@ -52,7 +52,7 @@ struct PvStoreInfo {
 	uint32_t*                    compact_mask_id    = nullptr;
 };
 
-// Host device capabilities that change the emitted SPIR-V. Built once per device.
+// Host device capabilities and user options that change the emitted SPIR-V. Built once per device.
 struct Profile {
 	bool maintenance8         = false; // Dynamic texel offsets on image samples.
 	bool native_float_min_max = false; // NMin/NMax give the guest's NaN and signed-zero results.
@@ -63,6 +63,8 @@ struct Profile {
 	// 8 and 8_8 sRGB textures sample through sRGB views; without one the shader decodes them.
 	bool r8_srgb_views   = false;
 	bool r8g8_srgb_views = false;
+	// Native float ops: NaN, signed-zero and denormal results may differ from the guest.
+	bool relaxed_float = false;
 };
 
 inline constexpr Profile DefaultProfile {};
