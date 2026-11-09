@@ -12,7 +12,9 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <mutex>
+#include <string_view>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -279,20 +281,47 @@ bool                g_record_any = false;
 std::vector<Sample> g_replay;
 bool                g_replay_on = false;
 
+// Level starts of the recording, in order, and how far the replay is through them.
+struct LevelMark {
+	uint64_t    flip = 0;
+	std::string name;
+};
+std::vector<LevelMark> g_replay_levels;
+size_t                 g_replay_level_next = 0;
+int64_t                g_replay_shift      = 0; // replay flip minus recording flip
+
 void OpenRecordReplay() {
 	if (const char* path = std::getenv("KYTY_PAD_REPLAY"); path != nullptr && *path != '\0') {
 		std::FILE* file = std::fopen(path, "r");
 		if (file == nullptr) {
 			EXIT("KYTY_PAD_REPLAY: can't open %s\n", path);
 		}
-		Sample             s;
-		unsigned long long flip = 0;
-		unsigned           axes[6] {};
-		while (std::fscanf(file, "%llu %x %u %u %u %u %u %u %f %f %f %f %f %f %f %f %f %f", &flip,
-		                   &s.buttons, &axes[0], &axes[1], &axes[2], &axes[3], &axes[4], &axes[5],
-		                   &s.motion[0], &s.motion[1], &s.motion[2], &s.motion[3], &s.motion[4],
-		                   &s.motion[5], &s.motion[6], &s.motion[7], &s.motion[8],
-		                   &s.motion[9]) == 18) {
+		char line[512];
+		while (std::fgets(line, sizeof(line), file) != nullptr) {
+			if (line[0] == 'L' && line[1] == ' ') {
+				LevelMark          mark;
+				unsigned long long flip = 0;
+				int                used = 0;
+				if (std::sscanf(line + 2, "%llu %n", &flip, &used) == 1) {
+					mark.flip = flip;
+					mark.name = std::string(line + 2 + used);
+					while (!mark.name.empty() && (mark.name.back() == '\n' || mark.name.back() == '\r')) {
+						mark.name.pop_back();
+					}
+					g_replay_levels.push_back(mark);
+				}
+				continue;
+			}
+			Sample             s;
+			unsigned long long flip = 0;
+			unsigned           axes[6] {};
+			if (std::sscanf(line, "%llu %x %u %u %u %u %u %u %f %f %f %f %f %f %f %f %f %f", &flip,
+			                &s.buttons, &axes[0], &axes[1], &axes[2], &axes[3], &axes[4], &axes[5],
+			                &s.motion[0], &s.motion[1], &s.motion[2], &s.motion[3], &s.motion[4],
+			                &s.motion[5], &s.motion[6], &s.motion[7], &s.motion[8],
+			                &s.motion[9]) != 18) {
+				continue;
+			}
 			s.flip = flip;
 			for (int i = 0; i < 6; i++) {
 				s.axes[i] = static_cast<uint8_t>(std::min(axes[i], 255u));
@@ -303,7 +332,8 @@ void OpenRecordReplay() {
 		std::stable_sort(g_replay.begin(), g_replay.end(),
 		                 [](const Sample& a, const Sample& b) { return a.flip < b.flip; });
 		g_replay_on = true;
-		LOGF("[pad-replay] %zu samples loaded from %s\n", g_replay.size(), path);
+		std::fprintf(stderr, "[pad-replay] %zu samples, %zu level marks loaded from %s\n", g_replay.size(),
+		     g_replay_levels.size(), path);
 	}
 	if (const char* path = std::getenv("KYTY_PAD_RECORD"); path != nullptr && *path != '\0') {
 		g_record_file = std::fopen(path, "w");
@@ -325,9 +355,11 @@ bool RecordOrReplay(PadData* data) {
 	std::lock_guard<std::mutex> lock(g_record_mutex);
 	if (g_replay_on) {
 		// The last sample at or before this flip; before the first one the pad is idle.
-		const auto next = std::upper_bound(g_replay.begin(), g_replay.end(), flip,
+		const int64_t shifted = static_cast<int64_t>(flip) - g_replay_shift;
+		const uint64_t key     = shifted < 0 ? 0 : static_cast<uint64_t>(shifted);
+		const auto next = std::upper_bound(g_replay.begin(), g_replay.end(), key,
 		                                   [](uint64_t f, const Sample& s) { return f < s.flip; });
-		ToData(next == g_replay.begin() ? Sample {} : *(next - 1), data);
+		ToData(next == g_replay.begin() || shifted < 0 ? Sample {} : *(next - 1), data);
 	}
 	if (g_record_file != nullptr) {
 		Sample sample;
@@ -346,6 +378,35 @@ bool RecordOrReplay(PadData* data) {
 		}
 	}
 	return g_replay_on;
+}
+
+void OnGuestText(const void* text, size_t size) {
+	static constexpr std::string_view MARK = "Level has started: ";
+	const std::string_view            view(static_cast<const char*>(text), size);
+	const auto                        at = view.find(MARK);
+	if (at == std::string_view::npos) {
+		return;
+	}
+	std::call_once(g_record_once, OpenRecordReplay);
+	if (!g_replay_on && g_record_file == nullptr) {
+		return;
+	}
+	auto name = view.substr(at + MARK.size());
+	name      = name.substr(0, name.find_first_of("\r\n"));
+	const uint64_t              flip = Graphics::FrameTiming::GuestFlips();
+	std::lock_guard<std::mutex> lock(g_record_mutex);
+	if (g_record_file != nullptr) {
+		std::fprintf(g_record_file, "L %llu %.*s\n", static_cast<unsigned long long>(flip),
+		             static_cast<int>(name.size()), name.data());
+		std::fflush(g_record_file);
+	}
+	if (g_replay_on && g_replay_level_next < g_replay_levels.size()) {
+		const auto& mark = g_replay_levels[g_replay_level_next++];
+		g_replay_shift   = static_cast<int64_t>(flip) - static_cast<int64_t>(mark.flip);
+		std::fprintf(stderr, "[pad-replay] level %zu '%.*s' (recorded '%s') at flip %llu, shift %lld\n",
+		     g_replay_level_next, static_cast<int>(name.size()), name.data(), mark.name.c_str(),
+		     static_cast<unsigned long long>(flip), static_cast<long long>(g_replay_shift));
+	}
 }
 
 } // namespace Libs::Controller::PadScript

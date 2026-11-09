@@ -1,6 +1,8 @@
 #ifndef KYTY_LIBS_PADSCRIPT_H_
 #define KYTY_LIBS_PADSCRIPT_H_
 
+#include <cstddef>
+
 namespace Libs::Controller {
 struct PadData;
 } // namespace Libs::Controller
@@ -26,6 +28,11 @@ void OnPadRead();
 //                     state of the current guest flip instead of the host pad
 // Called on every filled PadData of the first player; true when a replay overrode it.
 bool RecordOrReplay(PadData* data);
+
+// Guest text output (stdout/stderr). A recording notes each "Level has started" line with its flip
+// as "L flip name"; a replay re-anchors its flip clock on the matching level start, so a load that
+// takes a different number of flips does not shift the inputs that follow it.
+void OnGuestText(const void* text, size_t size);
 
 } // namespace Libs::Controller::PadScript
 
