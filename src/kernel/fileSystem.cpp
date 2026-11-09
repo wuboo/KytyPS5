@@ -1,5 +1,7 @@
 #include "kernel/fileSystem.h"
 
+#include "libs/padScript.h"
+
 #include "common/archive.h"
 #include "common/assert.h"
 #include "common/common.h"
@@ -835,6 +837,7 @@ int64_t KYTY_SYSV_ABI KernelWrite(int d, const void* buf, size_t nbytes) {
 	}
 
 	if (d == 1 || d == 2) {
+		::Libs::Controller::PadScript::OnGuestText(buf, nbytes);
 		auto*      out      = (d == 1 ? stdout : stderr);
 		const auto written  = std::fwrite(buf, 1, nbytes, out);
 		const auto flush_ok = std::fflush(out) == 0;
