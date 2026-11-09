@@ -4,12 +4,15 @@
 #include "common/logging/log.h"
 #include "graphics/presentation/frameTiming.h"
 #include "libs/controller.h"
+#include "libs/padData.h"
 #include "libs/padScriptParser.h"
 
 #include <atomic>
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
+#include <mutex>
 #include <cstdlib>
 #include <fstream>
 #include <sstream>
@@ -213,6 +216,136 @@ void OnPadRead() {
 			     static_cast<unsigned long long>(g_origin_frame.load()));
 		}
 	}
+}
+
+namespace {
+
+// One sample of a recording: the guest flip and the fields of PadData it replaces.
+struct Sample {
+	uint64_t flip       = 0;
+	uint32_t buttons    = 0;
+	uint8_t  axes[6]    = {128, 128, 128, 128, 0, 0};
+	float    motion[10] = {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+};
+
+void FromData(const PadData& data, uint64_t flip, Sample& sample) {
+	sample.flip    = flip;
+	sample.buttons = data.buttons;
+	sample.axes[0] = data.left_stick_x;
+	sample.axes[1] = data.left_stick_y;
+	sample.axes[2] = data.right_stick_x;
+	sample.axes[3] = data.right_stick_y;
+	sample.axes[4] = data.analog_buttons_l2;
+	sample.axes[5] = data.analog_buttons_r2;
+	const float motion[10] = {data.orientation_x,      data.orientation_y,      data.orientation_z,
+	                          data.orientation_w,      data.acceleration_x,     data.acceleration_y,
+	                          data.acceleration_z,     data.angular_velocity_x, data.angular_velocity_y,
+	                          data.angular_velocity_z};
+	std::copy(std::begin(motion), std::end(motion), std::begin(sample.motion));
+}
+
+void ToData(const Sample& sample, PadData* data) {
+	data->buttons            = sample.buttons;
+	data->left_stick_x       = sample.axes[0];
+	data->left_stick_y       = sample.axes[1];
+	data->right_stick_x      = sample.axes[2];
+	data->right_stick_y      = sample.axes[3];
+	data->analog_buttons_l2  = sample.axes[4];
+	data->analog_buttons_r2  = sample.axes[5];
+	data->orientation_x      = sample.motion[0];
+	data->orientation_y      = sample.motion[1];
+	data->orientation_z      = sample.motion[2];
+	data->orientation_w      = sample.motion[3];
+	data->acceleration_x     = sample.motion[4];
+	data->acceleration_y     = sample.motion[5];
+	data->acceleration_z     = sample.motion[6];
+	data->angular_velocity_x = sample.motion[7];
+	data->angular_velocity_y = sample.motion[8];
+	data->angular_velocity_z = sample.motion[9];
+	data->touch_data.touch_num = 0;
+	data->connected          = true;
+}
+
+bool SameState(const Sample& a, const Sample& b) {
+	return a.buttons == b.buttons && std::equal(std::begin(a.axes), std::end(a.axes), b.axes) &&
+	       std::equal(std::begin(a.motion), std::end(a.motion), b.motion);
+}
+
+std::mutex          g_record_mutex;
+std::once_flag      g_record_once;
+std::FILE*          g_record_file = nullptr;
+Sample              g_record_last;
+bool                g_record_any = false;
+std::vector<Sample> g_replay;
+bool                g_replay_on = false;
+
+void OpenRecordReplay() {
+	if (const char* path = std::getenv("KYTY_PAD_REPLAY"); path != nullptr && *path != '\0') {
+		std::FILE* file = std::fopen(path, "r");
+		if (file == nullptr) {
+			EXIT("KYTY_PAD_REPLAY: can't open %s\n", path);
+		}
+		Sample             s;
+		unsigned long long flip = 0;
+		unsigned           axes[6] {};
+		while (std::fscanf(file, "%llu %x %u %u %u %u %u %u %f %f %f %f %f %f %f %f %f %f", &flip,
+		                   &s.buttons, &axes[0], &axes[1], &axes[2], &axes[3], &axes[4], &axes[5],
+		                   &s.motion[0], &s.motion[1], &s.motion[2], &s.motion[3], &s.motion[4],
+		                   &s.motion[5], &s.motion[6], &s.motion[7], &s.motion[8],
+		                   &s.motion[9]) == 18) {
+			s.flip = flip;
+			for (int i = 0; i < 6; i++) {
+				s.axes[i] = static_cast<uint8_t>(std::min(axes[i], 255u));
+			}
+			g_replay.push_back(s);
+		}
+		std::fclose(file);
+		std::stable_sort(g_replay.begin(), g_replay.end(),
+		                 [](const Sample& a, const Sample& b) { return a.flip < b.flip; });
+		g_replay_on = true;
+		LOGF("[pad-replay] %zu samples loaded from %s\n", g_replay.size(), path);
+	}
+	if (const char* path = std::getenv("KYTY_PAD_RECORD"); path != nullptr && *path != '\0') {
+		g_record_file = std::fopen(path, "w");
+		if (g_record_file == nullptr) {
+			EXIT("KYTY_PAD_RECORD: can't open %s\n", path);
+		}
+		LOGF("[pad-record] recording to %s\n", path);
+	}
+}
+
+} // namespace
+
+bool RecordOrReplay(PadData* data) {
+	std::call_once(g_record_once, OpenRecordReplay);
+	if (!g_replay_on && g_record_file == nullptr) {
+		return false;
+	}
+	const uint64_t              flip = Graphics::FrameTiming::GuestFlips();
+	std::lock_guard<std::mutex> lock(g_record_mutex);
+	if (g_replay_on) {
+		// The last sample at or before this flip; before the first one the pad is idle.
+		const auto next = std::upper_bound(g_replay.begin(), g_replay.end(), flip,
+		                                   [](uint64_t f, const Sample& s) { return f < s.flip; });
+		ToData(next == g_replay.begin() ? Sample {} : *(next - 1), data);
+	}
+	if (g_record_file != nullptr) {
+		Sample sample;
+		FromData(*data, flip, sample);
+		if (!g_record_any || !SameState(sample, g_record_last)) {
+			std::fprintf(g_record_file,
+			             "%llu %x %u %u %u %u %u %u %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g %.6g\n",
+			             static_cast<unsigned long long>(flip), sample.buttons, sample.axes[0],
+			             sample.axes[1], sample.axes[2], sample.axes[3], sample.axes[4],
+			             sample.axes[5], sample.motion[0], sample.motion[1], sample.motion[2],
+			             sample.motion[3], sample.motion[4], sample.motion[5], sample.motion[6],
+			             sample.motion[7], sample.motion[8], sample.motion[9]);
+			std::fflush(g_record_file);
+			g_record_last = sample;
+			g_record_any  = true;
+		}
+	}
+	return g_replay_on;
 }
 
 } // namespace Libs::Controller::PadScript
