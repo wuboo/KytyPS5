@@ -1542,6 +1542,8 @@ struct GraphicsCase {
   u32 width = 1;
   std::vector<u32> object_ids;
   u32 wave_size = 64;
+  // Initial GDS dwords. The graphics runner binds GDS only when this is nonempty.
+  std::vector<u32> gds_initial;
 };
 
 struct CompiledShader {
