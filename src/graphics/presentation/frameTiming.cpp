@@ -704,6 +704,9 @@ constexpr const char* kCounterNames[] = {
     "upload_bytes",
     "draw_state_same_n",
     "rt_same_n",
+    "rb_clean_walk_n",
+    "rb_clean_walk_shadow_n",
+    "rb_clean_walk_shadow_ne_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

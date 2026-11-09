@@ -1464,4 +1464,10 @@ void SkipLoad(void* native_context, size_t length) {
 	context.Advance(length);
 }
 
+void CompleteLoad(void* native_context, size_t length, uint32_t eax) {
+	Context context {static_cast<decltype(Context::native)>(native_context)};
+	context.Gpr(0) = eax;
+	context.Advance(length);
+}
+
 } // namespace Loader::X64InstructionEmulator

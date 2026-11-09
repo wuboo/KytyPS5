@@ -21,6 +21,7 @@
 #include "graphics/host_gpu/renderer/cache/landSync.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
+#include "graphics/host_gpu/renderer/cleanWalk.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
@@ -913,6 +914,67 @@ static void S462DumpFaultContext(const Common::HostException::ExceptionInfo* inf
 	std::fflush(stdout);
 }
 
+namespace {
+
+// S507: a faulting walker dword. Served loads return true. Shadow arms a compare for after the drain.
+struct CleanWalkShadow {
+	bool     armed = false;
+	uint64_t addr  = 0;
+	uint8_t  bytes[4] {};
+};
+
+CleanWalkShadow& CleanWalkPending() {
+	static thread_local CleanWalkShadow pending;
+	return pending;
+}
+
+bool TryServeCleanWalk(const Common::HostException::ExceptionInfo* info, uint32_t length) {
+	auto& pending = CleanWalkPending();
+	pending.armed = false;
+	const auto mode = Libs::Graphics::CleanWalk::EnvMode();
+	if (mode == Libs::Graphics::CleanWalk::Mode::Off || length == 0) {
+		return false;
+	}
+	bool dirty = true, inflight = true, busy = true;
+	const bool queried = Libs::LibKernel::Memory::QueryGuestFaultBytes(info->access_violation_vaddr, 4, &dirty, &inflight, &busy);
+	const auto action  = Libs::Graphics::CleanWalk::Decide(mode, queried && dirty, queried && inflight, !queried || busy);
+	if (action == Libs::Graphics::CleanWalk::Action::Drain) {
+		return false;
+	}
+	if (!Libs::LibKernel::Memory::TryReadBacking(info->access_violation_vaddr, pending.bytes, 4)) {
+		return false;
+	}
+	if (action == Libs::Graphics::CleanWalk::Action::Serve) {
+		uint32_t eax = 0;
+		std::memcpy(&eax, pending.bytes, 4);
+		Loader::X64InstructionEmulator::CompleteLoad(info->native_context, length, eax);
+		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::RbCleanWalkN);
+		return true;
+	}
+	pending.armed = true;
+	pending.addr  = info->access_violation_vaddr;
+	return false;
+}
+
+void FinishCleanWalkShadow(uint64_t addr) {
+	auto& pending = CleanWalkPending();
+	if (!pending.armed || pending.addr != addr) {
+		pending.armed = false;
+		return;
+	}
+	pending.armed = false;
+	uint8_t after[4] {};
+	if (!Libs::LibKernel::Memory::TryReadBacking(addr, after, 4)) {
+		return;
+	}
+	Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::RbCleanWalkShadowN);
+	if (!Libs::Graphics::CleanWalk::Equal(pending.bytes, after, 4)) {
+		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::RbCleanWalkShadowNeN);
+	}
+}
+
+} // namespace
+
 static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exception_info) {
 	const auto* info = &exception_info;
 
@@ -944,21 +1006,30 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 				Loader::X64InstructionEmulator::SkipLoad(info->native_context, length);
 				return true;
 			}
+			if (const auto length = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(info->exception_address)) {
+				if (TryServeCleanWalk(info, length)) {
+					Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultHandled);
+					return true;
+				}
+			}
 			if (Libs::Graphics::GuestFault::Enabled() && !Libs::Graphics::GuestGpu::IsGpuThread()) {
 				GfEmuLogInstruction(info->native_context, info->access_violation_vaddr, info->exception_address);
 			}
 			if (TryGuestReadEmulation(info, &gf_shadow)) {
+				CleanWalkPending().armed = false;
 				Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultHandled);
 				return true;
 			}
 		}
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
+			FinishCleanWalkShadow(info->access_violation_vaddr);
 			GfEmuShadowFinish(gf_shadow);
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
 			Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultHandled);
 			return true;
 		}
 		Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultUnhandled);
+		CleanWalkPending().armed = false;
 		if (const auto length =
 		        Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(info->exception_address)) {
 			Loader::X64InstructionEmulator::SkipLoad(info->native_context, length);

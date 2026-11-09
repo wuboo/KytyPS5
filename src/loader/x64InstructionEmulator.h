@@ -33,6 +33,8 @@ WideStoreSplitResult SplitWideStores(uint64_t address, uint64_t size, uint64_t* 
                                      uint64_t trampoline_end);
 // Completes a faulting load into EAX as a zero read and resumes after it.
 void SkipLoad(void* native_context, size_t length);
+// Completes a faulting `mov eax, [r10]` with `eax` and resumes after the instruction.
+void CompleteLoad(void* native_context, size_t length, uint32_t eax);
 
 } // namespace Loader::X64InstructionEmulator
 

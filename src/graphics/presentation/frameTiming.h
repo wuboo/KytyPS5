@@ -434,6 +434,8 @@ enum class Counter : uint32_t {
 	// consecutive draws in one command buffer with the same pipeline, images, samplers, buffers and shader_data;
 	// consecutive draws with the same color/depth targets and texture-cache registration generation.
 	UploadPassBreakN, UploadBytes, DrawStateSameN, RtSameN,
+	// S507 (KYTY_RB_CLEAN_WALK): walker loads completed from the backing; shadow compares and mismatches.
+	RbCleanWalkN, RbCleanWalkShadowN, RbCleanWalkShadowNeN,
 	Count,
 };
 
