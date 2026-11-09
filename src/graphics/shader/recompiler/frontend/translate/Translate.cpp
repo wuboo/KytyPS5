@@ -115,9 +115,30 @@ Decoder::Operand Translator::PlainOperand(const Decoder::Operand& operand) {
 	return result;
 }
 
+bool WaveHalvesInHostSubgroup(const IR::Program& program) {
+	static const bool enabled = [] {
+		const char* text = std::getenv("KYTY_VS_WAVE32_HALVES");
+		return text != nullptr && text[0] == '1';
+	}();
+	return enabled && program.wave_size == 32u &&
+	       (program.stage == ShaderType::Vertex || program.stage == ShaderType::Local ||
+	        program.stage == ShaderType::TessellationEvaluation);
+}
+
+IR::U32 GuestWaveMask(IR::IREmitter& ir, const IR::Program& program, const IR::Value& ballot) {
+	const auto low = ir.CompositeExtract(ballot, 0);
+	if (!WaveHalvesInHostSubgroup(program)) {
+		return low;
+	}
+	const auto lane = IR::U32(ir.Emit(IR::ValueOpcode::LaneId));
+	return ir.Select(ir.ULessThan(lane, IR::U32(IR::Value(32u))), low,
+	                 ir.CompositeExtract(ballot, 1));
+}
+
 std::array<IR::U32, 2> Translator::BallotMask(IR::U1 value) {
 	const auto mask = ir.Emit(IR::ValueOpcode::Ballot, {value});
-	return {ir.CompositeExtract(mask, 0),
+	return {program.wave_size == 64u ? ir.CompositeExtract(mask, 0)
+	                                 : GuestWaveMask(ir, program, mask),
 	        program.wave_size == 64u ? ir.CompositeExtract(mask, 1) : IR::U32(IR::Value(0u))};
 }
 
@@ -1150,7 +1171,9 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 		const auto initial_mask = options.stage == ShaderType::Pixel
 		                              ? entry_ir.Emit(IR::ValueOpcode::LiveMask)
 		                              : entry_ir.Emit(IR::ValueOpcode::Ballot, {initial_exec});
-		const auto initial_lo = entry_ir.CompositeExtract(initial_mask, 0);
+		const auto initial_lo =
+		    options.wave_size == 64u ? entry_ir.CompositeExtract(initial_mask, 0)
+		                             : GuestWaveMask(entry_ir, result, initial_mask);
 		const auto initial_hi = options.wave_size == 64u ? entry_ir.CompositeExtract(initial_mask, 1)
 		                                               : IR::U32(IR::Value(0u));
 		entry_ir.SetExecLo(initial_lo);
@@ -1409,14 +1432,23 @@ IR::Program TranslateProgram(const Decoder::Program& decoded, const CFG::Graph& 
 			}
 		} else if (options.stage == ShaderType::Vertex) {
 			// Vulkan owns primitive assembly; each vertex subgroup is one NGG wave.
-			// ESVertCount describes input vertices, independently of lane ordinals.
-			entry_ir.SetScalarReg(static_cast<IR::ScalarReg>(2),
-			                      IR::U32(IR::Value(options.wave_size << 12u)));
-			entry_ir.SetScalarReg(static_cast<IR::ScalarReg>(3),
-			                      entry_ir.BitwiseOr(active_lane_count(), IR::U32(IR::Value(1u << 28u))));
-			// Vulkan adds an indirect record's bases to the indices; the hardware passes them
-			// only in the user SGPRs the packet patches. SH_NOP leaves those SGPRs unchanged;
-			// it does not make the record's bases zero.
+			if (WaveHalvesInHostSubgroup(result)) {
+				const auto lane = IR::U32(entry_ir.Emit(IR::ValueOpcode::LaneId));
+				const auto wave = entry_ir.ShiftRightLogical(lane, IR::U32(IR::Value(5u)));
+				entry_ir.SetScalarReg(static_cast<IR::ScalarReg>(2),
+				                      IR::U32(IR::Value((2u * options.wave_size) << 12u)));
+				entry_ir.SetScalarReg(
+				    static_cast<IR::ScalarReg>(3),
+				    entry_ir.BitwiseOr(
+				        IR::U32(IR::Value((2u << 28u) | options.wave_size)),
+				        entry_ir.ShiftLeftLogical(wave, IR::U32(IR::Value(24u)))));
+			} else {
+				entry_ir.SetScalarReg(static_cast<IR::ScalarReg>(2),
+				                      IR::U32(IR::Value(options.wave_size << 12u)));
+				entry_ir.SetScalarReg(static_cast<IR::ScalarReg>(3),
+				                      entry_ir.BitwiseOr(active_lane_count(),
+				                                         IR::U32(IR::Value(1u << 28u))));
+			}
 			const auto& offsets = options.input_info.vertex->indirect_offsets;
 			const auto  index   = [&](uint8_t slot, IR::StageInputKind kind,
 			                          IR::StageInputKind base_kind) {

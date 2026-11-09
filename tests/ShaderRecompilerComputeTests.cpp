@@ -30541,6 +30541,70 @@ TestCase VectorPermlanex16() {
   return test;
 }
 
+TestCase VectorWaveOrReduceWithUnlaunchedLanes(u32 wave_size, u32 threads) {
+  using O = ShaderOpcode;
+
+  std::vector<u32> code;
+  code.push_back(EncodeVop2(0x1b, 1, InlineU32(31), 0));
+  AppendVop3(&code, 0x11a, 2, Vgpr(1), InlineU32(1));
+  code.push_back(EncodeSop1(0x04, 10, 126));
+  code.push_back(EncodeSop1(0x28, 12, 10));
+  AppendVop3(&code, 0x101, 3, InlineU32(0), Vgpr(2), 10);
+  for (const u32 shift : {1u, 2u, 4u, 8u}) {
+    code.push_back(EncodeVop2(0x1c, 3, 250, 3));
+    code.push_back(EncodeVop2Dpp(3, 0x110u + shift));
+  }
+  if (wave_size == 64u) {
+    AppendVop3(&code, 0x378, 4, Vgpr(3), 193, 193, 0, 2);
+    code.push_back(EncodeVop2(0x1c, 3, Vgpr(4), 3));
+  }
+  code.push_back(EncodeSop1(0x04, 126, 12));
+  const u32 last = wave_size == 64u ? 31u : 15u;
+  AppendVop3(&code, 0x360, 20, Vgpr(3), InlineU32(last));
+  AppendVop3(&code, 0x360, 21, Vgpr(3), InlineU32(2u * last + 1u));
+  code.push_back(EncodeSop2(0x10, 22, 20, 21));
+  AppendStoreSgpr(&code, 20, 0);
+  AppendStoreSgpr(&code, 21, 1);
+  AppendStoreSgpr(&code, 22, 2);
+  AppendEnd(&code);
+
+  const auto bits = [](u32 first, u32 end) {
+    u32 mask = 0;
+    for (u32 lane = first; lane < end; lane++) {
+      mask |= 1u << (lane % 32u);
+    }
+    return mask;
+  };
+  const u32 split = last + 1u;
+  const u32 low   = bits(0, std::min(threads, split));
+  u32       high  = bits(split, std::max(threads, split));
+  if (threads <= split) {
+    high = low;
+  }
+  TestCase test;
+  static std::map<std::pair<u32, u32>, std::string> names;
+  test.name = names
+                  .try_emplace({wave_size, threads}, "VectorWaveOrReduceWithUnlaunchedLanesW" +
+                                                         std::to_string(wave_size) + "T" +
+                                                         std::to_string(threads))
+                  .first->second.c_str();
+  test.code = std::move(code);
+  test.expected = {low, high, low | high};
+  test.opcodes = {O::V_AND_B32,      O::V_LSHLREV_B32, O::S_MOV_B64,   O::S_ORN2_SAVEEXEC_B64,
+                  O::V_CNDMASK_B32,  O::V_OR_B32,      O::V_READLANE_B32, O::S_OR_B32,
+                  O::V_MOV_B32,      O::BUFFER_STORE_DWORD, O::S_ENDPGM};
+  if (wave_size == 64u) {
+    test.opcodes.push_back(O::V_PERMLANEX16_B32);
+  }
+  test.compute_info.threads_num[0] = threads;
+  test.compute_info.threads_num[1] = 1;
+  test.compute_info.threads_num[2] = 1;
+  test.compute_info.wave_size = wave_size;
+  test.compute_info.thread_ids_num = 1;
+  test.has_compute_info = true;
+  return test;
+}
+
 TestCase VectorPermlane16InactiveSource(u32 op_sel, u32 wave_size) {
   using O = ShaderOpcode;
   constexpr u32 sentinel = 0xaaaaaaaau;
@@ -48436,6 +48500,11 @@ std::vector<TestCase> MakeCases() {
   AddCase(VectorLaneWave32RuntimeSelectorWraps);
   AddCase(VectorReadlaneSelectsTwoKeysWithinWave);
   AddCase(VectorPermlanex16);
+  cases.push_back(VectorWaveOrReduceWithUnlaunchedLanes(64, 64));
+  cases.push_back(VectorWaveOrReduceWithUnlaunchedLanes(64, 40));
+  cases.push_back(VectorWaveOrReduceWithUnlaunchedLanes(64, 20));
+  cases.push_back(VectorWaveOrReduceWithUnlaunchedLanes(32, 20));
+  cases.push_back(VectorWaveOrReduceWithUnlaunchedLanes(32, 10));
   for (const u32 op_sel : {0u, 1u, 2u})
     for (const u32 wave_size : {32u, 64u})
       cases.push_back(VectorPermlane16InactiveSource(op_sel, wave_size));

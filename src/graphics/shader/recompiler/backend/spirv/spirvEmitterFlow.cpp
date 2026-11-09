@@ -924,19 +924,44 @@ uint32_t EmitLiveMask(EmitterState& state) {
 }
 
 uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
-	const auto ballot = ctx.Ballot(inst.Arg(1));
-	const auto lane   = ctx.FirstLane(ballot);
-	return ctx.Shuffle(inst, 0, lane);
+	const auto ballot   = ctx.Ballot(inst.Arg(1));
+	const auto lane     = ctx.FirstLane(ballot);
+	const auto shuffled = ctx.Shuffle(inst, 0, lane);
+	if (WaveHalvesInHostSubgroup(ctx.state) || ctx.state.pixel_wave32_wide_host) {
+		return shuffled;
+	}
+	auto&      state  = ctx.state;
+	const auto result = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpGroupNonUniformBroadcastFirst,
+	                          TypeId(state, inst.Arg(0).GetType()), result,
+	                          ConstantU32(state, spv::ScopeSubgroup), shuffled);
+	return result;
 }
 
 uint32_t EmitReadLane(ValueEmitContext& ctx, const IR::Inst& inst) {
-	return ctx.Shuffle(inst, 0, EmitHostLaneOfGuestLane(ctx.state, ctx.Arg(inst, 1)));
+	auto& state = ctx.state;
+	if (state.pixel_wave32_wide_host) {
+		return ctx.Shuffle(inst, 0, EmitHostLaneOfGuestLane(state, ctx.Arg(inst, 1)));
+	}
+	if (WaveHalvesInHostSubgroup(state)) {
+		const auto lane =
+		    EmitBinaryU32(state, spv::OpBitwiseAnd, ctx.Arg(inst, 1), ConstantU32(state, 31));
+		return ctx.Shuffle(inst, 0,
+		                   EmitAddU32(state, EmitLaunchedLaneAtOrBelow(state, lane),
+		                              EmitOwnWaveHalfBase(state)));
+	}
+	const auto shuffled = ctx.Shuffle(inst, 0, EmitLaunchedLaneAtOrBelow(state, ctx.Arg(inst, 1)));
+	const auto result   = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpGroupNonUniformBroadcastFirst,
+	                          TypeId(state, inst.Arg(0).GetType()), result,
+	                          ConstantU32(state, spv::ScopeSubgroup), shuffled);
+	return result;
 }
 
 template <spv::Op Reduce, auto Combine>
 static uint32_t EmitSubgroupReduceU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto& state = ctx.state;
-	auto value = ctx.Arg(inst, 0);
+	auto value  = ctx.Arg(inst, 0);
 	if (ctx.other_half != nullptr) {
 		value = Combine(state, ctx.HalfArg(inst, 0, 0), ctx.HalfArg(inst, 0, 1));
 	}
@@ -961,9 +986,15 @@ uint32_t EmitSubgroupOrU32(ValueEmitContext& ctx, const IR::Inst& inst) {
 
 uint32_t EmitWriteLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 	auto&      state = ctx.state;
-	const auto hit   = state.builder.AllocateId();
-	state.builder.AddFunction(spv::OpIEqual, TypeBool(state), hit,
-	                          EmitGuestLaneId(state), ctx.Arg(inst, 2));
+	const auto hit  = state.builder.AllocateId();
+	const auto lane = state.pixel_wave32_wide_host
+	                      ? EmitGuestLaneId(state)
+	                      : (WaveHalvesInHostSubgroup(state)
+	                             ? EmitBinaryU32(state, spv::OpBitwiseAnd,
+	                                             EmitSubgroupLocalInvocationId(state),
+	                                             ConstantU32(state, 31))
+	                             : EmitSubgroupLocalInvocationId(state));
+	state.builder.AddFunction(spv::OpIEqual, TypeBool(state), hit, lane, ctx.Arg(inst, 2));
 	return EmitNative<spv::OpSelect, IR::Type::U32>(ctx.state, hit, ctx.Arg(inst, 1),
 	                                                ctx.Arg(inst, 0));
 }
@@ -1000,12 +1031,36 @@ uint32_t EmitPermlane16U32(ValueEmitContext& ctx, const IR::Inst& inst) {
 	state.builder.AddFunction(spv::OpBitwiseAnd, TypeU32(state), index, shifted,
 	                          ConstantU32(state, 15));
 	state.builder.AddFunction(spv::OpBitwiseOr, TypeU32(state), target, row_value, index);
-	const auto shuffled = ctx.Shuffle(inst, 0, target);
-	if (flags.fetch_inactive) {
-		return shuffled;
+	const auto launched = EmitLaunchedLaneAtOrBelow(state, target);
+	const auto shuffled = ctx.Shuffle(inst, 0, launched);
+	uint32_t   result   = shuffled;
+	if (!flags.fetch_inactive) {
+		const auto in_high = state.builder.AllocateId();
+		state.builder.AddFunction(
+		    spv::OpLogicalAnd, TypeBool(state), in_high,
+		    ConstantBool(state, state.program.wave_size == 64u),
+		    Binary(state, spv::OpINotEqual, TypeBool(state),
+		                   EmitBinaryU32(state, spv::OpBitwiseAnd, target, ConstantU32(state, 32)),
+		                   ConstantU32(state, 0)));
+		const auto exec_word = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpSelect, TypeU32(state), exec_word, in_high,
+		                          ctx.Arg(inst, 5), ctx.Arg(inst, 4));
+		const auto exec_bit = EmitBinaryU32(
+		    state, spv::OpBitwiseAnd,
+		    EmitBinaryU32(state, spv::OpShiftRightLogical, exec_word,
+		                  EmitBinaryU32(state, spv::OpBitwiseAnd, target, ConstantU32(state, 31))),
+		    ConstantU32(state, 1));
+		const auto was_launched = state.builder.AllocateId();
+		const auto source_exec  = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpIEqual, TypeBool(state), was_launched, launched, target);
+		state.builder.AddFunction(
+		    spv::OpSelect, TypeBool(state), source_exec, was_launched, ctx.Shuffle(inst, 3, launched),
+		    Binary(state, spv::OpINotEqual, TypeBool(state), exec_bit, ConstantU32(state, 0)));
+		result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpSelect, TypeU32(state), result, source_exec, shuffled,
+		                          ConstantU32(state, 0));
 	}
-	return Select(state, TypeU32(state), EmitSourceLaneActive(ctx, ctx.Arg(inst, 3), target),
-	              shuffled, ctx.Arg(inst, 4));
+	return result;
 }
 
 uint32_t EmitGetAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {

@@ -570,16 +570,26 @@ uint32_t ValueEmitContext::Ballot(IR::Value predicate, bool negate) {
 }
 
 uint32_t ValueEmitContext::FirstLane(uint32_t ballot) {
-	// An empty ballot (EXEC zero) gives lane 0, which V_READFIRSTLANE reads on hardware. FindILsb
-	// returns -1 for zero, unlike BallotFindLSB, whose result is then undefined.
+	if (other_half == nullptr && WaveHalvesInHostSubgroup(state)) {
+		const auto first = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpExtInst, TypeU32(state), first, GlslStd450(state),
+		                          GLSLstd450FindILsb, EmitOwnWaveHalfWord(state, ballot));
+		return EmitAddU32(state, first, EmitOwnWaveHalfBase(state));
+	}
 	const auto first = [&](uint32_t word) {
 		const auto bits = state.builder.AllocateId();
 		state.builder.AddFunction(spv::OpCompositeExtract, TypeU32(state), bits, ballot, word);
 		return std::pair {bits, EmitGlsl<GLSLstd450FindILsb, IR::Type::U32>(state, bits)};
 	};
 	const auto [low, low_first] = first(0);
-	if (state.program.wave_size == 32u) {
-		return EmitGlsl<GLSLstd450SMax, IR::Type::U32>(state, low_first, ConstantU32(state, 0));
+	if (other_half == nullptr) {
+		if (state.program.wave_size == 32u) {
+			return EmitGlsl<GLSLstd450SMax, IR::Type::U32>(state, low_first, ConstantU32(state, 0));
+		}
+		const auto result = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpGroupNonUniformBallotFindLSB, TypeU32(state), result,
+		                          ConstantU32(state, spv::ScopeSubgroup), ballot);
+		return result;
 	}
 	const auto high_first = first(1).second;
 	const auto high_lane  = EmitGlsl<GLSLstd450SMax, IR::Type::U32>(
