@@ -1,6 +1,10 @@
 #ifndef KYTY_LIBS_PADSCRIPT_H_
 #define KYTY_LIBS_PADSCRIPT_H_
 
+namespace Libs::Controller {
+struct PadData;
+} // namespace Libs::Controller
+
 namespace Libs::Controller::PadScript {
 
 // Scripted pad input for reproducible benchmark runs, driven through the host-input controller.
@@ -14,6 +18,14 @@ void Stop();
 
 // Called by the pad read entry points; the first call sets the script origin.
 void OnPadRead();
+
+// Pad recording for replaying a real play session in a benchmark run, keyed by guest flip:
+//   KYTY_PAD_RECORD   path; every change of the first player's pad state is appended as
+//                     "flip buttons lx ly rx ry l2 r2 ox oy oz ow ax ay az gx gy gz"
+//   KYTY_PAD_REPLAY   path of such a recording; the first player's reads return the recorded
+//                     state of the current guest flip instead of the host pad
+// Called on every filled PadData of the first player; true when a replay overrode it.
+bool RecordOrReplay(PadData* data);
 
 } // namespace Libs::Controller::PadScript
 

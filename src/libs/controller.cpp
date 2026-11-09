@@ -1440,6 +1440,9 @@ int KYTY_SYSV_ABI PadReadState(int handle, PadData* data) {
 	PlayerForHandle(handle)->ReadState(&state, &connected, &connected_count);
 
 	pad_fill_data(data, state, connected, connected_count);
+	if (handle == PAD_HANDLE) {
+		PadScript::RecordOrReplay(data);
+	}
 
 	return OK;
 }
@@ -1474,6 +1477,15 @@ int KYTY_SYSV_ABI PadRead(int handle, PadData* data, int num) {
 
 	for (int i = 0; i < ret_num; i++) {
 		pad_fill_data(&data[i], states[i], connected, connected_count);
+	}
+	// A recording keeps one state per read; a replay returns that one state.
+	if (handle == PAD_HANDLE) {
+		if (PadScript::RecordOrReplay(&data[ret_num - 1])) {
+			if (ret_num > 1) {
+				data[0] = data[ret_num - 1];
+			}
+			ret_num = 1;
+		}
 	}
 
 	return ret_num;
