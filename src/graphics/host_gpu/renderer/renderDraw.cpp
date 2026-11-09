@@ -1341,7 +1341,6 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		                       emit.indirect.count, emit.indirect.stride);
 	}
 	occlusion_queries.End(vk_buffer, occlusion_query);
-	}
 	if (CpPhases::Enabled()) {
 		DrawRepeat::Finger now;
 		now.cb         = buffer.RecordingId();
@@ -1380,6 +1379,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	if (shader_write_stages) {
 		buffer.EndRendering();
 		ShaderWriteBarrier(vk_buffer, shader_write_stages);
+	}
 	}
 }
 
