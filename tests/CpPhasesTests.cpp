@@ -3,6 +3,7 @@
 // DROP_PARSE (the Parse phase is never counted).
 
 #include "graphics/presentation/cpPhases.h"
+#include "graphics/host_gpu/renderer/drawRepeatDiag.h"
 
 #include <cstdio>
 
@@ -94,6 +95,67 @@ int main() {
 		a.Leave(5);
 		a.Leave(9);
 		Check(a.Depth() == 0 && a.Total() == 9, "bookkeeping intact after overflow");
+	}
+
+	// Draw phases: self times add up to the outer span, children excluded.
+	{
+		Accountant<> a;
+		int64_t      t = 0;
+		a.Enter(Phase::Handler, t);
+		a.Enter(Phase::DrawShaders, t);
+		t += 4;
+		a.Leave(t);
+		a.Enter(Phase::DrawBind, t);
+		t += 6;
+		a.Leave(t);
+		a.Enter(Phase::DrawPipeline, t);
+		t += 3;
+		a.Leave(t);
+		a.Enter(Phase::DrawTargets, t);
+		t += 5;
+		a.Leave(t);
+		a.Enter(Phase::DrawDesc, t);
+		t += 2;
+		a.Leave(t);
+		a.Enter(Phase::DrawVkcmd, t);
+		t += 8;
+		a.Leave(t);
+		t += 1;
+		a.Leave(t);
+		Check(a.Self(Phase::DrawShaders) == 4 && a.Self(Phase::DrawBind) == 6 && a.Self(Phase::DrawPipeline) == 3, "draw phase selves");
+		Check(a.Self(Phase::DrawTargets) == 5 && a.Self(Phase::DrawDesc) == 2 && a.Self(Phase::DrawVkcmd) == 8, "draw phase selves, rest");
+		Check(a.Self(Phase::Handler) == 1, "handler keeps only the gap");
+		Check(a.Total() == 29, "draw phases plus handler equal the outer span");
+	}
+
+	{
+		using Libs::Graphics::DrawRepeat::Finger;
+		using Libs::Graphics::DrawRepeat::SameRt;
+		using Libs::Graphics::DrawRepeat::SameState;
+		Finger a;
+		a.valid = true;
+		a.cb = 1;
+		a.pipeline = 9;
+		a.generation = 3;
+		a.color_n = 1;
+		a.colors[0] = 4;
+		a.depth = 5;
+		a.images = {7};
+		a.samplers = {8};
+		a.buffers = {2};
+		a.shader_data = {1, 2, 3};
+		Finger b = a;
+		Check(SameState(a, b) && SameRt(a, b), "identical draw repeats state and targets");
+		b.shader_data[2] = 9;
+		Check(!SameState(a, b) && SameRt(a, b), "shader_data is part of the state");
+		b = a;
+		b.generation = 4;
+		Check(SameState(a, b) && !SameRt(a, b), "texture generation is part of the targets");
+		b = a;
+		b.cb = 2;
+		Check(!SameState(a, b) && !SameRt(a, b), "a new command buffer is not a repeat");
+		Finger empty;
+		Check(!SameState(empty, a) && !SameRt(empty, a), "the first draw is not a repeat");
 	}
 
 	return g_failures == 0 ? 0 : 1;

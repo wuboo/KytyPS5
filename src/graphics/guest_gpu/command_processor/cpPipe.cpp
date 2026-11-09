@@ -402,7 +402,20 @@ void CommandProcessor::PipeExecuteFront() {
 			                     it.cls == CpPipe::OpClass::Draw ? C::HdlDrawN : (it.cls == CpPipe::OpClass::Dispatch ? C::HdlDispN : C::HdlOtherN));
 		}
 		const auto packet_dw = static_cast<uint32_t>(it.dw.size());
+		if (CpSampler::Active().load(std::memory_order_relaxed)) {
+			CpSampler::CpOpcode().store(it.opcode, std::memory_order_relaxed);
+		}
+		const bool rf_op = RfOp::Enabled();
+		if (rf_op) {
+			RfOp::BeginPacket(it.opcode, it.dw.data(), packet_dw);
+		}
 		const auto consumed  = handler(*this, it.dw[0] & ~1u, it.dw.data() + 1, packet_dw, packet_dw) + 1;
+		if (rf_op) {
+			RfOp::EndPacket();
+		}
+		if (CpSampler::Active().load(std::memory_order_relaxed)) {
+			CpSampler::CpOpcode().store(CpSampler::kNoOpcode, std::memory_order_relaxed);
+		}
 		if (consumed != packet_dw) {
 			FrameTiming::Add(C::PipeLenMismatchN);
 			static std::atomic<uint32_t> logged {0};

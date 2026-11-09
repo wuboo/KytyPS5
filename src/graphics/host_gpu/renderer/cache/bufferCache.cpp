@@ -675,7 +675,7 @@ void BufferCache::LogSyncReadback(SyncCensus::Site site, uint64_t vaddr, uint64_
 	static std::atomic<uint64_t> logged {0};
 	const auto                   flip = FrameTiming::GuestFlips();
 	const auto                   n    = logged.fetch_add(1, std::memory_order_relaxed);
-	if (n >= 300 && !(flip >= 6300 && flip <= 6310)) {
+	if (n >= 300 && !RfOp::FlipInLogWindow(flip)) {
 		return;
 	}
 	// S404: cmds_since_submit is the snapshot taken before the drain; the live difference would count from the drain's own Submit.
@@ -702,13 +702,17 @@ void BufferCache::LogSyncReadback(SyncCensus::Site site, uint64_t vaddr, uint64_
 		std::snprintf(eager_text, sizeof(eager_text), " etick=%" PRIu64 " elag=%" PRIu64 " edone=%d ewait_us=%" PRIu64,
 		              probe.eager_tick, probe.eager_lag, probe.eager_already_done ? 1 : 0, probe.eager_wait_ns / 1000);
 	}
-	LOGF("[sync] flip=%" PRIu64 " site=%s addr=0x%016" PRIx64 " size=0x%" PRIx64 " wait_us=%" PRIu64
-	     " dl=%d lag=%" PRIu64 " done=%d eager=%d cmds_since_submit=%" PRIu64 " backlog=%" PRIu64 " cmds_since_writer=%" PRIu64
-	     " tid=%u gpu_thread=%d queue_us=%" PRIu64 " lambda_us=%" PRIu64 "%s%s%s\n",
-	     flip, SyncCensus::SiteName(site), vaddr, size, wait_ns / 1000, probe.downloaded ? 1 : 0,
-	     SyncCensus::Lag(probe.current, probe.writer), probe.done ? 1 : 0, eager ? 1 : 0, commands, probe.backlog,
-	     probe.cmds_since_writer, probe.thread_id, probe.gpu_thread ? 1 : 0, probe.queue_ns / 1000, probe.lambda_ns / 1000, reader,
-	     stale, eager_text);
+	char line[2048];
+	std::snprintf(line, sizeof(line),
+	              "[sync] flip=%" PRIu64 " site=%s addr=0x%016" PRIx64 " size=0x%" PRIx64 " wait_us=%" PRIu64
+	              " dl=%d lag=%" PRIu64 " done=%d eager=%d cmds_since_submit=%" PRIu64 " backlog=%" PRIu64 " cmds_since_writer=%" PRIu64
+	              " tid=%u gpu_thread=%d queue_us=%" PRIu64 " lambda_us=%" PRIu64 "%s%s%s\n",
+	              flip, SyncCensus::SiteName(site), vaddr, size, wait_ns / 1000, probe.downloaded ? 1 : 0,
+	              SyncCensus::Lag(probe.current, probe.writer), probe.done ? 1 : 0, eager ? 1 : 0, commands, probe.backlog,
+	              probe.cmds_since_writer, probe.thread_id, probe.gpu_thread ? 1 : 0, probe.queue_ns / 1000, probe.lambda_ns / 1000, reader,
+	              stale, eager_text);
+	LOGF("%s", line);
+	RfOp::WriteStdout(line);
 }
 
 namespace {
@@ -1059,6 +1063,9 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 	    [&]() noexcept { source = UploadCopies(buffer, copies, total_size); });
 	if (source) {
 		auto& command = m_scheduler.Current();
+		if (command.IsRendering()) {
+			FrameTiming::Add(FrameTiming::Counter::UploadPassBreakN);
+		}
 		command.EndRendering();
 		const auto              native = command.Handle();
 		vk::BufferMemoryBarrier before {};
@@ -1097,6 +1104,7 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 		return nullptr;
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::BufferUploadBytes, total_size);
+	FrameTiming::Add(FrameTiming::Counter::UploadBytes, total_size);
 
 	const auto source = UploadMemory(m_graphics, m_scheduler, m_staging_buffer, total_size, 4,
 	    vk::BufferUsageFlagBits::eTransferSrc, [&](uint8_t* mapped, uint64_t base_offset) {
@@ -1150,7 +1158,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 			}
 		}
 		if (RfOp::Enabled()) {
-			m_rfop_writers.Note(vaddr, size, RfOp::CurrentPacket().opcode);
+			m_rfop_writers.Note(vaddr, size, RfOp::CurrentPacket().opcode, RfOp::CurrentWriterHash());
 		}
 		if (SyncCensus::Enabled()) {
 			m_sync_ticks.Note(vaddr, size, m_scheduler.CurrentTick());

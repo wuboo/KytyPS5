@@ -13,10 +13,12 @@
 //                      rf_op_draw_index_indirect_n and rf_op_draw_index_indirect_wait_ns (opcode 0x25).
 // This header is the pure part (tests/RfOpDiagTests.cpp pins it). Nothing here feeds a shader or pipeline cache key.
 
+#include "graphics/host_gpu/renderer/gfDiag.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
 #include "graphics/presentation/cpSampler.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -269,23 +271,74 @@ inline std::string FormatLine(const Event& event) {
 	return text;
 }
 
-// At most 400 lines, plus every line of flips 6300-6310.
-constexpr bool ShouldLog(uint64_t index, uint64_t flip) {
-	return index < 400 || (flip >= 6300 && flip <= 6310);
+// Built-in light-window sample, plus KYTY_DIAG_RFOP_WINDOW=a:b (same parser as KYTY_DIAG_GF_WINDOW).
+inline bool FlipInLogWindow(uint64_t flip) {
+	if (flip >= 6300 && flip <= 6310) {
+		return true;
+	}
+#if defined(KYTY_RFOP_MUTANT_WINDOW_IGNORED)
+	(void)flip;
+	return false;
+#else
+	uint64_t    from = 0, to = 0;
+	const char* text = std::getenv("KYTY_DIAG_RFOP_WINDOW");
+	return GuestFault::ParseWindow(text, &from, &to) && flip >= from && flip <= to;
+#endif
 }
+
+// At most 400 lines, plus every line of flips 6300-6310 and of KYTY_DIAG_RFOP_WINDOW.
+inline bool ShouldLog(uint64_t index, uint64_t flip) {
+	return index < 400 || FlipInLogWindow(flip);
+}
+
+// Bench runs with --printf-direction Silent, which drops LOGF. The capped diag lines also go to stdout, which bench2 captures.
+inline void WriteStdout(const char* text) {
+	if (text == nullptr) {
+		return;
+	}
+	std::fputs(text, stdout);
+	const auto n = std::strlen(text);
+	if (n == 0 || text[n - 1] != '\n') {
+		std::fputc('\n', stdout);
+	}
+	std::fflush(stdout);
+}
+
+// Hash of the compute shader whose dispatch is recording GPU writes (0 outside one).
+inline uint64_t& CurrentWriterHash() {
+	static thread_local uint64_t hash = 0;
+	return hash;
+}
+struct WriterHashGuard {
+	explicit WriterHashGuard(uint64_t hash) {
+		if (Enabled()) {
+			CurrentWriterHash() = hash;
+		}
+	}
+	~WriterHashGuard() {
+		if (Enabled()) {
+			CurrentWriterHash() = 0;
+		}
+	}
+	WriterHashGuard(const WriterHashGuard&)            = delete;
+	WriterHashGuard& operator=(const WriterHashGuard&) = delete;
+};
 
 // Opcode of the newest GPU writer per 4 KiB page (the PM4 handler that recorded the write; the writing shader's hash is not known at
 // the recording site). Touched on the GPU thread only; the lock is for the diagnostics' sake.
 class WriterOps {
 public:
 	static constexpr uint64_t kPageSize = 4096;
-	void Note(uint64_t address, uint64_t size, uint32_t opcode) {
+	void Note(uint64_t address, uint64_t size, uint32_t opcode, uint64_t hash = 0) {
 		if (size == 0) {
 			return;
 		}
+#if defined(KYTY_RFOP_MUTANT_HASH_DROPPED)
+		hash = 0;
+#endif
 		std::lock_guard lock(m_lock);
 		for (auto page = address / kPageSize; page <= (address + size - 1) / kPageSize; page++) {
-			m_pages[page] = {++m_seq, opcode};
+			m_pages[page] = {++m_seq, opcode, hash};
 		}
 		if (m_pages.size() > kMaxPages) {
 			m_pages.clear();
@@ -308,12 +361,30 @@ public:
 		}
 		return result;
 	}
+	// Hash stored beside the opcode; 0 when the writer was not a tracked compute dispatch.
+	[[nodiscard]] uint64_t FindHash(uint64_t address, uint64_t size) const {
+		if (size == 0) {
+			return 0;
+		}
+		std::lock_guard lock(m_lock);
+		uint64_t        best   = 0;
+		uint64_t        result = 0;
+		for (auto page = address / kPageSize; page <= (address + size - 1) / kPageSize; page++) {
+			const auto found = m_pages.find(page);
+			if (found != m_pages.end() && found->second.seq > best) {
+				best   = found->second.seq;
+				result = found->second.hash;
+			}
+		}
+		return result;
+	}
 
 private:
 	static constexpr size_t kMaxPages = 1u << 18;
 	struct Entry {
 		uint64_t seq    = 0;
 		uint32_t opcode = kNoOpcode;
+		uint64_t hash   = 0;
 	};
 	mutable std::mutex                     m_lock;
 	std::unordered_map<uint64_t, Entry>    m_pages;

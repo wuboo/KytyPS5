@@ -21,6 +21,8 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/guest_gpu/command_processor/cpPipe.h"
 #include "graphics/guest_gpu/command_processor/cpPipeJob.h"
+#include "graphics/host_gpu/renderer/drawRepeatDiag.h"
+#include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/host_gpu/renderer/meshIndirectRuntime.h"
 #include "graphics/host_gpu/renderer/pvIndirect.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -454,6 +456,7 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
                                                  vk::ImageAspectFlags& feedback_aspects,
                                                  std::span<PreparedBindings* const> stages) {
 	EXIT_IF(colors == nullptr || color_count > RENDER_COLOR_ATTACHMENTS_MAX);
+	KYTY_CP_SITE(DrawRenderState);
 	feedback_aspects = {};
 	auto&       cache = m_context.GetTextureCache();
 	RenderState state {};
@@ -857,6 +860,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		FrameTiming::Add(FrameTiming::Counter::PipeUsedN);
 	} else {
 		if (job != nullptr && !job_used) FrameTiming::Add(FrameTiming::Counter::PipeFallbackN);
+		CpPhases::Scope shaders(CpPhases::Phase::DrawShaders);
 		m_context.GetPipelineCache().GetGraphicsPrograms(buffer, state);
 		if (job_used) CompareWithJob(state, *job);
 	}
@@ -865,15 +869,18 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	if (state.vertex_info[0].stage.module == nullptr) {
 		return false;
 	}
-	for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
-		if ((state.mrt_mask & (1u << slot)) != 0) {
-			ResolveRenderColorTarget(buffer, state.color_info[state.color_count], slot);
-			if (state.color_info[state.color_count].image_id) {
-				state.color_count++;
+	{
+		CpPhases::Scope targets(CpPhases::Phase::DrawTargets);
+		for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
+			if ((state.mrt_mask & (1u << slot)) != 0) {
+				ResolveRenderColorTarget(buffer, state.color_info[state.color_count], slot);
+				if (state.color_info[state.color_count].image_id) {
+					state.color_count++;
+				}
 			}
 		}
+		ResolveRenderDepthTarget(buffer, state.depth_info);
 	}
-	ResolveRenderDepthTarget(buffer, state.depth_info);
 	// TODO(PPSA09243): Vulkan passes take one sample count. Where PS5 attachments mix counts,
 	// keep those matching the raster count instead of resolving multisampled shadows.
 	const auto colors       = std::span {state.color_info, state.color_count};
@@ -1151,16 +1158,20 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	auto&                            bindings = m_graphics_bindings;
 	std::array<PreparedBindings*, 4> descriptor_stages {};
 	uint32_t                         stage_count = 0;
-	for (uint32_t i = 0; i < vertex_stages.size(); i++) {
-		PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i]);
-		descriptor_stages[stage_count++] = &bindings.vertex[i];
-	}
-	if (state.ps_active) {
-		PrepareBindings(state.ps_input_info.stage, bindings.pixel);
-		descriptor_stages[stage_count++] = &bindings.pixel;
-	}
-	const auto stages = std::span {descriptor_stages.data(), stage_count};
-	PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
+	const auto stages = [&] {
+		CpPhases::Scope bind(CpPhases::Phase::DrawBind);
+		for (uint32_t i = 0; i < vertex_stages.size(); i++) {
+			PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i]);
+			descriptor_stages[stage_count++] = &bindings.vertex[i];
+		}
+		if (state.ps_active) {
+			PrepareBindings(state.ps_input_info.stage, bindings.pixel);
+			descriptor_stages[stage_count++] = &bindings.pixel;
+		}
+		const auto stages = std::span {descriptor_stages.data(), stage_count};
+		PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
+		return stages;
+	}();
 	PreparedVertexBuffers vertex_bindings;
 	PreparedIndexBuffer   index_binding;
 	if (!mesh_active) {
@@ -1175,11 +1186,16 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		args_buffer = m_context.GetBufferCache().ObtainBuffer(emit.indirect.address, size, false);
 		EXIT_IF((args_buffer.second & 3u) != 0);
 	}
-	auto& pipeline = m_context.GetPipelineCache().GetGraphicsPipeline(buffer, state);
+	auto& pipeline = [&]() -> auto& {
+		CpPhases::Scope pipe(CpPhases::Phase::DrawPipeline);
+		return m_context.GetPipelineCache().GetGraphicsPipeline(buffer, state);
+	}();
 	vk::ImageAspectFlags feedback_aspects;
-	const auto rendering =
-	    AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
-	                         feedback_aspects, stages);
+	const auto rendering = [&] {
+		CpPhases::Scope targets(CpPhases::Phase::DrawTargets);
+		return AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,
+		                            feedback_aspects, stages);
+	}();
 	vk::DeviceAddress task_params = 0;
 	if (mesh_task) {
 		const MeshTaskParams params {
@@ -1240,10 +1256,15 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	if (!mesh_active) {
 		CommitVertexBuffers(vk_buffer, vertex_bindings);
 	}
-	CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
+	{
+		CpPhases::Scope desc(CpPhases::Phase::DrawDesc);
+		CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, pipeline, stages);
+	}
 	if (!mesh_active) {
 		CommitIndexBuffer(vk_buffer, index_binding);
 	}
+	{
+	CpPhases::Scope vkcmd(CpPhases::Phase::DrawVkcmd);
 	using ShaderRecompiler::IR::PushData;
 	const auto draw_dwords =
 	    PushData::GraphicsDrawDwords(mesh_active, state.ps_input_info.object_primitive_id);
@@ -1320,6 +1341,39 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		                       emit.indirect.count, emit.indirect.stride);
 	}
 	occlusion_queries.End(vk_buffer, occlusion_query);
+	}
+	if (CpPhases::Enabled()) {
+		DrawRepeat::Finger now;
+		now.cb         = buffer.RecordingId();
+		now.pipeline   = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkPipeline>(pipeline.pipeline)));
+		now.generation = m_context.GetTextureCache().RegistrationGeneration();
+		now.color_n    = state.color_count < 8 ? state.color_count : 8;
+		for (uint32_t i = 0; i < now.color_n; i++) {
+			now.colors[i] = state.color_info[i].image_id.index;
+		}
+		now.depth = state.depth_info.image_id.index;
+		for (const auto* stage: stages) {
+			for (const auto& image: stage->images) {
+				now.images.push_back(image.image_id.index);
+			}
+			for (const auto sampler: stage->samplers) {
+				now.samplers.push_back(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkSampler>(sampler))));
+			}
+			for (const auto& source: stage->buffer_sources) {
+				now.buffers.push_back(source.id.index);
+			}
+			now.shader_data.insert(now.shader_data.end(), stage->shader_data.begin(), stage->shader_data.end());
+		}
+		bool state_same = false;
+		bool rt_same    = false;
+		DrawRepeat::Observe(std::move(now), &state_same, &rt_same);
+		if (state_same) {
+			FrameTiming::Add(FrameTiming::Counter::DrawStateSameN);
+		}
+		if (rt_same) {
+			FrameTiming::Add(FrameTiming::Counter::RtSameN);
+		}
+	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);
 

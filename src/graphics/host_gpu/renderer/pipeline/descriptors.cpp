@@ -14,6 +14,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/tile.h"
+#include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
@@ -663,6 +664,7 @@ static vk::Sampler NativeSampler(RenderContext&                       context,
 
 static vk::DescriptorBufferInfo NativeUpload(RenderContext&            context,
                                              std::span<const uint32_t> data) {
+	KYTY_CP_SITE(BindNativeUpload);
 	EXIT_IF(data.empty());
 	auto&      buffer = context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream);
 	const auto offset = buffer.Copy(data.data(), data.size_bytes(), 256);
@@ -698,6 +700,8 @@ void RenderExecutor::ResetBindings() {
 void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
                                      PreparedBindings& prepared) {
 	KYTY_PROFILER_FUNCTION();
+	CpPhases::SubTimer bind_prep(FrameTiming::Counter::BindPrepNs);
+	KYTY_CP_SITE(BindResolveTexture);
 	EXIT_IF(!runtime);
 	const auto& program  = runtime.module->info;
 	const auto& snapshot = *runtime.resources;
@@ -737,6 +741,8 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 
 void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 	KYTY_PROFILER_FUNCTION();
+	CpPhases::SubTimer bind_find(FrameTiming::Counter::BindFindNs);
+	KYTY_CP_SITE(BindFindBuffers);
 	auto& cache = m_context.GetBufferCache();
 	for (auto* stage: stages) {
 		auto&       prepared = *stage;
@@ -796,6 +802,8 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 
 void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 	KYTY_PROFILER_FUNCTION();
+	CpPhases::SubTimer bind_buf(FrameTiming::Counter::BindBufNs);
+	KYTY_CP_SITE(BindRebindBuffers);
 	const auto& program  = prepared.runtime->module->info;
 	const auto& snapshot = *prepared.runtime->resources;
 	const auto& layout   = program.bindings;
@@ -829,6 +837,8 @@ void RenderExecutor::RebindBuffers(PreparedBindings& prepared) {
 
 void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 	KYTY_PROFILER_FUNCTION();
+	CpPhases::SubTimer bind_img(FrameTiming::Counter::BindImgNs);
+	KYTY_CP_SITE(BindRebindImages);
 	const auto& program       = prepared.runtime->module->info;
 	const auto& snapshot      = *prepared.runtime->resources;
 	auto&       images        = prepared.images;
@@ -875,6 +885,7 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 		uses_image_heap |= stage->runtime->module->info.info.uses_image_heap;
 	}
 	if (uses_dma) {
+		CpPhases::SubTimer bind_bda(FrameTiming::Counter::BindBdaNs);
 		m_context.PrepareBda();
 	}
 	if (uses_image_heap) {
@@ -884,15 +895,18 @@ void RenderExecutor::PrepareGraphicsBindings(std::span<PreparedBindings* const> 
 		RebindImages(*stage);
 	}
 	auto& cache = m_context.GetTextureCache();
-	for (auto& target: colors) {
-		EXIT_IF(!target.image_id);
-		auto& old_image = cache.m_slot_images[target.image_id];
-		if (!old_image.registered || old_image.binding.needs_rebind) {
-			old_image.binding = {};
-			target.desc.view_info.base_level = target.guest_mip_level;
-			target.desc.view_info.base_layer = target.guest_array_layer;
-			target.image_id = cache.FindImage(target.desc);
-			BindRenderTarget(target.image_id);
+	{
+		CpPhases::SubTimer bind_rt(FrameTiming::Counter::BindRtNs);
+		for (auto& target: colors) {
+			EXIT_IF(!target.image_id);
+			auto& old_image = cache.m_slot_images[target.image_id];
+			if (!old_image.registered || old_image.binding.needs_rebind) {
+				old_image.binding = {};
+				target.desc.view_info.base_level = target.guest_mip_level;
+				target.desc.view_info.base_layer = target.guest_array_layer;
+				target.image_id = cache.FindImage(target.desc);
+				BindRenderTarget(target.image_id);
+			}
 		}
 	}
 	// Discovery can read back PS5 metadata and submit the scheduler. Reserve draw buffers only

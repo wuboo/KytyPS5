@@ -123,6 +123,7 @@ public:
 	void               RunGarbageCollector();
 	// S412 (KYTY_DIAG_RFOP)
 	[[nodiscard]] uint32_t RfOpWriter(uint64_t vaddr, uint64_t size) const { return m_rfop_writers.Find(vaddr, size); }
+	[[nodiscard]] uint64_t RfOpWriterHash(uint64_t vaddr, uint64_t size) const { return m_rfop_writers.FindHash(vaddr, size); }
 
 private:
 	friend struct BufferCacheTestAccess;

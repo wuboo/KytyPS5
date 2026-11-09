@@ -75,6 +75,24 @@ void TestLogGate() {
 	Check(ShouldLog(5000, 6300) && ShouldLog(5000, 6310) && !ShouldLog(5000, 6311), "flips 6300-6310 always log");
 }
 
+// KYTY_DIAG_RFOP_WINDOW=a:b logs past the 400-line cap. The same predicate gates [sync] and [cp-wait].
+void TestEnvWindow() {
+#if defined(_WIN32)
+	_putenv_s("KYTY_DIAG_RFOP_WINDOW", "5000:5030");
+#else
+	setenv("KYTY_DIAG_RFOP_WINDOW", "5000:5030", 1);
+#endif
+	Check(FlipInLogWindow(5000) && FlipInLogWindow(5030), "env window includes its ends");
+	Check(ShouldLog(400, 5000) && ShouldLog(400, 5030), "env window logs after 400 lines");
+	Check(!ShouldLog(400, 4999) && !ShouldLog(400, 5031), "outside the env window stays quiet");
+	Check(ShouldLog(400, 6305), "built-in light window still logs");
+#if defined(_WIN32)
+	_putenv_s("KYTY_DIAG_RFOP_WINDOW", "");
+#else
+	unsetenv("KYTY_DIAG_RFOP_WINDOW");
+#endif
+}
+
 void TestWriterOps() {
 	WriterOps writers;
 	Check(writers.Find(0x10000, 0x100) == kNoOpcode, "no writer known");
@@ -85,6 +103,10 @@ void TestWriterOps() {
 	writers.Note(0x10000, 0x10, 0x2C);
 	Check(writers.Find(0x10ff0, 4) == 0x2C, "a later write replaces the writer");
 	Check(writers.Find(0x13000, 4) == kNoOpcode, "page nobody wrote");
+	writers.Note(0x20000, 0x1000, 0x15, 0x8b5e4eceull);
+	Check(writers.Find(0x20010, 4) == 0x15, "opcode kept beside the hash");
+	Check(writers.FindHash(0x20010, 4) == 0x8b5e4eceull, "writer hash of the page");
+	Check(writers.FindHash(0x10010, 4) == 0, "a note without a hash stays 0");
 }
 
 void TestResolvePc() {
@@ -173,6 +195,7 @@ int main() {
 	TestShortPacketAndOther();
 	TestPacketIsPerThread();
 	TestLogGate();
+	TestEnvWindow();
 	TestWriterOps();
 	TestResolvePc();
 	TestLineSiteWaitDirtyBt();

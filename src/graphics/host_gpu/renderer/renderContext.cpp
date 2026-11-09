@@ -256,7 +256,8 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 			rf_event.flip      = FrameTiming::GuestFlips();
 			rf_event.packet    = RfOp::CurrentPacket();
 			rf_event.addr      = fault_vaddr;
-			rf_event.writer_op = m_buffer_cache.RfOpWriter(fault_vaddr, fault_size);
+			rf_event.writer_op   = m_buffer_cache.RfOpWriter(fault_vaddr, fault_size);
+			rf_event.writer_hash = m_buffer_cache.RfOpWriterHash(fault_vaddr, fault_size);
 			FrameTiming::Add(static_cast<FrameTiming::Counter>(static_cast<uint32_t>(FrameTiming::Counter::RfOpWaitRegMemN) +
 			                                                   RfOp::SlotOf(rf_event.packet.opcode)));
 			FrameTiming::Add(FrameTiming::Counter::RfOpWaitNs, wait_ns);
@@ -272,7 +273,9 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 				if (RfOp::CurrentStackBounds(&stack_lo, &stack_hi)) {
 					rf_event.bt_text = RfOp::FormatBacktrace(frames, RfOp::WalkFrames(ctx, stack_lo, stack_hi, frames));
 				}
-				LOGF("%s\n", RfOp::FormatLine(rf_event).c_str());
+				const auto line = RfOp::FormatLine(rf_event);
+				LOGF("%s\n", line.c_str());
+				RfOp::WriteStdout(line.c_str());
 			}
 		}
 		if (!downloaded && access != PageFaultAccess::Execute) {

@@ -430,6 +430,10 @@ enum class Counter : uint32_t {
 	// S486 (KYTY_SRT_PROT_AVOID) and S495 (KYTY_LAND_SYNC). The upstream walker has no compiled-load site for the avoid hook; the counters stay so the landing guest path can record.
 	SrtPaWalkN, SrtPaReadN, SrtPaFallbackN, SrtPaShadowNeN, SrtPaFaultNoteN,
 	LandDccGpuN, LandDccGpuMissN, LandGuestEmuN,
+	// S507 DIAG (KYTY_DIAG_CP_PHASES / KYTY_DIAG_RFOP): uploads that closed an open pass and their bytes;
+	// consecutive draws in one command buffer with the same pipeline, images, samplers, buffers and shader_data;
+	// consecutive draws with the same color/depth targets and texture-cache registration generation.
+	UploadPassBreakN, UploadBytes, DrawStateSameN, RtSameN,
 	Count,
 };
 

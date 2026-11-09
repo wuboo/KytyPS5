@@ -365,6 +365,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	}
 
 	const auto& program   = input_info.stage.module->info;
+	RfOp::WriterHashGuard cs_writer_hash(static_cast<uint64_t>(program.shader_hash));
 	const auto& resources = *input_info.stage.resources;
 	if (resources.specialization_reads.empty()) {
 		// The clear must not skip the fill: the fill is what the ledger records (S491).
@@ -546,6 +547,7 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	BackAddressBases(m_context, input_info.stage);
 	FindBuffers(std::span {&descriptor_stage, 1u});
 	const auto& program = input_info.stage.module->info;
+	RfOp::WriterHashGuard cs_writer_hash(static_cast<uint64_t>(program.shader_hash));
 	if (program.info.uses_dma) {
 		m_context.PrepareBda();
 	}

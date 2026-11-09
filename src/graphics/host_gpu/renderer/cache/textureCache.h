@@ -190,6 +190,7 @@ private:
 	[[nodiscard]] static BindingType UploadBinding(const Image& image);
 
 	// Stamps the pages of a registration change; exact lookups there search again.
+	[[nodiscard]] uint64_t RegistrationGeneration() const noexcept { return m_registration_generation; }
 	void               TouchRegistrations(uint64_t address, uint64_t size);
 	[[nodiscard]] bool RegistrationsSince(uint64_t address, uint64_t size,
 	                                      uint64_t generation) const;

@@ -150,6 +150,11 @@ public:
 		m_reopen_state   = before;
 	}
 	void EndRendering() const;
+	[[nodiscard]] bool IsRendering() const noexcept { return m_rendering; }
+	// Identity of the command buffer currently being recorded (0 before the first begin). Diag only.
+	[[nodiscard]] uint64_t RecordingId() const noexcept {
+		return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkCommandBuffer>(m_buffer)));
+	}
 
 	[[nodiscard]] vk::CommandBuffer Handle() const noexcept {
 		m_recorded = true;
