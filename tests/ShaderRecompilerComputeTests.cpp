@@ -20186,9 +20186,14 @@ public:
       mode.polymode_back_ptype = back;
       mode.provoking_vtx_last = provoking_last;
       registers.SetModeControl(mode);
-      DrawRenderState state{.depth_info = depth, .color_info = {color}, .color_count = 1,
-                            .topology = topology, .ps_active = true,
-                            .vertex_info = {vertex}, .ps_input_info = pixel};
+      DrawRenderState state;
+      state.depth_info     = depth;
+      state.color_info[0]  = color;
+      state.color_count    = 1;
+      state.topology       = topology;
+      state.ps_active      = true;
+      state.vertex_info[0] = vertex;
+      state.ps_input_info  = pixel;
       return context.GetPipelineCache().GetGraphicsPipeline(scheduler.Current(), state);
     };
     auto &filled = pipeline(true, 2, 2);
@@ -49131,7 +49136,8 @@ void CheckShaderStore(VulkanHarness &vulkan) {
       context.MapMemory(base, allocation_size);
       processor.DispatchDirect(1, 1, 1, 0x41u);
       auto &scheduler = context.GetCommandScheduler();
-      DrawRenderState state{.topology = vk::PrimitiveTopology::eTriangleList};
+      DrawRenderState state;
+      state.topology = vk::PrimitiveTopology::eTriangleList;
       pipelines.GetGraphicsPrograms(scheduler.Current(), state);
       (void)pipelines.GetGraphicsPipeline(scheduler.Current(), state);
       context.GetBufferCache().ReadMemory(base, sizeof(u32));

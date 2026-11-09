@@ -436,6 +436,9 @@ enum class Counter : uint32_t {
 	UploadPassBreakN, UploadBytes, DrawStateSameN, RtSameN,
 	// S507 (KYTY_RB_CLEAN_WALK): walker loads completed from the backing; shadow compares and mismatches.
 	RbCleanWalkN, RbCleanWalkShadowN, RbCleanWalkShadowNeN,
+	// S511 (KYTY_DEFER_WRITE_BARRIER): draws whose buffer-write barrier was left pending; times that
+	// barrier was recorded; flushes because the next draw may read; write-draws that kept the immediate pair.
+	DeferWriteDrawN, DeferWriteFlushN, DeferWriteReadN, DeferWriteNowN,
 	Count,
 };
 

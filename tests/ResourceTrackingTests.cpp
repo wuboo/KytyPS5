@@ -5417,10 +5417,13 @@ void TestDenseBufferTracking() {
   Check(fixture.program.descriptor_sources.size() == 2,
         "descriptor source table did not match dense topology");
   const auto &resource = fixture.program.info.buffers[0];
-  Check(resource.read && resource.written && resource.atomic &&
+  Check(resource.read && resource.written && resource.atomic && resource.stored && resource.loaded &&
             resource.formatted && resource.max_byte_extent == 16 &&
             resource.first_use_pc == 4,
         "buffer access facts were not merged");
+  Check(fixture.program.info.buffers[1].loaded && !fixture.program.info.buffers[1].stored &&
+            !fixture.program.info.buffers[1].written,
+        "a load-only buffer is not a plain store");
   Check(first.Instruction()->Flags<uint32_t>() == 0 &&
             second.Instruction()->Flags<uint32_t>() == 1,
         "typed handles were not assigned dense indices");

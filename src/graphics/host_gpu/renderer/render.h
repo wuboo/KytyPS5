@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/indirectGpu.h"
 #include "graphics/host_gpu/renderer/meshIndirect.h"
+#include "graphics/host_gpu/renderer/deferWriteBarrier.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -150,6 +151,10 @@ public:
 		m_reopen_state   = before;
 	}
 	void EndRendering() const;
+	// S511: a buffer-writing draw leaves its shader-write barrier pending. EndRendering records it.
+	// Every command other than a draw ends rendering before it records, which records the barrier.
+	void DeferShaderWriteBarrier(vk::PipelineStageFlags source_stages) const { m_pending_shader_writes |= source_stages; }
+	[[nodiscard]] bool HasPendingShaderWrites() const noexcept { return static_cast<bool>(m_pending_shader_writes); }
 	[[nodiscard]] bool IsRendering() const noexcept { return m_rendering; }
 	// Identity of the command buffer currently being recorded (0 before the first begin). Diag only.
 	[[nodiscard]] uint64_t RecordingId() const noexcept {
@@ -182,6 +187,7 @@ private:
 	vk::CommandBuffer   m_buffer = nullptr;
 	mutable RenderState m_render_state;
 	mutable bool        m_rendering   = false;
+	mutable vk::PipelineStageFlags m_pending_shader_writes {};
 	// S327: the scheduler arms this at a drain end; the next real EndRendering stamps the time (seg_first_pass_end_ns).
 	mutable bool        m_strip_clears = false; // S328
 	mutable bool        m_note_pass_end = false;
@@ -250,6 +256,11 @@ private:
 	void ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallInfo& draw,
 	                         DrawRenderState& state, const DrawEmitInfo& emit,
 	                         const DrawIndexBufferSource& index_source, MeshIndirectRequest* mesh_gpu = nullptr);
+	// S511: true when this draw may read bytes a deferred buffer write has not barriered yet.
+	[[nodiscard]] bool DrawReadsPending(std::span<PreparedBindings* const> stages, const ShaderVertexInputInfo& vertex_input,
+	                                    const DrawIndexBufferSource& index_source, const DrawEmitInfo& emit, uint64_t mesh_args_addr) const;
+	// Records the buffer ranges this draw writes. False when the range list is full (caller flushes).
+	bool NotePendingBufferWrites(std::span<PreparedBindings* const> stages);
 	[[nodiscard]] MeshIndirectRuntime& MeshIndirectRt(); // S472
 	[[nodiscard]] RenderState AcquireRenderTargets(CommandBuffer& buffer, RenderColorInfo* colors,
 	                                               uint32_t color_count, RenderDepthInfo& depth,
@@ -275,6 +286,8 @@ private:
 	};
 
 	RenderContext&                        m_context;
+	// S511: guest ranges deferred buffer-writes cover, dropped when the barrier is recorded.
+	std::vector<DeferBarrier::Range>      m_pending_writes;
 	bool                                  m_lod_stats = Config::LodStatsEnabled();
 	GraphicsBindings                     m_graphics_bindings;
 	PreparedBindings                     m_compute_bindings;

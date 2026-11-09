@@ -709,7 +709,7 @@ ShaderParams PrepareProgram(const HW::VertexShaderInfo& regs, const HW::Context&
 
 std::array<ShaderParams, 3>
 PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context& context,
-                            std::array<ShaderVertexInputInfo, 3>& input_info) {
+                            std::span<ShaderVertexInputInfo, 3> input_info) {
 	const auto& sh        = context.GetShaderRegisters();
 	const auto [local, local_hash] = ShaderGetMappedData(regs.ls_regs.data_addr, "ShaderGetInputInfoLS():");
 	const auto [control, control_hash] = ShaderGetMappedData(regs.hs_regs.data_addr, "ShaderGetInputInfoHS():");
@@ -734,7 +734,9 @@ PrepareTessellationPrograms(const HW::VertexShaderInfo& regs, const HW::Context&
 	params[1].user_data[0] = static_cast<uint32_t>(regs.hs_regs.user_data_addr);
 	params[1].user_data[1] = static_cast<uint32_t>(regs.hs_regs.user_data_addr >> 32u);
 
-	input_info = {};
+	for (auto& stage: input_info) {
+		stage = {};
+	}
 	if (!ShaderGetStaticVertexInputInfo(regs.ls_regs.data_addr, regs.hs_user_sgpr,
 	                                    regs.hs_regs.rsrc2.user_sgpr, sh, local, input_info[0])) {
 		EXIT("failed to prepare local shader program\n");

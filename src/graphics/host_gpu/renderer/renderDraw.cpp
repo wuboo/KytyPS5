@@ -16,6 +16,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
+#include "graphics/host_gpu/renderer/drsNoZero.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
@@ -49,6 +50,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <optional>
 #include <span>
 #include <unordered_map>
@@ -873,6 +875,11 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		CpPhases::Scope targets(CpPhases::Phase::DrawTargets);
 		for (uint32_t slot = 0; slot < RENDER_COLOR_ATTACHMENTS_MAX; slot++) {
 			if ((state.mrt_mask & (1u << slot)) != 0) {
+				// S511: a fast state has only slot 0 constructed. Resolve assigns the entry (`r = {}`),
+				// which needs a live object. color_count == color_constructed means the next slot is new.
+				if (state.color_count == state.color_constructed) {
+					std::construct_at(&state.color_info[state.color_constructed++]);
+				}
 				ResolveRenderColorTarget(buffer, state.color_info[state.color_count], slot);
 				if (state.color_info[state.color_count].image_id) {
 					state.color_count++;
@@ -1082,6 +1089,88 @@ struct MeshIndirectRecorder {
 	void BarrierToIndirect() { runtime.BarrierToIndirect(command); }
 };
 } // namespace
+
+bool RenderExecutor::DrawReadsPending(std::span<PreparedBindings* const> stages, const ShaderVertexInputInfo& vertex_input,
+                                    const DrawIndexBufferSource& index_source, const DrawEmitInfo& emit, uint64_t mesh_args_addr) const {
+	std::array<DeferBarrier::Touch, 64>                  touches {};
+	uint32_t                                             touch_n = 0;
+	std::array<std::pair<uint64_t, uint64_t>, 40>        plain {};
+	uint32_t                                             plain_n  = 0;
+	bool                                                 uses_dma = false;
+	bool                                                 overflow = false;
+	const auto add_plain = [&](uint64_t begin, uint64_t size) {
+		if (begin == 0 || size == 0) {
+			return;
+		}
+		if (plain_n >= plain.size()) {
+			overflow = true;
+			return;
+		}
+		plain[plain_n++] = {begin, begin + size};
+	};
+	for (const auto* stage: stages) {
+		const auto& info = stage->runtime->module->info;
+		uses_dma |= info.info.uses_dma;
+		for (uint32_t i = 0; i < info.info.buffers.size(); i++) {
+			const auto& resource = info.info.buffers[i];
+			if (resource.descriptor_index == UINT32_MAX || resource.descriptor_index >= stage->buffer_sources.size()) {
+				continue;
+			}
+			const auto& source = stage->buffer_sources[resource.descriptor_index];
+			if (source.address == 0 || source.size == 0) {
+				continue;
+			}
+			if (touch_n >= touches.size()) {
+				overflow = true;
+				break;
+			}
+			touches[touch_n++] = {source.address, source.address + source.size,
+			                      resource.atomic && !resource.stored && !resource.loaded};
+		}
+	}
+	for (int i = 0; i < vertex_input.buffers_num && i < ShaderVertexInputInfo::RES_MAX; i++) {
+		add_plain(vertex_input.buffers[i].addr, VertexBufferDescriptorSize(i, vertex_input));
+	}
+	add_plain(index_source.address, index_source.size);
+	if (emit.indirect.address != 0 && emit.indirect.count != 0) {
+		const auto size = static_cast<uint64_t>(emit.indirect.count - 1) * emit.indirect.stride +
+		                  (index_source.guest_element_size != 0 ? sizeof(vk::DrawIndexedIndirectCommand) : sizeof(vk::DrawIndirectCommand));
+		add_plain(emit.indirect.address, size);
+	}
+	add_plain(mesh_args_addr, mesh_args_addr != 0 ? sizeof(vk::DrawIndexedIndirectCommand) : 0);
+	if (overflow) {
+		return !m_pending_writes.empty();
+	}
+	return DeferBarrier::ReadsPending(m_pending_writes, std::span {touches.data(), touch_n}, uses_dma, std::span {plain.data(), plain_n});
+}
+
+bool RenderExecutor::NotePendingBufferWrites(std::span<PreparedBindings* const> stages) {
+	std::array<DeferBarrier::Range, 64> slots {};
+	uint32_t                            count = static_cast<uint32_t>(m_pending_writes.size());
+	if (count > slots.size()) {
+		return false;
+	}
+	for (uint32_t i = 0; i < count; i++) {
+		slots[i] = m_pending_writes[i];
+	}
+	for (const auto* stage: stages) {
+		const auto& info = stage->runtime->module->info.info;
+		for (uint32_t i = 0; i < info.buffers.size(); i++) {
+			const auto& resource = info.buffers[i];
+			if (!resource.written || resource.descriptor_index == UINT32_MAX ||
+			    resource.descriptor_index >= stage->buffer_sources.size()) {
+				continue;
+			}
+			const auto& source = stage->buffer_sources[resource.descriptor_index];
+			if (!DeferBarrier::NoteWrite(slots, count, source.address, source.address + source.size,
+			                             resource.atomic && !resource.stored)) {
+				return false;
+			}
+		}
+	}
+	m_pending_writes.assign(slots.begin(), slots.begin() + count);
+	return true;
+}
 
 MeshIndirectRuntime& RenderExecutor::MeshIndirectRt() {
 	if (!m_mesh_ind_rt) m_mesh_ind_rt = std::make_shared<MeshIndirectRuntime>(m_context.GetGraphics(), m_context.GetCommandScheduler());
@@ -1308,18 +1397,41 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	dynamic_state.Commit(m_context.GetGraphics(), vk_buffer);
 
 	vk::PipelineStageFlags shader_write_stages = {};
+	bool                   address_writes      = false;
 	for (const auto& stage: vertex_stages) {
 		if (HasShaderBufferWrites(stage.stage)) {
 			shader_write_stages |= ShaderPipelineStages(NativeShaderStage(stage.logical_stage));
 		}
+		address_writes |= stage.stage.module->info.has_address_writes;
 	}
 	if (state.ps_active && HasShaderBufferWrites(state.ps_input_info.stage)) {
 		shader_write_stages |= vk::PipelineStageFlagBits::eFragmentShader;
 	}
-	if (shader_write_stages) {
+	if (state.ps_active) {
+		address_writes |= state.ps_input_info.stage.module->info.has_address_writes;
+	}
+	// S511: bounded buffer writes (the garden's BUFFER_ATOMIC) leave the barrier pending.
+	// An address write has no range, so it keeps the immediate pair. Env off keeps both barriers.
+	// A draw that does not itself write still flushes when it may read a pending range.
+	const bool defer_on    = DeferBarrier::Enabled();
+	const bool defer_write = defer_on && static_cast<bool>(shader_write_stages) && !address_writes;
+	if (defer_on) {
+		if (!buffer.HasPendingShaderWrites()) {
+			m_pending_writes.clear();
+		} else if (DrawReadsPending(stages, state.vertex_info[0], index_source, emit, mesh_args_addr)) {
+			buffer.EndRendering();
+			m_pending_writes.clear();
+			FrameTiming::Add(FrameTiming::Counter::DeferWriteReadN);
+		}
+	}
+	if (shader_write_stages && !defer_write) {
 		// As for dispatches, buffer writes wait for earlier accesses to the memory.
 		buffer.EndRendering();
+		m_pending_writes.clear();
 		ShaderWriteHazardBarrier(vk_buffer, shader_write_stages);
+		if (defer_on) {
+			FrameTiming::Add(FrameTiming::Counter::DeferWriteNowN);
+		}
 	}
 	buffer.BeginRendering(rendering);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
@@ -1376,9 +1488,16 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);
 
-	if (shader_write_stages) {
+	if (shader_write_stages && !defer_write) {
 		buffer.EndRendering();
 		ShaderWriteBarrier(vk_buffer, shader_write_stages);
+	} else if (defer_write) {
+		buffer.DeferShaderWriteBarrier(shader_write_stages);
+		if (!NotePendingBufferWrites(stages)) {
+			buffer.EndRendering();
+			m_pending_writes.clear();
+		}
+		FrameTiming::Add(FrameTiming::Counter::DeferWriteDrawN);
 	}
 	}
 }
@@ -1590,8 +1709,16 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 
 	hw_check(buffer);
 
-	DrawRenderState state {.indirect_offsets = args.indirect.offsets,
-	                       .indirect_draw    = args.indirect.address != 0};
+	alignas(DrawRenderState) unsigned char state_mem[sizeof(DrawRenderState)];
+	DrawRenderState& state = *[&]() -> DrawRenderState* {
+		if (DrsNoZero()) {
+			return new (state_mem) DrawRenderState(DrawRenderState::Fast {}, args.indirect.offsets, args.indirect.address != 0);
+		}
+		auto* full                = new (state_mem) DrawRenderState();
+		full->indirect_offsets    = args.indirect.offsets;
+		full->indirect_draw       = args.indirect.address != 0;
+		return full;
+	}();
 	if (!GetDrawTopology(ucfg, state.topology)) {
 		return true;
 	}
@@ -1711,8 +1838,16 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 
 	const DrawCallInfo draw {false, args.vertex_count, args.instance_count};
 
-	DrawRenderState state {.indirect_offsets = args.indirect.offsets,
-	                       .indirect_draw    = args.indirect.address != 0};
+	alignas(DrawRenderState) unsigned char state_mem[sizeof(DrawRenderState)];
+	DrawRenderState& state = *[&]() -> DrawRenderState* {
+		if (DrsNoZero()) {
+			return new (state_mem) DrawRenderState(DrawRenderState::Fast {}, args.indirect.offsets, args.indirect.address != 0);
+		}
+		auto* full             = new (state_mem) DrawRenderState();
+		full->indirect_offsets = args.indirect.offsets;
+		full->indirect_draw    = args.indirect.address != 0;
+		return full;
+	}();
 	if (!GetDrawTopology(ucfg, state.topology)) {
 		ResetBindings();
 		return true;

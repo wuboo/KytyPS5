@@ -33,6 +33,7 @@
 #include <cstring>
 #include <fmt/format.h>
 #include <limits>
+#include <new>
 #include <ranges>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
@@ -758,8 +759,9 @@ void PipelineCache::WriteDriverCache() const {
 }
 
 void PipelineCache::GetGraphicsPrograms(const CommandBuffer& command, DrawRenderState& state) {
-	GraphicsProgramsImpl<false>(command.GetRegisters(), command.GetUserConfig(), command.GetShaders(), state.vertex_info, state.ps_input_info,
-	                            state.ps_active, state.mrt_mask, nullptr, &state);
+	GraphicsProgramsImpl<false>(command.GetRegisters(), command.GetUserConfig(), command.GetShaders(),
+	                            std::span<ShaderVertexInputInfo, 3> {state.vertex_info, 3}, state.ps_input_info, state.ps_active,
+	                            state.mrt_mask, nullptr, &state);
 }
 
 bool PipelineCache::GetGraphicsProgramsOffThread(const HW::Context& context, const HW::UserConfig& user_config, const HW::Shader& shaders,
@@ -769,13 +771,13 @@ bool PipelineCache::GetGraphicsProgramsOffThread(const HW::Context& context, con
 	out.pixel_info  = {};
 	out.ps_active   = false;
 	out.mrt_mask    = 0;
-	return GraphicsProgramsImpl<true>(context, user_config, shaders, out.vertex_info, out.pixel_info, out.ps_active, out.mrt_mask, &out,
-	                                  nullptr);
+	return GraphicsProgramsImpl<true>(context, user_config, shaders, std::span<ShaderVertexInputInfo, 3> {out.vertex_info}, out.pixel_info,
+	                                  out.ps_active, out.mrt_mask, &out, nullptr);
 }
 
 template <bool OffThread>
 bool PipelineCache::GraphicsProgramsImpl(const HW::Context& context, const HW::UserConfig& user_config, const HW::Shader& shaders,
-                                         std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info,
+                                         std::span<ShaderVertexInputInfo, 3> vertex_info, ShaderPixelInputInfo& pixel_info,
                                          bool& ps_active_out, uint32_t& mrt_mask, OffThreadPrograms* off_thread,
                                          DrawRenderState* draw_state) {
 	const auto& sh                = context.GetShaderRegisters();
@@ -811,6 +813,13 @@ bool PipelineCache::GraphicsProgramsImpl(const HW::Context& context, const HW::U
 	}
 	std::array<ShaderParams, 3> vertex_params;
 	if (tess_active) {
+		// S511: the fast DrawRenderState constructed only slot 0. Tessellation writes all three.
+		if (draw_state != nullptr && draw_state->vertex_alive < 3) {
+			for (uint32_t i = draw_state->vertex_alive; i < 3; i++) {
+				std::construct_at(&vertex_info[i]);
+			}
+			draw_state->vertex_alive = 3;
+		}
 		vertex_params = PrepareTessellationPrograms(vertex_regs, context, vertex_info);
 		// Reflection decodes both programs; the key also covers the VGT fields in tess.
 		const uint64_t layout_key[] = {vertex_params[0].hash, vertex_params[1].hash,

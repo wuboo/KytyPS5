@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
+#include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/eagerSubmit.h"
 #include "graphics/host_gpu/renderer/gpuDone.h"
 #include "graphics/host_gpu/renderer/gpuTimestamps.h"
@@ -19,13 +20,14 @@
 #include <algorithm>
 #include <bit>
 #include <cstring>
+#include <utility>
 namespace Libs::Graphics {
 
 CommandBuffer::CommandBuffer(CommandScheduler& scheduler)
     : m_context(scheduler.Context()), m_graphics(scheduler.Graphics()) {}
 
 void CommandBuffer::Begin() {
-	EXIT_IF(m_rendering || IsInvalid());
+	EXIT_IF(m_rendering || m_pending_shader_writes || IsInvalid());
 	auto buffer = Handle();
 
 	vk::CommandBufferBeginInfo begin_info {};
@@ -125,17 +127,21 @@ void CommandBuffer::BeginRendering(const RenderState& wanted) const {
 }
 
 void CommandBuffer::EndRendering() const {
-	if (!m_rendering) {
-		return;
+	if (m_rendering) {
+		m_strip_clears = false; // S328: a closed pass ends the reopen
+		Handle().endRendering();
+		if (m_note_pass_end) {
+			m_note_pass_end = false;
+			m_pass_end_ns   = FrameTiming::SteadyNowNs();
+		}
+		m_rendering    = false;
+		m_render_state = {};
 	}
-	m_strip_clears = false; // S328: a closed pass ends the reopen
-	Handle().endRendering();
-	if (m_note_pass_end) {
-		m_note_pass_end = false;
-		m_pass_end_ns   = FrameTiming::SteadyNowNs();
+	// S511: a deferred shader-write barrier is recorded here, including when the pass was already closed.
+	if (m_pending_shader_writes) {
+		ShaderWriteBarrier(Handle(), std::exchange(m_pending_shader_writes, {}));
+		FrameTiming::Add(FrameTiming::Counter::DeferWriteFlushN);
 	}
-	m_rendering    = false;
-	m_render_state = {};
 }
 
 } // namespace Libs::Graphics

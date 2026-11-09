@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <new>
 #include <queue>
 #include <shared_mutex>
 #include <span>
@@ -131,23 +132,68 @@ struct ShaderModule {
 };
 
 // A draw's topology, shader stages (from PipelineCache::GetGraphicsPrograms) and targets.
+// S511 (KYTY_DRS_NO_ZERO): color_info and vertex_info sit in unions so a default-initialized
+// state does not construct the unused slots. Value-init (`DrawRenderState{}` and the designated
+// call sites) still zeroes every slot. color_constructed / vertex_alive say how many are alive
+// (8 and 3 after value-init; the fast path sets 1 and 1).
 struct DrawRenderState {
-	RenderDepthInfo                      depth_info;
-	RenderColorInfo                      color_info[RENDER_COLOR_ATTACHMENTS_MAX] = {};
-	uint32_t                             color_count                              = 0;
+	RenderDepthInfo depth_info;
+	union {
+		RenderColorInfo color_info[RENDER_COLOR_ATTACHMENTS_MAX];
+	};
+	uint32_t color_count = 0;
+	// How many leading color_info entries have been constructed. Resolve constructs the next one
+	// when color_count catches up. Value-init leaves all eight alive.
+	uint32_t color_constructed = RENDER_COLOR_ATTACHMENTS_MAX;
 	// Color targets the pixel program writes.
-	uint32_t                             mrt_mask                                 = 0;
-	vk::PrimitiveTopology                topology = vk::PrimitiveTopology::ePointList;
-	bool                                 primitive_restart_enable                 = false;
-	bool                                 ps_active                                = false;
-	std::array<ShaderVertexInputInfo, 3> vertex_info;
-	ShaderPixelInputInfo                 ps_input_info;
+	uint32_t              mrt_mask = 0;
+	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
+	bool                  primitive_restart_enable = false;
+	bool                  ps_active                = false;
+	union {
+		ShaderVertexInputInfo vertex_info[3];
+	};
+	// 1: only slot 0 is constructed (VertexStages must not read slot 1). 3: all three are alive.
+	uint32_t             vertex_alive = 3;
+	ShaderPixelInputInfo ps_input_info;
 	// Input: the user-data slots a GPU-read indirect draw patches.
-	ShaderIndirectOffsets                indirect_offsets;
-	bool                                 indirect_draw = false;
+	ShaderIndirectOffsets indirect_offsets;
+	bool                  indirect_draw = false;
+
+	// Constructs every color and vertex slot. Tests and KYTY_DRS_NO_ZERO=0 use this.
+	DrawRenderState() {
+		for (uint32_t i = 0; i < RENDER_COLOR_ATTACHMENTS_MAX; i++) {
+			std::construct_at(&color_info[i]);
+		}
+		for (uint32_t i = 0; i < 3; i++) {
+			std::construct_at(&vertex_info[i]);
+		}
+	}
+	// S511: constructs color slot 0 and vertex slot 0 only. The unused slots stay unconstructed.
+	struct Fast {};
+	DrawRenderState(Fast, ShaderIndirectOffsets offsets, bool indirect) {
+#if defined(KYTY_DRS_MUTANT_ZERO_ALL)
+		for (uint32_t i = 0; i < RENDER_COLOR_ATTACHMENTS_MAX; i++) {
+			std::construct_at(&color_info[i]);
+		}
+		for (uint32_t i = 0; i < 3; i++) {
+			std::construct_at(&vertex_info[i]);
+		}
+		color_constructed = RENDER_COLOR_ATTACHMENTS_MAX;
+		vertex_alive      = 3;
+#else
+		std::construct_at(&color_info[0]);
+		std::construct_at(&vertex_info[0]);
+		color_constructed = 1;
+		vertex_alive      = 1;
+#endif
+		indirect_offsets = offsets;
+		indirect_draw    = indirect;
+	}
 
 	[[nodiscard]] std::span<const ShaderVertexInputInfo> VertexStages() const {
-		return {vertex_info.data(), vertex_info[1].stage ? 3u : 1u};
+		const uint32_t n = vertex_alive == 1 ? 1u : (vertex_info[1].stage ? 3u : 1u);
+		return {vertex_info, n};
 	}
 };
 
@@ -286,7 +332,7 @@ private:
 	                                        ShaderRecompiler::IR::ResourceSnapshot& resources, uint32_t& fail);
 	template <bool OffThread>
 	bool GraphicsProgramsImpl(const HW::Context& context, const HW::UserConfig& user_config, const HW::Shader& shaders,
-	                          std::array<ShaderVertexInputInfo, 3>& vertex_info, ShaderPixelInputInfo& pixel_info, bool& ps_active_out,
+	                          std::span<ShaderVertexInputInfo, 3> vertex_info, ShaderPixelInputInfo& pixel_info, bool& ps_active_out,
 	                          uint32_t& mrt_mask, OffThreadPrograms* off_thread, DrawRenderState* draw_state);
 	ShaderModule& CompileModule(Program& program, const ProgramKey& key,
 	                            ShaderRecompiler::CompileOptions  options,
