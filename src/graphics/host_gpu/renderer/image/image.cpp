@@ -19,6 +19,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <xxhash.h>
 
@@ -57,6 +58,14 @@ ImageCreateFlags(const GraphicContext& graphics, const ImageInfo& info, vk::Imag
 	return static_cast<bool>(properties.optimalTilingFeatures & feature);
 }
 
+[[nodiscard]] bool BlockStorageForced() {
+	static const bool forced = [] {
+		const char* value = std::getenv("KYTY_BC_STORAGE_FORCE");
+		return value != nullptr && value[0] == '1';
+	}();
+	return forced;
+}
+
 [[nodiscard]] vk::ImageUsageFlags ImageUsageFlags(GraphicContext& graphics, const ImageInfo& info) {
 	auto usage = vk::ImageUsageFlagBits::eTransferSrc | vk::ImageUsageFlagBits::eTransferDst;
 	if (info.IsBlock()) {
@@ -68,6 +77,16 @@ ImageCreateFlags(const GraphicContext& graphics, const ImageInfo& info, vk::Imag
 			                                      ImageCreateFlags(graphics, info, storage),
 			                                      nullptr) == vk::Result::eSuccess) {
 				usage = storage;
+			} else if (BlockStorageForced()) {
+				// The driver refuses the query, but block-texel views with extended usage may still
+				// accept storage writes; without it the guest's compute-encoded blocks never land.
+				usage = storage;
+				static std::atomic_flag forced = ATOMIC_FLAG_INIT;
+				if (!forced.test_and_set(std::memory_order_relaxed)) {
+					Log::WriteToConsoleAndLog(fmt::format(
+					    "KYTY_BC_STORAGE_FORCE: storage usage forced on {} block images\n",
+					    vk::to_string(info.pixel_format)));
+				}
 			} else {
 				static std::atomic_flag warned = ATOMIC_FLAG_INIT;
 				if (!warned.test_and_set(std::memory_order_relaxed)) {

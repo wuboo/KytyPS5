@@ -3,6 +3,11 @@
 #include "common/assert.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "common/logging/log.h"
+
+#include <atomic>
+#include <cstdint>
+#include <fmt/format.h>
 
 namespace Libs::Graphics {
 
@@ -293,6 +298,21 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 	for (const auto& cached: views) {
 		if (cached.info == normalized) {
 			return cached.view;
+		}
+	}
+
+	if (is_storage && !(image.usage & vk::ImageUsageFlagBits::eStorage)) {
+		// A storage view of an image created without storage usage is invalid; on drivers that
+		// still create it the guest's writes are lost. Report the first cases and a running count.
+		static std::atomic<uint32_t> missing {0};
+		const uint32_t n = ++missing;
+		if (n <= 16 || (n & (n - 1)) == 0) {
+			Log::WriteToConsoleAndLog(fmt::format(
+			    "Warning: storage view #{} on an image without storage usage: address 0x{:x} image {} "
+			    "view {} {}x{}x{} levels {}+{}\n",
+			    n, info.data.address, vk::to_string(image.format), vk::to_string(normalized.format),
+			    image.extent.width, image.extent.height, image.extent.depth, normalized.base_level,
+			    normalized.level_count));
 		}
 	}
 
