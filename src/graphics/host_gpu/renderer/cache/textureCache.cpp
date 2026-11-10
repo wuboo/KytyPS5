@@ -1137,7 +1137,8 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 	const auto  range = desc.info.metadata.range;
 	const auto& view  = desc.view_info;
 	const auto note   = [&](const char* why, uint32_t slice = 0, uint32_t code = 0, uint64_t ssize = 0) {
-		if (!S459Log::Hit()) return;
+		const bool card_clear = S459Log::Card() && (desc.info.data.address == 0x514080000ull || desc.info.data.address == 0x53aa00000ull);
+		if (!S459Log::Hit() && !card_clear) return;
 		// skip-checked fires on every later bind of a DCC image. One line per image per present frame.
 		if (why[0] == 's' && why[5] == 'c') {
 			static long     seen_present = -1;
@@ -1155,7 +1156,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 			if (seen_n >= 2048) return;
 			seen_addr[seen_n++] = addr;
 		}
-		S459Log::Linef("[s459-clear] present=%ld guest=%ld kind=fast why=%s addr=0x%016" PRIx64 " meta=0x%016" PRIx64
+		S459Log::LineWatch("[s459-clear] present=%ld guest=%ld kind=fast why=%s addr=0x%016" PRIx64 " meta=0x%016" PRIx64
 		               " msize=0x%" PRIx64 " ssize=0x%" PRIx64 " slice=%u code=%u %ux%u fmt=%d\n",
 		               S459Log::Present(), S459Log::Guest(), why, desc.info.data.address, range.address, range.size, ssize,
 		               slice, code, desc.info.extent.width, desc.info.extent.height, static_cast<int>(desc.info.pixel_format));

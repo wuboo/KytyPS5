@@ -8,6 +8,7 @@
 
 #include "graphics/presentation/frameTiming.h"
 
+#include <atomic>
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
@@ -17,9 +18,12 @@
 namespace Libs::Graphics::S459Log {
 
 struct Gate {
-	bool on   = false;
-	bool list = false;
-	long base = -1;
+	bool on    = false;
+	bool list  = false;
+	bool guest = false;
+	long base  = -1;
+	long glo   = 0;
+	long ghi   = -1;
 	long frames[8] {};
 	int  n = 0;
 
@@ -36,6 +40,19 @@ struct Gate {
 inline Gate Parse(const char* value) {
 	Gate g;
 	if (value == nullptr || value[0] == '\0') return g;
+	// g4240-4400: the card moves in present flips. Watch that guest span without logging every draw.
+	if (value[0] == 'g') {
+		char* end = nullptr;
+		const long lo = std::strtol(value + 1, &end, 10);
+		if (end == value + 1 || *end != '-') return g;
+		char* end2 = nullptr;
+		const long hi = std::strtol(end + 1, &end2, 10);
+		if (end2 == end + 1 || hi < lo || hi - lo > 400) return g;
+		g.guest = true;
+		g.glo   = lo;
+		g.ghi   = hi;
+		return g;
+	}
 	if (std::strchr(value, ',') == nullptr) {
 		g.base = std::atol(value);
 		g.on   = g.base >= 0;
@@ -66,6 +83,43 @@ inline bool Hit() {
 	return gate.Hit(static_cast<long>(FrameTiming::PresentedFrames() + 1));
 }
 
+// Guest span from KYTY_DIAG_S459_FLIP=g<lo>-<hi>. Present lists stay on Hit().
+inline bool Card() {
+	const Gate& gate = Get();
+	if (!gate.guest) return false;
+	const long guest = static_cast<long>(FrameTiming::GuestFlips() + 1);
+	return guest >= gate.glo && guest <= gate.ghi;
+}
+
+inline bool Watch() { return Hit() || Card(); }
+
+// Up to four present flips asked for while a card frame is still being drawn.
+inline std::atomic<long>* DumpSlots() {
+	static std::atomic<long> slots[4] {};
+	return slots;
+}
+
+inline void RequestDump(long present) {
+	if (present <= 0) return;
+	auto* slots = DumpSlots();
+	for (int i = 0; i < 4; i++) {
+		if (slots[i].load(std::memory_order_acquire) == present) return;
+	}
+	for (int i = 0; i < 4; i++) {
+		long expected = 0;
+		if (slots[i].compare_exchange_strong(expected, present, std::memory_order_release, std::memory_order_relaxed)) return;
+		if (expected == present) return;
+	}
+}
+
+inline bool DumpRequested(long present) {
+	auto* slots = DumpSlots();
+	for (int i = 0; i < 4; i++) {
+		if (slots[i].load(std::memory_order_acquire) == present) return true;
+	}
+	return false;
+}
+
 inline long Present() { return static_cast<long>(FrameTiming::PresentedFrames() + 1); }
 inline long Guest() { return static_cast<long>(FrameTiming::GuestFlips() + 1); }
 
@@ -83,20 +137,25 @@ inline LogState& State() {
 inline constexpr size_t kCap = 40u * 1024u * 1024u;
 
 // One fwrite of an already formatted line. Shared by every TU (function-local static).
-inline void Write(const char* text, size_t n) {
-	if (!Hit() || text == nullptr || n == 0) return;
+inline void Emit(const char* text, size_t n) {
+	if (text == nullptr || n == 0) return;
 	LogState& state = State();
 	if (!state.opened) {
-		state.opened        = true;
-		const char* path    = std::getenv("KYTY_DIAG_S459_FILE");
-		const char* use     = (path != nullptr && path[0] != '\0') ? path : "s459-draws.txt";
-		state.file          = std::fopen(use, "a");
+		state.opened     = true;
+		const char* path = std::getenv("KYTY_DIAG_S459_FILE");
+		const char* use  = (path != nullptr && path[0] != '\0') ? path : "s459-draws.txt";
+		state.file       = std::fopen(use, "a");
 	}
 	if (state.file == nullptr || state.bytes >= kCap) return;
 	if (n > kCap - state.bytes) n = kCap - state.bytes;
 	std::fwrite(text, 1, n, state.file);
 	std::fflush(state.file);
 	state.bytes += n;
+}
+
+inline void Write(const char* text, size_t n) {
+	if (!Hit()) return;
+	Emit(text, n);
 }
 
 inline void Linef(const char* fmt, ...) {
@@ -108,7 +167,20 @@ inline void Linef(const char* fmt, ...) {
 	va_end(ap);
 	if (n <= 0) return;
 	const size_t take = static_cast<size_t>(n) < sizeof(buf) ? static_cast<size_t>(n) : sizeof(buf) - 1;
-	Write(buf, take);
+	Emit(buf, take);
+}
+
+// Present list or the card's guest span. The guest span does not turn Hit() on.
+inline void LineWatch(const char* fmt, ...) {
+	if (!Watch()) return;
+	char    buf[2048];
+	va_list ap;
+	va_start(ap, fmt);
+	const int n = std::vsnprintf(buf, sizeof(buf), fmt, ap);
+	va_end(ap);
+	if (n <= 0) return;
+	const size_t take = static_cast<size_t>(n) < sizeof(buf) ? static_cast<size_t>(n) : sizeof(buf) - 1;
+	Emit(buf, take);
 }
 
 // S522. The file must be set. Not gated on the present list: a handful of metadata

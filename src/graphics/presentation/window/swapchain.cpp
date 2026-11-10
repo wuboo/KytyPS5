@@ -18,6 +18,7 @@
 #include "graphics/presentation/presenter.h"
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
+#include "graphics/host_gpu/renderer/s459log.h"
 #include "graphics/presentation/window/frameDumpFlips.h"
 #include "graphics/presentation/window/presentRect.h"
 #include "graphics/presentation/window/windowInternal.h"
@@ -1131,7 +1132,8 @@ bool FrameDumpDue(uint64_t* stamp_s) {
 
 bool FrameDumpFlip(uint64_t flip, uint64_t* stamp) {
 	const auto& config = GetFrameDumpConfig();
-	if (config.dir.empty() || !FrameDumpFlipWanted(config.flips, flip)) {
+	if (config.dir.empty() ||
+	    !(FrameDumpFlipWanted(config.flips, flip) || S459Log::DumpRequested(static_cast<long>(flip)))) {
 		return false;
 	}
 	*stamp = flip;

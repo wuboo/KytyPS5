@@ -1284,7 +1284,7 @@ static void S522LogImage(const char* when, const char* role, uint32_t slot, uint
 	const size_t count = static_cast<size_t>(width) * height;
 	if (layout.channels == 0 || layout.bytes == 0 || width == 0 || height == 0 || count > 8u * 1024u * 1024u ||
 	    data == nullptr || nbytes < count * layout.bytes) {
-		S459Log::Linef("[s522-img] when=%s present=%ld guest=%ld role=%s slot=%u addr=0x%016" PRIx64
+		S459Log::LineWatch("[s522-img] when=%s present=%ld guest=%ld role=%s slot=%u addr=0x%016" PRIx64
 		               " fail fmt=%d %ux%u bytes=%zu\n",
 		               when, S459Log::Present(), S459Log::Guest(), role, slot, addr, vk_format, width, height, nbytes);
 		return;
@@ -1314,7 +1314,7 @@ static void S522LogImage(const char* when, const char* role, uint32_t slot, uint
 		}
 	}
 	const double n = static_cast<double>(count);
-	S459Log::Linef("[s522-img] when=%s present=%ld guest=%ld role=%s slot=%u addr=0x%016" PRIx64
+	S459Log::LineWatch("[s522-img] when=%s present=%ld guest=%ld role=%s slot=%u addr=0x%016" PRIx64
 	               " fmt=%d %ux%u r=%.6g/%.6g/%.6g hot1=%.4f hot16=%.4f zero=%.4f in_n=%" PRIu64 " in_mean=%.6g out_n=%" PRIu64
 	               " out_mean=%.6g\n",
 	               when, S459Log::Present(), S459Log::Guest(), role, slot, addr, vk_format, width, height,
@@ -1326,7 +1326,7 @@ static void S522LogImage(const char* when, const char* role, uint32_t slot, uint
 // First graphics draw of the hot input 0x514080000 in a listed present frame. The copy is the
 // image after that frame's clears and compute, before this draw. Once per present, eight times.
 static void S522ProbeHot(RenderContext& context, const DrawRenderState& state) {
-	if (!S459Log::Hit()) return;
+	if (!S459Log::Watch()) return;
 	const RenderColorInfo* color = nullptr;
 	for (uint32_t i = 0; i < state.color_count; i++) {
 		if (state.color_info[i].desc.info.data.address == 0x514080000ull) color = &state.color_info[i];
@@ -1337,8 +1337,14 @@ static void S522ProbeHot(RenderContext& context, const DrawRenderState& state) {
 	if (present == seen) return;
 	seen = present;
 	static int n = 0;
-	if (n >= 8) return;
+	if (n >= 16) return;
 	n++;
+	uint64_t before_ps = 0;
+	if (state.ps_active && state.ps_input_info.stage.module != nullptr) {
+		before_ps = state.ps_input_info.stage.module->info.shader_hash;
+	}
+	S459Log::LineWatch("[s525-hot] present=%ld guest=%ld before_ps=0x%016" PRIx64 "\n", S459Log::Present(), S459Log::Guest(),
+	                   before_ps);
 	const auto extent = color->Extent();
 	context.GetCommandScheduler().EndRendering();
 	std::vector<std::unique_ptr<Buffer>> buffers;
@@ -1360,13 +1366,22 @@ static void S522ProbeHot(RenderContext& context, const DrawRenderState& state) {
 
 static void S522Probe(RenderContext& context, CommandBuffer& buffer, const DrawRenderState& state, const PreparedBindings* inputs,
                       uint32_t index_count, const char* when) {
-	if (!S459Log::Hit() || !state.ps_active || state.ps_input_info.stage.module == nullptr) return;
+	if (!S459Log::Watch() || !state.ps_active || state.ps_input_info.stage.module == nullptr) return;
 	if (state.ps_input_info.stage.module->info.shader_hash != 0x3bf81ef1b8147b45ull) return;
 	const RenderColorInfo* color = nullptr;
 	for (uint32_t i = 0; i < state.color_count; i++) {
 		if (state.color_info[i].desc.info.data.address == 0x53aa00000ull) color = &state.color_info[i];
 	}
 	if (color == nullptr) return;
+	static int asked = 0;
+	if (asked == 0) {
+		asked = 1;
+		const long p = S459Log::Present();
+		S459Log::RequestDump(p);
+		S459Log::RequestDump(p + 16);
+		S459Log::RequestDump(p + 32);
+		S459Log::LineWatch("[s525-card] present=%ld guest=%ld dump=%ld,%ld,%ld\n", p, S459Log::Guest(), p, p + 16, p + 32);
+	}
 	static int probes = 0;
 	if (probes >= 32) return;
 	probes++;
@@ -1375,7 +1390,7 @@ static void S522Probe(RenderContext& context, CommandBuffer& buffer, const DrawR
 	const auto& vp0    = hw.GetScreenViewport().viewports[0];
 	const auto  extent = color->Extent();
 	const auto  sc     = calc_final_scissor(hw.GetScreenViewport(), hw.GetScanModeControl(), extent, 0);
-	S459Log::Linef("[s522-draw] when=%s present=%ld guest=%ld idx=%u %ux%u vp=(%.1f,%.1f %.1fx%.1f) scissor=(%d,%d)-(%d,%d)\n",
+	S459Log::LineWatch("[s522-draw] when=%s present=%ld guest=%ld idx=%u %ux%u vp=(%.1f,%.1f %.1fx%.1f) scissor=(%d,%d)-(%d,%d)\n",
 	               when, S459Log::Present(), S459Log::Guest(), index_count, extent.width, extent.height, vp0.xoffset - vp0.xscale,
 	               vp0.yoffset - vp0.yscale, vp0.xscale * 2.0f, vp0.yscale * 2.0f, sc.left, sc.top, sc.right, sc.bottom);
 
@@ -1751,10 +1766,19 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	// S459 DIAG, extended in S521. KYTY_DIAG_S459_FLIP=<n> lists draws on presented frames n..n+2.
 	// KYTY_DIAG_S459_FLIP=a,b,c lists those frames. addr= is the guest base of each color target.
 	// Unset: one getenv at the first completed draw, then one compare, no file.
-	if (S459Log::Hit()) {
+	const uint64_t s459_ps =
+	    state.ps_active && state.ps_input_info.stage.module != nullptr ? state.ps_input_info.stage.module->info.shader_hash : 0;
+	bool s459_log = S459Log::Hit();
+	if (!s459_log && S459Log::Card()) {
+		if (s459_ps == 0x3bf81ef1b8147b45ull) s459_log = true;
+		for (uint32_t i = 0; i < state.color_count && !s459_log; i++) {
+			const auto addr = state.color_info[i].desc.info.data.address;
+			if (addr == 0x514080000ull || addr == 0x53aa00000ull) s459_log = true;
+		}
+	}
+	if (s459_log) {
 		const auto& s459_hw = buffer.GetRegisters();
-		const uint64_t ps_hash =
-		    state.ps_active && state.ps_input_info.stage.module != nullptr ? state.ps_input_info.stage.module->info.shader_hash : 0;
+		const uint64_t ps_hash = s459_ps;
 		char buf[4096];
 		int  n = std::snprintf(buf, sizeof(buf), "[s459-draw] present=%ld guest=%ld ps=0x%016" PRIx64 " idx=%u colors=%u",
 		                       S459Log::Present(), S459Log::Guest(), ps_hash, static_cast<unsigned>(draw.index_count),
@@ -1774,7 +1798,8 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		}
 		if (n > 0) {
 			const size_t take = static_cast<size_t>(n) < sizeof(buf) ? static_cast<size_t>(n) : sizeof(buf) - 1;
-			S459Log::Write(buf, take);
+			if (S459Log::Hit()) S459Log::Write(buf, take);
+			else S459Log::Emit(buf, take);
 		}
 	}
 	S522Probe(m_context, buffer, state, nullptr, draw.index_count, "after");

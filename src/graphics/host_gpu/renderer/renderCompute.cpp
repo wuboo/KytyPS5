@@ -307,9 +307,20 @@ static bool HasStorageWrites(const ShaderComputeInputInfo& input_info,
 // S521 DIAG. Written buffer and image guest addresses of one dispatch. Off: Hit() is one bool.
 static void LogCsWrites(const ShaderComputeInputInfo& input, const char* kind, uint32_t group_x,
                         uint32_t group_y, uint32_t group_z) {
-	if (!S459Log::Hit() || input.stage.module == nullptr || input.stage.resources == nullptr) return;
+	if (input.stage.module == nullptr || input.stage.resources == nullptr) return;
+	const bool hit = S459Log::Hit();
+	if (!hit && !S459Log::Card()) return;
 	const auto& program   = input.stage.module->info;
 	const auto& resources = *input.stage.resources;
+	if (!hit) {
+		bool touch = false;
+		for (uint32_t i = 0; i < program.info.images.size() && !touch; i++) {
+			if (i >= resources.images.size() || program.info.images[i].heap) continue;
+			const auto r = DecodeNativeDescriptor<ShaderTextureResource>(resources.images[i]);
+			if (r.Base40() == 0x514080000ull) touch = true;
+		}
+		if (!touch) return;
+	}
 	char        buf[4096];
 	int         n = std::snprintf(buf, sizeof(buf),
 	                              "[s459-cs] present=%ld guest=%ld cs=0x%016" PRIx64 " kind=%s groups=%u,%u,%u dma=%d",
@@ -335,7 +346,8 @@ static void LogCsWrites(const ShaderComputeInputInfo& input, const char* kind, u
 	}
 	if (n > 0) {
 		const size_t take = static_cast<size_t>(n) < sizeof(buf) ? static_cast<size_t>(n) : sizeof(buf) - 1;
-		S459Log::Write(buf, take);
+		if (hit) S459Log::Write(buf, take);
+		else S459Log::Emit(buf, take);
 	}
 }
 
