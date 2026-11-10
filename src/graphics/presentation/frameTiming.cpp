@@ -1,4 +1,5 @@
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/presentation/window.h"
 #include "kernel/eventQueue.h"
 #include "graphics/presentation/cpPhases.h"
 #include "graphics/presentation/cpSampler.h"
@@ -12,6 +13,7 @@
 #include "common/memEvents.h"
 #include "common/controlFile.h"
 #include "common/logging/log.h"
+#include "libs/exitAfter.h"
 #include "common/profiler.h"
 #include "common/signalCensus.h"
 #include "graphics/presentation/cpFrameStats.h"
@@ -792,6 +794,7 @@ void OnFramePresented() {
 		// The emulator usually exits through a hard stop, so keep the file current.
 		std::fflush(log);
 	}
+	PollBenchExit();
 	NullDesc::OnPresented(static_cast<uint32_t>(frame),
 	                      static_cast<uint32_t>(g_guest_flips.load(std::memory_order_relaxed)),
 	                      Get(Counter::MinLodRemapped), Get(Counter::MinLodDropped));
@@ -1101,6 +1104,56 @@ uint64_t PresentedFrames() {
 
 uint64_t GuestFlips() {
 	return g_guest_flips.load(std::memory_order_relaxed);
+}
+
+namespace {
+
+std::atomic<bool>     g_exit_after_armed{false};
+std::atomic<uint64_t> g_exit_after_target{0};
+std::atomic<bool>     g_exit_sent{false};
+
+} // namespace
+
+void NoteLevelForExit(std::string_view name) {
+	static const BenchExit::ParsedExitAfter spec = [] {
+		const char* env = std::getenv("KYTY_EXIT_AFTER");
+		if (env == nullptr || env[0] == '\0') {
+			return BenchExit::ParsedExitAfter{};
+		}
+		return BenchExit::ParseExitAfter(env);
+	}();
+	if (!spec.ok || name != spec.name || g_exit_after_armed.load(std::memory_order_acquire)) {
+		return;
+	}
+	const uint64_t target = GuestFlips() + spec.plus;
+	g_exit_after_target.store(target, std::memory_order_relaxed);
+	g_exit_after_armed.store(true, std::memory_order_release);
+	std::fprintf(stderr, "[bench-exit] armed '%.*s'+%llu at guest flip %llu\n", static_cast<int>(name.size()), name.data(),
+	             static_cast<unsigned long long>(spec.plus), static_cast<unsigned long long>(target));
+	std::fflush(stderr);
+}
+
+void PollBenchExit() {
+	static const uint64_t at_flip = [] {
+		const char* env = std::getenv("KYTY_EXIT_AT_FLIP");
+		uint64_t    n   = 0;
+		if (env == nullptr || env[0] == '\0' || !BenchExit::ParseUint(env, n)) {
+			return UINT64_MAX;
+		}
+		return n;
+	}();
+	const uint64_t flips = GuestFlips();
+	bool           due   = at_flip != UINT64_MAX && BenchExit::GuestFlipReached(flips, at_flip);
+	if (g_exit_after_armed.load(std::memory_order_acquire) &&
+	    BenchExit::GuestFlipReached(flips, g_exit_after_target.load(std::memory_order_acquire))) {
+		due = true;
+	}
+	if (!due || g_exit_sent.exchange(true, std::memory_order_acq_rel)) {
+		return;
+	}
+	std::fprintf(stderr, "[bench-exit] quit at guest flips %llu\n", static_cast<unsigned long long>(flips));
+	std::fflush(stderr);
+	WindowRequestQuit();
 }
 
 } // namespace Libs::Graphics::FrameTiming

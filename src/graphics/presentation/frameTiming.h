@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <string_view>
 
 namespace Libs::Graphics::FrameTiming {
 
@@ -495,6 +496,11 @@ uint64_t PresentedFrames();
 
 // Guest flips so far: the `flips` column of KYTY_FRAME_LOG.
 uint64_t GuestFlips();
+
+// KYTY_EXIT_AFTER=<level>+<N>, armed on "Level has started: <level>". Compared with GuestFlips(), not the present frame.
+void NoteLevelForExit(std::string_view name);
+// After the frame-log flush: SDL_EVENT_QUIT when KYTY_EXIT_AT_FLIP or an armed EXIT_AFTER is due. Does not write need_exit.
+void PollBenchExit();
 
 } // namespace Libs::Graphics::FrameTiming
 

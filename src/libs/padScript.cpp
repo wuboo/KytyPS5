@@ -4,6 +4,7 @@
 #include "common/logging/log.h"
 #include "graphics/presentation/frameTiming.h"
 #include "libs/controller.h"
+#include "libs/exitAfter.h"
 #include "libs/padData.h"
 #include "libs/padScriptParser.h"
 
@@ -387,12 +388,14 @@ void OnGuestText(const void* text, size_t size) {
 	if (at == std::string_view::npos) {
 		return;
 	}
+	auto name = view.substr(at + MARK.size());
+	name      = name.substr(0, name.find_first_of("\r\n"));
+	// Arm KYTY_EXIT_AFTER even when this process is not recording or replaying.
+	Graphics::FrameTiming::NoteLevelForExit(name);
 	std::call_once(g_record_once, OpenRecordReplay);
 	if (!g_replay_on && g_record_file == nullptr) {
 		return;
 	}
-	auto name = view.substr(at + MARK.size());
-	name      = name.substr(0, name.find_first_of("\r\n"));
 	const uint64_t              flip = Graphics::FrameTiming::GuestFlips();
 	std::lock_guard<std::mutex> lock(g_record_mutex);
 	if (g_record_file != nullptr) {

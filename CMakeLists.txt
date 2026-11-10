@@ -881,6 +881,14 @@ add_executable(pad_script_parser_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/PadScriptParserTests.cpp"
 )
 target_include_directories(pad_script_parser_tests PRIVATE ${inc_headers})
+add_executable(exit_after_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ExitAfterTests.cpp")
+target_include_directories(exit_after_tests PRIVATE ${inc_headers})
+add_executable(exit_after_mutant_ignore_n_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ExitAfterTests.cpp")
+target_include_directories(exit_after_mutant_ignore_n_tests PRIVATE ${inc_headers})
+target_compile_definitions(exit_after_mutant_ignore_n_tests PRIVATE KYTY_EXIT_MUTANT_IGNORE_N=1)
+add_executable(replay_mark_mutant_always_consume_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/ExitAfterTests.cpp")
+target_include_directories(replay_mark_mutant_always_consume_tests PRIVATE ${inc_headers})
+target_compile_definitions(replay_mark_mutant_always_consume_tests PRIVATE KYTY_REPLAY_MUTANT_ALWAYS_CONSUME=1)
 
 add_executable(slot_vector_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/SlotVectorTests.cpp"
@@ -2012,6 +2020,11 @@ if(BUILD_TESTING)
 	add_test(NAME gpu_gap_mutant_clock_max COMMAND $<TARGET_FILE:gpu_gap_mutant_clock_max_tests>)
 	set_tests_properties(eager_submit_mutant_pass_open eager_submit_mutant_busy eager_submit_mutant_no_age eager_submit_mutant_no_closing gpu_gap_mutant_arm_first eager_submit_mutant_mid_any_cb eager_submit_mutant_mid_no_limit eager_submit_mutant_clear_reopen gpu_gap_mutant_clock_max PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME pad_script_parser COMMAND $<TARGET_FILE:pad_script_parser_tests>)
+	add_test(NAME exit_after COMMAND $<TARGET_FILE:exit_after_tests>)
+	add_test(NAME exit_after_mutant_ignore_n COMMAND $<TARGET_FILE:exit_after_mutant_ignore_n_tests>)
+	set_tests_properties(exit_after_mutant_ignore_n PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME replay_mark_mutant_always_consume COMMAND $<TARGET_FILE:replay_mark_mutant_always_consume_tests>)
+	set_tests_properties(replay_mark_mutant_always_consume PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME shader_vertex_metadata COMMAND $<TARGET_FILE:shader_vertex_metadata_tests>)
 	add_test(NAME resource_materialization COMMAND $<TARGET_FILE:resource_materialization_tests>)
 	foreach(mutant IN ITEMS scratch_shared worker_fault_ignored)

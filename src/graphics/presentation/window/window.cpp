@@ -197,6 +197,14 @@ static void GameEventQuit(WindowLoopState& game) {
 	game.need_exit = true;
 }
 
+void WindowRequestQuit() {
+	SDL_Event event{};
+	event.type = SDL_EVENT_QUIT;
+	if (!SDL_PushEvent(&event)) {
+		LOGF("WindowRequestQuit failed: %s\n", SDL_GetError());
+	}
+}
+
 static void GameEventTerminate(WindowLoopState& game) {
 	LOGF("Event: terminate\n");
 

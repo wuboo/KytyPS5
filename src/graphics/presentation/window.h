@@ -12,6 +12,9 @@ class Presenter;
 void                     WindowRun();
 void                     WindowShutdown();
 
+// Thread-safe. The present thread asks the window loop to take the normal quit path (Save included). It does not store need_exit.
+void WindowRequestQuit();
+
 // Nits of the display showing the game window; the defaults apply when the host reports none.
 struct DisplayLuminance {
 	float max_full_frame = 80.0f;
