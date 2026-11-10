@@ -2144,6 +2144,12 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		buffer.EndRendering();
 		GalaxyBarrier::Record(vk_buffer, false);
 	}
+	// S527 DIAG. kind=drain is the S526 between-draw wait without a texture read.
+	if (GalaxyBarrier::WantDrainDraw()) {
+		buffer.EndRendering();
+		m_context.GetCommandScheduler().FlushAndWait();
+		GalaxyBarrier::Note("drain");
+	}
 	}
 	// S459 DIAG, extended in S521. KYTY_DIAG_S459_FLIP=<n> lists draws on presented frames n..n+2.
 	// KYTY_DIAG_S459_FLIP=a,b,c lists those frames. addr= is the guest base of each color target.

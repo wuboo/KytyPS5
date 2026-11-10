@@ -11,6 +11,7 @@
 //   ssbo      do not defer the existing buffer-write barrier (L1 off inside the window)
 //   5e        the full barrier only before pixel shader 5e7524f281e7d196
 //   submit    wait for the GPU after every submit inside the window
+//   drain     end the pass and wait for the GPU after every draw inside the window, no texture read
 // Not a fix. The recorded draws stay the same; only the dependency changes, and only while the
 // variable is 1. Not codegen.
 
@@ -27,7 +28,7 @@ namespace Libs::Graphics::GalaxyBarrier {
 
 inline constexpr uint64_t kShader5e = 0x5e7524f281e7d196ull;
 
-enum class Kind { Off, Full, Draw, Dispatch, Xfer, Ssbo, Shader5e, Submit };
+enum class Kind { Off, Full, Draw, Dispatch, Xfer, Ssbo, Shader5e, Submit, Drain };
 
 struct Config {
 	Kind kind = Kind::Off;
@@ -45,6 +46,7 @@ inline const char* KindName(Kind kind) {
 		case Kind::Ssbo: return "ssbo";
 		case Kind::Shader5e: return "5e";
 		case Kind::Submit: return "submit";
+		case Kind::Drain: return "drain";
 	}
 	return "off";
 }
@@ -57,6 +59,7 @@ inline Kind ParseKind(const char* text) {
 	if (std::strcmp(text, "ssbo") == 0) return Kind::Ssbo;
 	if (std::strcmp(text, "5e") == 0) return Kind::Shader5e;
 	if (std::strcmp(text, "submit") == 0) return Kind::Submit;
+	if (std::strcmp(text, "drain") == 0) return Kind::Drain;
 	return Kind::Full;
 }
 
@@ -121,6 +124,8 @@ inline bool BeforeIsXfer() { return Get().kind == Kind::Xfer; }
 inline bool ForceImmediate() { return InWindow() && Get().kind == Kind::Ssbo; }
 
 inline bool WantWaitSubmit() { return InWindow() && Get().kind == Kind::Submit; }
+
+inline bool WantDrainDraw() { return InWindow() && Get().kind == Kind::Drain; }
 
 inline void Note(const char* slot) {
 	static std::atomic<uint64_t> n {0};
