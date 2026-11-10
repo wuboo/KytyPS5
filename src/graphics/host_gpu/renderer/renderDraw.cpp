@@ -1808,6 +1808,159 @@ static void S526After(RenderContext& context, CommandBuffer& buffer, const DrawR
 	for (int i = 0; i < 5; i++) prev_pt[i] = pix.pt[i];
 }
 
+// S529 DIAG. KYTY_DIAG_S529=copy-inv|copy|layout. Guest flips 4000-4500, every 4th blend-on
+// draw of 0x514080000. copy-inv and copy record the same Image::Download as S526 and discard
+// the bytes; copy-inv also calls Buffer::Invalidate. layout records only the image barrier
+// Download uses (TRANSFER_SRC, TRANSFER_READ, eCopy). No FlushAndWait. Download buffers stay
+// in a pool until that command buffer's tick is free. Unset: one getenv, then nothing.
+// Not a fix. Not codegen.
+static void S529After(RenderContext& context, CommandBuffer& buffer, const DrawRenderState& state) {
+	enum class Mode { Off, CopyInv, Copy, Layout };
+	struct Cfg {
+		Mode mode = Mode::Off;
+	};
+	static const Cfg cfg = [] {
+		Cfg        c;
+		const char* value = std::getenv("KYTY_DIAG_S529");
+		const char* name  = "off";
+		if (value != nullptr && std::strcmp(value, "copy-inv") == 0) {
+			c.mode = Mode::CopyInv;
+			name   = "copy-inv";
+		} else if (value != nullptr && std::strcmp(value, "copy") == 0) {
+			c.mode = Mode::Copy;
+			name   = "copy";
+		} else if (value != nullptr && std::strcmp(value, "layout") == 0) {
+			c.mode = Mode::Layout;
+			name   = "layout";
+		} else if (value != nullptr && value[0] != '\0') {
+			name = "bad";
+		}
+		std::fprintf(stderr, "[s529-cp] cfg mode=%s step=4 lo=4000 hi=4500\n", name);
+		return c;
+	}();
+	if (cfg.mode == Mode::Off) return;
+
+	const long guest = static_cast<long>(FrameTiming::GuestFlips() + 1);
+	static bool     seen       = false;
+	static uint64_t n          = 0;
+	static uint64_t skip       = 0;
+	static uint64_t fail       = 0;
+	static uint64_t bar        = 0;
+	static long     last_guest = -1;
+	if (guest < 4000 || guest > 4500) {
+		if (seen && guest > 4500) {
+			seen = false;
+			std::fprintf(stderr, "[s529-cp] done n=%llu skip=%llu fail=%llu bar=%llu\n", static_cast<unsigned long long>(n),
+			             static_cast<unsigned long long>(skip), static_cast<unsigned long long>(fail),
+			             static_cast<unsigned long long>(bar));
+		}
+		return;
+	}
+	seen = true;
+	if (guest != last_guest) {
+		last_guest = guest;
+		std::fprintf(stderr, "[s529-cp] guest=%ld n=%llu skip=%llu fail=%llu bar=%llu\n", guest, static_cast<unsigned long long>(n),
+		             static_cast<unsigned long long>(skip), static_cast<unsigned long long>(fail),
+		             static_cast<unsigned long long>(bar));
+	}
+
+	const RenderColorInfo* color = nullptr;
+	for (uint32_t i = 0; i < state.color_count; i++) {
+		if (state.color_info[i].desc.info.data.address == 0x514080000ull) color = &state.color_info[i];
+	}
+	if (color == nullptr) return;
+	if (!buffer.GetRegisters().GetBlendControl(color->target_slot).enable) return;
+
+	const long present = static_cast<long>(FrameTiming::PresentedFrames() + 1);
+	static long cur    = -1;
+	static int  ord    = 0;
+	if (present != cur) {
+		cur = present;
+		ord = 0;
+	}
+	ord++;
+	if ((ord % 4) != 0) return;
+
+	auto& image = context.GetTextureCache().GetImage(color->image_id);
+	if (cfg.mode == Mode::Layout) {
+		auto& scheduler = context.GetCommandScheduler();
+		scheduler.EndRendering();
+		auto barriers = image.GetBarriers(vk::ImageLayout::eTransferSrcOptimal, vk::AccessFlagBits2::eTransferRead,
+		                                  vk::PipelineStageFlagBits2::eCopy, {});
+		if (!barriers.empty()) {
+			vk::DependencyInfo dependency {};
+			dependency.dependencyFlags         = vk::DependencyFlagBits::eByRegion;
+			dependency.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());
+			dependency.pImageMemoryBarriers    = barriers.data();
+			scheduler.Current().Handle().pipelineBarrier2(dependency);
+			bar++;
+		}
+		n++;
+		return;
+	}
+
+	const auto extent = color->Extent();
+	const auto bytes  = DiagDump::RtLayoutFor(static_cast<int>(image.info.pixel_format)).bytes;
+	if (image.backing.image == nullptr || image.info.samples != 1 || bytes == 0 || extent.width == 0 || extent.height == 0) {
+		fail++;
+		return;
+	}
+	const uint64_t size = static_cast<uint64_t>(extent.width) * extent.height * bytes;
+	if (size == 0 || size > 80ull * 1024ull * 1024ull) {
+		fail++;
+		return;
+	}
+
+	struct Slot {
+		std::unique_ptr<Buffer> buf;
+		uint64_t                tick = 0;
+	};
+	static std::vector<Slot> pool;
+	auto&                    scheduler = context.GetCommandScheduler();
+	Slot*                    slot      = nullptr;
+	for (auto& candidate: pool) {
+		if (candidate.buf && candidate.buf->Size() >= size && scheduler.IsFree(candidate.tick)) {
+			slot = &candidate;
+			break;
+		}
+	}
+	if (slot == nullptr) {
+		if (pool.size() >= 32) {
+			skip++;
+			return;
+		}
+		pool.emplace_back();
+		slot = &pool.back();
+	}
+	if (!slot->buf || slot->buf->Size() < size) {
+		slot->buf = std::make_unique<Buffer>(context.GetGraphics(), scheduler, MemoryUsage::Download, 0,
+		                                     vk::BufferUsageFlagBits::eTransferDst, size);
+		static bool logged_mem = false;
+		if (!logged_mem) {
+			logged_mem = true;
+			std::fprintf(stderr, "[s529-cp] buf coherent=%d bytes=%llu\n", slot->buf->IsCoherent() ? 1 : 0,
+			             static_cast<unsigned long long>(size));
+		}
+	}
+	vk::BufferImageCopy region {};
+	region.imageSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
+	region.imageSubresource.mipLevel       = color->guest_mip_level;
+	region.imageSubresource.baseArrayLayer = color->guest_array_layer;
+	region.imageSubresource.layerCount     = 1;
+	region.imageExtent                     = vk::Extent3D {extent.width, extent.height, 1};
+	image.Download(std::span {&region, 1}, slot->buf->Handle(), 0, size);
+	if (cfg.mode == Mode::CopyInv) {
+		slot->buf->Invalidate(0, slot->buf->Size());
+		const auto mapped = slot->buf->Mapped();
+		if (!mapped.empty()) {
+			volatile uint8_t sink = mapped[0];
+			(void)sink;
+		}
+	}
+	slot->tick = scheduler.CurrentTick();
+	n++;
+}
+
 void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallInfo& draw,
                                          DrawRenderState& state, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
@@ -2187,6 +2340,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	S522Probe(m_context, buffer, state, nullptr, draw.index_count, "after");
 	S527CardDump(state);
 	S526After(m_context, buffer, state, draw, emit, index_source, state.ps_active ? &bindings.pixel : nullptr);
+	S529After(m_context, buffer, state);
 	// dump_rt / diag_tex only while the control file lists them. The snapshot pointer is one load per draw.
 	{
 		const auto& snap = Common::ControlFile::Current();
