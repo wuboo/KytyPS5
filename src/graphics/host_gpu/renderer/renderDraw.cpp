@@ -1438,9 +1438,12 @@ static void S522Probe(RenderContext& context, CommandBuffer& buffer, const DrawR
 }
 
 // S526 DIAG. Between the second apply-gpu and the copy 3bf81ef1, mean R of 0x514080000
-// goes from ~0 to ~164 (S525). Sample that target every KYTY_DIAG_S526_STEP draws (default 4)
-// until the first present whose mean crosses 1, then stop. KYTY_DIAG_S526_ORD=lo-hi samples
-// every draw in that ordinal window and logs the draw's inputs. Both names are non-codegen.
+// goes from ~0 to ~164 (S525). Sample that target every KYTY_DIAG_S526_STEP blend-enabled
+// draws (default 4) until the first present whose mean crosses 1, then stop.
+// KYTY_DIAG_S526_ORD=lo-hi samples every blend-enabled draw in that window and logs inputs.
+// Blend-off draws are not counted: a run of 0 or 56 fef4fc01 (blend off) sits in front of
+// the additive shaders and does not move the mean, so an absolute ordinal is not the same
+// draw on every present. Both env names are non-codegen.
 struct S526Pix {
 	bool     ok    = false;
 	double   mean  = 0;
@@ -1545,7 +1548,8 @@ static void S526After(RenderContext& context, CommandBuffer& buffer, const DrawR
 	static bool logged_cfg = false;
 	if (!logged_cfg) {
 		logged_cfg = true;
-		S459Log::LineWatch("[s526-cfg] step=%d ord=%d lo=%d hi=%d\n", cfg.step, cfg.ord ? 1 : 0, cfg.lo, cfg.hi);
+		S459Log::LineWatch("[s526-cfg] step=%d ord=%d lo=%d hi=%d count=blend-on\n", cfg.step, cfg.ord ? 1 : 0, cfg.lo,
+		                   cfg.hi);
 	}
 	static bool done = false;
 	if (done) return;
@@ -1591,6 +1595,10 @@ static void S526After(RenderContext& context, CommandBuffer& buffer, const DrawR
 		for (float& p: prev_pt) p = 0;
 	}
 
+	const auto& hw = buffer.GetRegisters();
+	const auto& bc = hw.GetBlendControl(color->target_slot);
+	if (!bc.enable) return;
+
 	const uint64_t ps = state.ps_active && state.ps_input_info.stage.module != nullptr
 	                        ? state.ps_input_info.stage.module->info.shader_hash
 	                        : 0;
@@ -1602,8 +1610,6 @@ static void S526After(RenderContext& context, CommandBuffer& buffer, const DrawR
 	else noth++;
 	if (cfg.ord && (ord < cfg.lo || ord > cfg.hi)) return;
 
-	const auto& hw     = buffer.GetRegisters();
-	const auto& bc     = hw.GetBlendControl(color->target_slot);
 	const auto& vp0    = hw.GetScreenViewport().viewports[0];
 	const auto  extent = color->Extent();
 	const auto  sc     = calc_final_scissor(hw.GetScreenViewport(), hw.GetScanModeControl(), extent, 0);
