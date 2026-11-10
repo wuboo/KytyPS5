@@ -90,6 +90,16 @@ void TestDiagTex() {
 	Check(!CF::Parse("diag_tex=abc\n").errors.empty() && !CF::Parse("diag_tex=abc:128\n").errors.empty() &&
 	          !CF::Parse("diag_tex=0:1\n").errors.empty() && !CF::Parse("diag_tex=abc:x\n").errors.empty(),
 	      "bad diag_tex accepted");
+	const auto filtered = CF::Parse("diag_tex=b3a5c6b02f90bcb2:1@53aa00000\n");
+	Check(filtered.errors.empty(), "diag_tex address filter rejected");
+	const auto filtered_snap = CF::Resolve(filtered, 1);
+	Check(filtered_snap.diag_tex.size() == 1 && filtered_snap.diag_tex[0].addr == 0x53aa00000ull &&
+	          filtered_snap.diag_tex[0].slot == 1 && !filtered_snap.diag_tex[0].all,
+	      "diag_tex address filter fields");
+	Check(filtered_snap.DiagTexListed(0xb3a5c6b02f90bcb2ull, 1), "address filter still lists the slot");
+	Check(!CF::Parse("diag_tex=aa:1@\n").errors.empty() && !CF::Parse("diag_tex=aa:1@0\n").errors.empty() &&
+	          !CF::Parse("diag_tex=aa:1:all@10\n").errors.empty(),
+	      "bad diag_tex address filter accepted");
 	CF::Snapshot a, b;
 	b.diag_tex.push_back({1, 2});
 	Check(!a.SameSettings(b), "diag_tex ignored by SameSettings");

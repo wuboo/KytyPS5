@@ -32,7 +32,9 @@ struct TexRequest {
 	TexInfo        info;
 };
 
-bool                    WantsTex(uint64_t ps_hash, uint32_t slot); // true once per (block, ps, slot)
+// True once per (block, ps, slot). addr is the guest base of this bind; an entry with
+// DiagTex::addr set does not consume the once-token until that address is bound.
+bool                    WantsTex(uint64_t ps_hash, uint32_t slot, uint64_t addr);
 void                    AddTexRequest(TexRequest&& request);
 std::vector<TexRequest> TakeTexRequests();
 void                    StoreTex(const TexInfo& info, Target&& target); // empty data = could not be read back

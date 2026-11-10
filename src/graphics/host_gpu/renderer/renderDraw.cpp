@@ -18,6 +18,7 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/diagDump.h"
+#include "graphics/host_gpu/renderer/s459log.h"
 #include "graphics/host_gpu/renderer/drsNoZero.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -596,6 +597,11 @@ bool RenderExecutor::ConsumeMetadataColorOperation(CommandBuffer& buffer) {
 		// clear metadata before the expanded image is sampled.
 		RenderColorInfo target {};
 		ResolveRenderColorTarget(buffer, target, 0, true);
+		if (S459Log::Hit()) {
+			S459Log::Linef("[s459-clear] present=%ld guest=%ld kind=fce addr=0x%016" PRIx64 " %ux%u fmt=%d\n",
+			               S459Log::Present(), S459Log::Guest(), target.desc.info.data.address, target.Extent().width,
+			               target.Extent().height, static_cast<int>(target.desc.info.pixel_format));
+		}
 		return true;
 	}
 	// Metadata/decompression shaders must not export colors into the expanded image.
@@ -1592,41 +1598,33 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		FrameTiming::Add(FrameTiming::Counter::DeferWriteDrawN);
 	}
 	}
-	// S459 DIAG, ported in S519. KYTY_DIAG_S459_FLIP=<n> lists every graphics draw on presented
-	// frames n..n+2, the same index as frame_flip_<n>.ppm. guest= is GuestFlips()+1 (control file
-	// and pad-replay). Unset: one getenv at the first completed draw, then one compare, no file.
-	{
-		static const long s459_present = [] {
-			const char* value = std::getenv("KYTY_DIAG_S459_FLIP");
-			return (value != nullptr && value[0] != '\0') ? std::atol(value) : -1L;
-		}();
-		const long now_present = static_cast<long>(FrameTiming::PresentedFrames() + 1);
-		if (s459_present >= 0 && now_present >= s459_present && now_present < s459_present + 3) {
-			static FILE* s459_file = nullptr;
-			static bool  s459_opened = false;
-			if (!s459_opened) {
-				const char* path = std::getenv("KYTY_DIAG_S459_FILE");
-				s459_file        = std::fopen(path != nullptr && path[0] != '\0' ? path : "s459-draws.txt", "a");
-				s459_opened      = true;
-			}
-			if (s459_file != nullptr) {
-				const auto& s459_hw   = buffer.GetRegisters();
-				const long  now_guest = static_cast<long>(FrameTiming::GuestFlips() + 1);
-				const uint64_t ps_hash =
-				    state.ps_active && state.ps_input_info.stage.module != nullptr ? state.ps_input_info.stage.module->info.shader_hash : 0;
-				std::fprintf(s459_file, "[s459-draw] present=%ld guest=%ld ps=0x%016" PRIx64 " idx=%u colors=%u", now_present, now_guest,
-				             ps_hash, static_cast<unsigned>(draw.index_count), static_cast<unsigned>(state.color_count));
-				for (uint32_t i = 0; i < state.color_count; i++) {
-					const auto& c  = state.color_info[i];
-					const auto& bc = s459_hw.GetBlendControl(c.target_slot);
-					std::fprintf(s459_file, " | slot=%u fmt=%d %ux%u map=0x%02x blend=%d c=%u/%u/%u a=%u/%u/%u sep=%d", c.target_slot,
-					             static_cast<int>(c.desc.info.pixel_format), c.Extent().width, c.Extent().height, c.export_mapping.packed,
-					             bc.enable ? 1 : 0, bc.color_srcblend, bc.color_comb_fcn, bc.color_destblend, bc.alpha_srcblend, bc.alpha_comb_fcn,
-					             bc.alpha_destblend, bc.separate_alpha_blend ? 1 : 0);
-				}
-				std::fprintf(s459_file, " depth=%d\n", state.depth_info.image_id ? 1 : 0);
-				std::fflush(s459_file);
-			}
+	// S459 DIAG, extended in S521. KYTY_DIAG_S459_FLIP=<n> lists draws on presented frames n..n+2.
+	// KYTY_DIAG_S459_FLIP=a,b,c lists those frames. addr= is the guest base of each color target.
+	// Unset: one getenv at the first completed draw, then one compare, no file.
+	if (S459Log::Hit()) {
+		const auto& s459_hw = buffer.GetRegisters();
+		const uint64_t ps_hash =
+		    state.ps_active && state.ps_input_info.stage.module != nullptr ? state.ps_input_info.stage.module->info.shader_hash : 0;
+		char buf[4096];
+		int  n = std::snprintf(buf, sizeof(buf), "[s459-draw] present=%ld guest=%ld ps=0x%016" PRIx64 " idx=%u colors=%u",
+		                       S459Log::Present(), S459Log::Guest(), ps_hash, static_cast<unsigned>(draw.index_count),
+		                       static_cast<unsigned>(state.color_count));
+		for (uint32_t i = 0; i < state.color_count && n > 0 && static_cast<size_t>(n) < sizeof(buf); i++) {
+			const auto& c  = state.color_info[i];
+			const auto& bc = s459_hw.GetBlendControl(c.target_slot);
+			n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n),
+			                   " | slot=%u fmt=%d %ux%u addr=0x%016" PRIx64 " map=0x%02x blend=%d c=%u/%u/%u a=%u/%u/%u sep=%d",
+			                   c.target_slot, static_cast<int>(c.desc.info.pixel_format), c.Extent().width, c.Extent().height,
+			                   c.desc.info.data.address, c.export_mapping.packed, bc.enable ? 1 : 0, bc.color_srcblend, bc.color_comb_fcn,
+			                   bc.color_destblend, bc.alpha_srcblend, bc.alpha_comb_fcn, bc.alpha_destblend,
+			                   bc.separate_alpha_blend ? 1 : 0);
+		}
+		if (n > 0 && static_cast<size_t>(n) < sizeof(buf)) {
+			n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " depth=%d\n", state.depth_info.image_id ? 1 : 0);
+		}
+		if (n > 0) {
+			const size_t take = static_cast<size_t>(n) < sizeof(buf) ? static_cast<size_t>(n) : sizeof(buf) - 1;
+			S459Log::Write(buf, take);
 		}
 	}
 	// dump_rt / diag_tex only while the control file lists them. The snapshot pointer is one load per draw.

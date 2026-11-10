@@ -46,9 +46,22 @@ std::vector<WatchRange> g_watch_ranges;      // armed by WatchTexTrigger, report
 
 } // namespace
 
-bool WantsTex(uint64_t ps_hash, uint32_t slot) {
+bool WantsTex(uint64_t ps_hash, uint32_t slot, uint64_t addr) {
 	const auto& snapshot = Common::ControlFile::Current();
 	if (snapshot.diag_tex.empty() || ps_hash == 0 || !snapshot.DiagTexListed(ps_hash, slot)) return false;
+	bool addr_ok = false;
+	for (const auto& entry: snapshot.diag_tex) {
+		if (entry.all) continue;
+#ifdef KYTY_CONTROL_MUTANT_DIAG_ANY_SLOT
+		if (entry.ps != ps_hash) continue;
+#else
+		if (entry.ps != ps_hash || entry.slot != slot) continue;
+#endif
+		if (entry.addr != 0 && entry.addr != addr) continue;
+		addr_ok = true;
+		break;
+	}
+	if (!addr_ok) return false;
 	std::lock_guard lock(g_mutex);
 	return TexFirst(g_tex_once, snapshot.gen, ps_hash, slot);
 }

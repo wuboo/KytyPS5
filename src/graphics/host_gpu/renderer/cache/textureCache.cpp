@@ -21,6 +21,7 @@
 #include "graphics/host_gpu/renderer/image/tiler.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/host_gpu/renderer/s459log.h"
 #include "kernel/memory.h"
 
 #include <algorithm>
@@ -1135,6 +1136,13 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 	}
 	const auto  range = desc.info.metadata.range;
 	const auto& view  = desc.view_info;
+	const auto note   = [&](const char* why, uint32_t slice = 0, uint32_t code = 0) {
+		if (!S459Log::Hit()) return;
+		S459Log::Linef("[s459-clear] present=%ld guest=%ld kind=fast why=%s addr=0x%016" PRIx64 " meta=0x%016" PRIx64
+		               " slice=%u code=%u %ux%u fmt=%d\n",
+		               S459Log::Present(), S459Log::Guest(), why, desc.info.data.address, range.address, slice, code,
+		               desc.info.extent.width, desc.info.extent.height, static_cast<int>(desc.info.pixel_format));
+	};
 	{
 		std::scoped_lock lock {m_lock};
 		auto& image         = m_slot_images[id];
@@ -1142,6 +1150,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		// Native color metadata must not retain a reused HTile clear flag.
 		m_surface_metas.erase(range.address);
 		if (range.size == 0 || view.level_count != 1) {
+			note("skip-range");
 			return;
 		}
 	}
@@ -1149,6 +1158,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 	// reading DCC metadata, like emulators that ignore DCC fast clears altogether.
 	static const bool decode = FrameTiming::OptEnabled("dcc_decode");
 	if (!decode) {
+		note("skip-dcc-off");
 		return;
 	}
 	const auto layers = desc.info.TransferLayers();
@@ -1195,6 +1205,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		mip = mips[view.base_level];
 	}
 	if (mip.size == 0) {
+		note("skip-mip");
 		return;
 	}
 	const GuestRange viewed {range.address + slice_size * first + mip.offset,
@@ -1216,6 +1227,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 			checked = m_buffer_cache.IsColorMetadataChecked(run(slice), mip.size, keys);
 		}
 		if (checked) {
+			note("skip-checked");
 			return;
 		}
 		{
@@ -1262,6 +1274,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 				}
 				command.endRendering();
 				CommitGpuWrite(image);
+				note("apply-gpu");
 				return;
 			}
 		}
@@ -1280,6 +1293,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		uint8_t code = 0;
 		if (known) {
 			if (!DccFillPublish::CodeFromFill(known_values[slice], &code)) {
+				note("skip-not-code", slice);
 				continue; // not one code repeated: no fast clear
 			}
 		} else if (!LibKernel::Memory::TryReadBacking(address, &code, sizeof(code))) {
@@ -1287,6 +1301,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		}
 		vk::ClearValue clear {};
 		if (!DecodeColorClear(desc, code, clear.color)) {
+			note("skip-decode", slice, code);
 			continue;
 		}
 		std::vector<uint8_t> bytes(known ? slice_size : mip.size);
@@ -1295,6 +1310,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 				EXIT("TextureCache: failed to read color metadata slice\n");
 			}
 			if (!std::all_of(bytes.begin(), bytes.end(), [code](uint8_t byte) { return byte == code; })) {
+				note("skip-mixed", slice, code);
 				continue;
 			}
 		}
@@ -1310,6 +1326,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 			           {depth ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor,
 			            view.base_level, view.level_count,
 			            image_first + slice, 1}, clear);
+			note("apply", slice, code);
 		}
 		// Publish the conversion's expanded keys without treating them as guest writes
 		// to overlapping image data. Invalidate the buffer before updating its backing.
@@ -1839,6 +1856,12 @@ void TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format for
 	        range.layerCount == 0 || range.baseArrayLayer >= layers ||
 	        range.layerCount > layers - range.baseArrayLayer ||
 	        (range.aspectMask & aspects) != range.aspectMask);
+	if (S459Log::Hit()) {
+		S459Log::Linef("[s459-clear] present=%ld guest=%ld kind=image addr=0x%016" PRIx64 " fmt=%d aspect=0x%x level=%u/%u layer=%u/%u\n",
+		               S459Log::Present(), S459Log::Guest(), image.info.data.address, static_cast<int>(format),
+		               static_cast<unsigned>(static_cast<VkImageAspectFlags>(range.aspectMask)), range.baseMipLevel, range.levelCount,
+		               range.baseArrayLayer, range.layerCount);
+	}
 	const bool full_subresources = range.baseMipLevel == 0 &&
 	                               range.levelCount == image.info.resources.levels &&
 	                               range.baseArrayLayer == 0 && range.layerCount == layers;
@@ -2250,6 +2273,10 @@ bool TextureCache::ClearMeta(uint64_t address) {
 		return false;
 	}
 	found->second.clear_mask.set();
+	if (S459Log::Hit()) {
+		S459Log::Linef("[s459-clear] present=%ld guest=%ld kind=clearmeta addr=0x%016" PRIx64 "\n", S459Log::Present(),
+		               S459Log::Guest(), address);
+	}
 	return true;
 }
 
@@ -2260,6 +2287,10 @@ bool TextureCache::TouchMeta(uint64_t address, uint32_t slice, bool is_clear) {
 		return false;
 	}
 	found->second.clear_mask.set(slice, is_clear);
+	if (S459Log::Hit()) {
+		S459Log::Linef("[s459-clear] present=%ld guest=%ld kind=%s addr=0x%016" PRIx64 " slice=%u\n", S459Log::Present(),
+		               S459Log::Guest(), is_clear ? "touch-set" : "touch-consume", address, slice);
+	}
 	return true;
 }
 

@@ -723,10 +723,14 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 		}
 		auto binding = ResolveTexture(program.info.images[i], snapshot.images[i]);
 		// S519: diag_tex was unhooked when ResolveTexture lost its ps/slot arguments. Queue the host
-		// image only while the control file lists this pixel shader and slot (WantsTex is false otherwise).
-		if (program.stage == ShaderType::Pixel && binding.image_id && DiagDump::WantsTex(program.shader_hash, i)) {
-			auto        descriptor = DecodeNativeDescriptor<ShaderTextureResource>(snapshot.images[i]);
-			const auto& image      = m_context.GetTextureCache().GetImage(binding.image_id);
+		// image only while the control file lists this pixel shader and slot. S521: @addr on that
+		// entry waits for the guest address instead of consuming the once-token on the first bind.
+		// No diag_tex: one snapshot load and empty(), the same cost WantsTex had when the list was empty.
+		if (program.stage == ShaderType::Pixel && binding.image_id &&
+		    !Common::ControlFile::Current().diag_tex.empty()) {
+			auto descriptor = DecodeNativeDescriptor<ShaderTextureResource>(snapshot.images[i]);
+			if (DiagDump::WantsTex(program.shader_hash, i, descriptor.Base40())) {
+			const auto& image = m_context.GetTextureCache().GetImage(binding.image_id);
 			DiagDump::TexInfo info;
 			info.flip          = FrameTiming::GuestFlips() + 1;
 			info.ps            = program.shader_hash;
@@ -750,6 +754,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 				}
 			}
 			DiagDump::AddTexRequest({binding.image_id, info});
+			}
 		}
 		BindImage(binding.image_id, binding.desc.type == TextureCache::BindingType::Storage);
 		binding.mip_views.swap(prepared.images[i].mip_views);

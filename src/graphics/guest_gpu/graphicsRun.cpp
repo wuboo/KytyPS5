@@ -21,6 +21,7 @@
 #include "graphics/host_gpu/renderer/indirectGpu.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/render.h"
+#include "graphics/host_gpu/renderer/s459log.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/sync.h"
@@ -400,6 +401,12 @@ void CommandProcessor::DmaData(uint8_t dst_sel, uint64_t dst_address_or_offset, 
 	}
 	auto& buffer_cache = m_renderer.GetBufferCache();
 	if (src_sel == 2) {
+		if (S459Log::Hit()) {
+			S459Log::Linef("[s459-clear] present=%ld guest=%ld kind=dma-fill addr=0x%016" PRIx64 " size=0x%x value=0x%08" PRIx32
+			               " gds=%d\n",
+			               S459Log::Present(), S459Log::Guest(), dst_address_or_offset, num_bytes,
+			               static_cast<uint32_t>(src_address_or_offset_or_immediate & 0xffffffffu), dst_gds ? 1 : 0);
+		}
 		buffer_cache.FillBuffer(
 		    dst_address_or_offset, num_bytes,
 		    static_cast<uint32_t>(src_address_or_offset_or_immediate & 0xffffffffu), dst_gds);

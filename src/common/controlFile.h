@@ -12,8 +12,9 @@
 //                                              0xAABBGGRR (r in the low byte); an optional filter
 //                                              `@<addr hex>` or `@fmt=<n>,<w>x<h>` limits it to draws whose T#
 //                                              has that base address / format and size (others sample normally)
-//   diag_tex=<ps hex>:<slot dec>[,...]         once per block: log the full T# of that slot of the pixel shader
-//                                              and dump the host image it samples ([diag-tex], KYTY_DIAG_DIR)
+//   diag_tex=<ps hex>:<slot dec>[@<addr hex>]  once per block: log the full T# of that slot of the pixel shader
+//                                              and dump the host image it samples ([diag-tex], KYTY_DIAG_DIR).
+//                                              @addr waits for a bind of that guest address instead of the first bind.
 //   diag_tex=<ps hex>:<slot dec>:all           every draw of the shader: one [diag-tex-d] line per draw plus a
 //                                              histogram per (addr, fmt, size) at the end of the flip (no readback)
 //   dump_tex=<ps hex>:<slot dec>[@<addr hex>|@fmt=<n>,<w>x<h>][,...]
@@ -99,7 +100,10 @@ struct DiagTex {
 	uint64_t ps   = 0;
 	uint32_t slot = 0;
 	bool     all  = false; // every draw (log + histogram) instead of once per block with a readback
-	bool     operator==(const DiagTex& o) const { return ps == o.ps && slot == o.slot && all == o.all; }
+	uint64_t addr = 0;     // 0 = the first bind of the slot; otherwise only that guest address
+	bool     operator==(const DiagTex& o) const {
+		return ps == o.ps && slot == o.slot && all == o.all && addr == o.addr;
+	}
 };
 
 struct DumpTex {
@@ -327,16 +331,24 @@ inline bool ParseForceTex(std::string_view text, std::vector<ForceTex>& out) {
 inline bool ParseDiagTex(std::string_view text, std::vector<DiagTex>& out) {
 	out.clear();
 	return ForEachItem(text, [&](std::string_view item) {
+		uint64_t addr = 0;
+		if (const auto at = item.find('@'); at != std::string_view::npos) {
+			auto hex = Trim(item.substr(at + 1));
+			if (hex.rfind("0x", 0) == 0 || hex.rfind("0X", 0) == 0) hex.remove_prefix(2);
+			if (!ParseNumber(hex, 16, addr) || addr == 0) return false;
+			item = Trim(item.substr(0, at));
+		}
 		const auto c1 = item.find(':');
 		if (c1 == std::string_view::npos) return false;
 		const auto c2   = item.find(':', c1 + 1);
 		const bool all  = c2 != std::string_view::npos;
 		uint64_t   ps = 0, slot = 0;
 		if (all && Trim(item.substr(c2 + 1)) != "all") return false;
+		if (all && addr != 0) return false;
 		if (!ParseNumber(item.substr(0, c1), 16, ps) || ps == 0 ||
 		    !ParseNumber(item.substr(c1 + 1, all ? c2 - c1 - 1 : std::string_view::npos), 10, slot) || slot > 127)
 			return false;
-		out.push_back({ps, static_cast<uint32_t>(slot), all});
+		out.push_back({ps, static_cast<uint32_t>(slot), all, addr});
 		return true;
 	});
 }
@@ -402,7 +414,7 @@ inline bool ValidateItem(const Item& item, std::string& why) {
 		why = "force_tex is <ps hex>:<slot 0..127>:<rgba8 hex>[@<addr hex>|@fmt=<n>,<w>x<h>]";
 	} else if (item.key == "diag_tex") {
 		if (ParseDiagTex(item.value, diags)) return true;
-		why = "diag_tex is <ps hex>:<slot 0..127>[:all]";
+		why = "diag_tex is <ps hex>:<slot 0..127>[:all][@<addr hex>]";
 	} else if (item.key == "dump_tex") {
 		if (ParseDumpTex(item.value, dumptex)) return true;
 		why = "dump_tex is <ps hex>:<slot 0..127>[@<addr hex>|@fmt=<n>,<w>x<h>]";

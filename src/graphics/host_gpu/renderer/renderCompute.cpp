@@ -14,6 +14,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/gpuLabelsVk.h"
 #include "graphics/host_gpu/renderer/computeMetaFill.h"
+#include "graphics/host_gpu/renderer/s459log.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -213,6 +214,11 @@ bool RenderExecutor::TryConsumeComputeFill(const ShaderComputeInputInfo& input,
 				return false;
 			}
 			// Like the shader it replaces, write on the GPU: a CPU fill of a tracked range takes a write fault per page.
+			if (S459Log::Hit()) {
+				S459Log::Linef("[s459-clear] present=%ld guest=%ld kind=cs-fill addr=0x%016" PRIx64 " size=0x%016" PRIx64
+				               " value=0x%08" PRIx32 "\n",
+				               S459Log::Present(), S459Log::Guest(), descriptor.Base48(), size, packed_clear);
+			}
 			buffer_cache.FillBuffer(descriptor.Base48(), size, packed_clear, false, true);
 			FrameTiming::Add(FrameTiming::Counter::ComputeFillsReplaced);
 			return true;
@@ -224,6 +230,11 @@ bool RenderExecutor::TryConsumeComputeFill(const ShaderComputeInputInfo& input,
 		    !m_context.IsMapped(descriptor.Base48(), size) ||
 		    cache.IsRegionRegistered(descriptor.Base48(), size)) {
 			return false;
+		}
+		if (S459Log::Hit()) {
+			S459Log::Linef("[s459-clear] present=%ld guest=%ld kind=cs-fill addr=0x%016" PRIx64 " size=0x%016" PRIx64
+			               " value=0x%08" PRIx32 "\n",
+			               S459Log::Present(), S459Log::Guest(), descriptor.Base48(), size, packed_clear);
 		}
 		buffer_cache.FillBuffer(descriptor.Base48(), size, packed_clear, false, true);
 		FrameTiming::Add(FrameTiming::Counter::ComputeFillsReplaced);
@@ -289,6 +300,41 @@ static bool HasStorageWrites(const ShaderComputeInputInfo& input_info,
 		       return image.written &&
 		              image.resource_class == ShaderRecompiler::IR::ImageResourceClass::Storage;
 	       });
+}
+
+// S521 DIAG. Written buffer and image guest addresses of one dispatch. Off: Hit() is one bool.
+static void LogCsWrites(const ShaderComputeInputInfo& input, const char* kind, uint32_t group_x,
+                        uint32_t group_y, uint32_t group_z) {
+	if (!S459Log::Hit() || input.stage.module == nullptr || input.stage.resources == nullptr) return;
+	const auto& program   = input.stage.module->info;
+	const auto& resources = *input.stage.resources;
+	char        buf[4096];
+	int         n = std::snprintf(buf, sizeof(buf),
+	                              "[s459-cs] present=%ld guest=%ld cs=0x%016" PRIx64 " kind=%s groups=%u,%u,%u dma=%d",
+	                              S459Log::Present(), S459Log::Guest(), program.shader_hash, kind, group_x, group_y, group_z,
+	                              program.info.uses_dma ? 1 : 0);
+	for (uint32_t i = 0; i < program.info.buffers.size() && n > 0 && static_cast<size_t>(n) < sizeof(buf); i++) {
+		if (!program.info.buffers[i].written || i >= resources.buffers.size()) continue;
+		const auto r = DecodeNativeDescriptor<ShaderBufferResource>(resources.buffers[i]);
+		n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " | buf=0x%016" PRIx64 " size=0x%016" PRIx64,
+		                   r.Base48(), r.GetSize());
+	}
+	for (uint32_t i = 0; i < program.info.images.size() && n > 0 && static_cast<size_t>(n) < sizeof(buf); i++) {
+		const auto& image = program.info.images[i];
+		if (!image.written || image.heap || i >= resources.images.size()) continue;
+		const auto r = DecodeNativeDescriptor<ShaderTextureResource>(resources.images[i]);
+		n += std::snprintf(buf + n, sizeof(buf) - static_cast<size_t>(n), " | img=0x%016" PRIx64 " %ux%u fmt=%u", r.Base40(),
+		                   static_cast<unsigned>(r.Width5()) + 1u, static_cast<unsigned>(r.Height5()) + 1u,
+		                   static_cast<unsigned>(r.Format()));
+	}
+	if (n > 0 && static_cast<size_t>(n) + 1 < sizeof(buf)) {
+		buf[n++] = '\n';
+		buf[n]   = '\0';
+	}
+	if (n > 0) {
+		const size_t take = static_cast<size_t>(n) < sizeof(buf) ? static_cast<size_t>(n) : sizeof(buf) - 1;
+		S459Log::Write(buf, take);
+	}
 }
 
 void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x,
@@ -376,6 +422,8 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 			                             thread_group_z, mode);
 		}
 		if (meta || fill) {
+			LogCsWrites(input_info, meta && fill ? "meta+fill" : (meta ? "meta" : "fill"), thread_group_x, thread_group_y,
+			            thread_group_z);
 			ResetBindings();
 			return;
 		}
@@ -506,6 +554,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	GpuLabel::NoteCause(GpuLabel::Cause::Cs);
+	LogCsWrites(input_info, "cs", thread_group_x, thread_group_y, thread_group_z);
 	ResetBindings();
 }
 
@@ -587,6 +636,7 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Guest);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	GpuLabel::NoteCause(GpuLabel::Cause::Cs);
+	LogCsWrites(input_info, "cs-ind", args.x, args.y, args.z);
 	ResetBindings();
 }
 
