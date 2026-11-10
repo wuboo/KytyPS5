@@ -219,6 +219,7 @@ bool RenderExecutor::TryConsumeComputeFill(const ShaderComputeInputInfo& input,
 				               " value=0x%08" PRIx32 "\n",
 				               S459Log::Present(), S459Log::Guest(), descriptor.Base48(), size, packed_clear);
 			}
+			S459Log::NoteMetaWrite("cs-fill", 0, descriptor.Base48(), size, packed_clear, 0, 0);
 			buffer_cache.FillBuffer(descriptor.Base48(), size, packed_clear, false, true);
 			FrameTiming::Add(FrameTiming::Counter::ComputeFillsReplaced);
 			return true;
@@ -236,6 +237,7 @@ bool RenderExecutor::TryConsumeComputeFill(const ShaderComputeInputInfo& input,
 			               " value=0x%08" PRIx32 "\n",
 			               S459Log::Present(), S459Log::Guest(), descriptor.Base48(), size, packed_clear);
 		}
+		S459Log::NoteMetaWrite("cs-fill", 0, descriptor.Base48(), size, packed_clear, 0, 0);
 		buffer_cache.FillBuffer(descriptor.Base48(), size, packed_clear, false, true);
 		FrameTiming::Add(FrameTiming::Counter::ComputeFillsReplaced);
 	}

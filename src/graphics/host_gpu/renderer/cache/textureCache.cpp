@@ -1136,7 +1136,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 	}
 	const auto  range = desc.info.metadata.range;
 	const auto& view  = desc.view_info;
-	const auto note   = [&](const char* why, uint32_t slice = 0, uint32_t code = 0) {
+	const auto note   = [&](const char* why, uint32_t slice = 0, uint32_t code = 0, uint64_t ssize = 0) {
 		if (!S459Log::Hit()) return;
 		// skip-checked fires on every later bind of a DCC image. One line per image per present frame.
 		if (why[0] == 's' && why[5] == 'c') {
@@ -1156,9 +1156,9 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 			seen_addr[seen_n++] = addr;
 		}
 		S459Log::Linef("[s459-clear] present=%ld guest=%ld kind=fast why=%s addr=0x%016" PRIx64 " meta=0x%016" PRIx64
-		               " slice=%u code=%u %ux%u fmt=%d\n",
-		               S459Log::Present(), S459Log::Guest(), why, desc.info.data.address, range.address, slice, code,
-		               desc.info.extent.width, desc.info.extent.height, static_cast<int>(desc.info.pixel_format));
+		               " msize=0x%" PRIx64 " ssize=0x%" PRIx64 " slice=%u code=%u %ux%u fmt=%d\n",
+		               S459Log::Present(), S459Log::Guest(), why, desc.info.data.address, range.address, range.size, ssize,
+		               slice, code, desc.info.extent.width, desc.info.extent.height, static_cast<int>(desc.info.pixel_format));
 	};
 	{
 		std::scoped_lock lock {m_lock};
@@ -1222,7 +1222,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		mip = mips[view.base_level];
 	}
 	if (mip.size == 0) {
-		note("skip-mip");
+		note("skip-mip", 0, 0, slice_size);
 		return;
 	}
 	const GuestRange viewed {range.address + slice_size * first + mip.offset,
@@ -1244,7 +1244,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 			checked = m_buffer_cache.IsColorMetadataChecked(run(slice), mip.size, keys);
 		}
 		if (checked) {
-			note("skip-checked");
+			note("skip-checked", 0, 0, slice_size);
 			return;
 		}
 		{
@@ -1291,7 +1291,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 				}
 				command.endRendering();
 				CommitGpuWrite(image);
-				note("apply-gpu");
+				note("apply-gpu", 0, 0, slice_size);
 				return;
 			}
 		}
@@ -1310,7 +1310,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		uint8_t code = 0;
 		if (known) {
 			if (!DccFillPublish::CodeFromFill(known_values[slice], &code)) {
-				note("skip-not-code", slice);
+				note("skip-not-code", slice, 0, slice_size);
 				continue; // not one code repeated: no fast clear
 			}
 		} else if (!LibKernel::Memory::TryReadBacking(address, &code, sizeof(code))) {
@@ -1318,7 +1318,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		}
 		vk::ClearValue clear {};
 		if (!DecodeColorClear(desc, code, clear.color)) {
-			note("skip-decode", slice, code);
+			note("skip-decode", slice, code, slice_size);
 			continue;
 		}
 		std::vector<uint8_t> bytes(known ? slice_size : mip.size);
@@ -1327,7 +1327,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 				EXIT("TextureCache: failed to read color metadata slice\n");
 			}
 			if (!std::all_of(bytes.begin(), bytes.end(), [code](uint8_t byte) { return byte == code; })) {
-				note("skip-mixed", slice, code);
+				note("skip-mixed", slice, code, slice_size);
 				continue;
 			}
 		}
@@ -1343,14 +1343,17 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 			           {depth ? vk::ImageAspectFlagBits::eDepth : vk::ImageAspectFlagBits::eColor,
 			            view.base_level, view.level_count,
 			            image_first + slice, 1}, clear);
-			note("apply", slice, code);
+			note("apply", slice, code, slice_size);
 		}
 		// Publish the conversion's expanded keys without treating them as guest writes
 		// to overlapping image data. Invalidate the buffer before updating its backing.
 		if (desc.type != BindingType::VideoOut) {
-			std::fill(bytes.begin(), bytes.end(), known ? DccFillPublish::kMetadataKeyByte : uint8_t {0xff});
+			const uint8_t marker = known ? DccFillPublish::kMetadataKeyByte : uint8_t {0xff};
+			std::fill(bytes.begin(), bytes.end(), marker);
 			m_buffer_cache.InvalidateMemory(address, bytes.size());
 			LibKernel::Memory::WriteBacking(address, bytes.data(), bytes.size());
+			S459Log::NoteMetaWrite("ff-write", desc.info.data.address, address, bytes.size(), marker,
+			                       desc.info.extent.width, desc.info.extent.height);
 		}
 	}
 }

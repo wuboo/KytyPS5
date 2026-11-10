@@ -1275,6 +1275,118 @@ static void DiagDumpAfterDraw(RenderContext& context, bool ps_active, uint64_t p
 	DumpRenderTargets(context, ps_hash, colors, color_count);
 }
 
+// S522 DIAG. One pixel shader writes 1920x1080 at 0x53aa00000. On listed present frames, copy that
+// image just before the draw (and its sampled inputs) and again just after. Stats stay in the
+// s459 file; nothing is written as PPM. Other draws pay one Hit() check.
+static void S522LogImage(const char* when, const char* role, uint32_t slot, uint64_t addr, int vk_format, uint32_t width,
+                         uint32_t height, const uint8_t* data, size_t nbytes, bool split, int sl, int st, int sr, int sb) {
+	const auto layout = DiagDump::RtLayoutFor(vk_format);
+	const size_t count = static_cast<size_t>(width) * height;
+	if (layout.channels == 0 || layout.bytes == 0 || width == 0 || height == 0 || count > 8u * 1024u * 1024u ||
+	    data == nullptr || nbytes < count * layout.bytes) {
+		S459Log::Linef("[s522-img] when=%s present=%ld guest=%ld role=%s slot=%u addr=0x%016" PRIx64
+		               " fail fmt=%d %ux%u bytes=%zu\n",
+		               when, S459Log::Present(), S459Log::Guest(), role, slot, addr, vk_format, width, height, nbytes);
+		return;
+	}
+	const auto values = DiagDump::RtDecode(layout, data, count);
+	const auto stats  = DiagDump::RtComputeStats(values, layout.channels);
+	const uint32_t ch = layout.channels;
+	uint64_t hot1 = 0, hot16 = 0, zeros = 0, in_n = 0, out_n = 0;
+	double   in_sum = 0, out_sum = 0;
+	for (size_t i = 0; i < count; i++) {
+		const float r = values[i * ch];
+		bool        zero = true;
+		for (uint32_t c = 0; c < ch; c++) zero = zero && values[i * ch + c] == 0.0f;
+		if (zero) zeros++;
+		if (!std::isfinite(r)) continue;
+		if (r > 1.0f) hot1++;
+		if (r > 16.0f) hot16++;
+		if (!split) continue;
+		const int x = static_cast<int>(i % width);
+		const int y = static_cast<int>(i / width);
+		if (x >= sl && x < sr && y >= st && y < sb) {
+			in_n++;
+			in_sum += r;
+		} else {
+			out_n++;
+			out_sum += r;
+		}
+	}
+	const double n = static_cast<double>(count);
+	S459Log::Linef("[s522-img] when=%s present=%ld guest=%ld role=%s slot=%u addr=0x%016" PRIx64
+	               " fmt=%d %ux%u r=%.6g/%.6g/%.6g hot1=%.4f hot16=%.4f zero=%.4f in_n=%" PRIu64 " in_mean=%.6g out_n=%" PRIu64
+	               " out_mean=%.6g\n",
+	               when, S459Log::Present(), S459Log::Guest(), role, slot, addr, vk_format, width, height,
+	               static_cast<double>(stats.min[0]), static_cast<double>(stats.max[0]), stats.mean[0],
+	               static_cast<double>(hot1) / n, static_cast<double>(hot16) / n, static_cast<double>(zeros) / n, in_n,
+	               in_n != 0 ? in_sum / static_cast<double>(in_n) : 0.0, out_n, out_n != 0 ? out_sum / static_cast<double>(out_n) : 0.0);
+}
+
+static void S522Probe(RenderContext& context, CommandBuffer& buffer, const DrawRenderState& state, const PreparedBindings* inputs,
+                      uint32_t index_count, const char* when) {
+	if (!S459Log::Hit() || !state.ps_active || state.ps_input_info.stage.module == nullptr) return;
+	if (state.ps_input_info.stage.module->info.shader_hash != 0x3bf81ef1b8147b45ull) return;
+	const RenderColorInfo* color = nullptr;
+	for (uint32_t i = 0; i < state.color_count; i++) {
+		if (state.color_info[i].desc.info.data.address == 0x53aa00000ull) color = &state.color_info[i];
+	}
+	if (color == nullptr) return;
+	static int probes = 0;
+	if (probes >= 32) return;
+	probes++;
+
+	const auto& hw     = buffer.GetRegisters();
+	const auto& vp0    = hw.GetScreenViewport().viewports[0];
+	const auto  extent = color->Extent();
+	const auto  sc     = calc_final_scissor(hw.GetScreenViewport(), hw.GetScanModeControl(), extent, 0);
+	S459Log::Linef("[s522-draw] when=%s present=%ld guest=%ld idx=%u %ux%u vp=(%.1f,%.1f %.1fx%.1f) scissor=(%d,%d)-(%d,%d)\n",
+	               when, S459Log::Present(), S459Log::Guest(), index_count, extent.width, extent.height, vp0.xoffset - vp0.xscale,
+	               vp0.yoffset - vp0.yscale, vp0.xscale * 2.0f, vp0.yscale * 2.0f, sc.left, sc.top, sc.right, sc.bottom);
+
+	context.GetCommandScheduler().EndRendering();
+	std::vector<std::unique_ptr<Buffer>> buffers;
+	std::vector<DiagDump::Target>        targets;
+	struct Item {
+		const char* role;
+		uint32_t    slot;
+		uint64_t    addr;
+		bool        split;
+	};
+	std::vector<Item> items;
+	const auto        take = [&](ImageId id, uint32_t mip, uint32_t layer, vk::Extent2D ext, Item item) {
+		const auto before = targets.size();
+		if (DumpRtCopy(context, id, mip, layer, ext, 0, buffers, targets) && targets.size() != before) items.push_back(item);
+		else
+			S522LogImage(when, item.role, item.slot, item.addr, 0, ext.width, ext.height, nullptr, 0, false, 0, 0, 0, 0);
+	};
+	take(color->image_id, color->guest_mip_level, color->guest_array_layer, extent,
+	     {"color", color->target_slot, color->desc.info.data.address, true});
+	if (inputs != nullptr) {
+		uint32_t logged = 0;
+		for (uint32_t i = 0; i < inputs->images.size() && logged < 8; i++) {
+			const auto& binding = inputs->images[i];
+			if (!binding.image_id) continue;
+			const auto& image = context.GetTextureCache().GetImage(binding.image_id);
+			const auto  ext   = vk::Extent2D {std::max(image.info.extent.width, 1u), std::max(image.info.extent.height, 1u)};
+			take(binding.image_id, 0, 0, ext, {"in", i, binding.desc.info.data.address, false});
+			logged++;
+		}
+	}
+	if (!targets.empty()) context.GetCommandScheduler().FlushAndWait();
+	for (size_t i = 0; i < targets.size(); i++) {
+		buffers[i]->Invalidate(0, buffers[i]->Size());
+		const auto mapped = buffers[i]->Mapped();
+		if (mapped.size() < targets[i].data.size()) {
+			S522LogImage(when, items[i].role, items[i].slot, items[i].addr, targets[i].vk_format, targets[i].width, targets[i].height,
+			             nullptr, mapped.size(), false, 0, 0, 0, 0);
+			continue;
+		}
+		S522LogImage(when, items[i].role, items[i].slot, items[i].addr, targets[i].vk_format, targets[i].width, targets[i].height,
+		             mapped.data(), targets[i].data.size(), items[i].split, sc.left, sc.top, sc.right, sc.bottom);
+	}
+}
+
 void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallInfo& draw,
                                          DrawRenderState& state, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
@@ -1432,7 +1544,9 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
 	// point onward, every operation targets the current command buffer and cannot touch guest
-	// memory.
+	// memory. S522 reads the target before that capture, so the draw itself lands in the buffer
+	// begun after the readback submit.
+	S522Probe(m_context, buffer, state, state.ps_active ? &bindings.pixel : nullptr, draw.index_count, "before");
 	auto vk_buffer = buffer.Handle();
 	if (mesh_prepared.ok) {
 		// The prepare compute runs outside a pass, before the draw: the draw takes its output as indirect args.
@@ -1627,6 +1741,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 			S459Log::Write(buf, take);
 		}
 	}
+	S522Probe(m_context, buffer, state, nullptr, draw.index_count, "after");
 	// dump_rt / diag_tex only while the control file lists them. The snapshot pointer is one load per draw.
 	{
 		const auto& snap = Common::ControlFile::Current();

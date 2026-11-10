@@ -407,6 +407,8 @@ void CommandProcessor::DmaData(uint8_t dst_sel, uint64_t dst_address_or_offset, 
 			               S459Log::Present(), S459Log::Guest(), dst_address_or_offset, num_bytes,
 			               static_cast<uint32_t>(src_address_or_offset_or_immediate & 0xffffffffu), dst_gds ? 1 : 0);
 		}
+		S459Log::NoteMetaWrite("dma-fill", 0, dst_address_or_offset, num_bytes,
+		                       static_cast<uint32_t>(src_address_or_offset_or_immediate & 0xffffffffu), 0, 0);
 		buffer_cache.FillBuffer(
 		    dst_address_or_offset, num_bytes,
 		    static_cast<uint32_t>(src_address_or_offset_or_immediate & 0xffffffffu), dst_gds);
