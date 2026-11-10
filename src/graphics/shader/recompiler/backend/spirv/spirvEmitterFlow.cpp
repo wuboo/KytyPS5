@@ -925,7 +925,10 @@ uint32_t EmitLiveMask(EmitterState& state) {
 
 uint32_t EmitReadFirstLane(ValueEmitContext& ctx, const IR::Inst& inst) {
 	const auto ballot = ctx.Ballot(inst.Arg(1));
-	const auto lane   = ctx.FirstLane(ballot);
+	auto       lane   = ctx.FirstLane(ballot);
+	if (ctx.state.pixel_wave32_wide_host && PixelWave32FirstLaneFix()) {
+		lane = EmitHostLaneOfGuestLane(ctx.state, lane);
+	}
 	return ctx.Shuffle(inst, 0, lane);
 }
 

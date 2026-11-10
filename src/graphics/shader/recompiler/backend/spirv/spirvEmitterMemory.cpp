@@ -1572,10 +1572,15 @@ uint32_t EmitAppendConsume(ValueEmitContext& ctx, const IR::Inst& inst) {
 		live_ballot = Binary(state, spv::OpBitwiseAnd, TypeU32Vector(state, 4), ballot, live);
 	}
 	const auto first = ctx.FirstLane(live_ballot);
-	const auto source_lane =
+	auto source_lane =
 	    state.lane_count == 2
 	        ? Binary(state, spv::OpBitwiseAnd, TypeU32(state), first, ConstantU32(state, 31))
 	        : first;
+	if (state.pixel_wave32_wide_host && PixelWave32FirstLaneFix()) {
+		// The upper wave of a shared host subgroup otherwise never elects (its host lanes are
+		// 32..63) and reads the lower wave's base, so both waves append to the same slots.
+		source_lane = EmitHostLaneOfGuestLane(state, source_lane);
+	}
 	const auto is_first       = Binary(state, spv::OpIEqual, TypeBool(state),
 	                                   EmitSubgroupLocalInvocationId(state), source_lane);
 	auto bounds = EmitMemoryElementInBounds(state, access, index);

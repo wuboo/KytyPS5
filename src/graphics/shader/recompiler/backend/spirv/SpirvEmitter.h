@@ -15,6 +15,9 @@ namespace Libs::Graphics::ShaderRecompiler::Spirv {
 // of its own half. Set once at device init to the device's default subgroup size.
 void SetHostFragmentSubgroupSize(uint32_t size);
 bool PixelWave32OnWideHost(uint32_t wave_size);
+// KYTY_FIX_PS_WAVE32_FIRST=1: on such a host the first live lane of a wave is a guest lane (0..31) of
+// its own half; read it, elect on it and broadcast from it through the host lane of that half.
+bool PixelWave32FirstLaneFix();
 
 // PerVertex capture ABI: set 1 contains attributes (uvec4), outputs (vec4), and IDs (uvec2).
 struct VertexCaptureInfo {

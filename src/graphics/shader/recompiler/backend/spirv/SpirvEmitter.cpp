@@ -27,6 +27,14 @@ bool PixelWave32OnWideHost(uint32_t wave_size) {
 	return fix && wave_size == 32u && g_host_fragment_subgroup_size.load(std::memory_order_relaxed) >= 64u;
 }
 
+bool PixelWave32FirstLaneFix() {
+	static const bool fix = [] {
+		const char* v = std::getenv("KYTY_FIX_PS_WAVE32_FIRST");
+		return v != nullptr && v[0] == '1';
+	}();
+	return fix;
+}
+
 namespace {
 
 [[noreturn]] void Fail(const IR::Program& program, const char* reason) {
