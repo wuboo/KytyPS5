@@ -404,11 +404,21 @@ void OnGuestText(const void* text, size_t size) {
 		std::fflush(g_record_file);
 	}
 	if (g_replay_on && g_replay_level_next < g_replay_levels.size()) {
-		const auto& mark = g_replay_levels[g_replay_level_next++];
-		g_replay_shift   = static_cast<int64_t>(flip) - static_cast<int64_t>(mark.flip);
-		std::fprintf(stderr, "[pad-replay] level %zu '%.*s' (recorded '%s') at flip %llu, shift %lld\n",
-		     g_replay_level_next, static_cast<int>(name.size()), name.data(), mark.name.c_str(),
-		     static_cast<unsigned long long>(flip), static_cast<long long>(g_replay_shift));
+		const auto& mark   = g_replay_levels[g_replay_level_next];
+		const auto  action = BenchExit::ReplayMarkAction(name, mark.name);
+		if (action == BenchExit::MarkAction::Mismatch) {
+			std::fprintf(stderr, "[pad-replay] MISMATCH level %zu live '%.*s' recorded '%s' at flip %llu (mark not consumed)\n",
+			             g_replay_level_next + 1, static_cast<int>(name.size()), name.data(), mark.name.c_str(),
+			             static_cast<unsigned long long>(flip));
+			std::fflush(stderr);
+		} else {
+			g_replay_level_next++;
+			g_replay_shift = static_cast<int64_t>(flip) - static_cast<int64_t>(mark.flip);
+			std::fprintf(stderr, "[pad-replay] level %zu '%.*s' (recorded '%s') at flip %llu, shift %lld\n",
+			             g_replay_level_next, static_cast<int>(name.size()), name.data(), mark.name.c_str(),
+			             static_cast<unsigned long long>(flip), static_cast<long long>(g_replay_shift));
+			std::fflush(stderr);
+		}
 	}
 }
 
