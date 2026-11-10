@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
+#include "graphics/host_gpu/renderer/galaxyBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/shader/shaderBindings.h"
@@ -171,6 +172,7 @@ void RenderExecutor::ProcessPssr(CommandBuffer& buffer, const Pssr::Request& req
 	command.dispatch((parameters.output_size[0] + 7) / 8,
 	                 (parameters.output_size[1] + 7) / 8, 1);
 	ShaderAccessBarrier(command, vk::PipelineStageFlagBits::eComputeShader);
+	if (GalaxyBarrier::WantAfterDispatch()) GalaxyBarrier::Record(command, false);
 	ResetBindings();
 }
 

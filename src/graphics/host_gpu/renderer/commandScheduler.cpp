@@ -5,6 +5,7 @@
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/eagerSubmit.h"
+#include "graphics/host_gpu/renderer/galaxyBarrier.h"
 #include "graphics/host_gpu/renderer/gpuTimestamps.h"
 
 #include "common/assert.h"
@@ -266,7 +267,11 @@ bool CommandScheduler::HasOperationsAtCurrentTick() {
 }
 
 void CommandScheduler::Flush(SubmitInfo& submit) {
-	Submit(submit);
+	const uint64_t tick = Submit(submit);
+	if (GalaxyBarrier::WantWaitSubmit()) {
+		m_master.Wait(tick);
+		GalaxyBarrier::Note("wait");
+	}
 	BeginNext();
 }
 

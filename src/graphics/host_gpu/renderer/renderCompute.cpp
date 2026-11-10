@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/gpuLabelsVk.h"
 #include "graphics/host_gpu/renderer/computeMetaFill.h"
 #include "graphics/host_gpu/renderer/s459log.h"
+#include "graphics/host_gpu/renderer/galaxyBarrier.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -567,6 +568,9 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 
 	// The removed host fence also ordered read-only dispatches before later writers.
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	if (GalaxyBarrier::WantAfterDispatch()) {
+		GalaxyBarrier::Record(vk_buffer, false);
+	}
 	GpuLabel::NoteCause(GpuLabel::Cause::Cs);
 	LogCsWrites(input_info, "cs", thread_group_x, thread_group_y, thread_group_z);
 	ResetBindings();
@@ -649,6 +653,9 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Guest);
 	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	if (GalaxyBarrier::WantAfterDispatch()) {
+		GalaxyBarrier::Record(vk_buffer, false);
+	}
 	GpuLabel::NoteCause(GpuLabel::Cause::Cs);
 	LogCsWrites(input_info, "cs-ind", args.x, args.y, args.z);
 	ResetBindings();

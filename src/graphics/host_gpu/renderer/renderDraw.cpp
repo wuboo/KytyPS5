@@ -19,6 +19,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/diagDump.h"
 #include "graphics/host_gpu/renderer/s459log.h"
+#include "graphics/host_gpu/renderer/galaxyBarrier.h"
 #include "graphics/host_gpu/renderer/drsNoZero.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -1364,6 +1365,29 @@ static void S522ProbeHot(RenderContext& context, const DrawRenderState& state) {
 	             targets[0].height, data, nbytes, false, 0, 0, 0, 0);
 }
 
+// Present of the card copy, plus 16 and 32. No GPU read: the swapchain writes the PPM at present time.
+static void S527CardDump(const DrawRenderState& state) {
+	static const bool on = [] {
+		const char* dir = std::getenv("KYTY_FRAME_DUMP_DIR");
+		return dir != nullptr && dir[0] != '\0';
+	}();
+	if (!on || !state.ps_active || state.ps_input_info.stage.module == nullptr) return;
+	if (state.ps_input_info.stage.module->info.shader_hash != 0x3bf81ef1b8147b45ull) return;
+	bool hit = false;
+	for (uint32_t i = 0; i < state.color_count; i++) {
+		if (state.color_info[i].desc.info.data.address == 0x53aa00000ull) hit = true;
+	}
+	if (!hit) return;
+	static int asked = 0;
+	if (asked != 0) return;
+	asked = 1;
+	const long p = S459Log::Present();
+	S459Log::RequestDump(p);
+	S459Log::RequestDump(p + 16);
+	S459Log::RequestDump(p + 32);
+	std::fprintf(stderr, "[s527-card] present=%ld guest=%ld dump=%ld,%ld,%ld\n", p, S459Log::Guest(), p, p + 16, p + 32);
+}
+
 static void S522Probe(RenderContext& context, CommandBuffer& buffer, const DrawRenderState& state, const PreparedBindings* inputs,
                       uint32_t index_count, const char* when) {
 	if (!S459Log::Watch() || !state.ps_active || state.ps_input_info.stage.module == nullptr) return;
@@ -2024,7 +2048,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	// An address write has no range, so it keeps the immediate pair. Env off keeps both barriers.
 	// A draw that does not itself write still flushes when it may read a pending range.
 	const bool defer_on    = DeferBarrier::Enabled();
-	const bool defer_write = defer_on && static_cast<bool>(shader_write_stages) && !address_writes;
+	const bool defer_write = defer_on && static_cast<bool>(shader_write_stages) && !address_writes && !GalaxyBarrier::ForceImmediate();
 	if (defer_on) {
 		if (!buffer.HasPendingShaderWrites()) {
 			m_pending_writes.clear();
@@ -2042,6 +2066,13 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		if (defer_on) {
 			FrameTiming::Add(FrameTiming::Counter::DeferWriteNowN);
 		}
+	}
+	const uint64_t s527_ps = state.ps_active && state.ps_input_info.stage.module != nullptr
+	                             ? state.ps_input_info.stage.module->info.shader_hash
+	                             : 0;
+	if (GalaxyBarrier::WantBeforeDraw(s527_ps)) {
+		buffer.EndRendering();
+		GalaxyBarrier::Record(vk_buffer, GalaxyBarrier::BeforeIsXfer());
 	}
 	buffer.BeginRendering(rendering);
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
@@ -2109,6 +2140,10 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		}
 		FrameTiming::Add(FrameTiming::Counter::DeferWriteDrawN);
 	}
+	if (GalaxyBarrier::WantAfterDraw()) {
+		buffer.EndRendering();
+		GalaxyBarrier::Record(vk_buffer, false);
+	}
 	}
 	// S459 DIAG, extended in S521. KYTY_DIAG_S459_FLIP=<n> lists draws on presented frames n..n+2.
 	// KYTY_DIAG_S459_FLIP=a,b,c lists those frames. addr= is the guest base of each color target.
@@ -2150,6 +2185,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		}
 	}
 	S522Probe(m_context, buffer, state, nullptr, draw.index_count, "after");
+	S527CardDump(state);
 	S526After(m_context, buffer, state, draw, emit, index_source, state.ps_active ? &bindings.pixel : nullptr);
 	// dump_rt / diag_tex only while the control file lists them. The snapshot pointer is one load per draw.
 	{

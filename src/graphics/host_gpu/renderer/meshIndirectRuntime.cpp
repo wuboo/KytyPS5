@@ -8,6 +8,7 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/host_gpu/renderer/galaxyBarrier.h"
 
 #include <atomic>
 #include <cinttypes>
@@ -142,6 +143,7 @@ void MeshIndirectRuntime::Push(vk::CommandBuffer command, const Prepared& prepar
 void MeshIndirectRuntime::Dispatch(vk::CommandBuffer command) {
 	GpuLabel::With(command, GpuLabel::Class::PvIndirect, [&] { command.dispatch(1, 1, 1); }, "I.meshind");
 	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Other);
+	if (GalaxyBarrier::WantAfterDispatch()) GalaxyBarrier::Record(command, false);
 }
 
 void MeshIndirectRuntime::BarrierToIndirect(vk::CommandBuffer command) {

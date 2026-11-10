@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/host_gpu/renderer/galaxyBarrier.h"
 
 #include <cstring>
 
@@ -169,6 +170,7 @@ void PvIndirectRuntime::Push(vk::CommandBuffer command, const Prepared& prepared
 void PvIndirectRuntime::Dispatch(vk::CommandBuffer command) {
 	GpuLabel::With(command, GpuLabel::Class::PvIndirect, [&] { command.dispatch(1, 1, 1); }, "I.pvind");
 	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Other);
+	if (GalaxyBarrier::WantAfterDispatch()) GalaxyBarrier::Record(command, false);
 }
 
 void PvIndirectRuntime::BarrierToIndirect(vk::CommandBuffer command) {
