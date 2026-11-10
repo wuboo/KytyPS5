@@ -1522,9 +1522,10 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 			if (s459_file != nullptr) {
 				const auto& s459_hw   = buffer.GetRegisters();
 				const long  now_guest = static_cast<long>(FrameTiming::GuestFlips() + 1);
+				const uint64_t ps_hash =
+				    state.ps_active && state.ps_input_info.stage.module != nullptr ? state.ps_input_info.stage.module->info.shader_hash : 0;
 				std::fprintf(s459_file, "[s459-draw] present=%ld guest=%ld ps=0x%016" PRIx64 " idx=%u colors=%u", now_present, now_guest,
-				             state.ps_active ? state.ps_input_info.stage.program->shader_hash : 0, static_cast<unsigned>(draw.index_count),
-				             static_cast<unsigned>(state.color_count));
+				             ps_hash, static_cast<unsigned>(draw.index_count), static_cast<unsigned>(state.color_count));
 				for (uint32_t i = 0; i < state.color_count; i++) {
 					const auto& c  = state.color_info[i];
 					const auto& bc = s459_hw.GetBlendControl(c.target_slot);
