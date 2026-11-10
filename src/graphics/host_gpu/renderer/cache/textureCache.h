@@ -81,6 +81,10 @@ public:
 	void                        UpdateImage(ImageId id);
 	[[nodiscard]] ImageId       FindImageFromRange(uint64_t address, uint64_t size,
 	                                               bool ensure_valid = true);
+	// S530 diag. Images whose guest base is `address`. Prefers a render target of `width`×`height`.
+	// Does not materialize color metadata and does not write guest memory. `aliases` is the match count.
+	[[nodiscard]] ImageId       FindDccTarget(uint64_t address, uint32_t width, uint32_t height,
+	                                          int* aliases);
 	[[nodiscard]] vk::ImageView FindTexture(ImageId id, const ImageDesc& desc);
 	[[nodiscard]] vk::ImageView FindRenderTarget(ImageId id, const ImageDesc& desc);
 	[[nodiscard]] vk::ImageView FindDepthTarget(ImageId id, const ImageDesc& desc);

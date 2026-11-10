@@ -590,9 +590,150 @@ enum class CbColorMode : uint8_t {
 	DccDecompress      = 6,
 };
 
+// S530 DIAG. KYTY_DIAG_S530=1: on CB mode DccDecompress, if a color target is 0x514080000,
+// record the same Image::Download as S529 and discard the bytes. No FlushAndWait, no guest
+// write. The destination is a host download buffer, not another image's backing. Unset: one
+// getenv, then nothing. Not a fix. Not codegen.
+static void S530DccDownload(RenderContext& context, CommandBuffer& buffer) {
+	static const bool on = [] {
+		const char* value   = std::getenv("KYTY_DIAG_S530");
+		const bool  enabled = value != nullptr && std::strcmp(value, "1") == 0;
+		std::fprintf(stderr, "[s530-dc] cfg on=%d addr=0x514080000\n", enabled ? 1 : 0);
+		return enabled;
+	}();
+	if (!on) {
+		return;
+	}
+
+	const auto& hw   = buffer.GetRegisters();
+	int         slot = -1;
+	for (uint32_t i = 0; i < 8; i++) {
+		if (hw.GetRenderTarget(i).base.addr == 0x514080000ull) {
+			slot = static_cast<int>(i);
+			break;
+		}
+	}
+	static uint64_t dcc        = 0;
+	static uint64_t hit        = 0;
+	static uint64_t skip       = 0;
+	static uint64_t fail       = 0;
+	static uint64_t alias_max  = 0;
+	static long     last_guest = -1;
+	static bool     logged_buf = false;
+	dcc++;
+	const long guest = static_cast<long>(FrameTiming::GuestFlips() + 1);
+	const auto note  = [&] {
+		if (guest == last_guest) {
+			return;
+		}
+		last_guest = guest;
+		std::fprintf(stderr, "[s530-dc] guest=%ld dcc=%llu hit=%llu skip=%llu fail=%llu alias=%llu\n", guest,
+		             static_cast<unsigned long long>(dcc), static_cast<unsigned long long>(hit),
+		             static_cast<unsigned long long>(skip), static_cast<unsigned long long>(fail),
+		             static_cast<unsigned long long>(alias_max));
+	};
+	if (slot < 0) {
+		note();
+		return;
+	}
+
+	const auto& rt     = hw.GetRenderTarget(static_cast<uint32_t>(slot));
+	const auto  width  = rt.attrib2.width + 1u;
+	const auto  height = rt.attrib2.height + 1u;
+	int         aliases = 0;
+	const auto  id      = context.GetTextureCache().FindDccTarget(0x514080000ull, width, height, &aliases);
+	if (aliases > 0 && static_cast<uint64_t>(aliases) > alias_max) {
+		alias_max = static_cast<uint64_t>(aliases);
+	}
+	if (!id) {
+		fail++;
+		note();
+		return;
+	}
+	auto&      image  = context.GetTextureCache().GetImage(id);
+	const auto extent = image.info.extent;
+	uint32_t   layer  = rt.view.base_array_slice_index;
+	if (image.info.IsVolume()) {
+		layer = 0;
+	}
+	if (image.info.resources.levels == 0 ||
+	    (!image.info.IsVolume() && layer >= image.info.resources.layers)) {
+		fail++;
+		note();
+		return;
+	}
+	const auto mip    = std::min(rt.view.current_mip_level, image.info.resources.levels - 1u);
+	const auto copy_w = std::max(extent.width >> mip, 1u);
+	const auto copy_h = std::max(extent.height >> mip, 1u);
+	const auto bytes  = DiagDump::RtLayoutFor(static_cast<int>(image.info.pixel_format)).bytes;
+	if (image.backing.image == nullptr || image.info.samples != 1 || bytes == 0 || copy_w == 0 || copy_h == 0) {
+		fail++;
+		note();
+		return;
+	}
+	const uint64_t size = static_cast<uint64_t>(copy_w) * copy_h * bytes;
+	if (size == 0 || size > 80ull * 1024ull * 1024ull) {
+		fail++;
+		note();
+		return;
+	}
+
+	struct Slot {
+		std::unique_ptr<Buffer> buf;
+		uint64_t                tick = 0;
+	};
+	static std::vector<Slot> pool;
+	auto&                    scheduler = context.GetCommandScheduler();
+	Slot*                    chosen    = nullptr;
+	for (auto& candidate: pool) {
+		if (candidate.buf && candidate.buf->Size() >= size && scheduler.IsFree(candidate.tick)) {
+			chosen = &candidate;
+			break;
+		}
+	}
+	if (chosen == nullptr) {
+		if (pool.size() >= 32) {
+			skip++;
+			note();
+			return;
+		}
+		pool.emplace_back();
+		chosen = &pool.back();
+	}
+	if (!chosen->buf || chosen->buf->Size() < size) {
+		chosen->buf = std::make_unique<Buffer>(context.GetGraphics(), scheduler, MemoryUsage::Download, 0,
+		                                       vk::BufferUsageFlagBits::eTransferDst, size);
+		if (!logged_buf) {
+			logged_buf = true;
+			std::fprintf(stderr, "[s530-dc] buf coherent=%d bytes=%llu %ux%u mip=%u dcc_en=%d dcc_addr=0x%016" PRIx64
+			                     " aliases=%d\n",
+			             chosen->buf->IsCoherent() ? 1 : 0, static_cast<unsigned long long>(size), copy_w, copy_h, mip,
+			             rt.info.dcc_compression_enable ? 1 : 0, rt.dcc_addr.addr, aliases);
+		}
+	}
+	vk::BufferImageCopy region {};
+	region.imageSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
+	region.imageSubresource.mipLevel       = mip;
+	region.imageSubresource.baseArrayLayer = layer;
+	region.imageSubresource.layerCount     = 1;
+	region.imageExtent                     = vk::Extent3D {copy_w, copy_h, 1};
+	image.Download(std::span {&region, 1}, chosen->buf->Handle(), 0, size);
+	chosen->tick = scheduler.CurrentTick();
+	hit++;
+	if (hit <= 20 || (hit % 64) == 0) {
+		std::fprintf(stderr, "[s530-dc] copy guest=%ld hit=%llu %ux%u mip=%u layer=%u\n", guest,
+		             static_cast<unsigned long long>(hit), copy_w, copy_h, mip, layer);
+	}
+	note();
+}
+
 bool RenderExecutor::ConsumeMetadataColorOperation(CommandBuffer& buffer) {
 	const auto& ctx  = buffer.GetRegisters();
 	const auto  mode = ctx.GetColorControl().mode;
+	if (mode == static_cast<uint8_t>(CbColorMode::DccDecompress)) {
+		S530DccDownload(m_context, buffer);
+		return true;
+	}
 	if (mode == static_cast<uint8_t>(CbColorMode::EliminateFastClear)) {
 		// FCE can precede any ordinary draw. Discover the target to materialize its native
 		// clear metadata before the expanded image is sampled.
@@ -605,9 +746,9 @@ bool RenderExecutor::ConsumeMetadataColorOperation(CommandBuffer& buffer) {
 		}
 		return true;
 	}
-	// Metadata/decompression shaders must not export colors into the expanded image.
-	return mode == static_cast<uint8_t>(CbColorMode::FmaskDecompress) ||
-	       mode == static_cast<uint8_t>(CbColorMode::DccDecompress);
+	// Fmask decompression must not export colors into the expanded image. DccDecompress
+	// returned above, after the S530 download.
+	return mode == static_cast<uint8_t>(CbColorMode::FmaskDecompress);
 }
 
 // vertex_offset is the first vertex of non-indexed draws.

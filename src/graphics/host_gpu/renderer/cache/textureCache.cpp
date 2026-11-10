@@ -1678,6 +1678,37 @@ ImageId TextureCache::FindImageFromRange(uint64_t address, uint64_t size, bool e
 	return selected;
 }
 
+ImageId TextureCache::FindDccTarget(uint64_t address, uint32_t width, uint32_t height, int* aliases) {
+	std::scoped_lock lock {m_lock};
+	ImageId          best {};
+	int              best_score = -1;
+	int              matches    = 0;
+	for (const auto id: FindImagesInRegion(address, 1)) {
+		const auto& image = m_slot_images[id];
+		if (image.depth_id || image.info.data.address != address || image.backing.image == nullptr ||
+		    image.info.samples != 1) {
+			continue;
+		}
+		matches++;
+		int score = 0;
+		if (image.usage.render_target) {
+			score += 4;
+		}
+		if (width != 0 && height != 0 && image.info.extent.width == width &&
+		    image.info.extent.height == height) {
+			score += 2;
+		}
+		if (score > best_score) {
+			best       = id;
+			best_score = score;
+		}
+	}
+	if (aliases != nullptr) {
+		*aliases = matches;
+	}
+	return best;
+}
+
 vk::ImageView TextureCache::FindTexture(ImageId id, const ImageDesc& desc) {
 	std::scoped_lock lock {m_lock};
 	auto&            image = m_slot_images[id];
