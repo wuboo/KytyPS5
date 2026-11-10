@@ -20118,9 +20118,6 @@ public:
     vertex_shader.info.stage = ShaderType::Vertex;
     vertex_shader.info.info.vertex_fetch_components[0] = 2;
     vertex_shader.info.info.vertex_fetch_components[1] = packed_vertex_color ? 3 : 4;
-    // No narrower host format covers the components the stage reads from either attribute.
-    vertex_shader.vertex_formats = {VulkanFormat(Prospero::BufferFormat::k32_32Float),
-                                    VulkanFormat(color_format)};
     ShaderModule pixel_shader{.id = 2, .module = CreateShaderModule(name, fragment.spirv)};
     pixel_shader.info.stage = ShaderType::Pixel;
     pixel_shader.info.info = fragment.program.info;

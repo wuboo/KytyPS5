@@ -40,7 +40,7 @@ namespace {
 std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo input_info,
                                   uint32_t push_data_start_dword, const Profile& profile,
                                   bool emit_debug_info, const VertexCaptureInfo* vertex_capture,
-                                  const PvStoreInfo* pv_store) {
+                                  const PvStoreInfo* pv_store, uint32_t push_data_ceiling) {
 	using namespace Emitter;
 
 	if (!program.srt_plan_complete || !program.resource_tracking_complete ||
@@ -82,7 +82,7 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 		state.lane_count =
 		    program.wave_size == 64 && vertex_capture->host_subgroup_size == 32 ? 2u : 1u;
 	}
-	DefineModule(state);
+	DefineModule(state, push_data_ceiling);
 	EmitProgram(state);
 	state.builder.AddEntryPoint(vertex_capture != nullptr
 	                                ? spv::ExecutionModelGLCompute

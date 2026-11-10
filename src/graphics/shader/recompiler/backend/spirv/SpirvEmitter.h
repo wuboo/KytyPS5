@@ -75,7 +75,8 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
                                   const Profile& profile = DefaultProfile,
                                   bool emit_debug_info = false,
                                   const VertexCaptureInfo* vertex_capture = nullptr,
-                                  const PvStoreInfo* pv_store = nullptr);
+                                  const PvStoreInfo* pv_store = nullptr,
+                                  uint32_t push_data_ceiling = IR::PushData::DwordCount);
 
 } // namespace Libs::Graphics::ShaderRecompiler::Spirv
 

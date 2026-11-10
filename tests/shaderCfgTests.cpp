@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/perVertexPrototype.h"
 #include "graphics/host_gpu/renderer/perVertexVsStoreRuntime.h"
+#include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
@@ -144,7 +145,8 @@ TestCompileResult RecompileForTest(
     const ShaderRecompiler::CompileOptions &options,
     ShaderRecompiler::IR::SrtMemoryReader read_memory = nullptr,
     void *read_memory_data = nullptr, uint32_t push_data_start_dword = 0,
-    bool min_lod_remap = false) {
+    bool min_lod_remap = false,
+    uint32_t push_data_ceiling = ShaderRecompiler::IR::PushData::DwordCount) {
   auto translated = ShaderRecompiler::TranslateProgram(code, options);
   auto plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
   ShaderRecompiler::IR::ResourceSnapshot resources;
@@ -159,7 +161,8 @@ TestCompileResult RecompileForTest(
             plan, runtime, resources, specialization),
         "test shader resources did not materialize");
   auto compiled = ShaderRecompiler::CompileProgram(
-      std::move(translated), options, specialization, push_data_start_dword);
+      std::move(translated), options, specialization, push_data_start_dword,
+      push_data_ceiling);
   return {std::move(compiled.spirv), std::move(compiled.decoded_dump),
           std::move(compiled.ir_dump), std::move(compiled.program),
           std::move(resources)};
@@ -7819,6 +7822,10 @@ void TestMeshExportStorage() {
     CheckSpirvBinaryValidates(result.spirv);
     const auto &layout = result.program.bindings;
     Check(layout.UsesPushData() == (push_data_start == PushData::MeshDrawDwordCount) &&
+              layout.push_data_start_dword ==
+                  (push_data_start == PushData::MeshDrawDwordCount
+                       ? PushData::DwordCount - layout.ShaderDataDwords()
+                       : PushData::NoStart) &&
               layout.descriptor_counts[static_cast<size_t>(ShaderRecompiler::IR::DescriptorBindingKind::Buffers)] == 1,
           "mesh shader did not retain its user-data placement and buffer offset");
     const auto reg = std::ranges::find(result.program.info.user_data_registers, 13u);
@@ -7830,7 +7837,7 @@ void TestMeshExportStorage() {
       const auto operand =
           std::string(layout.UsesPushData() ? "vsharp" : "shader_data") +
           " %uint_0 %uint_" +
-          std::to_string(dword + (layout.UsesPushData() ? push_data_start : 0u));
+          std::to_string(dword + (layout.UsesPushData() ? layout.push_data_start_dword : 0u));
       Check(SpirvSourceHasInstructionUsing(source, "OpAccessChain", operand.c_str()),
             "mesh user SGPR or buffer offset loaded from the wrong storage");
     }
@@ -8180,6 +8187,27 @@ void TestEmbeddedFetchPreservesSharedScalarLoad() {
 void TestEmbeddedVertexFormatSwizzle() {
   using namespace ShaderRecompiler;
   using namespace ShaderRecompiler::IR;
+  const auto signature = Format::VertexFetchSignature(0x4022c);
+  Check(signature == Format::VertexFetchSignature(0x1722c) &&
+            signature == Format::VertexFetchSignature(0x42fac) &&
+            signature == Format::VertexFetchSignature(0x4a3ac),
+        "Vulkan default channels fragmented the vertex fetch signature");
+  Check(signature != Format::VertexFetchSignature((66u << 12u) | DstSel(4, 5, 6, 1)) &&
+            signature != Format::VertexFetchSignature((64u << 12u) | DstSel(1, 5, 0, 1)) &&
+            signature != Format::VertexFetchSignature((64u << 12u) | DstSel(4, 5, 0, 0)),
+        "vertex fetch signature merged a constant into a memory read");
+  Check(Format::VertexFetchSignature((62u << 12u) | DstSel(4, 5, 0, 1)) !=
+                Format::VertexFetchSignature((64u << 12u) | DstSel(4, 5, 0, 1)) &&
+            Format::VertexFetchSignature((63u << 12u) | DstSel(4, 5, 0, 1)) !=
+                Format::VertexFetchSignature((64u << 12u) | DstSel(4, 5, 0, 1)) &&
+            Format::VertexFetchSignature((62u << 12u) | DstSel(4, 5, 0, 1)) !=
+                Format::VertexFetchSignature((63u << 12u) | DstSel(4, 5, 0, 1)),
+        "vertex fetch signature merged float, uint and sint fetches");
+  for (const uint32_t word : {(113u << 12u) | DstSel(4, 5, 6, 7), (121u << 12u) | DstSel(4, 5, 0, 1),
+                              (64u << 12u) | DstSel(2, 5, 0, 1), (64u << 12u) | DstSel(4, 3, 0, 1)}) {
+    Check(Format::VertexFetchSignature(word) == (word & 0x7ffffu),
+          "raw formats and invalid selectors must keep the raw word");
+  }
   struct Case {
     Prospero::BufferFormat format;
     uint32_t swizzle, opcode, components, source_width;
@@ -8189,23 +8217,23 @@ void TestEmbeddedVertexFormatSwizzle() {
   const Case cases[] = {
       {Prospero::BufferFormat::k32_32_32Float, DstSel(4, 5, 6, 7), 3, 4, 3,
        {0x3e800000, 0x3f000000, 0x3f400000, 0x3e800000}},
-      {Prospero::BufferFormat::k32_32_32Float, DstSel(4, 5, 6, 1), 3, 4, 3,
+      {Prospero::BufferFormat::k32_32_32Float, DstSel(4, 5, 6, 1), 3, 4, 4,
        {0x3e800000, 0x3f000000, 0x3f400000, 0x3f800000}},
       {Prospero::BufferFormat::k32_32_32_32UInt, DstSel(7, 6, 5, 0), 3, 4, 4,
        {0x40000000, 0x3f400000, 0x3f000000, 0}},
       {Prospero::BufferFormat::k32_32_32_32UInt, DstSel(7, 0, 0, 0), 0, 1, 4,
        {0x40000000, 0, 0, 0}},
-      {Prospero::BufferFormat::k32UInt, DstSel(1, 0, 1, 0), 3, 4, 0,
+      {Prospero::BufferFormat::k32UInt, DstSel(1, 0, 1, 0), 3, 4, 2,
        {1, 0, 1, 0}},
-      {Prospero::BufferFormat::k32Float, DstSel(1, 0, 1, 0), 3, 4, 0,
+      {Prospero::BufferFormat::k32Float, DstSel(1, 0, 1, 0), 3, 4, 2,
        {0x3f800000, 0, 0x3f800000, 0}},
       {Prospero::BufferFormat::k32_32_32_32Float, DstSel(7, 6, 5, 4), 0x0e, 4, 4,
        {0x3e800000, 0x3f000000, 0x3f400000, 0x40000000}},
-      {Prospero::BufferFormat::k32UInt, DstSel(7, 6, 5, 4), 3, 4, 1,
+      {Prospero::BufferFormat::k32UInt, DstSel(7, 6, 5, 4), 3, 4, 4,
        {0x3e800000, 0, 0, 1}, Prospero::VertexAttribFormat::k32UInt},
-      {Prospero::BufferFormat::k32_32Float, DstSel(7, 6, 5, 4), 3, 4, 2,
+      {Prospero::BufferFormat::k32_32Float, DstSel(7, 6, 5, 4), 3, 4, 4,
        {0x3e800000, 0x3f000000, 0, 0x3f800000}, Prospero::VertexAttribFormat::k32_32Float},
-      {Prospero::BufferFormat::k32_32_32Float, DstSel(7, 6, 5, 4), 3, 4, 3,
+      {Prospero::BufferFormat::k32_32_32Float, DstSel(7, 6, 5, 4), 3, 4, 4,
        {0x3e800000, 0x3f000000, 0x3f400000, 0x3f800000},
        Prospero::VertexAttribFormat::k32_32_32Float},
       {Prospero::BufferFormat::k32_32_32_32Float, DstSel(7, 6, 5, 4), 3, 4, 4,
@@ -8266,7 +8294,13 @@ void TestEmbeddedVertexFormatSwizzle() {
     auto program = Frontend::TranslateProgram(decoded, CFG::BuildGraph(decoded), options);
     Check(program.info.vertex_fetch_components[0] == test.source_width,
           "vertex fetch width follows destination VGPR count instead of selected source channels");
-    const uint32_t source[] = {0x3e800000, 0x3f000000, 0x3f400000, 0x40000000};
+    uint32_t source[] = {0x3e800000, 0x3f000000, 0x3f400000, 0x40000000};
+    const auto format = Format::GetFormatInfo(input.resources[0].Format());
+    for (uint32_t component = format.component_count; component < 4; ++component) {
+      source[component] = Format::FormattedConstantBits(
+          format, component == 3 ? Format::FormattedSourceKind::One
+                                 : Format::FormattedSourceKind::Zero);
+    }
     for (auto *block : program.blocks) {
       for (auto &inst : *block) {
         if (inst.GetOpcode() == ValueOpcode::GetAttribute) {
@@ -12843,6 +12877,68 @@ void TestGraphicsPushConstantPlacement() {
   CheckSpirvBinaryValidates(spill.spirv);
 }
 
+void TestVertexPushConstantPlacement() {
+  using ShaderRecompiler::IR::PushData;
+  constexpr uint32_t PrefixDwords = PushData::GraphicsDrawDwords(false, true);
+  constexpr uint32_t FirstPixelDwords = 2;
+  constexpr uint32_t SecondPixelDwords = 7;
+  const uint32_t shader[] = {
+      EncodeVop1(0x01, 0, 0),
+      EncodeVop1(0x01, 1, 1),
+      EncodeVop1(0x01, 2, 2),
+      EncodeVop1(0x01, 3, 3),
+      EncodeExp0(0x0c, 0xf),
+      EncodeExp1(0, 1, 2, 3),
+      0xbf810000u,
+  };
+  const auto options = MakeCompileOptions(ShaderType::Vertex);
+  const auto first = RecompileForTest(shader, options, nullptr, nullptr,
+                                       PrefixDwords + FirstPixelDwords);
+  const auto second = RecompileForTest(shader, options, nullptr, nullptr,
+                                        PrefixDwords + SecondPixelDwords);
+  const auto size = first.program.bindings.ShaderDataDwords();
+  Check(size != 0 && first.program.bindings.UsesPushData() &&
+            first.program.bindings.push_data_start_dword == PushData::DwordCount - size &&
+            first.program.bindings == second.program.bindings && first.spirv == second.spirv,
+        "vertex shader placement depended on the paired pixel data size");
+  CheckSpirvBinaryValidates(first.spirv);
+  constexpr uint32_t Ceiling = 16;
+  const auto exact = RecompileForTest(shader, options, nullptr, nullptr, Ceiling - size, false, Ceiling);
+  const auto spill = RecompileForTest(shader, options, nullptr, nullptr, Ceiling - size + 1, false, Ceiling);
+  Check(exact.program.bindings.push_data_start_dword == Ceiling - size &&
+            !spill.program.bindings.UsesPushData(),
+        "vertex shader ignored the preceding vertex stage's push-data ceiling");
+  CheckSpirvBinaryValidates(exact.spirv);
+  CheckSpirvBinaryValidates(spill.spirv);
+}
+
+void TestGraphicsPushConstantFit() {
+  using ShaderRecompiler::IR::PushData;
+  for (uint32_t prefix = 0; prefix <= PushData::DwordCount; prefix++) {
+    for (uint32_t ps = 0; ps <= PushData::DwordCount; ps++) {
+      const bool ps_fits = ps != 0 && prefix + ps <= PushData::DwordCount;
+      const auto floor = prefix + (ps_fits ? ps : 0u);
+      const auto ps_start = ps_fits ? prefix : PushData::NoStart;
+      Check(PushData::StartFor(ShaderType::Pixel, prefix, ps) == ps_start &&
+                PushData::StartFor(ShaderType::Compute, prefix, ps) == ps_start,
+            "bottom-up shader data changed push/spill selection");
+      for (uint32_t used = 0; used <= PushData::DwordCount; used++) {
+        const auto ceiling = PushData::DwordCount - used;
+        for (uint32_t vs = 0; vs <= PushData::DwordCount; vs++) {
+          const bool fits = vs != 0 && floor + used + vs <= PushData::DwordCount;
+          const auto start = fits ? ceiling - vs : PushData::NoStart;
+          for (const auto stage : {ShaderType::Vertex, ShaderType::Mesh, ShaderType::Local,
+                                   ShaderType::TessellationControl,
+                                   ShaderType::TessellationEvaluation}) {
+            Check(PushData::StartFor(stage, floor, vs, ceiling) == start,
+                  "top-down shader data changed push/spill selection or placement");
+          }
+        }
+      }
+    }
+  }
+}
+
 void TestCapturedBufferLoadUbyteD16Decode() {
   namespace Decoder = ShaderRecompiler::Decoder;
   const uint32_t code[] = {0xe080e000u, 0x80040003u};
@@ -14399,6 +14495,8 @@ int main(int argc, char** argv) {
   TestComputeLdsAllocationIdentity();
   TestPixelProgramCacheBindingIdentity();
   TestGraphicsPushConstantPlacement();
+  TestVertexPushConstantPlacement();
+  TestGraphicsPushConstantFit();
   TestCapturedBufferLoadUbyteD16Decode();
   TestCapturedGlobalLoadShortD16HiDecode();
   TestFlatLoadShortD16HiLlvmEncodingAnchor();

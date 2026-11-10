@@ -89,8 +89,9 @@ struct PipelineVertexInputState {
 		uint8_t  instance = 0;
 	};
 	struct Attribute {
-		uint32_t offset  = 0;
-		uint8_t  binding = 0;
+		uint32_t   offset  = 0;
+		vk::Format format  = vk::Format::eUndefined;
+		uint8_t    binding = 0;
 	};
 
 	std::array<Binding, ShaderVertexInputInfo::RES_MAX>   bindings {};
@@ -123,8 +124,6 @@ struct ShaderModule {
 	ShaderRecompiler::IR::CompiledShaderInfo     info;
 	ShaderRecompiler::IR::ResourceSpecialization specialization;
 	std::vector<uint32_t>                        function_code;
-	// VS or LS: the host format of each vertex input attribute.
-	std::vector<vk::Format>                      vertex_formats;
 	// Rectangle-list PS: the parameters it reads.
 	std::vector<RectListParameter>               rect_parameters;
 	// Indirect mesh draw: a task shader reads the records and launches the groups.
@@ -283,7 +282,7 @@ private:
 		bool RefreshCallSource(const ShaderRecompiler::IR::SrtRuntime& runtime);
 		template <bool HasCalls>
 		ShaderModule* FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
-		                         uint32_t                                push_data_cursor);
+		                         uint32_t push_data_cursor, uint32_t push_data_ceiling);
 	};
 
 	struct ProgramKey {
@@ -326,10 +325,12 @@ private:
 
 	template <typename InputInfo>
 	const ShaderModule* GetProgram(const ShaderParams& params, InputInfo& input_info,
-	                               uint32_t& push_data_cursor);
+	                               uint32_t& push_data_cursor,
+	                               uint32_t push_data_ceiling = ShaderRecompiler::IR::PushData::DwordCount);
 	template <typename InputInfo>
 	const ShaderModule* GetProgramOffThread(const ShaderParams& params, InputInfo& input_info, uint32_t& push_data_cursor,
-	                                        ShaderRecompiler::IR::ResourceSnapshot& resources, uint32_t& fail);
+	                                        ShaderRecompiler::IR::ResourceSnapshot& resources, uint32_t& fail,
+	                                        uint32_t push_data_ceiling = ShaderRecompiler::IR::PushData::DwordCount);
 	template <bool OffThread>
 	bool GraphicsProgramsImpl(const HW::Context& context, const HW::UserConfig& user_config, const HW::Shader& shaders,
 	                          std::span<ShaderVertexInputInfo, 3> vertex_info, ShaderPixelInputInfo& pixel_info, bool& ps_active_out,
@@ -337,7 +338,7 @@ private:
 	ShaderModule& CompileModule(Program& program, const ProgramKey& key,
 	                            ShaderRecompiler::CompileOptions  options,
 	                            ShaderRecompiler::TranslateResult translated,
-	                            uint32_t                          push_data_cursor);
+	                            uint32_t push_data_cursor, uint32_t push_data_ceiling);
 	void InitializeDriverCache();
 	// Marks the driver cache changed and, once per interval, has the store thread write it.
 	void CheckpointDriverCache();
