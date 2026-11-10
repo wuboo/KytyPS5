@@ -15,11 +15,9 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/presentation/cpPhaseScope.h"
-#include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
-#include "graphics/host_gpu/renderer/diagDump.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
@@ -34,7 +32,6 @@
 
 #include <algorithm>
 #include <atomic>
-#include <cstdio>
 #include <bit>
 #include <fmt/format.h>
 #include <limits>
@@ -722,35 +719,6 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 			continue;
 		}
 		auto binding = ResolveTexture(program.info.images[i], snapshot.images[i]);
-		// S519: diag_tex was unhooked when ResolveTexture lost its ps/slot arguments. Queue the host
-		// image only while the control file lists this pixel shader and slot (WantsTex is false otherwise).
-		if (program.stage == ShaderType::Pixel && binding.image_id && DiagDump::WantsTex(program.shader_hash, i)) {
-			auto        descriptor = DecodeNativeDescriptor<ShaderTextureResource>(snapshot.images[i]);
-			const auto& image      = m_context.GetTextureCache().GetImage(binding.image_id);
-			DiagDump::TexInfo info;
-			info.flip          = FrameTiming::GuestFlips() + 1;
-			info.ps            = program.shader_hash;
-			info.slot          = i;
-			info.addr          = descriptor.Base40();
-			info.guest_format  = static_cast<uint32_t>(descriptor.Format());
-			info.numeric_class = static_cast<uint32_t>(program.info.images[i].numeric_class);
-			info.vk_format     = static_cast<uint32_t>(image.info.pixel_format);
-			info.width         = static_cast<uint32_t>(descriptor.Width5()) + 1u;
-			info.height        = static_cast<uint32_t>(descriptor.Height5()) + 1u;
-			info.depth         = static_cast<uint32_t>(descriptor.Depth()) + 1u;
-			info.from_cache    = image.backing.image != nullptr;
-			info.gpu_modified  = image.IsGpuModified();
-			info.cpu_dirty     = image.IsCpuDirty();
-			info.uma           = "win";
-			std::copy(std::begin(descriptor.fields), std::begin(descriptor.fields) + 8, info.dwords);
-			if (const char* path = std::getenv("KYTY_DIAG_S457_RTFILE"); path != nullptr && path[0] != '\0') {
-				if (FILE* out = std::fopen(path, "a")) {
-					std::fprintf(out, "%s\n", DiagDump::TexDescribe(info).c_str());
-					std::fclose(out);
-				}
-			}
-			DiagDump::AddTexRequest({binding.image_id, info});
-		}
 		BindImage(binding.image_id, binding.desc.type == TextureCache::BindingType::Storage);
 		binding.mip_views.swap(prepared.images[i].mip_views);
 		binding.mip_views.clear();
