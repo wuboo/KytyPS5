@@ -220,7 +220,15 @@ static void ReportTextures(uint64_t flip, const char* dir, const std::string& la
 		}
 		const auto values = RtDecode(layout, t.data.data(), texels);
 		const auto stats  = RtComputeStats(values, layout.channels);
-		LOGF("%s ps=%016" PRIx64 " slot=%u\n", TexStats(layout, t.width, t.height, values).c_str(), info.ps, info.slot);
+		const auto line   = TexStats(layout, t.width, t.height, values);
+		LOGF("%s ps=%016" PRIx64 " slot=%u\n", line.c_str(), info.ps, info.slot);
+		// Bench runs with --printf-direction Silent, so the numbers also go to KYTY_DIAG_S457_RTFILE.
+		if (const char* path = std::getenv("KYTY_DIAG_S457_RTFILE"); path != nullptr && path[0] != '\0') {
+			if (FILE* out = std::fopen(path, "a")) {
+				std::fprintf(out, "%s ps=%016" PRIx64 " slot=%u\n", line.c_str(), info.ps, info.slot);
+				std::fclose(out);
+			}
+		}
 		if (dir == nullptr) continue;
 		const auto ppm_path = TexDumpPath(dir, label, flip, info.ps, info.slot, "ppm");
 		const auto raw_path = TexDumpPath(dir, label, flip, info.ps, info.slot, "raw");
