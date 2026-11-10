@@ -1323,6 +1323,41 @@ static void S522LogImage(const char* when, const char* role, uint32_t slot, uint
 	               in_n != 0 ? in_sum / static_cast<double>(in_n) : 0.0, out_n, out_n != 0 ? out_sum / static_cast<double>(out_n) : 0.0);
 }
 
+// First graphics draw of the hot input 0x514080000 in a listed present frame. The copy is the
+// image after that frame's clears and compute, before this draw. Once per present, eight times.
+static void S522ProbeHot(RenderContext& context, const DrawRenderState& state) {
+	if (!S459Log::Hit()) return;
+	const RenderColorInfo* color = nullptr;
+	for (uint32_t i = 0; i < state.color_count; i++) {
+		if (state.color_info[i].desc.info.data.address == 0x514080000ull) color = &state.color_info[i];
+	}
+	if (color == nullptr) return;
+	static long seen = -1;
+	const long  present = S459Log::Present();
+	if (present == seen) return;
+	seen = present;
+	static int n = 0;
+	if (n >= 8) return;
+	n++;
+	const auto extent = color->Extent();
+	context.GetCommandScheduler().EndRendering();
+	std::vector<std::unique_ptr<Buffer>> buffers;
+	std::vector<DiagDump::Target>        targets;
+	if (!DumpRtCopy(context, color->image_id, color->guest_mip_level, color->guest_array_layer, extent, 0, buffers, targets) ||
+	    targets.empty()) {
+		S522LogImage("hot-before", "color", color->target_slot, color->desc.info.data.address, 0, extent.width, extent.height, nullptr, 0,
+		             false, 0, 0, 0, 0);
+		return;
+	}
+	context.GetCommandScheduler().FlushAndWait();
+	buffers[0]->Invalidate(0, buffers[0]->Size());
+	const auto mapped = buffers[0]->Mapped();
+	const uint8_t* data = mapped.size() >= targets[0].data.size() ? mapped.data() : nullptr;
+	const size_t nbytes = data != nullptr ? targets[0].data.size() : mapped.size();
+	S522LogImage("hot-before", "color", color->target_slot, color->desc.info.data.address, targets[0].vk_format, targets[0].width,
+	             targets[0].height, data, nbytes, false, 0, 0, 0, 0);
+}
+
 static void S522Probe(RenderContext& context, CommandBuffer& buffer, const DrawRenderState& state, const PreparedBindings* inputs,
                       uint32_t index_count, const char* when) {
 	if (!S459Log::Hit() || !state.ps_active || state.ps_input_info.stage.module == nullptr) return;
@@ -1546,6 +1581,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	// point onward, every operation targets the current command buffer and cannot touch guest
 	// memory. S522 reads the target before that capture, so the draw itself lands in the buffer
 	// begun after the readback submit.
+	S522ProbeHot(m_context, state);
 	S522Probe(m_context, buffer, state, state.ps_active ? &bindings.pixel : nullptr, draw.index_count, "before");
 	auto vk_buffer = buffer.Handle();
 	if (mesh_prepared.ok) {
