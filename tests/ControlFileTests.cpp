@@ -5,7 +5,11 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#ifdef _WIN32
+#include <process.h>
+#else
 #include <unistd.h>
+#endif
 
 namespace CF = Common::ControlFile;
 
@@ -183,7 +187,12 @@ void TestPublishAndPoll() {
 	Check(!CF::Publish(CF::Resolve(file, 101)) && CF::Current().gen == gen, "unchanged settings bumped the generation");
 	Check(CF::Publish(CF::Resolve(file, 6605)) && CF::Current().gen == gen + 1, "changed settings not published");
 
-	const auto dir  = std::filesystem::temp_directory_path() / ("kyty-control-" + std::to_string(::getpid()));
+#ifdef _WIN32
+	const auto pid = _getpid();
+#else
+	const auto pid = ::getpid();
+#endif
+	const auto dir = std::filesystem::temp_directory_path() / ("kyty-control-" + std::to_string(pid));
 	std::filesystem::create_directories(dir);
 	const auto path = dir / "control.txt";
 	{ std::ofstream(path) << "skip_cs=11\n"; }
