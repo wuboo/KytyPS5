@@ -1192,6 +1192,8 @@ static bool DumpRtCopy(RenderContext& context, ImageId id, uint32_t mip, uint32_
 		return false;
 	}
 	const uint64_t size = static_cast<uint64_t>(extent.width) * extent.height * bytes;
+	// A 4K RGBA16F target is ~66 MB. Anything larger is a bad extent, not a frame we can copy.
+	if (size == 0 || size > 80ull * 1024ull * 1024ull) return false;
 	buffers.push_back(std::make_unique<Buffer>(context.GetGraphics(), context.GetCommandScheduler(), MemoryUsage::Download, 0,
 	                                           vk::BufferUsageFlagBits::eTransferDst, size));
 	vk::BufferImageCopy region {};

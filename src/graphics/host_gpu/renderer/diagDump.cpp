@@ -223,7 +223,7 @@ static void ReportTextures(uint64_t flip, const char* dir, const std::string& la
 		const auto line   = TexStats(layout, t.width, t.height, values);
 		LOGF("%s ps=%016" PRIx64 " slot=%u\n", line.c_str(), info.ps, info.slot);
 		// Bench runs with --printf-direction Silent, so the numbers also go to KYTY_DIAG_S457_RTFILE.
-		if (const char* path = std::getenv("KYTY_DIAG_S457_RTFILE"); path != nullptr && path[0] != '\0') {
+		if (const char* path = std::getenv("KYTY_DIAG_S459_FILE"); path != nullptr && path[0] != '\0') {
 			if (FILE* out = std::fopen(path, "a")) {
 				std::fprintf(out, "%s ps=%016" PRIx64 " slot=%u\n", line.c_str(), info.ps, info.slot);
 				std::fclose(out);

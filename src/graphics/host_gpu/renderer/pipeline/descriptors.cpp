@@ -743,7 +743,7 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 			info.cpu_dirty     = image.IsCpuDirty();
 			info.uma           = "win";
 			std::copy(std::begin(descriptor.fields), std::begin(descriptor.fields) + 8, info.dwords);
-			if (const char* path = std::getenv("KYTY_DIAG_S457_RTFILE"); path != nullptr && path[0] != '\0') {
+			if (const char* path = std::getenv("KYTY_DIAG_S459_FILE"); path != nullptr && path[0] != '\0') {
 				if (FILE* out = std::fopen(path, "a")) {
 					std::fprintf(out, "%s\n", DiagDump::TexDescribe(info).c_str());
 					std::fclose(out);
