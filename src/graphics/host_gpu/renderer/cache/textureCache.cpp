@@ -1138,6 +1138,23 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 	const auto& view  = desc.view_info;
 	const auto note   = [&](const char* why, uint32_t slice = 0, uint32_t code = 0) {
 		if (!S459Log::Hit()) return;
+		// skip-checked fires on every later bind of a DCC image. One line per image per present frame.
+		if (why[0] == 's' && why[5] == 'c') {
+			static long     seen_present = -1;
+			static int      seen_n       = 0;
+			static uint64_t seen_addr[2048];
+			const long      present = S459Log::Present();
+			const uint64_t  addr    = desc.info.data.address;
+			if (present != seen_present) {
+				seen_present = present;
+				seen_n       = 0;
+			}
+			for (int i = 0; i < seen_n; i++) {
+				if (seen_addr[i] == addr) return;
+			}
+			if (seen_n >= 2048) return;
+			seen_addr[seen_n++] = addr;
+		}
 		S459Log::Linef("[s459-clear] present=%ld guest=%ld kind=fast why=%s addr=0x%016" PRIx64 " meta=0x%016" PRIx64
 		               " slice=%u code=%u %ux%u fmt=%d\n",
 		               S459Log::Present(), S459Log::Guest(), why, desc.info.data.address, range.address, slice, code,
