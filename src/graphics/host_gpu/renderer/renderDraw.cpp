@@ -1437,6 +1437,347 @@ static void S522Probe(RenderContext& context, CommandBuffer& buffer, const DrawR
 	}
 }
 
+// S526 DIAG. Between the second apply-gpu and the copy 3bf81ef1, mean R of 0x514080000
+// goes from ~0 to ~164 (S525). Sample that target every KYTY_DIAG_S526_STEP draws (default 4)
+// until the first present whose mean crosses 1, then stop. KYTY_DIAG_S526_ORD=lo-hi samples
+// every draw in that ordinal window and logs the draw's inputs. Both names are non-codegen.
+struct S526Pix {
+	bool     ok    = false;
+	double   mean  = 0;
+	double   minv  = 0;
+	double   maxv  = 0;
+	double   hot1  = 0;
+	uint32_t nan_n = 0;
+	uint32_t inf_n = 0;
+	float    pt[5] {};
+	int      maxx = 0;
+	int      maxy = 0;
+};
+
+static S526Pix S526PixOf(const DiagDump::Target& t, const uint8_t* data, size_t nbytes) {
+	S526Pix pix;
+	const auto layout = DiagDump::RtLayoutFor(t.vk_format);
+	const size_t count = static_cast<size_t>(t.width) * t.height;
+	if (layout.channels == 0 || layout.bytes == 0 || t.width == 0 || t.height == 0 || count > 8u * 1024u * 1024u ||
+	    data == nullptr || nbytes < count * layout.bytes) {
+		return pix;
+	}
+	const auto values = DiagDump::RtDecode(layout, data, count);
+	const auto stats  = DiagDump::RtComputeStats(values, layout.channels);
+	const uint32_t ch = layout.channels;
+	pix.mean          = stats.mean[0];
+	pix.minv          = static_cast<double>(stats.min[0]);
+	pix.maxv          = static_cast<double>(stats.max[0]);
+	uint64_t hot      = 0;
+	bool     any      = false;
+	float    best     = 0;
+	const uint32_t xs[5] = {t.width / 2u, t.width / 4u, t.width - t.width / 4u, t.width / 2u, t.width / 2u};
+	const uint32_t ys[5] = {t.height / 2u, t.height / 2u, t.height / 2u, t.height / 4u, t.height - t.height / 4u};
+	for (int k = 0; k < 5; k++) {
+		const uint32_t x  = xs[k] < t.width ? xs[k] : t.width - 1u;
+		const uint32_t y  = ys[k] < t.height ? ys[k] : t.height - 1u;
+		pix.pt[k]         = values[(static_cast<size_t>(y) * t.width + x) * ch];
+	}
+	for (size_t i = 0; i < count; i++) {
+		const float r = values[i * ch];
+		if (std::isnan(r)) {
+			pix.nan_n++;
+			continue;
+		}
+		if (std::isinf(r)) {
+			pix.inf_n++;
+			continue;
+		}
+		if (r > 1.0f) hot++;
+		if (!any || r > best) {
+			any     = true;
+			best    = r;
+			pix.maxx = static_cast<int>(i % t.width);
+			pix.maxy = static_cast<int>(i / t.width);
+		}
+	}
+	pix.hot1 = static_cast<double>(hot) / static_cast<double>(count);
+	pix.ok   = true;
+	return pix;
+}
+
+static void S526Hex(const uint8_t* bytes, size_t n, char* out, size_t out_n) {
+	size_t o = 0;
+	if (out_n == 0) return;
+	out[0] = '\0';
+	for (size_t i = 0; i < n && o + 3 < out_n; i++) {
+		o += static_cast<size_t>(std::snprintf(out + o, out_n - o, "%02x", bytes[i]));
+	}
+}
+
+static void S526After(RenderContext& context, CommandBuffer& buffer, const DrawRenderState& state, const DrawCallInfo& draw,
+                      const DrawEmitInfo& emit, const DrawIndexBufferSource& index_source, const PreparedBindings* inputs) {
+	if (!S459Log::Card()) return;
+	struct Cfg {
+		int  step = 4;
+		bool ord  = false;
+		int  lo   = 1;
+		int  hi   = 1;
+	};
+	static Cfg cfg = [] {
+		Cfg c;
+		if (const char* step = std::getenv("KYTY_DIAG_S526_STEP"); step != nullptr && step[0] != '\0') {
+			char* end = nullptr;
+			const long v = std::strtol(step, &end, 10);
+			if (end != step && v >= 1 && v <= 64) c.step = static_cast<int>(v);
+		}
+		if (const char* ord = std::getenv("KYTY_DIAG_S526_ORD"); ord != nullptr && ord[0] != '\0') {
+			char* end = nullptr;
+			const long lo = std::strtol(ord, &end, 10);
+			if (end != ord && *end == '-') {
+				char* end2 = nullptr;
+				const long hi = std::strtol(end + 1, &end2, 10);
+				if (end2 != end + 1 && lo >= 1 && hi >= lo && hi - lo <= 48) {
+					c.ord  = true;
+					c.lo   = static_cast<int>(lo);
+					c.hi   = static_cast<int>(hi);
+					c.step = 1;
+				}
+			}
+		}
+		return c;
+	}();
+	static bool logged_cfg = false;
+	if (!logged_cfg) {
+		logged_cfg = true;
+		S459Log::LineWatch("[s526-cfg] step=%d ord=%d lo=%d hi=%d\n", cfg.step, cfg.ord ? 1 : 0, cfg.lo, cfg.hi);
+	}
+	static bool done = false;
+	if (done) return;
+
+	const RenderColorInfo* color = nullptr;
+	for (uint32_t i = 0; i < state.color_count; i++) {
+		if (state.color_info[i].desc.info.data.address == 0x514080000ull) color = &state.color_info[i];
+	}
+	if (color == nullptr) return;
+
+	const long present = S459Log::Present();
+	static long cur = -1;
+	static long hot = -1;
+	static int  ord = 0;
+	static int  n5e = 0, n55 = 0, nb = 0, n69 = 0, noth = 0;
+	static int  samples = 0;
+	static int  fails   = 0;
+	static bool have_prev = false;
+	static double prev_mean = 0;
+	static float  prev_pt[5] {};
+	struct Rec {
+		int      ord;
+		uint64_t ps;
+		uint32_t idx, inst, prim;
+		uint64_t ind;
+		uint32_t ind_n, ind_st;
+	};
+	static Rec ring[64];
+	static int ring_n = 0;
+
+	if (present != cur) {
+		if (hot >= 0) {
+			done = true;
+			S459Log::LineWatch("[s526-stop] present=%ld hot=%ld samples=%d\n", present, hot, samples);
+			return;
+		}
+		cur       = present;
+		ord       = 0;
+		n5e = n55 = nb = n69 = noth = 0;
+		ring_n    = 0;
+		have_prev = false;
+		prev_mean = 0;
+		for (float& p: prev_pt) p = 0;
+	}
+
+	const uint64_t ps = state.ps_active && state.ps_input_info.stage.module != nullptr
+	                        ? state.ps_input_info.stage.module->info.shader_hash
+	                        : 0;
+	ord++;
+	if (ps == 0x5e7524f281e7d196ull) n5e++;
+	else if (ps == 0x5594222ec7101d12ull) n55++;
+	else if (ps == 0xb187440c9843cbe2ull) nb++;
+	else if (ps == 0x69728d546d9b387aull) n69++;
+	else noth++;
+	if (cfg.ord && (ord < cfg.lo || ord > cfg.hi)) return;
+
+	const auto& hw     = buffer.GetRegisters();
+	const auto& bc     = hw.GetBlendControl(color->target_slot);
+	const auto& vp0    = hw.GetScreenViewport().viewports[0];
+	const auto  extent = color->Extent();
+	const auto  sc     = calc_final_scissor(hw.GetScreenViewport(), hw.GetScanModeControl(), extent, 0);
+	const auto  prim   = static_cast<uint32_t>(buffer.GetUserConfig().GetPrimType());
+	if (ring_n < 64) {
+		Rec& r   = ring[ring_n++];
+		r.ord    = ord;
+		r.ps     = ps;
+		r.idx    = draw.index_count;
+		r.inst   = draw.instance_count;
+		r.prim   = prim;
+		r.ind    = emit.indirect.address;
+		r.ind_n  = emit.indirect.count;
+		r.ind_st = emit.indirect.stride;
+	}
+	const bool on_step = cfg.ord || (ord % cfg.step) == 0;
+	if (!on_step) return;
+	if (samples >= 640) {
+		done = true;
+		S459Log::LineWatch("[s526-cap] samples=%d present=%ld ord=%d\n", samples, present, ord);
+		return;
+	}
+	samples++;
+
+	context.GetCommandScheduler().EndRendering();
+	std::vector<std::unique_ptr<Buffer>> buffers;
+	std::vector<DiagDump::Target>        targets;
+	enum class Role : uint8_t { Color, Tex };
+	struct Tag {
+		Role     role;
+		int      slot;
+		int      guest_fmt;
+		uint64_t addr;
+	};
+	std::vector<Tag> tags;
+	const auto       take = [&](ImageId id, uint32_t mip, uint32_t layer, vk::Extent2D ext, Tag tag) {
+        const auto before = targets.size();
+        if (DumpRtCopy(context, id, mip, layer, ext, 0, buffers, targets) && targets.size() != before) tags.push_back(tag);
+	};
+	take(color->image_id, color->guest_mip_level, color->guest_array_layer, extent,
+	     {Role::Color, static_cast<int>(color->target_slot), static_cast<int>(color->desc.info.guest_format),
+	      color->desc.info.data.address});
+	if (cfg.ord && inputs != nullptr) {
+		uint32_t logged = 0;
+		for (uint32_t i = 0; i < inputs->images.size() && logged < 4; i++) {
+			const auto& binding = inputs->images[i];
+			if (!binding.image_id) continue;
+			const auto& image = context.GetTextureCache().GetImage(binding.image_id);
+			const auto  ext   = vk::Extent2D {std::max(image.info.extent.width, 1u), std::max(image.info.extent.height, 1u)};
+			take(binding.image_id, 0, 0, ext,
+			     {Role::Tex, static_cast<int>(i), static_cast<int>(binding.desc.info.guest_format), binding.desc.info.data.address});
+			logged++;
+		}
+	}
+	if (!targets.empty()) context.GetCommandScheduler().FlushAndWait();
+
+	S526Pix pix;
+	if (!tags.empty() && tags[0].role == Role::Color) {
+		buffers[0]->Invalidate(0, buffers[0]->Size());
+		const auto mapped = buffers[0]->Mapped();
+		const uint8_t* data = mapped.size() >= targets[0].data.size() ? mapped.data() : nullptr;
+		pix = S526PixOf(targets[0], data, data != nullptr ? targets[0].data.size() : 0);
+	}
+	if (!pix.ok) {
+		fails++;
+		if (fails >= 8) done = true;
+		S459Log::LineWatch("[s526-step] present=%ld guest=%ld ord=%d ps=0x%016" PRIx64 " fail n=%d\n", present,
+		                   S459Log::Guest(), ord, ps, fails);
+		return;
+	}
+	const double prev = have_prev ? prev_mean : 0.0;
+	S459Log::LineWatch("[s526-step] present=%ld guest=%ld ord=%d ps=0x%016" PRIx64
+	                   " idx=%u inst=%u prim=%u wv=%u/%u bl=%d %u/%u/%u ind=0x%016" PRIx64
+	                   " n=%u st=%u vp=%.0fx%.0f sc=(%d,%d)-(%d,%d) mean=%.6g min=%.6g max=%.6g hot1=%.4f"
+	                   " nan=%u inf=%u prev=%.6g n5e=%d n55=%d nb=%d n69=%d noth=%d"
+	                   " pt=%.4g,%.4g,%.4g,%.4g,%.4g d=%.4g,%.4g,%.4g,%.4g,%.4g xy=%d,%d\n",
+	                   present, S459Log::Guest(), ord, ps, draw.index_count, draw.instance_count, prim,
+	                   state.vertex_info[0].wave_size, state.ps_input_info.wave_size, bc.enable ? 1 : 0,
+	                   static_cast<unsigned>(bc.color_srcblend), static_cast<unsigned>(bc.color_comb_fcn),
+	                   static_cast<unsigned>(bc.color_destblend), emit.indirect.address, emit.indirect.count,
+	                   emit.indirect.stride, static_cast<double>(vp0.xscale) * 2.0, static_cast<double>(vp0.yscale) * 2.0,
+	                   sc.left, sc.top, sc.right, sc.bottom, pix.mean, pix.minv, pix.maxv, pix.hot1, pix.nan_n, pix.inf_n,
+	                   prev, n5e, n55, nb, n69, noth, static_cast<double>(pix.pt[0]), static_cast<double>(pix.pt[1]),
+	                   static_cast<double>(pix.pt[2]), static_cast<double>(pix.pt[3]), static_cast<double>(pix.pt[4]),
+	                   static_cast<double>(pix.pt[0]) - static_cast<double>(prev_pt[0]),
+	                   static_cast<double>(pix.pt[1]) - static_cast<double>(prev_pt[1]),
+	                   static_cast<double>(pix.pt[2]) - static_cast<double>(prev_pt[2]),
+	                   static_cast<double>(pix.pt[3]) - static_cast<double>(prev_pt[3]),
+	                   static_cast<double>(pix.pt[4]) - static_cast<double>(prev_pt[4]), pix.maxx, pix.maxy);
+	const bool crossed = pix.mean > 1.0 && prev <= 1.0;
+	if (crossed) {
+		if (hot < 0) hot = present;
+		S459Log::LineWatch("[s526-jump] present=%ld guest=%ld ord=%d mean=%.6g prev=%.6g ps=0x%016" PRIx64 "\n", present,
+		                   S459Log::Guest(), ord, pix.mean, prev, ps);
+		for (int i = 0; i < ring_n; i++) {
+			const Rec& r = ring[i];
+			S459Log::LineWatch("[s526-bucket] ord=%d ps=0x%016" PRIx64 " idx=%u inst=%u prim=%u ind=0x%016" PRIx64
+			                   " n=%u st=%u\n",
+			                   r.ord, r.ps, r.idx, r.inst, r.prim, r.ind, r.ind_n, r.ind_st);
+		}
+	}
+	if (cfg.ord && inputs != nullptr) {
+		for (size_t i = 1; i < targets.size() && i < tags.size(); i++) {
+			buffers[i]->Invalidate(0, buffers[i]->Size());
+			const auto mapped = buffers[i]->Mapped();
+			const uint8_t* data = mapped.size() >= targets[i].data.size() ? mapped.data() : nullptr;
+			const auto st = S526PixOf(targets[i], data, data != nullptr ? targets[i].data.size() : 0);
+			S459Log::LineWatch("[s526-tex] present=%ld ord=%d slot=%d addr=0x%016" PRIx64
+			                   " vk=%d guest=%d %ux%u ok=%d mean=%.6g max=%.6g hot1=%.4f nan=%u inf=%u pt=%.4g\n",
+			                   present, ord, tags[i].slot, tags[i].addr, targets[i].vk_format, tags[i].guest_fmt,
+			                   targets[i].width, targets[i].height, st.ok ? 1 : 0, st.mean, st.maxv, st.hot1, st.nan_n,
+			                   st.inf_n, static_cast<double>(st.pt[0]));
+		}
+		uint32_t nbuffers = 0;
+		for (size_t i = 0; i < inputs->buffer_sources.size() && nbuffers < 6; i++, nbuffers++) {
+			const auto& src = inputs->buffer_sources[i];
+			uint8_t     head[16] {};
+			const bool  ok = src.address != 0 && src.size >= 16 &&
+			                Libs::LibKernel::Memory::TryReadBacking(src.address, head, sizeof(head));
+			char hex[40] {};
+			if (ok) S526Hex(head, sizeof(head), hex, sizeof(hex));
+			float probe[4] {};
+			if (ok && src.size <= 32ull * 1024ull * 1024ull) {
+				const uint64_t offs[4] = {0, (src.size / 4u) & ~3ull, (src.size / 2u) & ~3ull, (src.size * 3u / 4u) & ~3ull};
+				for (int k = 0; k < 4; k++) {
+					if (offs[k] + 4 <= src.size) {
+						Libs::LibKernel::Memory::TryReadBacking(src.address + offs[k], &probe[k], sizeof(float));
+					}
+				}
+			}
+			S459Log::LineWatch("[s526-buf] ord=%d i=%zu addr=0x%016" PRIx64 " size=%" PRIu64
+			                   " ok=%d head=%s p=%.4g,%.4g,%.4g,%.4g\n",
+			                   ord, i, src.address, src.size, ok ? 1 : 0, hex, static_cast<double>(probe[0]),
+			                   static_cast<double>(probe[1]), static_cast<double>(probe[2]), static_cast<double>(probe[3]));
+		}
+		const auto& sd = inputs->shader_data;
+		char        body[192];
+		body[0]    = '\0';
+		int         used = 0;
+		const int   m    = static_cast<int>(sd.size() < 8 ? sd.size() : 8);
+		for (int i = 0; i < m && used >= 0 && static_cast<size_t>(used) + 24 < sizeof(body); i++) {
+			float f = 0;
+			std::memcpy(&f, &sd[static_cast<size_t>(i)], sizeof(f));
+			used += std::snprintf(body + used, sizeof(body) - static_cast<size_t>(used), "%s%08x/%.4g", i != 0 ? "," : "",
+			                      sd[static_cast<size_t>(i)], static_cast<double>(f));
+		}
+		S459Log::LineWatch("[s526-sdata] ord=%d n=%zu %s\n", ord, sd.size(), body);
+		const auto& vs = state.vertex_info[0];
+		for (int i = 0; i < vs.buffers_num && i < 4; i++) {
+			const auto& vb = vs.buffers[i];
+			uint8_t     head[16] {};
+			const bool  ok = vb.addr != 0 &&
+			                Libs::LibKernel::Memory::TryReadBacking(vb.addr, head, sizeof(head));
+			char hex[40] {};
+			if (ok) S526Hex(head, sizeof(head), hex, sizeof(hex));
+			S459Log::LineWatch("[s526-vb] ord=%d i=%d addr=0x%016" PRIx64 " stride=%u records=%u ok=%d head=%s\n", ord, i,
+			                   vb.addr, vb.stride, vb.num_records, ok ? 1 : 0, hex);
+		}
+		S459Log::LineWatch("[s526-ib] ord=%d addr=0x%016" PRIx64 " size=%" PRIu64 " elem=%u indexed=%d\n", ord,
+		                   index_source.address, index_source.size, index_source.guest_element_size, draw.indexed ? 1 : 0);
+		if (emit.indirect.address != 0) {
+			uint32_t words[5] {};
+			const bool ok = Libs::LibKernel::Memory::TryReadBacking(emit.indirect.address, words, sizeof(words));
+			S459Log::LineWatch("[s526-ind] ord=%d addr=0x%016" PRIx64 " n=%u st=%u ok=%d w=%u,%u,%u,%u,%u cpu=%u/%u\n",
+			                   ord, emit.indirect.address, emit.indirect.count, emit.indirect.stride, ok ? 1 : 0, words[0],
+			                   words[1], words[2], words[3], words[4], draw.index_count, draw.instance_count);
+		}
+	}
+	ring_n = 0;
+	prev_mean = pix.mean;
+	have_prev = true;
+	for (int i = 0; i < 5; i++) prev_pt[i] = pix.pt[i];
+}
+
 void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallInfo& draw,
                                          DrawRenderState& state, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
@@ -1803,6 +2144,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		}
 	}
 	S522Probe(m_context, buffer, state, nullptr, draw.index_count, "after");
+	S526After(m_context, buffer, state, draw, emit, index_source, state.ps_active ? &bindings.pixel : nullptr);
 	// dump_rt / diag_tex only while the control file lists them. The snapshot pointer is one load per draw.
 	{
 		const auto& snap = Common::ControlFile::Current();
