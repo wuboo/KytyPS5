@@ -15,7 +15,9 @@
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
+#include "graphics/host_gpu/renderer/cache/streamBuffer.h"
 #include "graphics/host_gpu/renderer/debug.h"
+#include "graphics/host_gpu/renderer/diagDump.h"
 #include "graphics/host_gpu/renderer/drsNoZero.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -1179,6 +1181,92 @@ MeshIndirectRuntime& RenderExecutor::MeshIndirectRt() {
 	return *m_mesh_ind_rt;
 }
 
+// dump_rt: copy one color target into a host buffer. False when it cannot be copied.
+static bool DumpRtCopy(RenderContext& context, ImageId id, uint32_t mip, uint32_t layer, vk::Extent2D extent, int mrt,
+                       std::vector<std::unique_ptr<Buffer>>& buffers, std::vector<DiagDump::Target>& targets) {
+	if (!id) return false;
+	auto&      image = context.GetTextureCache().GetImage(id);
+	const auto fmt   = image.info.pixel_format;
+	const auto bytes = DiagDump::RtLayoutFor(static_cast<int>(fmt)).bytes;
+	if (image.backing.image == nullptr || image.info.samples != 1 || bytes == 0 || extent.width == 0 || extent.height == 0) {
+		return false;
+	}
+	const uint64_t size = static_cast<uint64_t>(extent.width) * extent.height * bytes;
+	buffers.push_back(std::make_unique<Buffer>(context.GetGraphics(), context.GetCommandScheduler(), MemoryUsage::Download, 0,
+	                                           vk::BufferUsageFlagBits::eTransferDst, size));
+	vk::BufferImageCopy region {};
+	region.imageSubresource.aspectMask     = vk::ImageAspectFlagBits::eColor;
+	region.imageSubresource.mipLevel       = mip;
+	region.imageSubresource.baseArrayLayer = layer;
+	region.imageSubresource.layerCount     = 1;
+	region.imageExtent                     = vk::Extent3D {extent.width, extent.height, 1};
+	image.Download(std::span {&region, 1}, buffers.back()->Handle(), 0, size);
+	DiagDump::Target target;
+	target.mrt       = mrt;
+	target.vk_format = static_cast<int>(fmt);
+	target.width     = extent.width;
+	target.height    = extent.height;
+	target.data.resize(size);
+	targets.push_back(std::move(target));
+	return true;
+}
+
+static void DumpRenderTargets(RenderContext& context, uint64_t ps, const RenderColorInfo* colors, uint32_t color_count) {
+	std::vector<std::unique_ptr<Buffer>> buffers;
+	std::vector<DiagDump::Target>        targets;
+	for (uint32_t i = 0; i < color_count; i++) {
+		const auto& color = colors[i];
+		DumpRtCopy(context, color.image_id, color.guest_mip_level, color.guest_array_layer, color.Extent(),
+		           static_cast<int>(color.target_slot), buffers, targets);
+	}
+	if (targets.empty()) return;
+	context.GetCommandScheduler().FlushAndWait();
+	for (size_t i = 0; i < targets.size(); i++) {
+		buffers[i]->Invalidate(0, buffers[i]->Size());
+		if (buffers[i]->Mapped().size() >= targets[i].data.size()) {
+			std::memcpy(targets[i].data.data(), buffers[i]->Mapped().data(), targets[i].data.size());
+			DiagDump::Store(ps, std::move(targets[i]));
+		}
+	}
+}
+
+// diag_tex: read back mip 0 of every image ResolveTexture queued for this draw.
+static void DiagTexAfterDraw(RenderContext& context) {
+	auto requests = DiagDump::TakeTexRequests();
+	if (requests.empty()) return;
+	context.GetCommandScheduler().EndRendering();
+	std::vector<std::unique_ptr<Buffer>> buffers;
+	std::vector<DiagDump::Target>        targets;
+	std::vector<size_t>                  which;
+	for (size_t i = 0; i < requests.size(); i++) {
+		const auto& image  = context.GetTextureCache().GetImage(requests[i].image);
+		const auto  extent = image.info.extent;
+		const auto  before = targets.size();
+		DumpRtCopy(context, requests[i].image, 0, 0, {std::max(extent.width, 1u), std::max(extent.height, 1u)}, -3, buffers, targets);
+		if (targets.size() != before) which.push_back(i);
+	}
+	if (!targets.empty()) context.GetCommandScheduler().FlushAndWait();
+	std::vector<bool> stored(requests.size(), false);
+	for (size_t i = 0; i < targets.size(); i++) {
+		buffers[i]->Invalidate(0, buffers[i]->Size());
+		if (buffers[i]->Mapped().size() >= targets[i].data.size()) {
+			std::memcpy(targets[i].data.data(), buffers[i]->Mapped().data(), targets[i].data.size());
+			DiagDump::StoreTex(requests[which[i]].info, std::move(targets[i]));
+			stored[which[i]] = true;
+		}
+	}
+	for (size_t i = 0; i < requests.size(); i++) {
+		if (!stored[i]) DiagDump::StoreTex(requests[i].info, {});
+	}
+}
+
+static void DiagDumpAfterDraw(RenderContext& context, bool ps_active, uint64_t ps_hash, const RenderColorInfo* colors,
+                              uint32_t color_count) {
+	if (!ps_active || !DiagDump::Wants(ps_hash)) return;
+	context.GetCommandScheduler().EndRendering();
+	DumpRenderTargets(context, ps_hash, colors, color_count);
+}
+
 void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallInfo& draw,
                                          DrawRenderState& state, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
@@ -1537,6 +1625,17 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 				std::fprintf(s459_file, " depth=%d\n", state.depth_info.image_id ? 1 : 0);
 				std::fflush(s459_file);
 			}
+		}
+	}
+	// dump_rt / diag_tex only while the control file lists them. The snapshot pointer is one load per draw.
+	{
+		const auto& snap = Common::ControlFile::Current();
+		if (!snap.dump_rt.empty() || !snap.diag_tex.empty()) {
+			const uint64_t ps_hash = state.ps_active && state.ps_input_info.stage.module != nullptr
+			                             ? state.ps_input_info.stage.module->info.shader_hash
+			                             : 0;
+			DiagDumpAfterDraw(m_context, state.ps_active, ps_hash, state.color_info, state.color_count);
+			DiagTexAfterDraw(m_context);
 		}
 	}
 }
