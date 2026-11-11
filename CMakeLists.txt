@@ -1296,8 +1296,9 @@ endforeach()
 
 add_executable(min_lod_view_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/MinLodViewTests.cpp")
 target_include_directories(min_lod_view_tests PRIVATE ${inc_headers})
-# Mutants (each must be caught, WILL_FAIL): MinLod floors instead of rounding up; the shift is not capped at the last level; RESINFO reports the shifted view.
-foreach(mutant IN ITEMS FLOOR NO_CAP RESINFO)
+# Mutants (each must be caught, WILL_FAIL): MinLod floors instead of rounding up; the shift is not capped at the last level; RESINFO reports the shifted view;
+# S538: the native view clamp stays off with the fix on; the view minLod forgets the base level.
+foreach(mutant IN ITEMS FLOOR NO_CAP RESINFO VIEW_OFF VIEW_NO_BASE)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(min_lod_view_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/MinLodViewTests.cpp")
 	target_include_directories(min_lod_view_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})

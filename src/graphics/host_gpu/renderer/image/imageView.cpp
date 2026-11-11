@@ -3,6 +3,7 @@
 #include "common/assert.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "graphics/host_gpu/renderer/image/minLodView.h"
 
 namespace Libs::Graphics {
 
@@ -332,8 +333,7 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 	vk::ImageViewMinLodCreateInfoEXT min_lod {};
 	// Without the feature the caller has already folded the clamp into the view base level.
 	if (normalized.min_lod != 0 && m_graphics.has_view_min_lod) {
-		min_lod.minLod = static_cast<float>(normalized.base_level) +
-		                 static_cast<float>(normalized.min_lod) / 256.0f;
+		min_lod.minLod = Libs::Graphics::ViewMinLodValue(normalized.base_level, normalized.min_lod);
 		usage.pNext    = &min_lod;
 	}
 	vk::ImageViewCreateInfo create {};
