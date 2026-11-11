@@ -1742,7 +1742,14 @@ int main(int argc, char **argv) {
   TestCrossRegionUpload();
   TestConcurrentColdUploads();
   TestUploadDoesNotSerializeDisjointRegion();
-  TestQueriesSkipRegionLock();
+  // KYTY_TRACKER_QUERY_NOLOCK=1 (opt-in here) is the upstream lock-free query; without it the
+  // queries take the region lock and wait for the parked upload, as before the port.
+  if (const char *nolock = std::getenv("KYTY_TRACKER_QUERY_NOLOCK");
+      nolock != nullptr && std::strcmp(nolock, "1") == 0) {
+    TestQueriesSkipRegionLock();
+  } else {
+    std::puts("MemoryTrackerTests: TestQueriesSkipRegionLock skipped (KYTY_TRACKER_QUERY_NOLOCK unset)");
+  }
   TestDownloadDoesNotSerializeDisjointRegion();
   TestGpuUnmarkUsesRegionMask();
   TestFullRegionGpuUnmarkBatching();
