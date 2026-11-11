@@ -121,6 +121,9 @@ public:
 	}
 
 	~GuestBackingStore() {
+		for (auto& bucket: m_pages) {
+			delete[] bucket.load(std::memory_order_relaxed);
+		}
 #if KYTY_PLATFORM == KYTY_PLATFORM_WINDOWS
 		for (const auto& [_, entry]: m_maps) {
 			UnmapViewPreservePlaceholder(reinterpret_cast<void*>(entry.vaddr), entry.size);
@@ -177,6 +180,20 @@ public:
 		    [](uint64_t, uint64_t) {});
 	}
 
+	// Upstream 3bd22044: whether the page table shows every page of the span backed (false when
+	// the table is disabled, see m_pages_valid). Lock-free.
+	[[nodiscard]] bool IsBackedNoLock(uint64_t vaddr, uint64_t size) const {
+		if (size == 0 || UINT64_MAX - vaddr < size || !m_pages_valid.load(std::memory_order_acquire)) {
+			return false;
+		}
+		for (auto page = vaddr >> PageBits; page <= (vaddr + size - 1u) >> PageBits; ++page) {
+			if (LoadPage(page) == 0) {
+				return false;
+			}
+		}
+		return true;
+	}
+
 	// S430 (KYTY_SPEC_READ_FAST): the sequence of the mappings (odd while a change is under way) and the backing of a whole page that one mapping covers.
 	[[nodiscard]] uint64_t MapSeq() const { return m_map_seq.load(std::memory_order_acquire); }
 
@@ -217,6 +234,14 @@ public:
 	bool TryReadBacking(uint64_t vaddr, void* data, uint64_t size) {
 		if (data == nullptr || size == 0 || UINT64_MAX - vaddr < size) {
 			return false;
+		}
+		// Upstream 1b59ee62 (KYTY_BACKING_READ_NOLOCK=1): a range the page table shows backed is
+		// read without m_mutex. Page entries are atomic, buckets live as long as the store and the
+		// alias stays mapped, so a read racing an unmap copies the backing's current bytes (or
+		// zeros for a page cleared between the check and the copy). Anything else takes the lock.
+		if (BackingReadNoLock() && IsBackedNoLock(vaddr, size)) {
+			ReadRunsNoLock(vaddr, data, size);
+			return true;
 		}
 
 		std::shared_lock lock(m_mutex);
@@ -290,6 +315,7 @@ public:
 			std::lock_guard lock(m_mutex);
 			MapMutation     mutation(m_map_seq);
 			EXIT_IF(!m_maps.emplace(vaddr, MapEntry {vaddr, size, backing_offset, mode}).second);
+			StorePages(vaddr, size, backing_offset);
 		}
 		SetFailure(failure_reason, FailureReason::None);
 		return true;
@@ -303,6 +329,7 @@ public:
 		RemoveMappingsUnlocked(vaddr, size);
 #endif
 		m_maps.emplace(vaddr, MapEntry {vaddr, size, backing_offset, mode});
+		StorePages(vaddr, size, backing_offset);
 		return true;
 	}
 
@@ -370,11 +397,13 @@ public:
 			std::lock_guard lock(m_mutex);
 			MapMutation     mutation(m_map_seq);
 			old = m_maps.extract(std::prev(m_maps.upper_bound(vaddr))).mapped();
+			ClearPages(old.vaddr, old.size);
 		}
 		if (!UnmapViewPreservePlaceholder(reinterpret_cast<void*>(old.vaddr), old.size)) {
 			std::lock_guard lock(m_mutex);
 			MapMutation     mutation(m_map_seq);
 			m_maps.emplace(old.vaddr, old);
+			StorePages(old.vaddr, old.size, old.backing_offset);
 			return false;
 		}
 
@@ -457,6 +486,89 @@ private:
 		VirtualMemory::Mode mode           = VirtualMemory::Mode::NoAccess;
 	};
 
+	static constexpr uint64_t PageBits    = 14;
+	static constexpr uint64_t PageMask    = (uint64_t {1} << PageBits) - 1u;
+	static constexpr uint64_t BucketPages = uint64_t {1} << 16u;
+	static constexpr uint64_t BucketCount =
+	    ((kExtendedMemoryBase + kExtendedMemorySize) >> PageBits) / BucketPages;
+
+	static bool BackingReadNoLock() {
+		static const bool on = [] {
+			const char* text = std::getenv("KYTY_BACKING_READ_NOLOCK");
+			return text != nullptr && std::strcmp(text, "1") == 0;
+		}();
+		return on;
+	}
+
+	[[nodiscard]] uint32_t LoadPage(uint64_t page) const {
+		if (page / BucketPages >= BucketCount) {
+			return 0;
+		}
+		const auto* entries = m_pages[page / BucketPages].load(std::memory_order_acquire);
+		return entries != nullptr ? entries[page % BucketPages].load(std::memory_order_relaxed) : 0;
+	}
+
+	// Copies the span in runs of contiguous backing; pages cleared since IsBackedNoLock read as zero.
+	void ReadRunsNoLock(uint64_t vaddr, void* data, uint64_t size) const {
+		auto*      destination = static_cast<uint8_t*>(data);
+		const auto end         = vaddr + size;
+		for (auto start = vaddr; start < end;) {
+			const auto     entry    = LoadPage(start >> PageBits);
+			const uint32_t step     = entry != 0 ? 1 : 0;
+			auto           expected = entry + step;
+			auto           stop     = (start | PageMask) + 1u;
+			while (stop < end && LoadPage(stop >> PageBits) == expected) {
+				stop += PageMask + 1u;
+				expected += step;
+			}
+			stop = std::min(stop, end);
+			if (entry != 0) {
+				std::memcpy(destination + (start - vaddr),
+				            m_backing_base + (uint64_t {entry - 1u} << PageBits) + (start & PageMask),
+				            stop - start);
+			} else {
+				std::memset(destination + (start - vaddr), 0, stop - start);
+			}
+			start = stop;
+		}
+	}
+
+	// Callers hold m_mutex exclusively.
+	void StorePages(uint64_t vaddr, uint64_t size, uint64_t backing_offset) {
+		const auto end = vaddr + size;
+		if (((vaddr | size | backing_offset) & PageMask) != 0 ||
+		    (end >> PageBits) > BucketCount * BucketPages || backing_offset + size > m_size) {
+			m_pages_valid.store(false, std::memory_order_release);
+			return;
+		}
+		auto entry = static_cast<uint32_t>(backing_offset >> PageBits) + 1u;
+		for (auto page = vaddr >> PageBits; page < end >> PageBits; ++page, ++entry) {
+			auto& bucket  = m_pages[page / BucketPages];
+			auto* entries = bucket.load(std::memory_order_relaxed);
+			if (entries == nullptr) {
+				entries = new std::atomic<uint32_t>[BucketPages] {};
+				bucket.store(entries, std::memory_order_release);
+			}
+			entries[page % BucketPages].store(entry, std::memory_order_relaxed);
+		}
+	}
+
+	// Callers hold m_mutex exclusively.
+	void ClearPages(uint64_t vaddr, uint64_t size) {
+		if (((vaddr | size) & PageMask) != 0) {
+			m_pages_valid.store(false, std::memory_order_release);
+			return;
+		}
+		for (auto page = vaddr >> PageBits; page < (vaddr + size) >> PageBits; ++page) {
+			if (page / BucketPages >= BucketCount) {
+				break;
+			}
+			if (auto* entries = m_pages[page / BucketPages].load(std::memory_order_relaxed)) {
+				entries[page % BucketPages].store(0, std::memory_order_relaxed);
+			}
+		}
+	}
+
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	void RemoveMappingsUnlocked(uint64_t vaddr, uint64_t size) {
 		const auto end = vaddr + size;
@@ -472,6 +584,7 @@ private:
 				continue;
 			}
 			it = m_maps.erase(it);
+			ClearPages(std::max(vaddr, old.vaddr), std::min(end, old_end) - std::max(vaddr, old.vaddr));
 			if (old.vaddr < vaddr) {
 				m_maps.emplace(old.vaddr,
 				               MapEntry {old.vaddr, vaddr - old.vaddr, old.backing_offset, old.mode});
@@ -598,6 +711,11 @@ private:
 	std::shared_mutex            m_mutex;
 	std::map<uint64_t, MapEntry> m_maps;
 	std::atomic<uint64_t>        m_map_seq {0};
+	// Upstream 1b59ee62: per 16 KiB guest page, the backing page index plus one (0: unbacked),
+	// written with m_mutex held exclusively next to m_maps. A mapping or unmapping that is not
+	// 16 KiB aligned (or out of the table) turns the table off for good: every read takes the lock.
+	std::array<std::atomic<std::atomic<uint32_t>*>, BucketCount> m_pages {};
+	std::atomic<bool>                                            m_pages_valid {true};
 };
 
 class GuestAddressSpace {
@@ -690,6 +808,10 @@ public:
 	}
 
 	[[nodiscard]] uint64_t MapSeq() const { return m_backing->MapSeq(); }
+
+	[[nodiscard]] bool IsBackedNoLock(uint64_t vaddr, uint64_t size) const {
+		return m_backing->IsBackedNoLock(vaddr, size);
+	}
 
 	bool TryResolveBackingPage(uint64_t page, const uint8_t** host, uint64_t* seq) {
 		return m_backing->TryResolveBackingPage(page, host, seq);
