@@ -16,9 +16,11 @@
 #include "graphics/shader/recompiler/ir/passes/ResourceTracking.h"
 #include "graphics/shader/recompiler/ir/passes/ShaderInfoCollection.h"
 #include "graphics/shader/recompiler/ir/passes/SsaRewrite.h"
+#include "graphics/shader/recompiler/s537Diag.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <fmt/format.h>
 #include <functional>
@@ -766,6 +768,11 @@ TranslateResult TranslateProgram(const Decoder::Program& decoded, const CompileO
 		    std::chrono::steady_clock::now() - compile_begin).count());
 	};
 
+	if (options.shader_hash == S537::kCardHash && S537::Dir() != nullptr) {
+		// S537 DIAG: the RDNA2 listing of the card shader (game code: artifacts only, never git).
+		const auto listing = Decoder::ProgramToString(decoded);
+		S537::WriteFile(fmt::format("s537-isa-{}.txt", stage), listing.data(), listing.size());
+	}
 	std::string decoded_dump;
 	if (options.dump_ir) {
 		decoded_dump = Decoder::ProgramToString(decoded);
@@ -930,8 +937,24 @@ CompileResult CompileProgram(TranslateResult translated, const CompileOptions& o
 
 	LOGF("ShaderRecompiler %s phase begin: hash=0x%016" PRIx64 " SPIR-V EmitProgram\n", stage,
 	     ir.shader_hash);
+	static std::atomic<uint32_t> s537_count {0};
+	const auto s537_index = ir.shader_hash == S537::kCardHash && S537::Dir() != nullptr
+	                            ? s537_count.fetch_add(1) + 1 : 0u;
+	if (s537_index != 0) {
+		// S537 DIAG: the IR the emitter sees, numbered as the probe's slot map.
+		const auto text = IR::ProgramToString(ir);
+		S537::WriteFile(fmt::format("s537-ir-{}-{}.txt", stage, s537_index), text.data(), text.size());
+	}
 	auto spirv = Spirv::EmitProgram(ir, options.input_info, push_data_start_dword, *options.profile,
 	                                options.emit_debug_info);
+	if (s537_index != 0) {
+		S537::WriteFile(fmt::format("s537-{}-{}{}.spv", stage, s537_index,
+		                            S537::ProbeAddress().load() != 0 && S537::Probe() ? "-probe" : ""),
+		                spirv.data(), spirv.size() * sizeof(uint32_t));
+		Log::WriteToConsoleAndLog(fmt::format("[s537] compiled card shader {} #{} words={} exact={} probe={}\n",
+		                                      stage, s537_index, spirv.size(), S537::ExactMinMax() ? 1 : 0,
+		                                      S537::Probe() ? 1 : 0));
+	}
 	LOGF("ShaderRecompiler %s phase end: hash=0x%016" PRIx64 " SPIR-V EmitProgram words=%" PRIu64
 	     " wave_size=%u elapsed_ms=%" PRIu64 "\n",
 	     stage, ir.shader_hash, static_cast<uint64_t>(spirv.size()), ir.wave_size,

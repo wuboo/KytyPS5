@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/backend/spirv/SpirvEmitter.h"
+#include "graphics/shader/recompiler/s537Diag.h"
 
 #include "common/assert.h"
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
@@ -81,6 +82,11 @@ std::vector<uint32_t> EmitProgram(IR::Program& program, ShaderStageInputInfo inp
 		}
 		state.lane_count =
 		    program.wave_size == 64 && vertex_capture->host_subgroup_size == 32 ? 2u : 1u;
+	}
+	if (S537::Probe() && program.shader_hash == S537::kCardHash &&
+	    program.stage == ShaderType::Pixel && state.lane_count == 1 && vertex_capture == nullptr &&
+	    pv_store == nullptr && !program.dispatcher_fallback) {
+		state.s537_probe_address = S537::ProbeAddress().load(std::memory_order_acquire);
 	}
 	DefineModule(state);
 	EmitProgram(state);
