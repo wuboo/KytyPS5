@@ -1140,6 +1140,17 @@ void CpGuestRead(Graphics::CpReadBacking::Site site, uint64_t vaddr, void* dst, 
 
 uint64_t ClampRangeSize(uint64_t vaddr, uint64_t size) {
 	EXIT_IF(g_virtual_ranges == nullptr);
+	// Upstream 3bd22044 (with KYTY_BACKING_READ_NOLOCK=1): backed pages lie in committed ranges,
+	// so a fully backed buffer needs no range walk. Up to 16 MiB (1024 pages) the page walk costs
+	// about as much as the locked range walk.
+	static const bool no_lock = [] {
+		const char* text = std::getenv("KYTY_BACKING_READ_NOLOCK");
+		return text != nullptr && std::strcmp(text, "1") == 0;
+	}();
+	if (no_lock && size <= (uint64_t {1} << 24u) && g_guest_address_space != nullptr &&
+	    g_guest_address_space->IsBackedNoLock(vaddr, size)) {
+		return size;
+	}
 
 	const auto clamped_size = g_virtual_ranges->ClampRangeSize(vaddr, size);
 	if (clamped_size == 0) {
