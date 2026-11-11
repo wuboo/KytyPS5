@@ -132,6 +132,7 @@ void CommandBuffer::EndRendering() const {
 	if (m_rendering) {
 		m_strip_clears = false; // S328: a closed pass ends the reopen
 		Handle().endRendering();
+		if (GpuTs::Seg::Enabled()) GpuTs::Seg::MarkV(Handle(), GpuTs::Seg::kPassEnd, "rp.end"); // S544 DIAG
 		if (m_note_pass_end) {
 			m_note_pass_end = false;
 			m_pass_end_ns   = FrameTiming::SteadyNowNs();

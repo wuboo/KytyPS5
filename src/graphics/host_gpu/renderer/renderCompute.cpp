@@ -487,6 +487,9 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	const uint64_t     group_threads = uint64_t {std::max(input_info.threads_num[0], 1u)} *
 	                                   std::max(input_info.threads_num[1], 1u) *
 	                                   std::max(input_info.threads_num[2], 1u);
+	if (GpuTs::Seg::Enabled()) { // S544 DIAG
+		GpuTs::Seg::MarkV(vk_buffer, static_cast<uint8_t>(GpuLabel::Class::GuestCs), "G.cs.%08x.dir", static_cast<uint32_t>(program.shader_hash));
+	}
 	if ((mode & DISPATCH_INITIATOR_ORDERED_APPEND_ENABLE) != 0 && program.info.uses_gds &&
 	    group_threads <= input_info.wave_size && !input_info.lds_storage) {
 		// A single guest wave per group can run in launch order without a device-wide

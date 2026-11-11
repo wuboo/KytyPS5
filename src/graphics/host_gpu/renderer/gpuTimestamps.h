@@ -62,6 +62,18 @@ void                  OnEnd(GraphicContext& graphics, vk::CommandBuffer buffer, 
 void                  OnSubmit(int32_t slot, uint64_t tick);
 void                  Poll(GraphicContext& graphics, MasterSemaphore& master);
 
+// S544 DIAG (KYTY_GPU_TS_SEG=1, only together with KYTY_GPU_TIMESTAMPS=1): GPU time per piece of work inside a command buffer. Every labelled command
+// (GpuLabel::With: guest pass begin, guest indirect dispatch, upload, tiler, ...), the guest direct dispatch and every EndRendering write a BOTTOM_OF_PIPE
+// timestamp first; the time from one mark to the next (or to the end of the buffer) is given to the class/key of the earlier mark, the time from the
+// start of the buffer to the first mark to "head". Keys: pass = size and colour count, dispatch = shader hash, others with digits folded to '#'.
+// Log: "[gpu-ts-seg]" lines (class totals and the top keys) at the flips of KYTY_GPU_TIMESTAMPS_AT. Off: one cached bool per mark site.
+namespace Seg {
+constexpr uint8_t kHead    = 12; // GpuLabel::Class::Count
+constexpr uint8_t kPassEnd = 13;
+[[nodiscard]] bool Enabled();
+void               MarkV(vk::CommandBuffer buffer, uint8_t cls, const char* format, ...);
+} // namespace Seg
+
 } // namespace GpuTs
 } // namespace Libs::Graphics
 

@@ -2,6 +2,7 @@
 #define KYTY_GRAPHICS_HOST_GPU_GPULABELSVK_H_
 
 #include "graphics/host_gpu/gpuLabels.h"
+#include "graphics/host_gpu/renderer/gpuTimestamps.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 namespace Libs::Graphics::GpuLabel {
@@ -32,6 +33,7 @@ inline const Backend kVulkan {VkBegin, VkEnd, VkInsert};
 // `record` is the command that opens the encoder (dispatch, beginRendering, copy ...).
 template <class F, class... Args>
 void With(vk::CommandBuffer cb, Class c, F&& record, const char* format, Args... args) {
+	if (GpuTs::Seg::Enabled()) GpuTs::Seg::MarkV(cb, static_cast<uint8_t>(c), format, args...); // S544 DIAG
 	Run(detail::kVulkan, static_cast<VkCommandBuffer>(cb), c, static_cast<F&&>(record), format, args...);
 }
 
