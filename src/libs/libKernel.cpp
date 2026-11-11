@@ -6,6 +6,14 @@
 #include "common/fpEnv.h"
 #include "common/signalCensus.h"
 
+extern "C" uint8_t kyty_s536_guest_fp_env = 0;
+
+#if defined(__APPLE__)
+#define KYTY_FP_FLAG "_kyty_s536_guest_fp_env"
+#else
+#define KYTY_FP_FLAG "kyty_s536_guest_fp_env"
+#endif
+
 #include "common/hostException.h"
 #include "common/logging/log.h"
 #include "common/singleton.h"
@@ -2449,8 +2457,11 @@ static void FiberSetContextValid(FiberObject* fiber, bool valid) {
 	             "movq %r11, 64(%r10)\n\t"
 	             "movq (%rsp), %r11\n\t"
 	             "movq %r11, 72(%r10)\n\t"
+	             "cmpb $0, " KYTY_FP_FLAG "(%rip)\n\t"
+	             "je 1f\n\t"
 	             "stmxcsr 80(%r10)\n\t"
 	             "fnstcw 84(%r10)\n\t"
+	             "1:\n\t"
 	             "xorl %eax, %eax\n\t"
 	             "retq\n");
 }
@@ -2468,6 +2479,8 @@ FiberRestoreContext(FiberCpuContext* /*ctx*/, uint64_t /*ret*/) {
 	             "movq 40(%r10), %r13\n\t"
 	             "movq 48(%r10), %r14\n\t"
 	             "movq 56(%r10), %r15\n\t"
+	             "cmpb $0, " KYTY_FP_FLAG "(%rip)\n\t"
+	             "je 1f\n\t"
 	             "subq $8, %rsp\n\t"
 	             "stmxcsr (%rsp)\n\t"
 	             "movl (%rsp), %ecx\n\t"
@@ -2478,6 +2491,7 @@ FiberRestoreContext(FiberCpuContext* /*ctx*/, uint64_t /*ret*/) {
 	             "movl %edx, (%rsp)\n\t"
 	             "ldmxcsr (%rsp)\n\t"
 	             "fldcw 84(%r10)\n\t"
+	             "1:\n\t"
 	             "movq 64(%r10), %rsp\n\t"
 	             "jmp *%r11\n");
 }
@@ -2507,10 +2521,12 @@ static void FiberRestoreContext(FiberCpuContext* ctx, uint64_t ret) {
 	ctx.rsp = rsp;
 	ctx.rip = reinterpret_cast<uint64_t>(&FiberStartTrampoline);
 	ctx.rdi = reinterpret_cast<uint64_t>(fiber);
-	if ((fiber->flags & FIBER_FLAG_SET_FPU_REGS) != 0) {
-		Common::WriteFpEnv(Common::GuestFpEnv);
+	if (Common::GuestFpEnvEnabled()) {
+		if ((fiber->flags & FIBER_FLAG_SET_FPU_REGS) != 0) {
+			Common::WriteFpEnv(Common::GuestFpEnv);
+		}
+		ctx.fp_env = Common::ReadFpEnv();
 	}
-	ctx.fp_env = Common::ReadFpEnv();
 
 	FiberRestoreContext(&ctx, 1);
 }
@@ -2649,6 +2665,7 @@ int32_t KYTY_SYSV_ABI FiberRun(FiberObject* fiber, uint64_t arg_on_run, uint64_t
 	// Register on the host stack; switching fibers only reads the native TLS slot.
 	FiberThreadContext context {};
 	FiberSetThreadContext(&context);
+	Common::GuestFpEnvEnabled();
 
 	if (FiberSaveContext(&context.cpu_context) == 0) {
 		if (fiber->context_valid) {
@@ -2692,6 +2709,7 @@ int32_t KYTY_SYSV_ABI FiberSwitch(FiberObject* fiber, uint64_t arg_on_run,
 
 	fiber->arg_on_run    = arg_on_run;
 	fiber->arg_on_return = 0;
+	Common::GuestFpEnvEnabled();
 
 	if (FiberSaveContext(&caller->saved_context) == 0) {
 		FiberSetContextValid(caller, true);
@@ -2734,6 +2752,7 @@ int32_t KYTY_SYSV_ABI FiberReturnToThread(uint64_t arg_on_return, uint64_t* arg_
 
 	auto* fiber          = context->current_fiber;
 	fiber->arg_on_return = arg_on_return;
+	Common::GuestFpEnvEnabled();
 
 	if (FiberSaveContext(&fiber->saved_context) == 0) {
 		FiberSetContextValid(fiber, true);

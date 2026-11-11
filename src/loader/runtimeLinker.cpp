@@ -7,6 +7,8 @@
 #include "common/emulatorConfig.h"
 #include "common/file.h"
 #include "common/fpEnv.h"
+
+#include <cstdlib>
 #include "common/hostException.h"
 #include "common/logging/log.h"
 #include "common/platform/sysDbg.h"
@@ -1749,7 +1751,16 @@ void RuntimeLinker::Execute(const std::filesystem::path& game_patch) {
 			EXIT("Failed to apply game cheat\n");
 		}
 	}
-	Common::WriteFpEnv(Common::GuestFpEnv);
+	if (Common::GuestFpEnvEnabled()) {
+		Common::WriteFpEnv(Common::GuestFpEnv);
+	}
+	{
+		const char* pr2096 = std::getenv("KYTY_PR2096");
+		const bool  bits   = pr2096 != nullptr && pr2096[0] == '1' && pr2096[1] == '\0';
+		Log::WriteToConsoleAndLog(Common::GuestFpEnvEnabled() ? "[s536-fp] guest_fpenv=1\n"
+		                                                      : "[s536-fp] guest_fpenv=0\n");
+		Log::WriteToConsoleAndLog(bits ? "[s536-fp] pr2096=1\n" : "[s536-fp] pr2096=0\n");
+	}
 	if (libc != nullptr && libc->dynamic_info->init_vaddr != 0) {
 		StartModule(libc, 0, nullptr, nullptr);
 	}

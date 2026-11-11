@@ -78,6 +78,46 @@ static uint32_t ShaderProgramSize(const uint32_t* binary, uint32_t size) {
 	return static_cast<uint32_t>(end);
 }
 
+// S536 DIAG: one line for the card shader. Counts F32 min/max/med3 in the code words, not the literal buffer.
+static void NoteCardShaderOps(uint64_t hash, const uint32_t* binary, uint32_t size_bytes) {
+	if (hash != 0x5e7524f281e7d196ull) {
+		return;
+	}
+	static bool logged = false;
+	if (logged) {
+		return;
+	}
+	logged = true;
+	uint32_t code_bytes = size_bytes;
+	constexpr uint32_t kFooter = 0x30;
+	if (size_bytes >= kFooter) {
+		const auto* footer = binary + (size_bytes - kFooter) / 4;
+		if (std::memcmp(footer, "barefoot", 8) == 0 && footer[4] == 1 && footer[5] != 0 &&
+		    footer[5] % 4 == 0 && footer[5] <= size_bytes) {
+			code_bytes = footer[5];
+		}
+	}
+	ShaderRecompiler::Decoder::Program program;
+	ShaderRecompiler::Decoder::DecodeProgram(std::span {binary, code_bytes / 4}, program);
+	int min_n = 0, max_n = 0, min3_n = 0, max3_n = 0, med3_n = 0;
+	for (const auto& inst: program.instructions) {
+		using ShaderRecompiler::Decoder::Opcode;
+		switch (inst.opcode) {
+			case Opcode::V_MIN_F32: ++min_n; break;
+			case Opcode::V_MAX_F32: ++max_n; break;
+			case Opcode::V_MIN3_F32: ++min3_n; break;
+			case Opcode::V_MAX3_F32: ++max3_n; break;
+			case Opcode::V_MED3_F32: ++med3_n; break;
+			default: break;
+		}
+	}
+	char line[160];
+	std::snprintf(line, sizeof(line),
+	              "[s536-isa] hash=5e7524f281e7d196 words=%u min=%d max=%d min3=%d max3=%d med3=%d\n",
+	              code_bytes / 4, min_n, max_n, min3_n, max3_n, med3_n);
+	Log::WriteToConsoleAndLog(line);
+}
+
 void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	EXIT_IF(g_shader_map == nullptr);
 
@@ -90,6 +130,7 @@ void ShaderMapUserData(uint64_t addr, const ShaderMappedData& data) {
 	// Translation reads the bytes the hash covers.
 	mapped.code_size_bytes = ShaderProgramSize(binary, data.code_size_bytes);
 	const auto hash        = XXH3_64bits(binary, mapped.code_size_bytes);
+	NoteCardShaderOps(hash, binary, mapped.code_size_bytes);
 	mapped.vertex_error =
 	    ShaderReadVertexMetadata(data, HW::UserSgprInfo::SGPRS_MAX, mapped.vertex);
 	std::scoped_lock lock(g_shader_map_mutex);

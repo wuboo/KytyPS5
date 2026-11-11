@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <semaphore>
@@ -5810,8 +5811,17 @@ void* KYTY_SYSV_ABI PthreadFpEntry(void* arg) {
 	return arg;
 }
 
+void EnableGuestFpEnv() {
+#if defined(_WIN32)
+	_putenv_s("KYTY_GUEST_FPENV", "1");
+#else
+	setenv("KYTY_GUEST_FPENV", "1", 1);
+#endif
+}
+
 void TestGuestPthreadFp() {
 	const char* test = "GuestPthreadFp";
+	EnableGuestFpEnv();
 	FpGuard     guard;
 	WriteFp(HostFp);
 	Check(test, FpWitness() == 0x00fffffeu, "a subnormal product is kept without DAZ");
@@ -5864,6 +5874,7 @@ struct FiberFpData {
 
 void TestFiberFp() {
 	const char*                              test = "FiberFp";
+	EnableGuestFpEnv();
 	FpGuard                                  guard;
 	alignas(8) std::array<uint8_t, 256>      object {};
 	alignas(16) std::array<uint8_t, 0x20000> stack {};

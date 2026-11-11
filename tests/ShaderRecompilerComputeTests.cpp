@@ -24046,6 +24046,16 @@ void CompareGraphicsWords(const GraphicsCase &test,
 }
 
 void RunCase(VulkanHarness *vulkan, const TestCase &test) {
+  // S536: the bit-order path is off unless KYTY_PR2096=1. These two cases expect that path.
+  const bool order_by_bits = test.name == "VectorMinMaxF32RuntimeEdges" ||
+                             test.name == "VectorMed3F32NanUsesMin3Path";
+  if (order_by_bits) setenv("KYTY_PR2096", "1", 1);
+  struct ClearPr2096 {
+    bool on;
+    ~ClearPr2096() {
+      if (on) unsetenv("KYTY_PR2096");
+    }
+  } clear {order_by_bits};
   auto compiled = CompileCase(test, vulkan != nullptr ? vulkan->SubgroupSize() : 64u);
   if (test.image_descriptor_swizzle != DstSel(4, 5, 6, 7) &&
       !compiled.program.info.images.empty()) {

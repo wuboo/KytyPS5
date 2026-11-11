@@ -3188,7 +3188,20 @@ static void CleanupThread(void* arg) {
 }
 
 static void* RunThread(void* arg) {
-	Common::WriteFpEnv(Common::GuestFpEnv);
+	if (Common::GuestFpEnvEnabled()) {
+		Common::WriteFpEnv(Common::GuestFpEnv);
+		static bool logged = false;
+		if (!logged) {
+			logged = true;
+			Log::WriteToConsoleAndLog("[s536-fp] guest thread MXCSR=0x9fc0\n");
+		}
+	} else {
+		static bool logged = false;
+		if (!logged) {
+			logged = true;
+			Log::WriteToConsoleAndLog("[s536-fp] guest thread MXCSR=host\n");
+		}
+	}
 
 #if KYTY_PLATFORM == KYTY_PLATFORM_LINUX
 	if (!Common::HostException::InitializeThreadSignalStack()) {

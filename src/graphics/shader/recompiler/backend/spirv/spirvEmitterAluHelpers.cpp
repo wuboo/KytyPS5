@@ -1,5 +1,7 @@
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInternal.h"
 
+#include <cstdlib>
+
 namespace Libs::Graphics::ShaderRecompiler::Spirv::Emitter {
 
 uint32_t EmitAndConstant(EmitterState& state, uint32_t value, uint32_t mask) {
@@ -93,8 +95,27 @@ uint32_t EmitClassMaskF16(EmitterState& state, uint32_t bits, uint32_t mask) {
 	return EmitClassMaskBits(state, bits, mask, true);
 }
 
+static bool OrderF32ByBits() {
+	const char* value = std::getenv("KYTY_PR2096");
+	return value != nullptr && value[0] == '1' && value[1] == '\0';
+}
+
 static uint32_t EmitMinMaxF32(EmitterState& state, uint32_t lhs, uint32_t rhs, uint32_t lhs_bits,
                               uint32_t rhs_bits, bool max_value) {
+	if (!OrderF32ByBits()) {
+		const auto either    = EmitOrU32(state, lhs_bits, rhs_bits);
+		const auto both_zero = EmitCompareU32Constant(state, spv::OpIEqual,
+		                                              EmitAndConstant(state, either, 0x7fffffffu), 0);
+		const auto zero =
+		    EmitBitcastU32ToF32(state, max_value ? EmitAndU32(state, lhs_bits, rhs_bits) : either);
+		const auto keep_lhs =
+		    Binary(state, max_value ? spv::OpFOrdGreaterThanEqual : spv::OpFOrdLessThan,
+		           TypeBool(state), lhs, rhs);
+		const auto ordered = Select(state, TypeF32(state), keep_lhs, lhs, rhs);
+		const auto numeric = Select(state, TypeF32(state), both_zero, zero, ordered);
+		return Select(state, TypeF32(state), Unary(state, spv::OpIsNan, TypeBool(state), rhs), lhs,
+		              numeric);
+	}
 	const auto both_negative =
 	    EmitCompareU32Constant(state, spv::OpSLessThan, EmitAndU32(state, lhs_bits, rhs_bits), 0);
 	const auto less = Binary(state, spv::OpSLessThan, TypeBool(state),
@@ -150,6 +171,29 @@ uint32_t EmitFPMedTri32(EmitterState& state, uint32_t a, uint32_t b, uint32_t c)
 		const auto bc = EmitMinMaxF32Value(state, b, c, true);
 		const auto ac = EmitMinMaxF32Value(state, a, c, true);
 		return EmitMinMaxF32Value(state, EmitMinMaxF32Value(state, ab, bc, false), ac, false);
+	}
+	if (!OrderF32ByBits()) {
+		const auto a_bits = EmitBitcastF32ToU32(state, a);
+		const auto b_bits = EmitBitcastF32ToU32(state, b);
+		const auto c_bits = EmitBitcastF32ToU32(state, c);
+		const auto min_ba = EmitMinMaxF32(state, b, a, b_bits, a_bits, false);
+		const auto min3 =
+		    EmitMinMaxF32(state, c, min_ba, c_bits, EmitBitcastF32ToU32(state, min_ba), false);
+		const auto max_ab = EmitMinMaxF32(state, a, b, a_bits, b_bits, true);
+		const auto max3 =
+		    EmitMinMaxF32(state, max_ab, c, EmitBitcastF32ToU32(state, max_ab), c_bits, true);
+		const auto a_is_max = Binary(state, spv::OpFOrdEqual, TypeBool(state), max3, a);
+		const auto b_is_max = Binary(state, spv::OpFOrdEqual, TypeBool(state), max3, b);
+		const auto x        = Select(state, TypeF32(state), a_is_max, b, a);
+		const auto y =
+		    Select(state, TypeF32(state), EmitLogicalOrBool(state, a_is_max, b_is_max), c, b);
+		const auto median = EmitMinMaxF32Value(state, x, y, true);
+		const auto is_nan = [&](uint32_t value) {
+			return Unary(state, spv::OpIsNan, TypeBool(state), value);
+		};
+		const auto any_nan =
+		    EmitLogicalOrBool(state, EmitLogicalOrBool(state, is_nan(a), is_nan(b)), is_nan(c));
+		return Select(state, TypeF32(state), any_nan, min3, median);
 	}
 	const auto below = [&](uint32_t lhs, uint32_t rhs) {
 		return Binary(state, spv::OpSLessThan, TypeBool(state), lhs, rhs);
