@@ -29,6 +29,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/host_gpu/renderer/cache/reuploadDiag.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -1181,6 +1182,25 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
                                          DrawRenderState& state, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
                                          MeshIndirectRequest*         mesh_gpu_request) {
+	ReuploadDiag::DrawScope reupload_copy;
+	if (ReuploadDiag::On()) {
+		uint64_t hash = 0;
+		if (state.ps_active && state.ps_input_info.stage.module != nullptr) {
+			hash = state.ps_input_info.stage.module->info.shader_hash;
+		}
+		if (hash == ReuploadDiag::kCopyPs) {
+			reupload_copy.Arm();
+		}
+		if (ReuploadDiag::InWindow()) {
+			const auto& hw = buffer.GetRegisters();
+			for (uint32_t i = 0; i < state.color_count && i < 8; i++) {
+				const auto slot = state.color_info[i].target_slot;
+				if (hw.GetBlendControl(slot).enable) {
+					ReuploadDiag::NoteBlend(state.color_info[i].desc.info.data.address);
+				}
+			}
+		}
+	}
 	auto&      ucfg                     = buffer.GetUserConfig();
 	const bool primitive_restart_enable = state.primitive_restart_enable;
 	if (CopyDepthToColor(buffer, draw, emit, state)) {

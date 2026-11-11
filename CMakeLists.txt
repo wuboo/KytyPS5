@@ -698,6 +698,14 @@ endforeach()
 # S495: KYTY_LAND_SYNC. Mutants revert one part of the package (the test must fail).
 # S503: image edge untrack stays inside the tracked interval. The mutant peels to the
 # page boundary even when that end is past the other one (the wrapped PageManager size).
+# S532: a CPU write on another 4 KiB page of the same 1 MiB must not select the image.
+# The mutant restores FindImagesInRegion(address, size, true).
+add_executable(cpu_alias_pages_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpuAliasPagesTests.cpp")
+target_include_directories(cpu_alias_pages_tests PRIVATE ${inc_headers})
+add_executable(cpu_alias_pages_mutant_old_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpuAliasPagesTests.cpp")
+target_include_directories(cpu_alias_pages_mutant_old_tests PRIVATE ${inc_headers})
+target_compile_definitions(cpu_alias_pages_mutant_old_tests PRIVATE KYTY_ALIAS_PAGES_MUTANT_OLD=1)
+
 add_executable(texture_track_range_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/TextureTrackRangeTests.cpp")
 target_include_directories(texture_track_range_tests PRIVATE ${inc_headers})
 add_executable(texture_track_range_mutant_no_clamp_tests EXCLUDE_FROM_ALL
@@ -2081,6 +2089,9 @@ if(BUILD_TESTING)
 		add_test(NAME srt_prot_avoid_mutant_${mutant} COMMAND $<TARGET_FILE:srt_prot_avoid_mutant_${mutant}_tests>)
 		set_tests_properties(srt_prot_avoid_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
+	add_test(NAME cpu_alias_pages COMMAND $<TARGET_FILE:cpu_alias_pages_tests>)
+	add_test(NAME cpu_alias_pages_mutant_old COMMAND $<TARGET_FILE:cpu_alias_pages_mutant_old_tests>)
+	set_tests_properties(cpu_alias_pages_mutant_old PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME texture_track_range COMMAND $<TARGET_FILE:texture_track_range_tests>)
 	add_test(NAME texture_track_range_mutant_no_clamp
 	         COMMAND $<TARGET_FILE:texture_track_range_mutant_no_clamp_tests>)

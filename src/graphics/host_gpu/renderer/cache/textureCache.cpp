@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 
+#include "graphics/host_gpu/renderer/cache/cpuAliasPages.h"
+#include "graphics/host_gpu/renderer/cache/reuploadDiag.h"
 #include "graphics/host_gpu/renderer/cache/textureTrackRange.h"
 
 #include "graphics/host_gpu/protectRing.h"
@@ -1109,12 +1111,17 @@ void TextureCache::InitializeImage(ImageId id) {
 	}
 	const bool upload = image.IsBufferModified() || image.IsCpuDirty();
 	if (upload) {
+		const bool  first = image.diag.uploads == 0;
+		const char* src   = ReuploadDiag::SourceOr(image.IsDefinitelyCpuDirty() ? "cpu"
+		                                                                        : image.IsMaybeCpuDirty() ? "maybe"
+		                                                                                                  : "buffer");
 		const auto [source, source_offset] =
 		    m_buffer_cache.ObtainBufferForImage(image.info.data.address, image.info.data.size);
 		if (source == nullptr) {
 			EXIT("TextureCache: failed to obtain image upload source\n");
 		}
 		UploadImage(image, *source, source_offset);
+		ReuploadDiag::OnUpload(image.info.data.address, src, first);
 		image.NoteDiagUpload();
 		image.ClearBufferModified();
 	}
@@ -1329,7 +1336,13 @@ void TextureCache::RefreshImage(ImageId id) {
 		return;
 	}
 	TrackImage(id);
-	if (image.IsMaybeCpuDirty()) {
+	const bool was_cpu   = image.IsDefinitelyCpuDirty();
+	const bool was_maybe = image.IsMaybeCpuDirty();
+	const bool was_buf   = image.IsBufferModified();
+	if (was_cpu || was_maybe || was_buf) {
+		ReuploadDiag::BeginSource(was_cpu ? "cpu" : was_maybe ? "maybe" : "buffer");
+	}
+	if (was_maybe) {
 		image.ResolveMaybeCpuHash(image.HashGuestEdges());
 	}
 	bool cpu_dirty = image.IsBufferModified() || image.IsDefinitelyCpuDirty();
@@ -1337,12 +1350,15 @@ void TextureCache::RefreshImage(ImageId id) {
 		if (cpu_dirty) {
 			EXIT("TextureCache: compressed guest image refresh is unsupported\n");
 		}
+		ReuploadDiag::EndSource();
 		return;
 	}
 	if (!cpu_dirty) {
+		ReuploadDiag::EndSource();
 		return;
 	}
 	InitializeImage(id);
+	ReuploadDiag::EndSource();
 }
 
 ImageId TextureCache::AssociateStencil(ImageId depth_id, GuestRange stencil) {
@@ -1868,6 +1884,7 @@ void TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format for
 		                    range.layerCount, &clear, command.Handle());
 		command.Handle().endRendering();
 		CommitGpuWrite(image);
+		ReuploadDiag::OnClear(image.info.data.address);
 		return;
 	}
 	image.Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {},
@@ -1886,6 +1903,7 @@ void TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format for
 		                                        &clear.depthStencil, 1, &native_range);
 	}
 	CommitGpuWrite(image);
+	ReuploadDiag::OnClear(image.info.data.address);
 }
 
 vk::Rect2D TextureCache::BeginColorRendering(Image& image, vk::Format format, uint32_t level,
@@ -2209,21 +2227,32 @@ void TextureCache::InvalidateCpuAliases(uint64_t address, uint64_t size) {
 	Common::MemEvents::Record(Common::MemEvents::Kind::CpuWrite, address, size);
 	const auto page_begin = Common::AlignDown(address, TRACKER_PAGE_SIZE);
 	const auto page_end   = Common::AlignUp(address + size, TRACKER_PAGE_SIZE);
-	for (const auto id: FindImagesInRegion(address, size, true)) {
+	// S532: KYTY_FIX_CPU_ALIAS_PAGES=1 looks up only the written 4 KiB pages
+	// (upstream 21f3b9de). Off keeps FindImagesInRegion(address, size, true).
+	const auto lookup = CpuAliasPages::Query(address, size);
+	for (const auto id: FindImagesInRegion(lookup.address, lookup.size, lookup.page_overlap)) {
 		auto& owner = m_slot_images[id];
 		if (owner.Overlaps(address, size)) {
 			owner.MarkCpuDirty();
 			UntrackImage(id);
+			ReuploadDiag::OnAlias(owner.info.data.address, owner.info.data.size, address, size,
+			                      "dirty");
 			continue;
 		}
 		const auto image_begin = owner.info.data.address;
 		const auto image_end   = owner.info.data.End();
 		if (page_end < image_end) {
 			UntrackImageHead(id);
+			ReuploadDiag::OnAlias(owner.info.data.address, owner.info.data.size, address, size,
+			                      "head");
 		} else if (image_begin < page_begin) {
 			UntrackImageTail(id);
+			ReuploadDiag::OnAlias(owner.info.data.address, owner.info.data.size, address, size,
+			                      "tail");
 		} else {
 			MarkAsMaybeDirty(id, owner);
+			ReuploadDiag::OnAlias(owner.info.data.address, owner.info.data.size, address, size,
+			                      "maybe");
 		}
 	}
 }
