@@ -42,6 +42,16 @@ void TestDropped() {
 	Check(!MinLodDropped(false, false, false, false, 0), "MinLod 0 is nothing to drop");
 }
 
+// S538: the native view clamp, on only with the fix switch and the device feature; minLod is absolute.
+void TestViewMinLod() {
+	Check(ViewMinLodEnabled(true, true), "fix on + feature: native clamp");
+	Check(!ViewMinLodEnabled(false, true), "fix off: as before (dropped)");
+	Check(!ViewMinLodEnabled(true, false), "no feature: no native clamp");
+	Check(ViewMinLodValue(0, 512) == 2.0f, "MinLod 2.0 above level 0 = 2.0");
+	Check(ViewMinLodValue(3, 128) == 3.5f, "MinLod 0.5 above base level 3 = 3.5");
+	Check(ViewMinLodValue(2, 0) == 2.0f, "no clamp above the base = the base");
+}
+
 // S127: one shift formula for the host view and the recompiler (table 0/256/1024/1100/cap).
 void TestShiftTable() {
 	Check(MinLodShift(12, 0) == 0, "MinLod 0: no shift");
@@ -87,6 +97,7 @@ void TestResinfo() {
 } // namespace
 
 int main() {
+	TestViewMinLod();
 	TestMapping();
 	TestDropped();
 	TestShiftTable();

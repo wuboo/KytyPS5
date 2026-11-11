@@ -7,6 +7,7 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/image/minLodView.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -446,6 +447,9 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	}
 	graphics.shader_image_int64_atomics_enabled = image_atomic_int64.shaderImageInt64Atomics;
 	graphics.sampler_filter_minmax_enabled      = supported12.samplerFilterMinmax;
+	// S538: device selection requires the minLod feature and the chain below enables it (check_feature, ImageViewMinLodFeaturesEXT).
+	graphics.has_view_min_lod = Libs::Graphics::ViewMinLodEnabled(Libs::Graphics::FixViewMinLodEnv(), true);
+	Log::WriteToConsoleAndLog(fmt::format("T# MinLod: native view clamp={} (KYTY_FIX_VIEW_MIN_LOD)\n", graphics.has_view_min_lod ? 1 : 0));
 
 	auto features12                     = WindowContext::RequiredVulkan12Features();
 	features12.shaderSharedInt64Atomics = supported12.shaderSharedInt64Atomics;
