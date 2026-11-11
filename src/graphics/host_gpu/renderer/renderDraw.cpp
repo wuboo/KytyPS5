@@ -28,6 +28,7 @@
 #include "graphics/host_gpu/renderer/pvIndirect.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/host_gpu/renderer/galaxyFeedback.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
@@ -1177,6 +1178,182 @@ MeshIndirectRuntime& RenderExecutor::MeshIndirectRt() {
 	return *m_mesh_ind_rt;
 }
 
+// S533. Before AcquireRenderTargets moves the attachment back to its draw layout, end the
+// open pass and barrier a feedback image to a shader read. Log mode does not record anything.
+static void S533BeforeTargets(RenderContext& context, CommandBuffer& buffer, const DrawRenderState& state,
+                              std::span<PreparedBindings* const> stages) {
+	const auto mode = GalaxyFeedback::Current();
+	if (mode == GalaxyFeedback::Mode::Off) return;
+
+	const long guest = static_cast<long>(FrameTiming::GuestFlips() + 1);
+	static bool     was    = false;
+	static uint64_t hits_n = 0;
+	static uint64_t addr_n = 0;
+	static uint64_t splits = 0;
+	static uint64_t blends = 0;
+	static long     last   = -1;
+	if (guest < GalaxyFeedback::kLo || guest > GalaxyFeedback::kHi) {
+		if (was && guest > GalaxyFeedback::kHi) {
+			was = false;
+			std::fprintf(stderr, "[s533-fb] done hits=%llu addr=%llu splits=%llu blend=%llu\n",
+			             static_cast<unsigned long long>(hits_n), static_cast<unsigned long long>(addr_n),
+			             static_cast<unsigned long long>(splits), static_cast<unsigned long long>(blends));
+			std::fflush(stderr);
+		}
+		return;
+	}
+	was = true;
+
+	constexpr uint64_t kCard = 0x514080000ull;
+	auto&              cache = context.GetTextureCache();
+	struct Live {
+		Image*                image = nullptr;
+		ImageSubresourceRange range {};
+		uint64_t              handle  = 0;
+		uint64_t              address = 0;
+		uint8_t               depth   = 0;
+	};
+	Live     live[RENDER_COLOR_ATTACHMENTS_MAX + 1] {};
+	uint32_t nlive = 0;
+	int      card  = -1;
+	bool     blend_on = false;
+	const auto& hw = buffer.GetRegisters();
+	for (uint32_t i = 0; i < state.color_count && nlive < RENDER_COLOR_ATTACHMENTS_MAX; i++) {
+		const auto& color = state.color_info[i];
+		if (!color.image_id) continue;
+		auto& image = cache.GetImage(color.image_id);
+		const auto& view = color.desc.view_info;
+		live[nlive] = Live {&image,
+		                    ImageSubresourceRange {view.base_level, view.level_count, view.base_layer, view.layer_count},
+		                    static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkImage>(image.backing.image))),
+		                    color.desc.info.data.address, 0};
+		if (color.desc.info.data.address == kCard) {
+			card = static_cast<int>(nlive);
+			if (hw.GetBlendControl(color.target_slot).enable) blend_on = true;
+		}
+		nlive++;
+	}
+	if (state.depth_info.image_id && nlive < RENDER_COLOR_ATTACHMENTS_MAX + 1) {
+		auto& image = cache.GetImage(state.depth_info.image_id);
+		const auto& view = state.depth_info.desc.view_info;
+		live[nlive] = Live {&image,
+		                    ImageSubresourceRange {view.base_level, view.level_count, view.base_layer, view.layer_count},
+		                    static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkImage>(image.backing.image))),
+		                    state.depth_info.desc.info.data.address, 1};
+		nlive++;
+	}
+	if (blend_on) blends++;
+
+	GalaxyFeedback::Bound bounds[64] {};
+	uint32_t               nbound = 0;
+	bool                   truncated = false;
+	for (uint32_t s = 0; s < stages.size(); s++) {
+		const auto* stage = stages[s];
+		if (stage == nullptr) continue;
+		const uint8_t is_ps = (state.ps_active && s + 1 == stages.size()) ? 1 : 0;
+		for (uint32_t slot = 0; slot < stage->images.size(); slot++) {
+			const auto& binding = stage->images[slot];
+			if (binding.desc.type != TextureCache::BindingType::Texture &&
+			    binding.desc.type != TextureCache::BindingType::Storage) {
+				continue;
+			}
+			if (!binding.image_id) continue;
+			if (nbound >= 64) {
+				truncated = true;
+				break;
+			}
+			auto& image = cache.GetImage(binding.image_id);
+			bounds[nbound++] = GalaxyFeedback::Bound {
+			    static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkImage>(image.backing.image))),
+			    image.info.data.address, slot, binding.desc.view_info.base_level,
+			    binding.desc.type == TextureCache::BindingType::Storage ? 1u : 0u, is_ps};
+		}
+	}
+
+	GalaxyFeedback::Attach attachments[RENDER_COLOR_ATTACHMENTS_MAX + 1] {};
+	for (uint32_t i = 0; i < nlive; i++) {
+		attachments[i] = GalaxyFeedback::Attach {live[i].handle, live[i].address, live[i].depth};
+	}
+	const uint64_t ps = state.ps_active && state.ps_input_info.stage.module != nullptr
+	                        ? state.ps_input_info.stage.module->info.shader_hash
+	                        : 0;
+	GalaxyFeedback::Hit found[32] {};
+	const uint32_t nhit = GalaxyFeedback::Find(bounds, nbound, attachments, nlive, found, 32);
+	GalaxyFeedback::Hit aliases[16] {};
+	const uint32_t nalias = GalaxyFeedback::FindAddress(bounds, nbound, attachments, nlive, aliases, 16);
+	if (guest != last) {
+		last = guest;
+		std::fprintf(stderr, "[s533-fb] guest=%ld hits=%llu addr=%llu splits=%llu blend=%llu\n", guest,
+		             static_cast<unsigned long long>(hits_n), static_cast<unsigned long long>(addr_n),
+		             static_cast<unsigned long long>(splits), static_cast<unsigned long long>(blends));
+	}
+	hits_n += nhit;
+	addr_n += nalias;
+
+	struct Key {
+		uint64_t ps;
+		uint64_t address;
+		uint64_t attach;
+		uint32_t slot;
+		uint32_t mip;
+		uint8_t  storage;
+		uint8_t  depth;
+		uint8_t  stage;
+		uint8_t  kind;
+	};
+	static Key seen[80] {};
+	static int seen_n = 0;
+	auto note = [&](const GalaxyFeedback::Hit& hit, uint8_t kind) {
+		for (int i = 0; i < seen_n; i++) {
+			const Key& key = seen[i];
+			if (key.ps == ps && key.address == hit.address && key.attach == hit.attach && key.slot == hit.slot &&
+			    key.mip == hit.mip && key.storage == hit.storage && key.depth == hit.depth && key.stage == hit.stage &&
+			    key.kind == kind) {
+				return;
+			}
+		}
+		if (seen_n >= 80) return;
+		seen[seen_n++] = Key {ps, hit.address, hit.attach, hit.slot, hit.mip, hit.storage, hit.depth, hit.stage, kind};
+		std::fprintf(stderr,
+		             "[s533-fb] hit guest=%ld ps=0x%016llx slot=%u st=%s addr=0x%llx att=0x%llx mip=%u storage=%u depth=%u kind=%s\n",
+		             guest, static_cast<unsigned long long>(ps), hit.slot, hit.stage ? "ps" : "vs",
+		             static_cast<unsigned long long>(hit.address), static_cast<unsigned long long>(hit.attach), hit.mip,
+		             hit.storage, hit.depth, kind ? "addr" : "image");
+	};
+	for (uint32_t i = 0; i < nhit; i++) note(found[i], 0);
+	for (uint32_t i = 0; i < nalias; i++) note(aliases[i], 1);
+	static bool trunc_logged = false;
+	if (truncated && !trunc_logged) {
+		trunc_logged = true;
+		std::fprintf(stderr, "[s533-fb] trunc guest=%ld bounds=64\n", guest);
+	}
+	if (!GalaxyFeedback::ShouldSplit(mode, nhit != 0, blend_on)) return;
+	bool want[RENDER_COLOR_ATTACHMENTS_MAX + 1] {};
+	bool storage[RENDER_COLOR_ATTACHMENTS_MAX + 1] {};
+	if (mode == GalaxyFeedback::Mode::Blend) {
+		if (card >= 0) want[card] = true;
+	} else {
+		for (uint32_t i = 0; i < nhit; i++) {
+			const uint8_t index = found[i].attach_index;
+			if (index >= nlive) continue;
+			want[index] = true;
+			storage[index] = storage[index] || found[i].storage != 0;
+		}
+	}
+	bool any = false;
+	for (uint32_t i = 0; i < nlive; i++) any = any || want[i];
+	if (!any) return;
+	context.GetCommandScheduler().EndRendering();
+	uint32_t nsplit = 0;
+	for (uint32_t i = 0; i < nlive; i++) {
+		if (!want[i] || live[i].image == nullptr || live[i].handle == 0) continue;
+		const auto layout = storage[i] ? vk::ImageLayout::eGeneral : live[i].image->ReadLayout();
+		live[i].image->Transit(layout, vk::AccessFlagBits2::eShaderRead, live[i].range, buffer.Handle());
+		nsplit++;
+	}
+	if (nsplit != 0) splits++;
+}
+
 void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallInfo& draw,
                                          DrawRenderState& state, const DrawEmitInfo& emit,
                                          const DrawIndexBufferSource& index_source,
@@ -1280,6 +1457,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		return m_context.GetPipelineCache().GetGraphicsPipeline(buffer, state);
 	}();
 	vk::ImageAspectFlags feedback_aspects;
+	S533BeforeTargets(m_context, buffer, state, stages);
 	const auto rendering = [&] {
 		CpPhases::Scope targets(CpPhases::Phase::DrawTargets);
 		return AcquireRenderTargets(buffer, state.color_info, state.color_count, state.depth_info,

@@ -705,6 +705,14 @@ add_executable(texture_track_range_mutant_no_clamp_tests EXCLUDE_FROM_ALL
 target_include_directories(texture_track_range_mutant_no_clamp_tests PRIVATE ${inc_headers})
 target_compile_definitions(texture_track_range_mutant_no_clamp_tests PRIVATE KYTY_TRACKEDGE_MUTANT_NO_CLAMP=1)
 
+# S533: a bound texture or storage image that is the same VkImage as a color or depth
+# attachment. The mutant reports no match and never splits.
+add_executable(galaxy_feedback_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GalaxyFeedbackTests.cpp")
+target_include_directories(galaxy_feedback_tests PRIVATE ${inc_headers})
+add_executable(galaxy_feedback_mutant_never_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GalaxyFeedbackTests.cpp")
+target_include_directories(galaxy_feedback_mutant_never_tests PRIVATE ${inc_headers})
+target_compile_definitions(galaxy_feedback_mutant_never_tests PRIVATE KYTY_FB_MUTANT_NEVER=1)
+
 add_executable(land_sync_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/LandSyncTests.cpp")
 target_include_directories(land_sync_tests PRIVATE ${inc_headers})
 foreach(mutant IN ITEMS ignore_master guest_off obtain_writes guest_gate)
