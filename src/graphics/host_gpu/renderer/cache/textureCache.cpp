@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 
+#include "graphics/host_gpu/hostDcc.h"
+
 #include "graphics/host_gpu/renderer/cache/textureTrackRange.h"
 
 #include "graphics/host_gpu/protectRing.h"
@@ -1861,6 +1863,7 @@ void TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format for
 	}
 	command.EndRendering();
 	// Transfer clears use the backing format; aliased clears must encode through their view.
+	HostDcc::NoteClear(image.info.data.address, image.backing.format, format, image.backing.usage);
 	if (format != image.backing.format || (image.info.IsVolume() && !full_image)) {
 		EXIT_NOT_IMPLEMENTED(range.aspectMask != vk::ImageAspectFlagBits::eColor ||
 		                     range.levelCount != 1);

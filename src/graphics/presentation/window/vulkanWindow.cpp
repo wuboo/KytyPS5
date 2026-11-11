@@ -7,6 +7,7 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/hostDcc.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
@@ -577,6 +578,19 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	     robustness2.robustImageAccess2 == VK_TRUE ? "true" : "false",
 	     graphics.robust_buffer_access_enabled ? "robustBufferAccess2" : "shader checks");
 
+	if (HostDcc::Current() != HostDcc::Mode::Off) {
+		const bool listed = add(VK_EXT_IMAGE_COMPRESSION_CONTROL_EXTENSION_NAME);
+		if (listed) {
+			vk::PhysicalDeviceImageCompressionControlFeaturesEXT queried {};
+			vk::PhysicalDeviceFeatures2                          wrap {};
+			wrap.pNext = &queried;
+			physical_device.getFeatures2(&wrap);
+			graphics.image_compression_control_enabled = queried.imageCompressionControl == VK_TRUE;
+		}
+		std::fprintf(stderr, "[s531-hd] ext=%d feature=%d\n", listed ? 1 : 0,
+		             graphics.image_compression_control_enabled ? 1 : 0);
+	}
+
 	const float                     queue_priority = 1.0f;
 	const vk::DeviceQueueCreateInfo queue_create_info {
 	    .queueFamilyIndex = queue_family, .queueCount = 1, .pQueuePriorities = &queue_priority};
@@ -603,7 +617,8 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	    // The renderer only uses the Vulkan 1.3 core dynamic states, but RADV (Mesa 26.3) creates
 	    // its PS epilog cache only when this EXT feature is enabled and crashes in vkCmdDraw when
 	    // a depth- or stencil-writing fragment shader needs an epilog.
-	    vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT {.extendedDynamicState = VK_TRUE}};
+	    vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT {.extendedDynamicState = VK_TRUE},
+	    vk::PhysicalDeviceImageCompressionControlFeaturesEXT {.imageCompressionControl = VK_TRUE}};
 	if (!workgroup_layout.workgroupMemoryExplicitLayout) {
 		create.unlink<vk::PhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR>();
 	}
@@ -636,6 +651,9 @@ static vk::Device VulkanCreateDevice(GraphicContext&          graphics,
 	}
 	if (!extended_dynamic_state) {
 		create.unlink<vk::PhysicalDeviceExtendedDynamicStateFeaturesEXT>();
+	}
+	if (!graphics.image_compression_control_enabled) {
+		create.unlink<vk::PhysicalDeviceImageCompressionControlFeaturesEXT>();
 	}
 
 	vk::Device device = nullptr;

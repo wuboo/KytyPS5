@@ -43,6 +43,8 @@ struct GraphicContext {
 	bool                               maintenance8_enabled                  = false;
 	// VK_EXT_conditional_rendering: DCC clear keys are selected on the GPU (KYTY_LAND_SYNC).
 	bool                               conditional_rendering_enabled         = false;
+	// S531 DIAG: VK_EXT_image_compression_control feature, only when KYTY_DIAG_NO_HOST_DCC is set.
+	bool                               image_compression_control_enabled     = false;
 	// robustness2.nullDescriptor enabled: unbound textures bind VK_NULL_HANDLE; otherwise a 1x1 stand-in image.
 	bool                               null_descriptor_enabled               = false;
 

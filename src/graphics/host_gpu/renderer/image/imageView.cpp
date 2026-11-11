@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 
+#include "graphics/host_gpu/hostDcc.h"
+
 #include "common/assert.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/image/image.h"
@@ -290,6 +292,7 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 		normalized.aspect = vk::ImageAspectFlagBits::eStencil;
 	}
 	normalized.usage = is_storage ? vk::ImageUsageFlagBits::eStorage : vk::ImageUsageFlags {};
+	HostDcc::NoteView(info.data.address, image.format, normalized.format, image.usage);
 	for (const auto& cached: views) {
 		if (cached.info == normalized) {
 			return cached.view;

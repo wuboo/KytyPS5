@@ -1,5 +1,7 @@
 #include "graphics/host_gpu/renderer/image/image.h"
 
+#include "graphics/host_gpu/hostDcc.h"
+
 #include "common/assert.h"
 #include "graphics/host_gpu/gpuLabelsVk.h"
 #include "common/logging/log.h"
@@ -792,6 +794,17 @@ Image::Image(GraphicContext& graphics, CommandScheduler& scheduler, const ImageI
 	create.tiling        = vk::ImageTiling::eOptimal;
 	create.initialLayout = vk::ImageLayout::eUndefined;
 	create.samples       = vulkan_sample_count(info.samples);
+
+	vk::ImageCompressionControlEXT compression {};
+	const auto                     dcc_path =
+	    HostDcc::Apply(create, compression, graphics.image_compression_control_enabled);
+	if (dcc_path == HostDcc::Path::StorageAdded) {
+		create.flags = ImageCreateFlags(graphics, info, create.usage);
+	}
+	HostDcc::LogCreate(info.data.address, static_cast<int>(create.format), create.extent.width,
+	                   create.extent.height,
+	                   static_cast<vk::ImageUsageFlags::MaskType>(create.usage),
+	                   static_cast<vk::ImageCreateFlags::MaskType>(create.flags), dcc_path);
 
 	vk::ImageFormatProperties properties {};
 	if (graphics.GetImageFormatProperties(create.format, create.imageType, create.tiling,
