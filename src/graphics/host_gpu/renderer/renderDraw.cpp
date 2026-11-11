@@ -468,6 +468,25 @@ static void S537NoteTextures(RenderContext& context, const PreparedBindings& pix
 			const auto tag = fmt::format("flip={} slot={}", flip, slot);
 			context.GetTextureCache().S537CompareGuest(binding.image_id, tag.c_str());
 		}
+		static uint64_t last_periodic = 0;
+		if (slot == 2 && flip >= 3990 && flip <= 4470 && flip % 10 == 0 && flip != last_periodic) {
+			// S537 DIAG: every 10 flips, the guest mip 0 of the bound slot-2 image (hash, zero 16-byte blocks).
+			last_periodic = flip;
+			const auto m0 = image.info.mip_layout[0];
+			std::vector<uint8_t> bytes(m0.size);
+			uint64_t hash = 0, zero = 0;
+			if (m0.size != 0 && m0.size <= (16u << 20) &&
+			    LibKernel::Memory::TryReadBacking(image.info.data.address + m0.offset, bytes.data(), bytes.size())) {
+				hash = XXH3_64bits(bytes.data(), bytes.size());
+				static const uint8_t z[16] {};
+				for (size_t b = 0; b + 16 <= bytes.size(); b += 16) zero += std::memcmp(bytes.data() + b, z, 16) == 0 ? 1 : 0;
+			}
+			Log::WriteToConsoleAndLog(fmt::format("[s537-per] flip={} addr=0x{:x} serial={} mip0_xxh={:016x} zero16={} uploads={} "
+			                                      "upload_flip={} cpu_dirty={} writes={} page_writes={}\n",
+			                                      flip, image.info.data.address, image.serial, hash, zero, image.diag.uploads,
+			                                      image.diag.upload_flip, image.IsCpuDirty() ? 1 : 0, image.diag.writes,
+			                                      image.diag.page_writes));
+		}
 		if (!seen.insert(key).second) continue;
 		lines++;
 		// Guest mip 0 now, to tell the same asset at another address from other content.
