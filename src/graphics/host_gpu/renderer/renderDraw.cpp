@@ -33,6 +33,7 @@
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+#include "graphics/shader/recompiler/s537Diag.h"
 #include "graphics/shader/shader.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/eventQueue.h"
@@ -54,7 +55,10 @@
 #include <new>
 #include <optional>
 #include <span>
+#include <chrono>
+#include <fmt/format.h>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -433,6 +437,33 @@ static void UpdateGraphicsDynamicState(const CommandBuffer& buffer, DynamicState
 		dynamic_state.SetStencilCompareMasks(front.compareMask, back.compareMask);
 		dynamic_state.SetStencilWriteMasks(front.writeMask, back.writeMask);
 		dynamic_state.SetStencilReferences(front.reference, back.reference);
+	}
+}
+
+// S537 DIAG (KYTY_DIAG_S537_DIR): the textures of the card pixel shader, one line per new (slot, image, state).
+static void S537NoteTextures(RenderContext& context, const PreparedBindings& pixel) {
+	static std::mutex                   mutex;
+	static std::unordered_set<uint64_t> seen;
+	static uint32_t                     lines = 0;
+	const std::scoped_lock              lock(mutex);
+	if (lines >= 600) return;
+	const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+	                     std::chrono::steady_clock::now().time_since_epoch()).count();
+	for (uint32_t slot = 0; slot < pixel.images.size(); slot++) {
+		const auto& binding = pixel.images[slot];
+		if (!binding.image_id) continue;
+		const auto& image = context.GetTextureCache().GetImage(binding.image_id);
+		const uint64_t key = (image.serial << 12) ^ (uint64_t {slot} << 4) ^ (image.IsGpuModified() ? 1u : 0u) ^
+		                     (image.IsCpuDirty() ? 2u : 0u) ^ (image.usage.render_target ? 4u : 0u) ^ (image.diag.uploads << 20);
+		if (!seen.insert(key).second) continue;
+		lines++;
+		Log::WriteToConsoleAndLog(fmt::format(
+		    "[s537-tex] t_ms={} slot={} addr=0x{:x} serial={} {}x{}x{} gfmt={} vk={} view_addr=0x{:x} rt={} gpu_mod={} "
+		    "cpu_dirty={} uploads={} upload_flip={} writes={} write_flip={}\n",
+		    now, slot, image.info.data.address, image.serial, image.info.extent.width, image.info.extent.height,
+		    image.info.extent.depth, static_cast<int>(image.info.guest_format), static_cast<int>(image.info.pixel_format),
+		    binding.desc.info.data.address, image.usage.render_target ? 1 : 0, image.IsGpuModified() ? 1 : 0,
+		    image.IsCpuDirty() ? 1 : 0, image.diag.uploads, image.diag.upload_flip, image.diag.writes, image.diag.write_flip));
 	}
 }
 
@@ -1257,6 +1288,10 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		PrepareGraphicsBindings(stages, std::span {m_targets.colors, m_targets.color_count});
 		return stages;
 	}();
+	if (ShaderRecompiler::S537::Dir() != nullptr && state.ps_active && state.ps_input_info.stage.module != nullptr &&
+	    state.ps_input_info.stage.module->info.shader_hash == ShaderRecompiler::S537::kCardHash) {
+		S537NoteTextures(m_context, bindings.pixel);
+	}
 	PreparedVertexBuffers vertex_bindings;
 	PreparedIndexBuffer   index_binding;
 	if (!mesh_active) {
