@@ -282,28 +282,37 @@ static void S537EnsureProbe(GraphicContext& graphics) {
 		std::thread([words] {
 			const std::string path = std::string(S537::Dir()) + "/s537-probe.txt";
 			constexpr uint32_t total = S537::kHotRecords + S537::kColdRecords;
+			auto* live = reinterpret_cast<volatile uint32_t*>(words);
 			std::array<uint8_t, total> state {}; // 0 unseen, 1 magic seen once, 2 written
-			uint32_t last_hot = 0;
+			uint32_t last[4] {};
+			int64_t  armed_ms = 0;
+			uint32_t arm      = 0;
 			for (;;) {
-				std::this_thread::sleep_for(std::chrono::seconds(2));
+				std::this_thread::sleep_for(std::chrono::milliseconds(50));
 				const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
 				                     std::chrono::steady_clock::now().time_since_epoch()).count();
 				FILE* file = std::fopen(path.c_str(), "ab");
 				if (file == nullptr) continue;
-				const uint32_t hot = reinterpret_cast<volatile uint32_t*>(words)[0];
-				if (hot != last_hot) {
-					std::fprintf(file, "COUNT t_ms=%lld hot=%u cold=%u\n", static_cast<long long>(now), hot,
-					             reinterpret_cast<volatile uint32_t*>(words)[1]);
-					last_hot = hot;
+				const uint32_t peak = live[2];
+				live[2] = 0;
+				const uint32_t counts[4] = {live[3], live[4], live[5], live[0]};
+				if (peak != 0 || std::memcmp(counts, last, sizeof(last)) != 0) {
+					float peak_value = 0;
+					std::memcpy(&peak_value, &peak, 4);
+					std::fprintf(file, "S t_ms=%lld peak=%g n1=%u n10=%u n100=%u n1000=%u\n", static_cast<long long>(now),
+					             peak_value, counts[0], counts[1], counts[2], counts[3]);
+					std::memcpy(last, counts, sizeof(last));
 				}
+				bool all_written = true;
 				for (uint32_t index = 0; index < total; index++) {
 					const auto* record = words + S537::kHeaderDwords + uint64_t {index} * S537::kRecordDwords;
-					if (state[index] == 2 || reinterpret_cast<const volatile uint32_t*>(record)[0] != S537::kMagic) continue;
-					if (state[index] == 0) { state[index] = 1; continue; }
+					if (state[index] == 2) continue;
+					if (reinterpret_cast<const volatile uint32_t*>(record)[0] != S537::kMagic) { all_written = false; continue; }
+					if (state[index] == 0) { state[index] = 1; all_written = false; continue; }
 					state[index] = 2;
 					const uint32_t slots = std::min(record[9], S537::kMaxTrace);
-					std::fprintf(file, "REC t_ms=%lld index=%u kind=%u ord=%u x=%08x y=%08x c=%08x %08x %08x %08x slots=%u\n",
-					             static_cast<long long>(now), index, record[1], record[2], record[3], record[4],
+					std::fprintf(file, "REC t_ms=%lld arm=%u index=%u kind=%u ord=%u x=%08x y=%08x c=%08x %08x %08x %08x slots=%u\n",
+					             static_cast<long long>(now), arm, index, record[1], record[2], record[3], record[4],
 					             record[5], record[6], record[7], record[8], slots);
 					for (uint32_t slot = 0; slot < slots; slot += 16) {
 						std::fprintf(file, "T %u", slot);
@@ -313,6 +322,23 @@ static void S537EnsureProbe(GraphicContext& graphics) {
 						std::fprintf(file, "\n");
 					}
 				}
+				// Re-arm once a second when either record kind is full, so later frames get records too.
+				const bool full = live[6] >= S537::kHotRecords || live[7] >= S537::kColdRecords;
+				if (full && now - armed_ms >= 1000) {
+					for (uint32_t index = 0; index < total; index++) {
+						auto* record = words + S537::kHeaderDwords + uint64_t {index} * S537::kRecordDwords;
+						if (state[index] != 1) {
+							reinterpret_cast<volatile uint32_t*>(record)[0] = 0;
+							state[index] = 0;
+						}
+					}
+					live[6] = 0;
+					live[7] = 0;
+					armed_ms = now;
+					arm++;
+					std::fprintf(file, "ARM t_ms=%lld arm=%u\n", static_cast<long long>(now), arm);
+				}
+				(void)all_written;
 				std::fclose(file);
 			}
 		}).detach();

@@ -545,40 +545,70 @@ void S537WriteRecord(EmitterState& state, uint32_t index, uint32_t kind, uint32_
 	S537Store(state, record, 0, ConstantU32(state, S537::kMagic));
 }
 
-// S537 DIAG: at the MRT0 export, keep the trace of a hot invocation (|c| > 1000, NaN, Inf) and of a few others.
+// S537 DIAG: at the MRT0 export. Header words: [0] hot (|c| > 1000, NaN, Inf) count, [2] max of max(|r|,|g|,|b|) as
+// bits (atomic max; the host clears it), [3] [4] [5] counts of that max above 1, 10, 100, [6] [7] record slots of the
+// current arm (hot, warm = above 10 and not hot). The host re-arms the records by clearing [6], [7] and the magics.
+void S537Count(EmitterState& state, uint32_t base, uint32_t dword) {
+	const auto old = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpAtomicIAdd, TypeU32(state), old, S537Pointer(state, base, uint64_t {dword} * 4u),
+	                          ConstantU32(state, spv::ScopeDevice), ConstantU32(state, 0), ConstantU32(state, 1));
+}
+
 void EmitS537Probe(EmitterState& state, uint32_t color) {
 	const auto vec4  = TypeF32Vector(state, 4);
 	const auto bvec4 = TypeBoolVector(state, 4);
 	const auto abs   = state.builder.AllocateId();
 	state.builder.AddFunction(spv::OpExtInst, vec4, abs, GlslStd450(state), GLSLstd450FAbs, color);
-	const auto limit = ConstantF32Value(state, S537::kHotThreshold);
-	const auto limits = state.builder.Constant(spv::OpConstantComposite, vec4, limit, limit, limit, limit);
-	const auto big   = Binary(state, spv::OpFOrdGreaterThan, bvec4, abs, limits);
+	const auto component = [&](uint32_t index) {
+		const auto value = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, TypeF32(state), value, abs, index);
+		return value;
+	};
+	const auto fmax = [&](uint32_t x, uint32_t y) {
+		const auto value = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpExtInst, TypeF32(state), value, GlslStd450(state), GLSLstd450NMax, x, y);
+		return value;
+	};
+	const auto peak  = fmax(fmax(component(0), component(1)), component(2));
+	const auto above = [&](float limit) {
+		return Binary(state, spv::OpFOrdGreaterThan, TypeBool(state), peak, ConstantF32Value(state, limit));
+	};
 	const auto nan   = Unary(state, spv::OpIsNan, bvec4, color);
 	const auto inf   = Unary(state, spv::OpIsInf, bvec4, color);
-	const auto any   = Binary(state, spv::OpLogicalOr, bvec4, Binary(state, spv::OpLogicalOr, bvec4, big, nan), inf);
-	const auto hot   = Unary(state, spv::OpAny, TypeBool(state), any);
+	const auto odd   = Unary(state, spv::OpAny, TypeBool(state), Binary(state, spv::OpLogicalOr, bvec4, nan, inf));
+	const auto hot   = Binary(state, spv::OpLogicalOr, TypeBool(state), odd, above(S537::kHotThreshold));
 	const auto base  = ConstantU64(state, state.s537_probe_address);
+	EmitIfCondition(state, Binary(state, spv::OpLogicalOr, TypeBool(state), odd, above(1.0f)), [&]() {
+		const auto old = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAtomicUMax, TypeU32(state), old, S537Pointer(state, base, 8),
+		                          ConstantU32(state, spv::ScopeDevice), ConstantU32(state, 0),
+		                          Unary(state, spv::OpBitcast, TypeU32(state), peak));
+		S537Count(state, base, 3);
+		EmitIfCondition(state, above(10.0f), [&]() { S537Count(state, base, 4); });
+		EmitIfCondition(state, above(100.0f), [&]() { S537Count(state, base, 5); });
+	});
 	EmitIfCondition(state, hot, [&]() {
+		S537Count(state, base, 0);
 		const auto slot = state.builder.AllocateId();
-		state.builder.AddFunction(spv::OpAtomicIAdd, TypeU32(state), slot, S537Pointer(state, base, 0),
+		state.builder.AddFunction(spv::OpAtomicIAdd, TypeU32(state), slot, S537Pointer(state, base, 24),
 		                          ConstantU32(state, spv::ScopeDevice), ConstantU32(state, 0),
 		                          ConstantU32(state, 1));
 		const auto keep = Binary(state, spv::OpULessThan, TypeBool(state), slot,
 		                         ConstantU32(state, S537::kHotRecords));
 		EmitIfCondition(state, keep, [&]() { S537WriteRecord(state, slot, 1, color); });
 	});
-	const auto cold = Unary(state, spv::OpLogicalNot, TypeBool(state), hot);
-	EmitIfCondition(state, cold, [&]() {
+	const auto warm = Binary(state, spv::OpLogicalAnd, TypeBool(state), above(10.0f),
+	                         Unary(state, spv::OpLogicalNot, TypeBool(state), hot));
+	EmitIfCondition(state, warm, [&]() {
 		const auto seen = state.builder.AllocateId();
-		state.builder.AddFunction(spv::OpLoad, TypeU32(state), seen, S537Pointer(state, base, 4),
+		state.builder.AddFunction(spv::OpLoad, TypeU32(state), seen, S537Pointer(state, base, 28),
 		                          spv::MemoryAccessAlignedMask, 4u);
 		const auto room = Binary(state, spv::OpULessThan, TypeBool(state), seen,
 		                         ConstantU32(state, S537::kColdRecords));
 		EmitIfCondition(state, room, [&]() {
 			const auto slot = state.builder.AllocateId();
 			state.builder.AddFunction(spv::OpAtomicIAdd, TypeU32(state), slot,
-			                          S537Pointer(state, base, 4), ConstantU32(state, spv::ScopeDevice),
+			                          S537Pointer(state, base, 28), ConstantU32(state, spv::ScopeDevice),
 			                          ConstantU32(state, 0), ConstantU32(state, 1));
 			const auto keep = Binary(state, spv::OpULessThan, TypeBool(state), slot,
 			                         ConstantU32(state, S537::kColdRecords));
@@ -591,6 +621,7 @@ void EmitS537Probe(EmitterState& state, uint32_t color) {
 }
 
 } // namespace
+
 uint32_t EmitWqmU64(EmitterState& state, uint32_t value) {
 	const auto shifted_one = state.builder.AllocateId();
 	const auto merged_one  = state.builder.AllocateId();
