@@ -131,20 +131,19 @@ struct ShaderModule {
 	bool                                         mesh_task = false;
 };
 
-// A draw's topology, shader stages (from PipelineCache::GetGraphicsPrograms) and targets.
-// S511 (KYTY_DRS_NO_ZERO): color_info and vertex_info sit in unions so a default-initialized
-// state does not construct the unused slots. Value-init (`DrawRenderState{}` and the designated
-// call sites) still zeroes every slot. color_constructed / vertex_alive say how many are alive
-// (8 and 3 after value-init; the fast path sets 1 and 1).
+// A draw's depth target and its first color_count color targets.
+struct DrawTargets {
+	RenderDepthInfo depth;
+	RenderColorInfo colors[RENDER_COLOR_ATTACHMENTS_MAX];
+	uint32_t        color_count = 0;
+};
+
+// A draw's topology and shader stages (from PipelineCache::GetGraphicsPrograms). The targets live
+// on the executor (RenderExecutor::m_targets, DrawTargets above).
+// S511 (KYTY_DRS_NO_ZERO): vertex_info sits in a union so a default-initialized state does not
+// construct the unused slots. Value-init (`DrawRenderState{}` and the designated call sites) still
+// zeroes every slot. vertex_alive says how many are alive (3 after value-init; the fast path sets 1).
 struct DrawRenderState {
-	RenderDepthInfo depth_info;
-	union {
-		RenderColorInfo color_info[RENDER_COLOR_ATTACHMENTS_MAX];
-	};
-	uint32_t color_count = 0;
-	// How many leading color_info entries have been constructed. Resolve constructs the next one
-	// when color_count catches up. Value-init leaves all eight alive.
-	uint32_t color_constructed = RENDER_COLOR_ATTACHMENTS_MAX;
 	// Color targets the pixel program writes.
 	uint32_t              mrt_mask = 0;
 	vk::PrimitiveTopology topology = vk::PrimitiveTopology::ePointList;
@@ -160,32 +159,23 @@ struct DrawRenderState {
 	ShaderIndirectOffsets indirect_offsets;
 	bool                  indirect_draw = false;
 
-	// Constructs every color and vertex slot. Tests and KYTY_DRS_NO_ZERO=0 use this.
+	// Constructs every vertex slot. Tests and KYTY_DRS_NO_ZERO=0 use this.
 	DrawRenderState() {
-		for (uint32_t i = 0; i < RENDER_COLOR_ATTACHMENTS_MAX; i++) {
-			std::construct_at(&color_info[i]);
-		}
 		for (uint32_t i = 0; i < 3; i++) {
 			std::construct_at(&vertex_info[i]);
 		}
 	}
-	// S511: constructs color slot 0 and vertex slot 0 only. The unused slots stay unconstructed.
+	// S511: constructs vertex slot 0 only. The unused slots stay unconstructed.
 	struct Fast {};
 	DrawRenderState(Fast, ShaderIndirectOffsets offsets, bool indirect) {
 #if defined(KYTY_DRS_MUTANT_ZERO_ALL)
-		for (uint32_t i = 0; i < RENDER_COLOR_ATTACHMENTS_MAX; i++) {
-			std::construct_at(&color_info[i]);
-		}
 		for (uint32_t i = 0; i < 3; i++) {
 			std::construct_at(&vertex_info[i]);
 		}
-		color_constructed = RENDER_COLOR_ATTACHMENTS_MAX;
-		vertex_alive      = 3;
+		vertex_alive = 3;
 #else
-		std::construct_at(&color_info[0]);
 		std::construct_at(&vertex_info[0]);
-		color_constructed = 1;
-		vertex_alive      = 1;
+		vertex_alive = 1;
 #endif
 		indirect_offsets = offsets;
 		indirect_draw    = indirect;
@@ -264,7 +254,8 @@ public:
 	const ShaderModule* GetComputeProgram(const HW::ComputeShaderInfo& regs,
 	                                      ShaderComputeInputInfo&      input_info);
 
-	Pipeline& GetGraphicsPipeline(const CommandBuffer& command, const DrawRenderState& state);
+	Pipeline& GetGraphicsPipeline(const CommandBuffer& command, const DrawRenderState& state,
+	                              const DrawTargets& targets);
 	Pipeline& GetComputePipeline(const ShaderComputeInputInfo& input_info);
 
 private:

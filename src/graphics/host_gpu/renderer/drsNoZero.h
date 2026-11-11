@@ -1,15 +1,12 @@
 #ifndef KYTY_GRAPHICS_HOST_GPU_RENDERER_DRSNOZERO_H_
 #define KYTY_GRAPHICS_HOST_GPU_RENDERER_DRSNOZERO_H_
 
-// S511 L2 (KYTY_DRS_NO_ZERO=0|1, unset = 0). The value-init of DrawRenderState zeroes eight
-// RenderColorInfo and three ShaderVertexInputInfo on every draw. The fast path leaves the unused
+// S511 L2 (KYTY_DRS_NO_ZERO=0|1, unset = 0). The value-init of DrawRenderState zeroes three
+// ShaderVertexInputInfo on every draw (the color/depth targets live on the executor since the
+// port of upstream 7ae328b3, RenderExecutor::m_targets, and are not zeroed per draw). The fast path leaves the unused
 // slots unconstructed. Fields a draw reads before GetGraphicsPrograms fills the used stage, and
 // who writes them:
-//   depth_info            default-init (ResolveRenderDepthTarget returns without writing when inactive)
-//   color_info[0]         InitDrawRenderStateFast (logs and sample count read slot 0 with color_count == 0)
-//   color_info[1..]       constructed in PrepareDrawRenderState just before ResolveRenderColorTarget,
-//                         which assigns the whole entry (`r = {}`)
-//   color_count, mrt_mask, ps_active, topology, primitive_restart  in-class defaults, then the caller
+//   mrt_mask, ps_active, topology, primitive_restart  in-class defaults, then the caller
 //   ps_input_info         default-init (object_primitive_id is read even when the pixel shader is off)
 //   indirect_offsets, indirect_draw  InitDrawRenderStateFast from the draw packet
 //   vertex_info[0]        construct_at here, then `info = {}` in ShaderGetStaticVertexInputInfo
