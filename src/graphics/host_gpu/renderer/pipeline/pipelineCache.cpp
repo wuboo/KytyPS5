@@ -19,7 +19,9 @@
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
+#include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/s537Diag.h"
+#include "graphics/shader/recompiler/s538Diag.h"
 #include "graphics/shader/scoutTableLog.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
@@ -519,8 +521,16 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 	m_lookup_key.hash            = params.hash;
 	m_lookup_key.user_data_count = params.user_data_count;
 	BuildStageStaticKey(input_info, m_lookup_key.static_state);
+	// S538 DIAG: the card pixel shader's walk records the range of every guest load.
+	const bool s538_card = ShaderRecompiler::S538::On() && options.stage == ShaderType::Pixel &&
+	                       params.hash == ShaderRecompiler::S537::kCardHash;
+	if (s538_card) runtime.capture_reads = true;
 	auto entry = m_program_cache.find(m_lookup_key);
 	const auto bind = [&](const ShaderModule& module) {
+		if (s538_card) {
+			entry->second.resources.s538_path    = 1;
+			entry->second.resources.s538_walk_ns = FrameTiming::SteadyNowNs();
+		}
 		input_info.stage = {.module = &module, .resources = &entry->second.resources};
 		module.info.bindings.AdvancePushData(push_data_cursor);
 		return &module;
@@ -680,6 +690,8 @@ const ShaderModule* PipelineCache::GetProgramOffThread(const ShaderParams& param
 		    candidate.specialization != specialization) {
 			continue;
 		}
+		resources.s538_path    = 2;
+		resources.s538_walk_ns = FrameTiming::SteadyNowNs();
 		input_info.stage = {.module = &candidate, .resources = &resources};
 		layout.AdvancePushData(push_data_cursor);
 		return &candidate;

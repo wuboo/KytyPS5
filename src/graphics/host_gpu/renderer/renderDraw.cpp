@@ -34,6 +34,8 @@
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
 #include "graphics/shader/recompiler/s537Diag.h"
+#include "graphics/shader/recompiler/s538Diag.h"
+#include "common/memEvents.h"
 #include "graphics/shader/shader.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/eventQueue.h"
@@ -58,6 +60,8 @@
 #include <fmt/format.h>
 #include <unordered_map>
 #include <unordered_set>
+#include <mutex>
+#include <thread>
 #include <xxhash.h>
 #include <vector>
 
@@ -507,6 +511,266 @@ static void S537NoteTextures(RenderContext& context, const PreparedBindings& pix
 		    image.IsCpuDirty() ? 1 : 0, image.diag.uploads, image.diag.upload_flip, image.diag.writes, image.diag.write_flip));
 	}
 }
+
+// S538 DIAG (KYTY_DIAG_S538=1 / KYTY_DIAG_S538_FORCE=1, s538Diag.h): the source of the card shader's slot-2 T#.
+namespace S538Diag {
+
+inline uint64_t T40(const std::array<uint32_t, 8>& d) {
+	return ((uint64_t {d[0]} | (uint64_t {d[1]} << 32u)) & 0xffffffffffull) << 8u;
+}
+
+// Polled guest places: [0] the T#'s place, [1..3] small (pointer) loads of the walk.
+struct Watch {
+	std::atomic<uint64_t> addr[4] {};
+	std::atomic<uint32_t> len[4] {};
+	std::atomic<int64_t>  change_ns[4] {};
+	std::atomic<uint64_t> change_flip[4] {};
+	std::atomic<uint64_t> changes[4] {};
+};
+inline Watch& GetWatch() {
+	static Watch watch;
+	return watch;
+}
+
+inline void StartWatcher() {
+	static std::once_flag once;
+	std::call_once(once, [] {
+		std::thread([] {
+			auto&                                   w = GetWatch();
+			std::array<std::array<uint32_t, 8>, 4> prev {};
+			std::array<uint64_t, 4>                prev_addr {};
+			uint32_t                               lines = 0;
+			for (;;) {
+				std::this_thread::sleep_for(std::chrono::microseconds(500));
+				const auto flip = FrameTiming::GuestFlips() + 1;
+				if (flip > 4520) return;
+				for (int i = 0; i < 4; i++) {
+					const auto a   = w.addr[i].load(std::memory_order_relaxed);
+					const auto len = std::min<uint32_t>(w.len[i].load(std::memory_order_relaxed), 32);
+					if (a == 0 || len == 0) continue;
+					std::array<uint32_t, 8> now {};
+					if (!LibKernel::Memory::TryReadBacking(a, now.data(), len)) continue;
+					if (a != prev_addr[i]) {
+						prev_addr[i] = a;
+						prev[i]      = now;
+						continue;
+					}
+					if (std::memcmp(now.data(), prev[i].data(), len) == 0) continue;
+					const auto ns = FrameTiming::SteadyNowNs();
+					w.change_ns[i].store(ns, std::memory_order_relaxed);
+					w.change_flip[i].store(flip, std::memory_order_relaxed);
+					w.changes[i].fetch_add(1, std::memory_order_relaxed);
+					if (lines < 6000) {
+						lines++;
+						std::string text = fmt::format("[s538-w] t_ms={} flip={} slot={} addr=0x{:x} new=", ns / 1000000, flip, i, a);
+						for (uint32_t k = 0; k < len / 4; k++) text += fmt::format("{:08x}{}", now[k], k + 1 < len / 4 ? "," : "");
+						text += " old=";
+						for (uint32_t k = 0; k < len / 4; k++) text += fmt::format("{:08x}{}", prev[i][k], k + 1 < len / 4 ? "," : "");
+						Log::WriteToConsoleAndLog(text + "\n");
+					}
+					prev[i] = now;
+				}
+			}
+		}).detach();
+	});
+}
+
+// The guest mip 0 hash of a bound image (cached by serial and upload count, refreshed every 10 flips).
+inline uint64_t BoundMip0(RenderContext& context, const TextureBinding& binding, uint64_t flip, uint64_t* off, uint64_t* size) {
+	struct Entry {
+		uint64_t hash = 0, flip = 0, uploads = 0, off = 0, size = 0;
+	};
+	static std::unordered_map<uint64_t, Entry> cache;
+	const auto& image = context.GetTextureCache().GetImage(binding.image_id);
+	auto&       e     = cache[image.serial];
+	const auto  m0    = image.info.mip_layout[0];
+	if (e.flip == 0 || e.uploads != image.diag.uploads || flip >= e.flip + 10) {
+		e         = {};
+		e.flip    = flip;
+		e.uploads = image.diag.uploads;
+		e.off     = m0.offset;
+		e.size    = m0.size;
+		if (m0.size != 0 && m0.size <= (16u << 20)) {
+			std::vector<uint8_t> bytes(m0.size);
+			if (LibKernel::Memory::TryReadBacking(image.info.data.address + m0.offset, bytes.data(), bytes.size())) {
+				e.hash = XXH3_64bits(bytes.data(), bytes.size());
+			}
+		}
+	}
+	*off  = e.off;
+	*size = e.size;
+	return e.hash;
+}
+
+struct Good {
+	bool                    have = false;
+	std::array<uint32_t, 8> t {};
+	uint64_t                mip0_off = 0, mip0_size = 0, checked_flip = 0;
+	bool                    valid = false;
+	uint64_t                forced = 0, kept = 0, missing = 0;
+};
+inline Good& GetGood() {
+	static Good good;
+	return good;
+}
+
+inline uint64_t HashAt(uint64_t address, uint64_t size) {
+	if (size == 0 || size > (16u << 20)) return 0;
+	std::vector<uint8_t> bytes(size);
+	if (!LibKernel::Memory::TryReadBacking(address, bytes.data(), bytes.size())) return 0;
+	return XXH3_64bits(bytes.data(), bytes.size());
+}
+
+// After the bindings: learn the T# of the particle asset.
+inline void Learn(RenderContext& context, const ShaderStageRuntime& ps, const PreparedBindings& pixel) {
+	const auto& snap = *ps.resources;
+	if (snap.images.size() < 3 || pixel.images.size() < 3 || !pixel.images[2].image_id) return;
+	const auto flip = FrameTiming::GuestFlips() + 1;
+	uint64_t   off = 0, size = 0;
+	if (BoundMip0(context, pixel.images[2], flip, &off, &size) != ShaderRecompiler::S538::kGoodMip0) return;
+	auto& g = GetGood();
+	if (!g.have || g.t != snap.images[2].dwords) {
+		Log::WriteToConsoleAndLog(fmt::format("[s538-good] flip={} t40=0x{:x} mip0_off=0x{:x} mip0_size=0x{:x} was_have={}\n", flip,
+		                                      T40(snap.images[2].dwords), off, size, g.have ? 1 : 0));
+	}
+	g.have         = true;
+	g.t            = snap.images[2].dwords;
+	g.mip0_off     = off;
+	g.mip0_size    = size;
+	g.valid        = true;
+	g.checked_flip = flip;
+}
+
+// Before the bindings: the causal control (KYTY_DIAG_S538_FORCE=1).
+inline void Force(const ShaderStageRuntime& ps) {
+	auto& snap = const_cast<ShaderRecompiler::IR::ResourceSnapshot&>(*ps.resources);
+	if (snap.images.size() < 3) return;
+	auto&      g    = GetGood();
+	const auto flip = FrameTiming::GuestFlips() + 1;
+	auto&      cur  = snap.images[2].dwords;
+	if (!g.have || cur == g.t || T40(cur) == 0) return;
+	static std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> seen; // base -> (hash, flip)
+	auto& s = seen[T40(cur)];
+	if (s.second == 0 || flip >= s.second + 10) s = {HashAt(T40(cur) + g.mip0_off, g.mip0_size), flip};
+	if (s.first == ShaderRecompiler::S538::kGoodMip0) {
+		g.kept++;
+		return;
+	}
+	if (flip >= g.checked_flip + 10) {
+		g.valid        = HashAt(T40(g.t) + g.mip0_off, g.mip0_size) == ShaderRecompiler::S538::kGoodMip0;
+		g.checked_flip = flip;
+	}
+	static uint64_t last_log = 0;
+	if (!g.valid) {
+		g.missing++;
+	} else {
+		cur = g.t;
+		g.forced++;
+	}
+	if (flip != last_log && flip % 10 == 0) {
+		last_log = flip;
+		Log::WriteToConsoleAndLog(fmt::format("[s538-force] flip={} cur40=0x{:x} cur_hash={:016x} good40=0x{:x} valid={} forced={} kept={} missing={}\n",
+		                                      flip, T40(snap.images[2].dwords), s.first, T40(g.t), g.valid ? 1 : 0, g.forced, g.kept,
+		                                      g.missing));
+	}
+}
+
+// After the bindings: the T# the renderer binds against guest memory now (KYTY_DIAG_S538=1).
+inline void Note(RenderContext& context, const ShaderStageRuntime& ps, const PreparedBindings& pixel) {
+	const auto flip = FrameTiming::GuestFlips() + 1;
+	if (flip < 3300 || flip > 4480) return;
+	const auto& snap = *ps.resources;
+	if (snap.images.size() < 3) return;
+	StartWatcher();
+	const auto& t = snap.images[2].dwords;
+	// Merged load ranges of the walk.
+	std::vector<std::pair<uint64_t, uint64_t>> ranges(snap.specialization_reads.begin(), snap.specialization_reads.end());
+	std::sort(ranges.begin(), ranges.end());
+	std::vector<std::pair<uint64_t, uint64_t>> merged;
+	for (const auto& [a, n]: ranges) {
+		if (n == 0) continue;
+		if (!merged.empty() && a <= merged.back().first + merged.back().second) {
+			merged.back().second = std::max(merged.back().second, a + n - merged.back().first);
+		} else {
+			merged.emplace_back(a, n);
+		}
+	}
+	uint64_t key = XXH3_64bits(t.data(), sizeof(t)) ^ (XXH3_64bits(snap.user_data.data(), snap.user_data.size() * 4) * 3);
+	for (const auto& [a, n]: merged) key = key * 1099511628211ull ^ a ^ (n << 48);
+	static uint64_t last_key = 0, last_periodic = 0;
+	static uint32_t lines    = 0;
+	const bool      periodic = flip % 10 == 0 && flip != last_periodic;
+	if ((key == last_key && !periodic) || lines >= 4000) return;
+	last_key = key;
+	if (periodic) last_periodic = flip;
+	lines++;
+	const auto now = FrameTiming::SteadyNowNs();
+	uint64_t   off = 0, size = 0;
+	const auto mip0 = pixel.images.size() > 2 && pixel.images[2].image_id ? BoundMip0(context, pixel.images[2], flip, &off, &size) : 0;
+	std::string ud;
+	for (size_t i = 0; i < snap.user_data.size() && i < 16; i++) ud += fmt::format("{:08x}{}", snap.user_data[i], i + 1 < snap.user_data.size() && i < 15 ? "," : "");
+	std::string ts;
+	for (size_t i = 0; i < 8; i++) ts += fmt::format("{:08x}{}", t[i], i < 7 ? "," : "");
+	// Find the T# in the loaded ranges as they are now.
+	uint64_t loc = 0, loc_range = 0;
+	int      eq  = 0;
+	std::string smalls;
+	uint32_t    small_n = 0;
+	for (const auto& [a, n]: merged) {
+		if (n > (64u << 10)) continue;
+		std::vector<uint32_t> words((n + 3) / 4);
+		if (!LibKernel::Memory::TryReadBacking(a, words.data(), words.size() * 4)) continue;
+		if (n <= 16 && small_n < 6) {
+			smalls += fmt::format(" 0x{:x}:{}=", a, n);
+			for (size_t k = 0; k < words.size(); k++) smalls += fmt::format("{:08x}{}", words[k], k + 1 < words.size() ? "," : "");
+			auto& w = GetWatch();
+			if (small_n < 3) {
+				w.addr[1 + small_n].store(a, std::memory_order_relaxed);
+				w.len[1 + small_n].store(static_cast<uint32_t>(std::min<uint64_t>(n, 32)), std::memory_order_relaxed);
+			}
+			small_n++;
+		}
+		if (loc != 0) continue;
+		for (size_t k = 0; k + 8 <= words.size(); k++) {
+			if (words[k] == t[0] && words[k + 1] == t[1]) {
+				loc       = a + k * 4;
+				loc_range = a;
+				eq        = std::memcmp(&words[k], t.data(), 32) == 0 ? 1 : 2;
+				break;
+			}
+		}
+	}
+	auto& w = GetWatch();
+	if (loc != 0) {
+		w.addr[0].store(loc, std::memory_order_relaxed);
+		w.len[0].store(32, std::memory_order_relaxed);
+	}
+	bool       dirty = false, inflight = false, busy = false;
+	const bool queried  = loc != 0 && LibKernel::Memory::QueryGuestFaultBytes(loc, 32, &dirty, &inflight, &busy);
+	const bool gpu_dirt = loc != 0 && LibKernel::Memory::QueryShaderGpuDirty(loc, 32);
+	std::string rs;
+	for (size_t i = 0; i < merged.size() && i < 12; i++) rs += fmt::format("{}0x{:x}:{}", i ? "," : "", merged[i].first, merged[i].second);
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "[s538-ts] t_ms={} flip={} path={} walk_age_us={} ud{}={} t2={} t40=0x{:x} bound_mip0={:016x} loc=0x{:x} range=0x{:x} eq={} "
+	    "q={} dirty={} inflight={} busy={} gpu_dirty={} w_changes={} w_last_flip={} w_last_age_ms={} nranges={} ranges={} small={}\n",
+	    now / 1000000, flip, snap.s538_path, snap.s538_walk_ns != 0 ? (now - snap.s538_walk_ns) / 1000 : -1, snap.user_data.size(), ud, ts,
+	    T40(t), mip0, loc, loc_range, eq, queried ? 1 : 0, dirty ? 1 : 0, inflight ? 1 : 0, busy ? 1 : 0, gpu_dirt ? 1 : 0,
+	    w.changes[0].load(), w.change_flip[0].load(),
+	    w.change_ns[0].load() != 0 ? (now - w.change_ns[0].load()) / 1000000 : -1, merged.size(), rs, smalls));
+	if (Common::MemEvents::Enabled()) {
+		const auto probe = [&](const char* what, uint64_t a, uint64_t n) {
+			for (const auto& e: Common::MemEvents::Global().Query(a, n, 4)) {
+				Log::WriteToConsoleAndLog(fmt::format("[s538-ev] flip={} {} 0x{:x} {}\n", flip, what, a, Common::MemEvents::Format(e)));
+			}
+		};
+		if (loc != 0) probe("tsharp", loc, 32);
+		for (size_t i = 0; i < merged.size() && i < 12; i++) {
+			if (merged[i].second <= 16) probe("small", merged[i].first, merged[i].second);
+		}
+	}
+}
+
+} // namespace S538Diag
 
 static bool DrawHasValidVertexShader(const HW::Shader& sh_ctx) {
 
@@ -1322,12 +1586,20 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 			PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i]);
 			descriptor_stages[stage_count++] = &bindings.vertex[i];
 		}
+		const bool s538_card = (ShaderRecompiler::S538::On() || ShaderRecompiler::S538::Force()) && state.ps_active &&
+		                       state.ps_input_info.stage.module != nullptr &&
+		                       state.ps_input_info.stage.module->info.shader_hash == ShaderRecompiler::S537::kCardHash;
+		if (s538_card && ShaderRecompiler::S538::Force()) S538Diag::Force(state.ps_input_info.stage);
 		if (state.ps_active) {
 			PrepareBindings(state.ps_input_info.stage, bindings.pixel);
 			descriptor_stages[stage_count++] = &bindings.pixel;
 		}
 		const auto stages = std::span {descriptor_stages.data(), stage_count};
 		PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
+		if (s538_card) {
+			S538Diag::Learn(m_context, state.ps_input_info.stage, bindings.pixel);
+			if (ShaderRecompiler::S538::On()) S538Diag::Note(m_context, state.ps_input_info.stage, bindings.pixel);
+		}
 		return stages;
 	}();
 	if (ShaderRecompiler::S537::Dir() != nullptr && state.ps_active && state.ps_input_info.stage.module != nullptr &&

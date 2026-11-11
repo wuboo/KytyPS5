@@ -52,6 +52,9 @@ struct ResourceSnapshot {
 	SrtMemo                     srt_memo;
 	SrtMemoOutcome              srt_outcome  = SrtMemoOutcome::None;
 	uint32_t                    srt_mismatch = UINT32_MAX; // Shadow: first differing flat slot (UINT32_MAX: a descriptor)
+	// S538 DIAG: which path walked this snapshot (1 CP, 2 pipeline worker) and when (steady ns). Not a key.
+	uint8_t                     s538_path    = 0;
+	int64_t                     s538_walk_ns = 0;
 };
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR
