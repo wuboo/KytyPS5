@@ -95,8 +95,6 @@ public:
 	RegionManager(PageManager& page_manager, uint64_t cpu_addr)
 	    : m_page_manager(page_manager), m_cpu_addr(cpu_addr) {
 		m_cpu_dirty.Fill();
-		m_writable.Fill();
-		m_readable.Fill();
 	}
 
 	KYTY_CLASS_NO_COPY(RegionManager);
@@ -127,7 +125,8 @@ public:
 			}
 		}
 		Bump();
-		auto& bits = GetBits<source>();
+		auto&      bits = GetBits<source>();
+		RegionBits changed(enable ? ~bits : bits, start, end);
 		if constexpr (enable) {
 #if defined(KYTY_MEMTRACKER_MUTANT_NO_BUMP_CPU)
 			constexpr bool stamp = source != DirtySource::Cpu;
@@ -145,9 +144,9 @@ public:
 			bits.UnsetRange(start, end);
 		}
 		if constexpr (source == DirtySource::Cpu) {
-			UpdateProtection<!enable, false>();
+			UpdateProtection<!enable, false>(changed);
 		} else {
-			UpdateProtection<enable, true>();
+			UpdateProtection<enable, true>(changed);
 		}
 	}
 
@@ -171,9 +170,9 @@ public:
 			Bump();
 			bits.UnsetRange(start, end);
 			if constexpr (source == DirtySource::Cpu) {
-				UpdateProtection<true, false>();
+				UpdateProtection<true, false>(mask);
 			} else {
-				UpdateProtection<false, true>();
+				UpdateProtection<false, true>(mask);
 			}
 		}
 		for (const auto [first, last]: mask) {
@@ -237,18 +236,19 @@ public:
 		const ProtectRing::TagScope tag("buf-release-hot");
 		const auto [start, end] = GetPageRange(vaddr, size);
 		auto&      hs           = *m_hot_state;
-		bool       any          = false;
+		RegionBits changed;
+		changed.Clear();
 		for (size_t page = start; page < end; ++page) {
 			DropCandidate(hs, page);
 			if (hs.hot.Get(page)) {
 				DropHot(hs, page);
+				if (m_cpu_dirty.Get(page)) {
+					changed.Set(page);
+				}
 				m_cpu_dirty.Unset(page);
-				any = true;
 			}
 		}
-		if (any) {
-			UpdateProtection<true, false>();
-		}
+		UpdateProtection<true, false>(changed);
 	}
 
 	// Shadow: hot pages that are clean (protected, nothing dirty) must still hash like their last upload.
@@ -408,7 +408,7 @@ public:
 				m_cpu_dirty.Unset(page);
 			}
 		}
-		UpdateProtection<true, false>();
+		UpdateProtection<true, false>(clear); // clear is a subset of mask: every page in it was dirty
 		// The protection is in force: a write before it went unseen by the hash, so look again and upload the page if it differs.
 		for (size_t page = start; page < end; ++page) {
 			if (!recheck.Get(page)) {
@@ -572,17 +572,14 @@ private:
 	}
 	void Bump() noexcept { m_generation.fetch_add(1, std::memory_order_release); }
 
+	// CPU-dirty pages are not write-watched; GPU-dirty pages are read-watched. `changed`: the pages
+	// whose dirty bit this call site flipped (upstream 79a04b9a dropped the shadow bitsets).
 	template <bool track, bool is_read>
-	void UpdateProtection() {
-		const ProtectRing::DefaultTagScope tag(is_read ? (track ? "buf-gpu-own" : "buf-gpu-release") : (track ? "buf-protect" : "buf-unprotect"));
-		const auto protection = is_read ? ~m_gpu_dirty : m_cpu_dirty;
-		auto&      previous   = is_read ? m_readable : m_writable;
-		auto       mask       = protection ^ previous;
-		if (mask.None()) {
-			return;
+	void UpdateProtection(RegionBits& changed) {
+		if (!changed.None()) {
+			const ProtectRing::DefaultTagScope tag(is_read ? (track ? "buf-gpu-own" : "buf-gpu-release") : (track ? "buf-protect" : "buf-unprotect"));
+			m_page_manager.UpdatePageWatchersForRegion<track, is_read>(m_cpu_addr, changed);
 		}
-		previous = protection;
-		m_page_manager.UpdatePageWatchersForRegion<track, is_read>(m_cpu_addr, mask);
 	}
 
 	template <DirtySource source>
@@ -612,8 +609,6 @@ private:
 	uint64_t     m_cpu_addr = 0;
 	RegionBits   m_cpu_dirty;
 	RegionBits   m_gpu_dirty;
-	RegionBits   m_writable;
-	RegionBits   m_readable;
 	std::array<uint64_t, TRACKER_REGION_PAGES> m_stamps {};
 	std::unique_ptr<HotState>                  m_hot_state;
 	std::atomic<uint32_t>                      m_hot_count {0};
