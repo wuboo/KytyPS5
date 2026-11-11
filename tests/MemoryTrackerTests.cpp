@@ -422,8 +422,8 @@ void TestPageGeneration() {
   TrackerHarness harness;
   auto &tracker = harness.tracker;
   auto &page_manager = harness.page_manager;
-  const auto page_size = page_manager.GetPageSize();
-  auto *memory = Allocate(page_manager, 4);
+  const auto page_size = Libs::Graphics::TRACKER_PAGE_SIZE;
+  auto *memory = Allocate(4);
   const auto address = reinterpret_cast<uint64_t>(memory);
   const auto whole = page_size * 4;
 
@@ -491,8 +491,8 @@ void TestRepeatedUploadSkip() {
   {
     TrackerHarness harness;
     auto &tracker = harness.tracker;
-    page_size = harness.page_manager.GetPageSize();
-    memory = Allocate(harness.page_manager, 2);
+    page_size = Libs::Graphics::TRACKER_PAGE_SIZE;
+    memory = Allocate(2);
     address = reinterpret_cast<uint64_t>(memory);
 
     upload(tracker, false);
@@ -1393,8 +1393,8 @@ void TestHotPages() {
 
   TrackerHarness harness;
   auto &tracker = harness.tracker;
-  const auto page_size = harness.page_manager.GetPageSize();
-  auto *memory = Allocate(harness.page_manager, 4);
+  const auto page_size = Libs::Graphics::TRACKER_PAGE_SIZE;
+  auto *memory = Allocate(4);
   const auto address = reinterpret_cast<uint64_t>(memory);
   const auto page = address + page_size; // page 1; page 0 and 2 stay ordinary
   g_hot_epoch = 0;
@@ -1543,8 +1543,8 @@ void TestFlipUnprotect() {
 
   TrackerHarness harness;
   auto &tracker = harness.tracker;
-  const auto page_size = harness.page_manager.GetPageSize();
-  auto *memory = Allocate(harness.page_manager, 4);
+  const auto page_size = Libs::Graphics::TRACKER_PAGE_SIZE;
+  auto *memory = Allocate(4);
   const auto address = reinterpret_cast<uint64_t>(memory);
   const auto page = address + page_size;
   g_hot_epoch = 100;
@@ -1662,8 +1662,8 @@ void TestStickyRefault() {
 
   TrackerHarness harness;
   auto &tracker = harness.tracker;
-  const auto page_size = harness.page_manager.GetPageSize();
-  auto *memory = Allocate(harness.page_manager, 4);
+  const auto page_size = Libs::Graphics::TRACKER_PAGE_SIZE;
+  auto *memory = Allocate(4);
   const auto address = reinterpret_cast<uint64_t>(memory);
   const auto page = address + page_size;
   g_hot_epoch = 300;
