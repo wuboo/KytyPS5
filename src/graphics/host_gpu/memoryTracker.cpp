@@ -3,6 +3,9 @@
 #include "common/alignment.h"
 #include "common/assert.h"
 
+#include <cstdlib>
+#include <cstring>
+
 namespace Libs::Graphics {
 
 static_assert(std::atomic<void*>::is_always_lock_free);
@@ -83,17 +86,36 @@ void MemoryTracker::AddHotPages(RangeSet& set) {
 	}
 }
 
+// Upstream e5c35553 queries without the region lock: dirty words are read atomically. Upstream
+// argues the query runs on the GPU thread, which alone writes GPU-dirty bits; here the fault
+// handler, the kernel and the CP pipe also query, so the lock-free read is opt-in
+// (KYTY_TRACKER_QUERY_NOLOCK=1; unset or 0 takes the lock as before).
+static bool TrackerQueryNoLock() {
+	static const bool on = [] {
+		const char* text = std::getenv("KYTY_TRACKER_QUERY_NOLOCK");
+		return text != nullptr && std::strcmp(text, "1") == 0;
+	}();
+	return on;
+}
+
+template <DirtySource source>
+static bool QueryModified(RegionManager* manager, uint64_t offset, uint64_t bytes) {
+	if (TrackerQueryNoLock()) {
+		return manager->IsModified<source>(offset, bytes);
+	}
+	std::scoped_lock lock(manager->lock);
+	return manager->IsModified<source>(offset, bytes);
+}
+
 bool MemoryTracker::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
 	return Iterate<true>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
-		std::scoped_lock lock(manager->lock);
-		return manager->IsModified<DirtySource::Cpu>(offset, bytes);
+		return QueryModified<DirtySource::Cpu>(manager, offset, bytes);
 	});
 }
 
 bool MemoryTracker::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 	return Iterate<false>(vaddr, size, [](RegionManager* manager, uint64_t offset, uint64_t bytes) {
-		std::scoped_lock lock(manager->lock);
-		return manager->IsModified<DirtySource::Gpu>(offset, bytes);
+		return QueryModified<DirtySource::Gpu>(manager, offset, bytes);
 	});
 }
 
