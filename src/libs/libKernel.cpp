@@ -6,7 +6,9 @@
 #include "common/fpEnv.h"
 #include "common/signalCensus.h"
 
-extern "C" uint8_t kyty_s536_guest_fp_env = 0;
+// The fiber switch names this byte from inline asm. LTO does not see that
+// use and drops the definition, so the link fails without used.
+extern "C" [[gnu::used]] uint8_t kyty_s536_guest_fp_env = 0;
 
 #if defined(__APPLE__)
 #define KYTY_FP_FLAG "_kyty_s536_guest_fp_env"
