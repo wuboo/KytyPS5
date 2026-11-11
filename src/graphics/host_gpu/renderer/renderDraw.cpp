@@ -606,6 +606,7 @@ struct Good {
 	bool                    have = false;
 	std::array<uint32_t, 8> t {};
 	uint64_t                mip0_off = 0, mip0_size = 0, checked_flip = 0;
+	std::vector<std::pair<uint64_t, uint64_t>> layouts; // every (mip 0 offset, size) a good T# had
 	bool                    valid = false;
 	uint64_t                forced = 0, kept = 0, missing = 0;
 };
@@ -637,6 +638,7 @@ inline void Learn(RenderContext& context, const ShaderStageRuntime& ps, const Pr
 	g.t            = snap.images[2].dwords;
 	g.mip0_off     = off;
 	g.mip0_size    = size;
+	if (std::find(g.layouts.begin(), g.layouts.end(), std::make_pair(off, size)) == g.layouts.end()) g.layouts.emplace_back(off, size);
 	g.valid        = true;
 	g.checked_flip = flip;
 }
@@ -651,7 +653,13 @@ inline void Force(const ShaderStageRuntime& ps) {
 	if (!g.have || cur == g.t || T40(cur) == 0) return;
 	static std::unordered_map<uint64_t, std::pair<uint64_t, uint64_t>> seen; // base -> (hash, flip)
 	auto& s = seen[T40(cur)];
-	if (s.second == 0 || flip >= s.second + 10) s = {HashAt(T40(cur) + g.mip0_off, g.mip0_size), flip};
+	if (s.second == 0 || flip >= s.second + 10) {
+		s = {0, flip};
+		for (const auto& [o, n]: g.layouts) {
+			s.first = HashAt(T40(cur) + o, n);
+			if (s.first == ShaderRecompiler::S538::kGoodMip0) break;
+		}
+	}
 	if (s.first == ShaderRecompiler::S538::kGoodMip0) {
 		g.kept++;
 		return;
@@ -695,18 +703,52 @@ inline void Note(RenderContext& context, const ShaderStageRuntime& ps, const Pre
 			merged.emplace_back(a, n);
 		}
 	}
-	uint64_t key = XXH3_64bits(t.data(), sizeof(t)) ^ (XXH3_64bits(snap.user_data.data(), snap.user_data.size() * 4) * 3);
-	for (const auto& [a, n]: merged) key = key * 1099511628211ull ^ a ^ (n << 48);
-	static uint64_t last_key = 0, last_periodic = 0;
-	static uint32_t lines    = 0;
-	const bool      periodic = flip % 10 == 0 && flip != last_periodic;
-	if ((key == last_key && !periodic) || lines >= 4000) return;
-	last_key = key;
-	if (periodic) last_periodic = flip;
-	lines++;
-	const auto now = FrameTiming::SteadyNowNs();
 	uint64_t   off = 0, size = 0;
 	const auto mip0 = pixel.images.size() > 2 && pixel.images[2].image_id ? BoundMip0(context, pixel.images[2], flip, &off, &size) : 0;
+	uint64_t key = XXH3_64bits(t.data(), sizeof(t)) ^ (XXH3_64bits(snap.user_data.data(), snap.user_data.size() * 4) * 3) ^ (mip0 * 7);
+	// One line per distinct (T#, user data, mip 0) per 10-flip bucket.
+	static std::unordered_set<uint64_t> seen;
+	static uint64_t                     bucket = 0;
+	static uint32_t                     lines  = 0;
+	static uint64_t                     draws_in_bucket = 0;
+	if (flip / 10 != bucket) {
+		if (bucket != 0) Log::WriteToConsoleAndLog(fmt::format("[s538-b] flips={}-{} card_draws={} keys={}\n", bucket * 10, bucket * 10 + 9, draws_in_bucket, seen.size()));
+		bucket = flip / 10;
+		seen.clear();
+		draws_in_bucket = 0;
+	}
+	draws_in_bucket++;
+	if (!seen.insert(key).second || lines >= 6000) return;
+	lines++;
+	const auto now = FrameTiming::SteadyNowNs();
+	// The CP's source of PS user data 0..7 (the T# of slot 2 when the shader takes it from user data).
+	auto&       src = ShaderRecompiler::S538::PsUd();
+	std::string us;
+	uint64_t    ud0_addr = 0;
+	int         ud_mem_eq = 1, ud_val_eq = 1;
+	for (uint32_t i = 0; i < 8 && i < snap.user_data.size(); i++) {
+		const auto a = src.addr[i].load(std::memory_order_relaxed);
+		uint32_t   m = 0;
+		const bool r = a != 0 && LibKernel::Memory::TryReadBacking(a, &m, 4);
+		if (!r || m != snap.user_data[i]) ud_mem_eq = 0;
+		if (src.value[i].load(std::memory_order_relaxed) != snap.user_data[i]) ud_val_eq = 0;
+		if (i == 0) ud0_addr = a;
+		us += fmt::format("{}{}:0x{:x}:{:08x}", i ? "," : "", src.kind[i].load(std::memory_order_relaxed), a, r ? m : 0xdeadbeefu);
+	}
+	if (ud0_addr != 0) {
+		auto& w0 = GetWatch();
+		const bool direct = src.kind[0].load(std::memory_order_relaxed) == 1;
+		w0.addr[3].store(ud0_addr, std::memory_order_relaxed);
+		w0.len[3].store(direct ? 32u : 4u, std::memory_order_relaxed);
+	}
+	static uint64_t described = 0;
+	if (ud0_addr != 0 && described < 3 && (described == 0 || flip >= 3990)) {
+		described = described == 0 ? 1 : described + 1;
+		for (const auto& line: LibKernel::Memory::DiagDescribeRange(ud0_addr, 32)) {
+			Log::WriteToConsoleAndLog(fmt::format("[s538-range] flip={} ud0=0x{:x} pkt=0x{:x} {}\n", flip, ud0_addr,
+			                                      src.packet[0].load(), line));
+		}
+	}
 	std::string ud;
 	for (size_t i = 0; i < snap.user_data.size() && i < 16; i++) ud += fmt::format("{:08x}{}", snap.user_data[i], i + 1 < snap.user_data.size() && i < 15 ? "," : "");
 	std::string ts;
@@ -724,7 +766,7 @@ inline void Note(RenderContext& context, const ShaderStageRuntime& ps, const Pre
 			smalls += fmt::format(" 0x{:x}:{}=", a, n);
 			for (size_t k = 0; k < words.size(); k++) smalls += fmt::format("{:08x}{}", words[k], k + 1 < words.size() ? "," : "");
 			auto& w = GetWatch();
-			if (small_n < 3) {
+			if (small_n < 2) {
 				w.addr[1 + small_n].store(a, std::memory_order_relaxed);
 				w.len[1 + small_n].store(static_cast<uint32_t>(std::min<uint64_t>(n, 32)), std::memory_order_relaxed);
 			}
@@ -752,11 +794,13 @@ inline void Note(RenderContext& context, const ShaderStageRuntime& ps, const Pre
 	for (size_t i = 0; i < merged.size() && i < 12; i++) rs += fmt::format("{}0x{:x}:{}", i ? "," : "", merged[i].first, merged[i].second);
 	Log::WriteToConsoleAndLog(fmt::format(
 	    "[s538-ts] t_ms={} flip={} path={} walk_age_us={} ud{}={} t2={} t40=0x{:x} bound_mip0={:016x} loc=0x{:x} range=0x{:x} eq={} "
-	    "q={} dirty={} inflight={} busy={} gpu_dirty={} w_changes={} w_last_flip={} w_last_age_ms={} nranges={} ranges={} small={}\n",
+	    "q={} dirty={} inflight={} busy={} gpu_dirty={} w_changes={} w_last_flip={} w_last_age_ms={} nranges={} ranges={} small={} "
+	    "ud_src={} ud_mem_eq={} ud_val_eq={} udw_changes={} udw_last_flip={} udw_last_age_ms={}\n",
 	    now / 1000000, flip, snap.s538_path, snap.s538_walk_ns != 0 ? (now - snap.s538_walk_ns) / 1000 : -1, snap.user_data.size(), ud, ts,
 	    T40(t), mip0, loc, loc_range, eq, queried ? 1 : 0, dirty ? 1 : 0, inflight ? 1 : 0, busy ? 1 : 0, gpu_dirt ? 1 : 0,
 	    w.changes[0].load(), w.change_flip[0].load(),
-	    w.change_ns[0].load() != 0 ? (now - w.change_ns[0].load()) / 1000000 : -1, merged.size(), rs, smalls));
+	    w.change_ns[0].load() != 0 ? (now - w.change_ns[0].load()) / 1000000 : -1, merged.size(), rs, smalls, us, ud_mem_eq, ud_val_eq,
+	    w.changes[3].load(), w.change_flip[3].load(), w.change_ns[3].load() != 0 ? (now - w.change_ns[3].load()) / 1000000 : -1));
 	if (Common::MemEvents::Enabled()) {
 		const auto probe = [&](const char* what, uint64_t a, uint64_t n) {
 			for (const auto& e: Common::MemEvents::Global().Query(a, n, 4)) {
@@ -764,6 +808,7 @@ inline void Note(RenderContext& context, const ShaderStageRuntime& ps, const Pre
 			}
 		};
 		if (loc != 0) probe("tsharp", loc, 32);
+		if (ud0_addr != 0) probe("ud0", ud0_addr, 32);
 		for (size_t i = 0; i < merged.size() && i < 12; i++) {
 			if (merged[i].second <= 16) probe("small", merged[i].first, merged[i].second);
 		}

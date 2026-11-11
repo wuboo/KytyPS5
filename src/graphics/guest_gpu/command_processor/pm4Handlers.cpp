@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "libs/agc.h"
+#include "graphics/shader/recompiler/s538Diag.h"
 
 #include <algorithm>
 #include <array>
@@ -378,6 +379,7 @@ KYTY_HW_SH_PARSER(HwShSetPsUserSgpr) {
 
 	for (uint32_t i = 0; i < reg_num; i++) {
 		cp.GetShCtx().SetPsUserSgpr(slot + i, buffer[i]);
+		ShaderRecompiler::S538::NotePsUd(slot + i, &buffer[i], buffer[i], 1, buffer - 2);
 	}
 
 	return reg_num;
@@ -1086,6 +1088,10 @@ KYTY_CP_OP_PARSER(CpOpIndirectShRegs) {
 		}
 
 		pfunc(cp, cmd_offset, value);
+		if (cmd_offset >= Pm4::SPI_SHADER_USER_DATA_PS_0 && cmd_offset < Pm4::SPI_SHADER_USER_DATA_PS_0 + 32) {
+			ShaderRecompiler::S538::NotePsUd(cmd_offset - Pm4::SPI_SHADER_USER_DATA_PS_0, &indirect_buffer[1], value, 2,
+			                                 reinterpret_cast<const void*>(indirect_address));
+		}
 	}
 
 	return KYTY_PM4_LEN(cmd_id) - 1u;
