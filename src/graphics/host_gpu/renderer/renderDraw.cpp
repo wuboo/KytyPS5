@@ -458,6 +458,15 @@ static void S537NoteTextures(RenderContext& context, const PreparedBindings& pix
 		const auto& image = context.GetTextureCache().GetImage(binding.image_id);
 		const uint64_t key = (image.serial << 12) ^ (uint64_t {slot} << 4) ^ (image.IsGpuModified() ? 1u : 0u) ^
 		                     (image.IsCpuDirty() ? 2u : 0u) ^ (image.usage.render_target ? 4u : 0u) ^ (image.diag.uploads << 20);
+		const auto flip = FrameTiming::GuestFlips() + 1;
+		static std::unordered_set<uint64_t> compared;
+		static uint32_t                     compares = 0;
+		if (slot == 2 && flip >= 4280 && flip <= 4470 && compares < 16 &&
+		    compared.insert((image.serial << 16) ^ image.diag.uploads).second) {
+			compares++;
+			const auto tag = fmt::format("flip={} slot={}", flip, slot);
+			context.GetTextureCache().S537CompareGuest(binding.image_id, tag.c_str());
+		}
 		if (!seen.insert(key).second) continue;
 		lines++;
 		Log::WriteToConsoleAndLog(fmt::format(

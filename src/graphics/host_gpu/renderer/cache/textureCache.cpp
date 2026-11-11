@@ -33,7 +33,9 @@
 #include <span>
 #include <tuple>
 #include <utility>
+#include <fmt/format.h>
 #include <vulkan/vulkan_format_traits.hpp>
+#include <xxhash.h>
 
 namespace Libs::Graphics {
 
@@ -1119,6 +1121,49 @@ void TextureCache::InitializeImage(ImageId id) {
 		image.ClearBufferModified();
 	}
 	image.RefreshComplete();
+}
+
+void TextureCache::S537CompareGuest(ImageId id, const char* tag) {
+	auto&      image = m_slot_images[id];
+	const auto range = image.info.data;
+	if (range.size == 0 || range.size > (64u << 20) || !CanDownload(image)) {
+		Log::WriteToConsoleAndLog(fmt::format("[s537-cmp] {} serial={} addr=0x{:x} size={} skipped can_download={}\n", tag,
+		                                      image.serial, range.address, range.size, CanDownload(image) ? 1 : 0));
+		return;
+	}
+	std::vector<uint8_t> guest(range.size);
+	const bool           guest_ok = LibKernel::Memory::TryReadBacking(range.address, guest.data(), range.size);
+	Buffer download(m_graphics, m_scheduler, MemoryUsage::Download, 0, vk::BufferUsageFlagBits::eTransferDst, range.size);
+	m_scheduler.EndRendering();
+	DownloadImage(image, download, 0, range.size, image.info.resources.levels);
+	m_scheduler.FlushAndWait();
+	download.Invalidate(0, range.size);
+	const auto* host = download.Mapped().data();
+	uint64_t diff_blocks = 0, first = UINT64_MAX, host_zero = 0, guest_zero = 0;
+	const uint64_t blocks = range.size / 16;
+	for (uint64_t b = 0; b < blocks; b++) {
+		const bool same = std::memcmp(host + b * 16, guest.data() + b * 16, 16) == 0;
+		if (!same) {
+			diff_blocks++;
+			if (first == UINT64_MAX) first = b;
+		}
+		static const uint8_t zero[16] {};
+		host_zero += std::memcmp(host + b * 16, zero, 16) == 0 ? 1 : 0;
+		guest_zero += std::memcmp(guest.data() + b * 16, zero, 16) == 0 ? 1 : 0;
+	}
+	const auto mip0 = image.info.mip_layout[0];
+	uint64_t   diff_mip0 = 0;
+	for (uint64_t b = mip0.offset / 16; b < std::min(blocks, (mip0.offset + mip0.size) / 16); b++) {
+		diff_mip0 += std::memcmp(host + b * 16, guest.data() + b * 16, 16) != 0 ? 1 : 0;
+	}
+	Log::WriteToConsoleAndLog(fmt::format(
+	    "[s537-cmp] {} serial={} addr=0x{:x} size={} {}x{} gfmt={} guest_ok={} blocks={} diff={} diff_mip0={} first=0x{:x} "
+	    "host_zero={} guest_zero={} gpu_mod={} cpu_dirty={} buf_mod={} uploads={} upload_flip={} xxh_guest={:016x} xxh_host={:016x}\n",
+	    tag, image.serial, range.address, range.size, image.info.extent.width, image.info.extent.height,
+	    static_cast<int>(image.info.guest_format), guest_ok ? 1 : 0, blocks, diff_blocks, diff_mip0,
+	    first == UINT64_MAX ? 0 : first * 16, host_zero, guest_zero, image.IsGpuModified() ? 1 : 0, image.IsCpuDirty() ? 1 : 0,
+	    image.IsBufferModified() ? 1 : 0, image.diag.uploads, image.diag.upload_flip,
+	    XXH3_64bits(guest.data(), guest.size()), XXH3_64bits(host, range.size)));
 }
 
 bool TextureCache::DiagUploadTiles(ImageId id, std::vector<GpuTileInfo>& tiles) {

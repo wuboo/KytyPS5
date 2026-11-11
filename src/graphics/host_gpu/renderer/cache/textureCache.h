@@ -89,6 +89,8 @@ public:
 	// S124 dump_tex: the tile list the upload of `id` from guest memory uses (mip 0, layer 0 first); false when the image
 	// is untiled, multisampled or a depth target.
 	[[nodiscard]] bool          DiagUploadTiles(ImageId id, std::vector<GpuTileInfo>& tiles);
+	// S537 DIAG: downloads the image in guest layout and compares it with guest memory; one log line.
+	void                        S537CompareGuest(ImageId id, const char* tag);
 	[[nodiscard]] Image&        GetImage(ImageId id) {
 		auto& image = m_slot_images[id];
 		TouchImage(image);
