@@ -6,6 +6,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
+#include "graphics/shader/recompiler/s537Diag.h"
 
 #include <algorithm>
 #include <chrono>
@@ -236,6 +237,16 @@ bool PipelineCache::LoadRecord(std::span<const uint8_t>& records) {
 			IoAll(reader, spirv);
 			if (!complete()) {
 				return false;
+			}
+			if (key.hash == ShaderRecompiler::S537::kCardHash && ShaderRecompiler::S537::Dir() != nullptr) {
+				// S537 DIAG: the stored SPIR-V of the card shader; with the probe the module is compiled again.
+				static int stored = 0;
+				ShaderRecompiler::S537::WriteFile(fmt::format("s537-stored-{}-{:016x}.spv", ++stored, module.id),
+				                                  spirv.data(), spirv.size() * sizeof(uint32_t));
+				if (ShaderRecompiler::S537::Probe()) {
+					records = records.subspan(sizeof(frame) + compressed.size());
+					return true;
+				}
 			}
 			const auto [program, inserted] = m_program_cache.try_emplace(std::move(key));
 			if (inserted &&

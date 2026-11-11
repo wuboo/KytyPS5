@@ -1,5 +1,6 @@
 #include "common/logging/log.h"
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
+#include "graphics/shader/recompiler/s537Diag.h"
 
 #include <algorithm>
 #include <atomic>
@@ -497,6 +498,98 @@ uint32_t ConvertPositionToClipSpace(EmitterState& state, uint32_t position) {
 	return converted;
 }
 
+
+// S537 DIAG: address + bytes as a PhysicalStorageBuffer u32 pointer.
+uint32_t S537Pointer(EmitterState& state, uint32_t address64, uint64_t bytes) {
+	auto address = address64;
+	if (bytes != 0) {
+		address = Binary(state, spv::OpIAdd, TypeU64(state), address64, ConstantU64(state, bytes));
+	}
+	const auto pointer = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpConvertUToPtr, TypePhysicalU32Pointer(state), pointer, address);
+	return pointer;
+}
+
+void S537Store(EmitterState& state, uint32_t record, uint32_t dword, uint32_t value) {
+	state.builder.AddFunction(spv::OpStore, S537Pointer(state, record, uint64_t {dword} * 4u), value,
+	                          spv::MemoryAccessAlignedMask, 4u);
+}
+
+// S537 DIAG: one record (header, colour, trace) at record index `index`; the magic goes last.
+void S537WriteRecord(EmitterState& state, uint32_t index, uint32_t kind, uint32_t color) {
+	const auto index64 = Unary(state, spv::OpUConvert, TypeU64(state), index);
+	const auto offset  = Binary(state, spv::OpIMul, TypeU64(state), index64,
+	                            ConstantU64(state, uint64_t {S537::kRecordDwords} * 4u));
+	const auto record  = Binary(state, spv::OpIAdd, TypeU64(state), offset,
+	                            ConstantU64(state, state.s537_probe_address +
+	                                                   uint64_t {S537::kHeaderDwords} * 4u));
+	S537Store(state, record, 1, ConstantU32(state, kind));
+	S537Store(state, record, 2, index);
+	S537Store(state, record, 3, EmitBuiltinU32(state, IR::StageInputKind::FragCoord, 0));
+	S537Store(state, record, 4, EmitBuiltinU32(state, IR::StageInputKind::FragCoord, 1));
+	for (uint32_t component = 0; component < 4; component++) {
+		const auto value = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpCompositeExtract, TypeF32(state), value, color, component);
+		S537Store(state, record, 5 + component, Unary(state, spv::OpBitcast, TypeU32(state), value));
+	}
+	S537Store(state, record, 9, ConstantU32(state, state.s537_trace_slots));
+	for (uint32_t slot = 0; slot < state.s537_trace_slots; slot++) {
+		const auto pointer = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAccessChain,
+		                          TypePointer(state, spv::StorageClassFunction, TypeU32(state)),
+		                          pointer, state.s537_trace_variable, ConstantU32(state, slot));
+		const auto value = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLoad, TypeU32(state), value, pointer);
+		S537Store(state, record, S537::kRecordHead + slot, value);
+	}
+	S537Store(state, record, 0, ConstantU32(state, S537::kMagic));
+}
+
+// S537 DIAG: at the MRT0 export, keep the trace of a hot invocation (|c| > 1000, NaN, Inf) and of a few others.
+void EmitS537Probe(EmitterState& state, uint32_t color) {
+	const auto vec4  = TypeF32Vector(state, 4);
+	const auto bvec4 = TypeBoolVector(state, 4);
+	const auto abs   = state.builder.AllocateId();
+	state.builder.AddFunction(spv::OpExtInst, vec4, abs, GlslStd450(state), GLSLstd450FAbs, color);
+	const auto limit = ConstantF32Value(state, S537::kHotThreshold);
+	const auto limits = state.builder.Constant(spv::OpConstantComposite, vec4, limit, limit, limit, limit);
+	const auto big   = Binary(state, spv::OpFOrdGreaterThan, bvec4, abs, limits);
+	const auto nan   = Unary(state, spv::OpIsNan, bvec4, color);
+	const auto inf   = Unary(state, spv::OpIsInf, bvec4, color);
+	const auto any   = Binary(state, spv::OpLogicalOr, bvec4, Binary(state, spv::OpLogicalOr, bvec4, big, nan), inf);
+	const auto hot   = Unary(state, spv::OpAny, TypeBool(state), any);
+	const auto base  = ConstantU64(state, state.s537_probe_address);
+	EmitIfCondition(state, hot, [&]() {
+		const auto slot = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAtomicIAdd, TypeU32(state), slot, S537Pointer(state, base, 0),
+		                          ConstantU32(state, spv::ScopeDevice), ConstantU32(state, 0),
+		                          ConstantU32(state, 1));
+		const auto keep = Binary(state, spv::OpULessThan, TypeBool(state), slot,
+		                         ConstantU32(state, S537::kHotRecords));
+		EmitIfCondition(state, keep, [&]() { S537WriteRecord(state, slot, 1, color); });
+	});
+	const auto cold = Unary(state, spv::OpLogicalNot, TypeBool(state), hot);
+	EmitIfCondition(state, cold, [&]() {
+		const auto seen = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpLoad, TypeU32(state), seen, S537Pointer(state, base, 4),
+		                          spv::MemoryAccessAlignedMask, 4u);
+		const auto room = Binary(state, spv::OpULessThan, TypeBool(state), seen,
+		                         ConstantU32(state, S537::kColdRecords));
+		EmitIfCondition(state, room, [&]() {
+			const auto slot = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpAtomicIAdd, TypeU32(state), slot,
+			                          S537Pointer(state, base, 4), ConstantU32(state, spv::ScopeDevice),
+			                          ConstantU32(state, 0), ConstantU32(state, 1));
+			const auto keep = Binary(state, spv::OpULessThan, TypeBool(state), slot,
+			                         ConstantU32(state, S537::kColdRecords));
+			EmitIfCondition(state, keep, [&]() {
+				S537WriteRecord(state, EmitAddU32(state, slot, ConstantU32(state, S537::kHotRecords)), 2,
+				                color);
+			});
+		});
+	});
+}
+
 } // namespace
 uint32_t EmitWqmU64(EmitterState& state, uint32_t value) {
 	const auto shifted_one = state.builder.AllocateId();
@@ -584,6 +677,11 @@ void EmitSetAttribute(ValueEmitContext& ctx, const IR::Inst& inst) {
 		const auto vector_type = MrtOutputMode(state, exp) != 0u ? MrtOutputType(state, exp.index)
 		                                                         : TypeF32Vector(state, 4);
 		auto       value       = ExportVector(ctx, data, exp, vector_type);
+		if (state.s537_probe_address != 0 && state.program.stage == ShaderType::Pixel &&
+		    exp.kind == IR::ExportTargetKind::Mrt && exp.index == 0 &&
+		    vector_type == TypeF32Vector(state, 4)) {
+			EmitS537Probe(state, value);
+		}
 		if (state.program.stage == ShaderType::Pixel && exp.kind == IR::ExportTargetKind::Mrt &&
 		    exp.index == 0 && vector_type == TypeF32Vector(state, 4) &&
 		    state.input_info.pixel->alpha_blend_source != ShaderAlphaBlendSource::None) {

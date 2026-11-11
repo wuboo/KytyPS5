@@ -169,6 +169,12 @@ struct EmitterState {
 	uint32_t                   current_label                         = 0;
 	const IR::Block*           current_block                         = nullptr;
 	uint32_t                   pixel_valid_mask_variable             = 0;
+	// S537 DIAG (KYTY_DIAG_S537_PROBE): probe buffer address, the Function u32 array of traced values and the
+	// first slot of each traced instruction (scalar 1 slot, vector one per component).
+	uint64_t                   s537_probe_address                    = 0;
+	uint32_t                   s537_trace_variable                   = 0;
+	uint32_t                   s537_trace_slots                      = 0;
+	std::unordered_map<const IR::Inst*, uint32_t> s537_slot;
 	uint32_t                   subgroup_local_invocation_id_variable = 0;
 	uint32_t                   helper_invocation_variable            = 0;
 	// Metal has no subgroup builtins in vertex functions; derive the lane from the vertex index.

@@ -19,6 +19,7 @@
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
+#include "graphics/shader/recompiler/s537Diag.h"
 #include "graphics/shader/scoutTableLog.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
@@ -37,7 +38,9 @@
 #include <ranges>
 #include <span>
 #include <spirv-tools/libspirv.hpp>
+#include <thread>
 #include <utility>
+#include <vk_mem_alloc.h>
 #include <vector>
 #include <xxhash.h>
 
@@ -243,11 +246,86 @@ std::vector<vk::Format> VertexInputFormats(const ShaderVertexInputInfo&         
 
 } // namespace
 
+// S537 DIAG (KYTY_DIAG_S537_PROBE=1): a host-visible buffer the probed card shader writes its records to, and a thread
+// that appends each finished record (magic seen on two scans in a row) to <dir>/s537-probe.txt.
+static void S537EnsureProbe(GraphicContext& graphics) {
+	namespace S537 = ShaderRecompiler::S537;
+	static std::once_flag once;
+	std::call_once(once, [&graphics] {
+		vk::BufferCreateInfo buffer_info {};
+		buffer_info.size  = S537::kBufferBytes;
+		buffer_info.usage = vk::BufferUsageFlagBits::eStorageBuffer |
+		                    vk::BufferUsageFlagBits::eShaderDeviceAddress;
+		VmaAllocationCreateInfo allocation_info {};
+		allocation_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+		                        VMA_ALLOCATION_CREATE_MAPPED_BIT;
+		allocation_info.usage         = VMA_MEMORY_USAGE_AUTO_PREFER_HOST;
+		allocation_info.requiredFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+		                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+		VkBuffer          buffer     = VK_NULL_HANDLE;
+		VmaAllocation     allocation = nullptr;
+		VmaAllocationInfo result {};
+		if (vmaCreateBuffer(graphics.allocator, static_cast<const VkBufferCreateInfo*>(buffer_info),
+		                    &allocation_info, &buffer, &allocation, &result) != VK_SUCCESS ||
+		    result.pMappedData == nullptr) {
+			Log::WriteToConsoleAndLog("[s537] probe buffer: allocation failed\n");
+			return;
+		}
+		auto* words = static_cast<uint32_t*>(result.pMappedData);
+		std::memset(words, 0, S537::kBufferBytes);
+		vk::BufferDeviceAddressInfo address_info {};
+		address_info.buffer = buffer;
+		const auto address  = graphics.device.getBufferAddress(address_info);
+		S537::ProbeAddress().store(address, std::memory_order_release);
+		Log::WriteToConsoleAndLog(fmt::format("[s537] probe buffer: {} bytes at 0x{:x}\n",
+		                                      S537::kBufferBytes, address));
+		std::thread([words] {
+			const std::string path = std::string(S537::Dir()) + "/s537-probe.txt";
+			constexpr uint32_t total = S537::kHotRecords + S537::kColdRecords;
+			std::array<uint8_t, total> state {}; // 0 unseen, 1 magic seen once, 2 written
+			uint32_t last_hot = 0;
+			for (;;) {
+				std::this_thread::sleep_for(std::chrono::seconds(2));
+				const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
+				                     std::chrono::steady_clock::now().time_since_epoch()).count();
+				FILE* file = std::fopen(path.c_str(), "ab");
+				if (file == nullptr) continue;
+				const uint32_t hot = reinterpret_cast<volatile uint32_t*>(words)[0];
+				if (hot != last_hot) {
+					std::fprintf(file, "COUNT t_ms=%lld hot=%u cold=%u\n", static_cast<long long>(now), hot,
+					             reinterpret_cast<volatile uint32_t*>(words)[1]);
+					last_hot = hot;
+				}
+				for (uint32_t index = 0; index < total; index++) {
+					const auto* record = words + S537::kHeaderDwords + uint64_t {index} * S537::kRecordDwords;
+					if (state[index] == 2 || reinterpret_cast<const volatile uint32_t*>(record)[0] != S537::kMagic) continue;
+					if (state[index] == 0) { state[index] = 1; continue; }
+					state[index] = 2;
+					const uint32_t slots = std::min(record[9], S537::kMaxTrace);
+					std::fprintf(file, "REC t_ms=%lld index=%u kind=%u ord=%u x=%08x y=%08x c=%08x %08x %08x %08x slots=%u\n",
+					             static_cast<long long>(now), index, record[1], record[2], record[3], record[4],
+					             record[5], record[6], record[7], record[8], slots);
+					for (uint32_t slot = 0; slot < slots; slot += 16) {
+						std::fprintf(file, "T %u", slot);
+						for (uint32_t k = slot; k < std::min(slots, slot + 16); k++) {
+							std::fprintf(file, " %08x", record[S537::kRecordHead + k]);
+						}
+						std::fprintf(file, "\n");
+					}
+				}
+				std::fclose(file);
+			}
+		}).detach();
+	});
+}
+
 ShaderRecompiler::Spirv::Profile SpirvProfile(const GraphicContext& graphics) {
 	// AMD GPUs (vendor 0x1002) run NMin/NMax as v_min/v_max, which give the guest's NaN and
 	// signed-zero results; GLSL.std.450 alone does not order -0 below +0.
 	return {.maintenance8           = graphics.maintenance8_enabled,
-	        .native_float_min_max   = graphics.physical_device_properties.vendorID == 0x1002u,
+	        // S537 (KYTY_EXACT_MINMAX=1): the bit-exact select path on AMD too.
+	        .native_float_min_max   = graphics.physical_device_properties.vendorID == 0x1002u &&
+	                                !ShaderRecompiler::S537::ExactMinMax(),
 	        .device_clock_period_ps = graphics.device_clock_period_ps,
 	        .robust_buffer_access   = graphics.robust_buffer_access_enabled,
 	        .r8_srgb_views          = graphics.r8_srgb_views,
@@ -264,7 +342,9 @@ std::filesystem::path ShaderStorePath() {
 	if (title_id.empty()) {
 		return {};
 	}
-	return std::filesystem::path("_PipelineCache") / (title_id + ".shaders");
+	// S537: the exact min/max store has another header; a file of its own keeps both stores warm.
+	return std::filesystem::path("_PipelineCache") /
+	       (title_id + (ShaderRecompiler::S537::ExactMinMax() ? ".exact.shaders" : ".shaders"));
 }
 
 bool GraphicsPipelineKey::operator==(const GraphicsPipelineKey& other) const {
@@ -317,6 +397,9 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	                                         Common::DebugCounters::Peak::ShaderCompileNs);
 	const auto profile = SpirvProfile(m_graphics);
 	options.profile    = &profile;
+	if (ShaderRecompiler::S537::Probe() && key.hash == ShaderRecompiler::S537::kCardHash) {
+		S537EnsureProbe(m_graphics);
+	}
 	auto result = ShaderRecompiler::CompileProgram(std::move(translated), options,
 	                                               program.specialization, push_data_cursor);
 	auto info = std::move(result.program).TakeCompiledInfo();
@@ -367,7 +450,10 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	            m_compiled[static_cast<size_t>(ShaderType::TessellationEvaluation)]);
 	// Programs with GPU-selected calls depend on their callees' current code.
 	if (program.call_source == nullptr) {
-		StoreModule(key, program, module, result.spirv);
+		// S537 DIAG: a probed module holds this run's buffer address; it is never stored.
+		if (!(ShaderRecompiler::S537::Probe() && key.hash == ShaderRecompiler::S537::kCardHash)) {
+			StoreModule(key, program, module, result.spirv);
+		}
 	}
 	return module;
 }

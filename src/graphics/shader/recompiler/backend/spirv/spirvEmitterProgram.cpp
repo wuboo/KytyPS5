@@ -1,5 +1,6 @@
 #include "common/assert.h"
 #include "graphics/shader/recompiler/backend/spirv/spirvEmitterInstructions.h"
+#include "graphics/shader/recompiler/s537Diag.h"
 
 #include <algorithm>
 #include <bit>
@@ -314,6 +315,57 @@ void EmitDispatcherInstruction(ValueEmitContext& ctx, const DispatcherFunctionSt
 	}
 }
 
+// S537 DIAG: components a traced value takes in the trace (0 = not traced).
+uint32_t S537Components(IR::Type type) {
+	switch (type) {
+		case IR::Type::U32:
+		case IR::Type::F16: // bits in a u32
+		case IR::Type::F32: return 1;
+		case IR::Type::U32x2:
+		case IR::Type::F32x2: return 2;
+		case IR::Type::U32x3: return 3;
+		case IR::Type::U32x4: return 4;
+		default: return 0;
+	}
+}
+
+// S537 DIAG: stores the value of a traced instruction, as bits, into its trace slots.
+void S537TraceStore(ValueEmitContext& ctx, const IR::Inst& inst) {
+	auto& state = ctx.state;
+	if (state.s537_trace_variable == 0 || ctx.half != 0) {
+		return;
+	}
+	const auto found = state.s537_slot.find(&inst);
+	if (found == state.s537_slot.end()) {
+		return;
+	}
+	const auto id = inst.Definition(0);
+	if (id == 0) {
+		return;
+	}
+	const auto type       = inst.GetType();
+	const auto components = S537Components(type);
+	const bool is_float   = type == IR::Type::F32 || type == IR::Type::F32x2;
+	for (uint32_t component = 0; component < components; component++) {
+		auto value = id;
+		if (components > 1) {
+			value = state.builder.AllocateId();
+			state.builder.AddFunction(spv::OpCompositeExtract,
+			                          is_float ? TypeF32(state) : TypeU32(state), value, id,
+			                          component);
+		}
+		if (is_float) {
+			value = Unary(state, spv::OpBitcast, TypeU32(state), value);
+		}
+		const auto pointer = state.builder.AllocateId();
+		state.builder.AddFunction(spv::OpAccessChain,
+		                          TypePointer(state, spv::StorageClassFunction, TypeU32(state)),
+		                          pointer, state.s537_trace_variable,
+		                          ConstantU32(state, found->second + component));
+		state.builder.AddFunction(spv::OpStore, pointer, value);
+	}
+}
+
 template <typename EmitInstruction>
 void EmitBlock(ValueEmitContext& ctx, const IR::Block* block, EmitInstruction&& emit_instruction) {
 	ctx.state.current_block = block;
@@ -335,6 +387,9 @@ void EmitBlock(ValueEmitContext& ctx, const IR::Block* block, EmitInstruction&& 
 			                  inst.GetOpcode() != IR::ValueOpcode::DataCacheInvalidate &&
 			                  inst.GetOpcode() != IR::ValueOpcode::MeshAllocate)) {
 				emit_instruction(lane, inst);
+				if (half == 0 && inst.GetOpcode() != IR::ValueOpcode::Phi) {
+					S537TraceStore(lane, inst);
+				}
 			}
 		}
 		ctx.state.lane_half = 0;
@@ -782,6 +837,36 @@ void EmitProgram(EmitterState& state) {
 		state.builder.AddFunction(spv::OpVariable,
 		                          TypePointer(state, spv::StorageClassFunction, TypeU32(state)),
 		                          state.pixel_valid_mask_variable, spv::StorageClassFunction);
+	}
+	if (state.s537_probe_address != 0) {
+		// S537 DIAG: slots in program order (the order IR::ProgramToString numbers instructions in).
+		state.s537_slot.clear();
+		uint32_t    slots   = 0;
+		uint32_t    ir_id   = 0;
+		std::string mapping = "slot ir_id components\n";
+		for (const auto* block: program.blocks) {
+			for (const auto& inst: *block) {
+				ir_id++;
+				const auto components = S537Components(inst.GetType());
+				if (components == 0 || inst.GetOpcode() == IR::ValueOpcode::Phi ||
+				    slots + components > S537::kMaxTrace) {
+					continue;
+				}
+				state.s537_slot.emplace(&inst, slots);
+				mapping += std::to_string(slots) + " " + std::to_string(ir_id) + " " +
+				           std::to_string(components) + "\n";
+				slots += components;
+			}
+		}
+		S537::WriteFile("s537-slots.txt", mapping.data(), mapping.size());
+		state.s537_trace_slots    = slots;
+		state.s537_trace_variable = state.builder.AllocateId();
+		const auto array = state.builder.Type(spv::OpTypeArray, TypeU32(state),
+		                                      ConstantU32(state, std::max(slots, 1u)));
+		state.builder.AddFunction(spv::OpVariable,
+		                          TypePointer(state, spv::StorageClassFunction, array),
+		                          state.s537_trace_variable, spv::StorageClassFunction,
+		                          state.builder.Constant(spv::OpConstantNull, array));
 	}
 	state.loop_counter_variables.clear();
 	state.back_edge_counters.clear();
