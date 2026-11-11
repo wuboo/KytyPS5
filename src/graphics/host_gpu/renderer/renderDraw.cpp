@@ -1266,7 +1266,7 @@ static void S533BeforeTargets(RenderContext& context, CommandBuffer& buffer, con
 			bounds[nbound++] = GalaxyFeedback::Bound {
 			    static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkImage>(image.backing.image))),
 			    image.info.data.address, slot, binding.desc.view_info.base_level,
-			    binding.desc.type == TextureCache::BindingType::Storage ? 1u : 0u, is_ps};
+			    static_cast<uint8_t>(binding.desc.type == TextureCache::BindingType::Storage), is_ps};
 		}
 	}
 
