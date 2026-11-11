@@ -23,6 +23,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/cpSampler.h"
+#include "graphics/presentation/diagCpCounters.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
@@ -390,6 +391,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
 	auto& bindings = m_compute_bindings;
+	DiagCp::Scope bind_scope(FrameTiming::Counter::DispBindNs); // S543 DIAG
 	PrepareBindings(input_info.stage, bindings);
 	if (program.bindings.dispatch_thread_dword != ShaderRecompiler::IR::PushData::NoStart) {
 		std::copy(std::begin(input_info.dispatch_threads_num), std::end(input_info.dispatch_threads_num),
@@ -411,9 +413,11 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	const auto vk_buffer = buffer.Handle();
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
+	bind_scope.Stop();
 	if (HasStorageWrites(input_info, bindings)) {
 		// A host fence used to serialize every dispatch. Preserve its read-before-write ordering
 		// while allowing the queue to execute asynchronously.
+		DiagCp::Scope barrier_scope(FrameTiming::Counter::DispBarrierNs); // S543 DIAG
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	}
 	if (Config::GraphicsDebugDumpEnabled()) {
@@ -504,7 +508,10 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Guest);
 
 	// The removed host fence also ordered read-only dispatches before later writers.
-	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	{
+		DiagCp::Scope barrier_scope(FrameTiming::Counter::DispBarrierNs); // S543 DIAG
+		ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	}
 	GpuLabel::NoteCause(GpuLabel::Cause::Cs);
 	ResetBindings();
 }
@@ -542,6 +549,7 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
 	auto& bindings = m_compute_bindings;
+	DiagCp::Scope bind_scope(FrameTiming::Counter::DispBindNs); // S543 DIAG
 	PrepareBindings(input_info.stage, bindings);
 	PreparedBindings* descriptor_stage = &bindings;
 	BackAddressBases(m_context, input_info.stage);
@@ -566,8 +574,10 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 		               std::span {&descriptor_stage, 1u});
 	}
+	bind_scope.Stop();
 	KYTY_CP_SITE(DispRecord);
 	const auto vk_buffer = buffer.Handle();
+	DiagCp::Scope barrier_scope(FrameTiming::Counter::DispBarrierNs); // S543 DIAG
 	if (HasStorageWrites(input_info, bindings)) {
 		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	}
@@ -579,13 +589,17 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	                              vk::PipelineStageFlagBits::eTransfer,
 	                          vk::PipelineStageFlagBits::eDrawIndirect, {},
 	                          1, &barrier, 0, nullptr, 0, nullptr);
+	barrier_scope.Stop();
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	GpuLabel::With(
 	    vk_buffer, GpuLabel::Class::GuestCs, [&] { vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset); },
 	    "G.cs.%08x.a%d.ind", static_cast<uint32_t>(program.shader_hash), async_compute ? 1 : 0);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Guest);
-	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	{
+		DiagCp::Scope access_scope(FrameTiming::Counter::DispBarrierNs); // S543 DIAG
+		ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	}
 	GpuLabel::NoteCause(GpuLabel::Cause::Cs);
 	ResetBindings();
 }

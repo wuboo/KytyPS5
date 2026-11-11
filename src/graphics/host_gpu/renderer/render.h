@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/diagCpCounters.h"
 
 #include <array>
 #include <memory>
@@ -162,6 +163,7 @@ public:
 	}
 
 	[[nodiscard]] vk::CommandBuffer Handle() const noexcept {
+		Libs::Graphics::DiagCp::Add(Libs::Graphics::FrameTiming::Counter::HandleRawN); // S543 DIAG
 		m_recorded = true;
 		return m_buffer;
 	}

@@ -29,6 +29,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/diagCpCounters.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -362,6 +363,9 @@ static void UpdateGraphicsDynamicState(const CommandBuffer& buffer, DynamicState
 			// Keep empty slots at their guest index; Vulkan requires a positive viewport width.
 			viewport.width = 1.0f;
 			scissor.extent = {0, 0};
+		}
+		if (i == 0 && (scissor.extent.width == 0 || scissor.extent.height == 0)) {
+			DiagCp::Add(FrameTiming::Counter::ScissorEmptyN); // S543 DIAG
 		}
 	}
 	dynamic_state.SetViewports(std::span {viewports}.first(viewport_count));
@@ -1448,6 +1452,33 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		                       emit.indirect.count, emit.indirect.stride);
 	}
 	occlusion_queries.End(vk_buffer, occlusion_query);
+	if (DiagCp::Enabled()) {
+		// S543 DIAG: the cheap versions of the DrawRepeat counters (no Observe, no stage walk): same pipeline / same colour+depth targets as the previous draw
+		// of the same command buffer (the registration generation is not compared).
+		struct Prev {
+			uint64_t cb = 0, pipeline = 0, depth = 0;
+			uint32_t color_n = 0;
+			uint32_t colors[8] {};
+		};
+		static thread_local Prev prev;
+		Prev now;
+		now.cb       = buffer.RecordingId();
+		now.pipeline = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkPipeline>(pipeline.pipeline)));
+		now.color_n  = m_targets.color_count < 8 ? m_targets.color_count : 8;
+		for (uint32_t i = 0; i < now.color_n; i++) {
+			now.colors[i] = m_targets.colors[i].image_id.index;
+		}
+		now.depth = m_targets.depth.image_id.index;
+		if (now.cb == prev.cb) {
+			if (now.pipeline == prev.pipeline) {
+				FrameTiming::Add(FrameTiming::Counter::PipelineSameN);
+			}
+			if (now.color_n == prev.color_n && now.depth == prev.depth && std::equal(now.colors, now.colors + now.color_n, prev.colors)) {
+				FrameTiming::Add(FrameTiming::Counter::RtSameNogenN);
+			}
+		}
+		prev = now;
+	}
 	if (CpPhases::Enabled()) {
 		DrawRepeat::Finger now;
 		now.cb         = buffer.RecordingId();

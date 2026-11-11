@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/diagCpCounters.h"
 #include "graphics/presentation/frameTiming.h"
 
 #include <algorithm>
@@ -63,6 +64,7 @@ bool CommandBuffer::SamePass(const RenderState& state) const {
 
 void CommandBuffer::BeginRendering(const RenderState& wanted) const {
 	if (SamePass(wanted)) {
+		DiagCp::Add(FrameTiming::Counter::SamePassN); // S543 DIAG
 		return;
 	}
 	RenderState state = wanted;

@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/wfDiag.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/cpPhaseScope.h"
+#include "graphics/presentation/diagCpCounters.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
 #include "kernel/memory.h"
@@ -1062,6 +1063,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 	    },
 	    [&]() noexcept { source = UploadCopies(buffer, copies, total_size); });
 	if (source) {
+		DiagCp::Add(FrameTiming::Counter::ObtainCopiesN); // S543 DIAG
 		auto& command = m_scheduler.Current();
 		if (command.IsRendering()) {
 			FrameTiming::Add(FrameTiming::Counter::UploadPassBreakN);
@@ -1105,6 +1107,7 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 	}
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::BufferUploadBytes, total_size);
 	FrameTiming::Add(FrameTiming::Counter::UploadBytes, total_size);
+	DiagCp::Scope upload_scope(FrameTiming::Counter::UploadCopiesNs); // S543 DIAG
 
 	const auto source = UploadMemory(m_graphics, m_scheduler, m_staging_buffer, total_size, 4,
 	    vk::BufferUsageFlagBits::eTransferSrc, [&](uint8_t* mapped, uint64_t base_offset) {
@@ -1123,6 +1126,10 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
                                                        bool is_written, bool is_texel_buffer,
                                                        BufferId id) {
 	EXIT_IF(!(GuestRange {vaddr, size}.Valid()));
+	if (DiagCp::Enabled()) { // S543 DIAG
+		FrameTiming::Add(FrameTiming::Counter::ObtainN);
+		if (is_written) FrameTiming::Add(FrameTiming::Counter::ObtainWrittenN);
+	}
 
 	if (!is_written && size <= CACHING_PAGESIZE &&
 	    !m_memory_tracker.IsRegionGpuModified(vaddr, size) &&
@@ -1135,6 +1142,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 				EXIT("BufferCache: failed to read sparse guest buffer memory\n");
 			}
 			m_stream_buffer.Commit();
+			DiagCp::Add(FrameTiming::Counter::ObtainStreamN); // S543 DIAG
 			return {&m_stream_buffer, offset};
 		}
 	}

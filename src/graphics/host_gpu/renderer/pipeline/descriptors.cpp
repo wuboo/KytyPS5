@@ -15,6 +15,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/presentation/cpPhaseScope.h"
+#include "graphics/presentation/diagCpCounters.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
@@ -771,6 +772,7 @@ void RenderExecutor::FindBuffers(std::span<PreparedBindings* const> stages) {
 				continue;
 			}
 			if (descriptor.NumRecords() == UINT32_MAX) {
+				DiagCp::Add(FrameTiming::Counter::NumrecordsSentinelN); // S543 DIAG
 				if (program.info.buffers[resource].written) {
 					// Sentinel write ranges end before tables captured by any bound stage.
 					for (const auto* reader: stages) {

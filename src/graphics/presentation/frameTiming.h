@@ -441,6 +441,16 @@ enum class Counter : uint32_t {
 	DeferWriteDrawN, DeferWriteFlushN, DeferWriteReadN, DeferWriteNowN,
 	// S540 (KYTY_FLUSH_DRAWS): submits made every N draws.
 	FlushDrawsN,
+	// S543 DIAG (KYTY_DIAG_CP_COUNTERS=1, diagCpCounters.h). Buffers: ObtainBuffer calls / of those for a written range / served from the stream buffer / that
+	// uploaded copies; descriptors with NumRecords == UINT32_MAX; pages InvalidateMemoryFromGPU walked; ns of UploadCopies (staging fill). Textures: RegisterImage /
+	// UnregisterImage. Draw: same colour/depth targets as the previous draw of the command buffer (registration generation ignored); BeginRendering served by the
+	// open pass; same pipeline as the previous draw of the command buffer; draws with an empty scissor (slot 0). Other: pages served by the clean walk (page changes);
+	// CommandBuffer::Handle() calls; ns of dispatch bind preparation / dispatch barriers. S542 disputes 5 and 12: CpWaitGpuNs added inside PipeExecuteFront; time and
+	// number of KernelWaitEqueue calls of threads other than the CP.
+	ObtainN, ObtainWrittenN, ObtainStreamN, ObtainCopiesN, NumrecordsSentinelN, InvGpuPagesN, UploadCopiesNs,
+	TexRegisterN, TexUnregisterN, RtSameNogenN, SamePassN, PipelineSameN, ScissorEmptyN,
+	RbCleanWalkPagesN, HandleRawN, DispBindNs, DispBarrierNs,
+	PipeExecWaitNs, GuestEqWaitNs, GuestEqWaitN,
 	Count,
 };
 

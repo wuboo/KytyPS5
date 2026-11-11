@@ -19,6 +19,7 @@
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/renderer/gfDiag.h"
 #include "graphics/host_gpu/renderer/cache/landSync.h"
+#include "graphics/presentation/diagCpCounters.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/cleanWalk.h"
@@ -949,6 +950,14 @@ bool TryServeCleanWalk(const Common::HostException::ExceptionInfo* info, uint32_
 		std::memcpy(&eax, pending.bytes, 4);
 		Loader::X64InstructionEmulator::CompleteLoad(info->native_context, length, eax);
 		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::RbCleanWalkN);
+		if (Libs::Graphics::DiagCp::Enabled()) { // S543 DIAG: pages served (a change of page between two served loads of this thread)
+			static thread_local uint64_t last_page = UINT64_MAX;
+			const uint64_t               page      = info->access_violation_vaddr >> 12;
+			if (page != last_page) {
+				last_page = page;
+				Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::RbCleanWalkPagesN);
+			}
+		}
 		return true;
 	}
 	pending.armed = true;

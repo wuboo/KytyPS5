@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/image/tiler.h"
 #include "graphics/host_gpu/renderer/render.h"
+#include "graphics/presentation/diagCpCounters.h"
 #include "graphics/presentation/frameTiming.h"
 #include "kernel/memory.h"
 
@@ -239,6 +240,7 @@ ImageId TextureCache::InsertImage(const ImageInfo& info) {
 }
 
 void TextureCache::RegisterImage(ImageId id) {
+	DiagCp::Add(FrameTiming::Counter::TexRegisterN); // S543 DIAG
 	auto& image = m_slot_images[id];
 	const auto& data  = image.info.data;
 	if (image.registered || data.Empty()) {
@@ -260,6 +262,7 @@ void TextureCache::RegisterImage(ImageId id) {
 }
 
 void TextureCache::UnregisterImage(ImageId id) {
+	DiagCp::Add(FrameTiming::Counter::TexUnregisterN); // S543 DIAG
 	auto& image = m_slot_images[id];
 	image.HeapChanged();
 	UntrackImage(id);
@@ -2122,6 +2125,9 @@ bool TextureCache::DownloadImageMemory(ImageId id) {
 }
 
 void TextureCache::InvalidateMemoryFromGPU(uint64_t address, uint64_t size) {
+	if (DiagCp::Enabled() && size != 0) { // S543 DIAG: pages of the range
+		FrameTiming::Add(FrameTiming::Counter::InvGpuPagesN, ((address + size - 1) >> 12) - (address >> 12) + 1);
+	}
 	std::scoped_lock lock {m_lock};
 	ForEachImageInRegion(address, size, [&](ImageId, Image& image) {
 		if (image.info.data.address != address) {

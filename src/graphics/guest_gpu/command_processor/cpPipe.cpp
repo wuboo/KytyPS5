@@ -7,6 +7,7 @@
 // CommandProcessor::Process is exactly what the old code left.
 
 #include "common/assert.h"
+#include "common/cpTuning.h"
 #include "common/diagOut.h"
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
@@ -17,6 +18,7 @@
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/presentation/cpPhaseScope.h"
+#include "graphics/presentation/diagCpCounters.h"
 #include "graphics/presentation/frameTiming.h"
 #include "kernel/memory.h"
 
@@ -47,6 +49,15 @@ size_t EnvWorkers() {
 		return static_cast<size_t>(value < 0 ? 0 : (value > 8 ? 8 : value));
 	}();
 	return workers;
+}
+
+// S543 (KYTY_CP_AFFINITY_PIPE=1, default off, needs KYTY_CP_AFFINITY=<lp>): the pipeline workers stay off the physical core of the CP thread, like the guest threads.
+bool EnvAffinityPipe() {
+	static const bool on = [] {
+		const char* text = std::getenv("KYTY_CP_AFFINITY_PIPE");
+		return text != nullptr && text[0] == '1' && text[1] == '\0';
+	}();
+	return on;
 }
 
 CpPipe::SignalPolicy EnvSignals() {
@@ -142,6 +153,7 @@ private:
 
 	void Run(size_t index) {
 		FrameTiming::SetThreadMute(true);
+		if (EnvAffinityPipe()) Common::CpTuning::ApplyToGuestThread();
 		Queue& queue = m_queues[m_shard ? index : 0];
 		for (;;) {
 			GfpJob* job = nullptr;
@@ -369,6 +381,7 @@ void CommandProcessor::PipeExecuteFront() {
 	auto&          it  = p.items[p.ring.Front()];
 	const uint64_t seq = p.ring.FrontSeq();
 	const auto     t0  = FrameTiming::SteadyNowNs();
+	const auto     wait0 = DiagCp::Enabled() ? FrameTiming::Get(C::CpWaitGpuNs) : 0; // S543 DIAG (dispute 5): CpWaitGpuNs inside the front
 	p.executing        = true;
 
 	const auto handler = g_cp_op_func[it.opcode];
@@ -448,6 +461,9 @@ void CommandProcessor::PipeExecuteFront() {
 		p.held.pop_front();
 	}
 	FrameTiming::Add(C::PipeExecNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
+	if (DiagCp::Enabled()) {
+		FrameTiming::Add(C::PipeExecWaitNs, FrameTiming::Get(C::CpWaitGpuNs) - wait0);
+	}
 }
 
 namespace {

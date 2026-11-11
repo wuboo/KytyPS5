@@ -6,6 +6,8 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/timer.h"
+#include "graphics/guest_gpu/graphicsRun.h"
+#include "graphics/presentation/diagCpCounters.h"
 #include "libs/errno.h"
 #include "libs/libs.h"
 
@@ -413,6 +415,10 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 	     (timo == nullptr ? "inf" : fmt::format("{}", *timo).c_str()),
 	     Common::Thread::GetThreadIdUnique());
 
+	// S543 DIAG (KYTY_DIAG_CP_COUNTERS, dispute 12): time and number of the KernelWaitEqueue calls (polls with a zero timeout included) of the threads other than the CP.
+	const bool guest_eq_diag = Libs::Graphics::DiagCp::Enabled() && !Libs::Graphics::GuestGpu::IsGpuThread();
+	const auto guest_eq_t0   = guest_eq_diag ? Libs::Graphics::FrameTiming::SteadyNowNs() : 0;
+
 	if (timo == nullptr) {
 		*out = owner->WaitForEvents(ev, num, 0);
 	}
@@ -423,6 +429,11 @@ int KYTY_SYSV_ABI KernelWaitEqueue(KernelEqueue eq, KernelEvent* ev, int num, in
 		} else {
 			*out = owner->WaitForEvents(ev, num, *timo);
 		}
+	}
+	if (guest_eq_diag) {
+		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GuestEqWaitN);
+		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GuestEqWaitNs,
+		                                 Libs::Graphics::FrameTiming::ElapsedNs(guest_eq_t0, Libs::Graphics::FrameTiming::SteadyNowNs()));
 	}
 
 	if (*out == KERNEL_ERROR_EBADF) {
