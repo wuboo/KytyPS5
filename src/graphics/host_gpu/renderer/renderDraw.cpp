@@ -521,11 +521,11 @@ inline uint64_t T40(const std::array<uint32_t, 8>& d) {
 
 // Polled guest places: [0] the T#'s place, [1..3] small (pointer) loads of the walk.
 struct Watch {
-	std::atomic<uint64_t> addr[4] {};
-	std::atomic<uint32_t> len[4] {};
-	std::atomic<int64_t>  change_ns[4] {};
-	std::atomic<uint64_t> change_flip[4] {};
-	std::atomic<uint64_t> changes[4] {};
+	std::atomic<uint64_t> addr[8] {};
+	std::atomic<uint32_t> len[8] {};
+	std::atomic<int64_t>  change_ns[8] {};
+	std::atomic<uint64_t> change_flip[8] {};
+	std::atomic<uint64_t> changes[8] {};
 };
 inline Watch& GetWatch() {
 	static Watch watch;
@@ -537,14 +537,14 @@ inline void StartWatcher() {
 	std::call_once(once, [] {
 		std::thread([] {
 			auto&                                   w = GetWatch();
-			std::array<std::array<uint32_t, 8>, 4> prev {};
-			std::array<uint64_t, 4>                prev_addr {};
+			std::array<std::array<uint32_t, 8>, 8> prev {};
+			std::array<uint64_t, 8>                prev_addr {};
 			uint32_t                               lines = 0;
 			for (;;) {
 				std::this_thread::sleep_for(std::chrono::microseconds(500));
 				const auto flip = FrameTiming::GuestFlips() + 1;
 				if (flip > 4520) return;
-				for (int i = 0; i < 4; i++) {
+				for (int i = 0; i < 8; i++) {
 					const auto a   = w.addr[i].load(std::memory_order_relaxed);
 					const auto len = std::min<uint32_t>(w.len[i].load(std::memory_order_relaxed), 32);
 					if (a == 0 || len == 0) continue;
@@ -683,6 +683,55 @@ inline void Force(const ShaderStageRuntime& ps) {
 	}
 }
 
+// A one-off scan of all committed guest memory for copies of a T# (its first two dwords at any dword offset); matches with
+// how many of the 8 dwords agree, the range they lie in, and the first non-command-buffer ones go to watcher slots 4..7.
+inline void StartScan(const char* what, std::array<uint32_t, 8> t, uint64_t flip, uint64_t skip_from, uint64_t skip_to, int first_slot) {
+	std::thread([=] {
+		const auto t0     = FrameTiming::SteadyNowNs();
+		const auto ranges = LibKernel::Memory::DiagMappedRanges();
+		uint64_t   scanned = 0, matches = 0;
+		int        slot    = first_slot;
+		const uint64_t key = uint64_t {t[0]} | (uint64_t {t[1]} << 32u);
+		std::vector<uint8_t> chunk;
+		for (const auto& [start, size]: ranges) {
+			if (size > (uint64_t {16} << 30)) continue;
+			for (uint64_t off = 0; off < size; off += (4u << 20)) {
+				const uint64_t n = std::min<uint64_t>(4u << 20, size - off) + 28; // overlap for a T# across chunks
+				const uint64_t want = std::min<uint64_t>(n, size - off);
+				chunk.resize(want);
+				if (!LibKernel::Memory::TryReadBacking(start + off, chunk.data(), want)) continue;
+				scanned += want;
+				for (uint64_t k = 0; k + 8 <= want; k += 4) {
+					uint64_t v;
+					std::memcpy(&v, chunk.data() + k, 8);
+					if (v != key) continue;
+					const uint64_t a = start + off + k;
+					if (k >= (4u << 20)) continue; // counted in the next chunk
+					matches++;
+					uint32_t same = 0;
+					std::array<uint32_t, 8> words {};
+					if (LibKernel::Memory::TryReadBacking(a, words.data(), 32)) {
+						for (int d = 0; d < 8; d++) same += words[d] == t[d] ? 1 : 0;
+					}
+					if (matches <= 48) {
+						const auto desc = LibKernel::Memory::DiagDescribeRange(a, 4);
+						Log::WriteToConsoleAndLog(fmt::format("[s538-scan] {} flip={} match=0x{:x} same={} {}\n", what, flip, a, same,
+						                                      desc.empty() ? std::string("?") : desc[0]));
+					}
+					if (same >= 6 && (a & 0xf) == 0 && (a < skip_from || a >= skip_to) && slot < first_slot + 2 && slot < 8) {
+						auto& w = GetWatch();
+						w.addr[slot].store(a, std::memory_order_relaxed);
+						w.len[slot].store(32, std::memory_order_relaxed);
+						slot++;
+					}
+				}
+			}
+		}
+		Log::WriteToConsoleAndLog(fmt::format("[s538-scan] {} done flip={} ranges={} scanned_mb={} matches={} ms={}\n", what, flip, ranges.size(),
+		                                      scanned >> 20, matches, (FrameTiming::SteadyNowNs() - t0) / 1000000));
+	}).detach();
+}
+
 // After the bindings: the T# the renderer binds against guest memory now (KYTY_DIAG_S538=1).
 inline void Note(RenderContext& context, const ShaderStageRuntime& ps, const PreparedBindings& pixel, const HW::PixelShaderInfo& ps_regs) {
 	const auto flip = FrameTiming::GuestFlips() + 1;
@@ -733,6 +782,32 @@ inline void Note(RenderContext& context, const ShaderStageRuntime& ps, const Pre
 		if (ps_regs.ps_user_sgpr.value[i] != snap.user_data[i]) ud_val_eq = 0;
 		if (i == 0) ud0_addr = a;
 		us += fmt::format("{}{}:0x{:x}:{:08x}", i ? "," : "", ps_regs.s538_kind[i], a, r ? m : 0xdeadbeefu);
+	}
+	// Copies of the card's T# in guest memory, once early in the card window and once late (and of the particle asset's T#).
+	static int scans = 0;
+	if (ud0_addr != 0 && ((scans == 0 && flip >= 3920) || (scans == 1 && flip >= 4050) || (scans == 2 && flip >= 4300))) {
+		scans++;
+		const uint64_t page = ud0_addr & ~uint64_t {0xfff};
+		static const char* const names[] = {"", "card-pre", "card-mid", "card-late"};
+		StartScan(names[scans], t, flip, page, page + 0x1000, scans == 1 ? 4 : (scans == 2 ? 6 : 8));
+		const auto& g = GetGood();
+		if (scans == 2 && g.have && g.t != t) StartScan("good-mid", g.t, flip, page, page + 0x1000, 8);
+	}
+	// A change of the card's T#: the memory events of the new and the old texture's range.
+	static uint64_t last_t40 = 0;
+	static uint32_t switches = 0;
+	if (T40(t) != last_t40) {
+		if (last_t40 != 0 && flip >= 3900 && switches < 40 && Common::MemEvents::Enabled()) {
+			switches++;
+			Log::WriteToConsoleAndLog(fmt::format("[s538-sw] flip={} from=0x{:x} to=0x{:x} mip0={:016x}\n", flip, last_t40, T40(t), mip0));
+			for (const auto& line: Common::MemEvents::WatchLines(Common::MemEvents::Global(), T40(t), 0x60000, 12)) {
+				Log::WriteToConsoleAndLog(fmt::format("[s538-sw] flip={} new 0x{:x} {}\n", flip, T40(t), line));
+			}
+			for (const auto& e: Common::MemEvents::Global().Query(last_t40, 0x60000, 6)) {
+				Log::WriteToConsoleAndLog(fmt::format("[s538-sw] flip={} old 0x{:x} {}\n", flip, last_t40, Common::MemEvents::Format(e)));
+			}
+		}
+		last_t40 = T40(t);
 	}
 	if (ud0_addr != 0) {
 		auto& w0 = GetWatch();

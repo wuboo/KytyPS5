@@ -4057,6 +4057,23 @@ int KYTY_SYSV_ABI KernelMemoryPoolBatch(const KernelMemoryPoolBatchEntry* entrie
 
 // S125 watch_tex (DIAG): what the kernel knows about [addr, addr+len): virtual ranges (type, protection, name) and, for pooled ones, the
 // physical pool mappings. Metadata only.
+// S538 DIAG: every committed (not reserved) virtual range, in address order.
+std::vector<std::pair<uint64_t, uint64_t>> DiagMappedRanges() {
+	std::vector<std::pair<uint64_t, uint64_t>> out;
+	if (g_virtual_ranges == nullptr) {
+		return out;
+	}
+	uint64_t current = 0;
+	while (out.size() < 200000) {
+		VirtualRanges::Range range {};
+		if (!g_virtual_ranges->Query(current, 1, &range) || range.size == 0) break;
+		if (!IsReservedRangeType(range.type)) out.emplace_back(range.start, range.size);
+		if (range.start + range.size <= current) break;
+		current = range.start + range.size;
+	}
+	return out;
+}
+
 std::vector<std::string> DiagDescribeRange(uint64_t addr, uint64_t len) {
 	std::vector<std::string> lines;
 	if (g_virtual_ranges == nullptr || len == 0 || len > UINT64_MAX - addr) {

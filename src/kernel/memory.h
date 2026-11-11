@@ -8,6 +8,7 @@
 #include "kernel/srtReadPass.h"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -170,6 +171,8 @@ void                   WriteBacking(uint64_t vaddr, const void* data, uint64_t s
 void                   InvalidateMemory(uint64_t vaddr, uint64_t size);
 // S125 watch_tex (DIAG): virtual ranges and pool mappings under [addr, addr+len), one line each.
 std::vector<std::string> DiagDescribeRange(uint64_t addr, uint64_t len);
+// S538 DIAG: every committed virtual range (start, size).
+std::vector<std::pair<uint64_t, uint64_t>> DiagMappedRanges();
 void                   InstallGpuResources(Graphics::RenderContext* renderer) noexcept;
 [[nodiscard]] bool HandleGpuFault(Graphics::PageFaultAccess access, uint64_t fault_vaddr) noexcept;
 // S426 (KYTY_GF_EMULATE): the GPU state of [vaddr, vaddr + size) for a read fault of a guest thread: false when the range is not tracked by the GPU
