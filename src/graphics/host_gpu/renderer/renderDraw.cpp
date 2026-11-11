@@ -868,12 +868,14 @@ inline void Note(RenderContext& context, const ShaderStageRuntime& ps, const Pre
 	Log::WriteToConsoleAndLog(fmt::format(
 	    "[s538-ts] t_ms={} flip={} path={} walk_age_us={} ud{}={} t2={} t40=0x{:x} bound_mip0={:016x} loc=0x{:x} range=0x{:x} eq={} "
 	    "q={} dirty={} inflight={} busy={} gpu_dirty={} w_changes={} w_last_flip={} w_last_age_ms={} nranges={} ranges={} small={} "
-	    "ud_src={} ud_mem_eq={} ud_val_eq={} udw_changes={} udw_last_flip={} udw_last_age_ms={}\n",
+	    "ud_src={} ud_mem_eq={} ud_val_eq={} udw_changes={} udw_last_flip={} udw_last_age_ms={} view_base={} view_levels={} view_min_lod={} native_min_lod={}\n",
 	    now / 1000000, flip, snap.s538_path, snap.s538_walk_ns != 0 ? (now - snap.s538_walk_ns) / 1000 : -1, snap.user_data.size(), ud, ts,
 	    T40(t), mip0, loc, loc_range, eq, queried ? 1 : 0, dirty ? 1 : 0, inflight ? 1 : 0, busy ? 1 : 0, gpu_dirt ? 1 : 0,
 	    w.changes[0].load(), w.change_flip[0].load(),
 	    w.change_ns[0].load() != 0 ? (now - w.change_ns[0].load()) / 1000000 : -1, merged.size(), rs, smalls, us, ud_mem_eq, ud_val_eq,
-	    w.changes[3].load(), w.change_flip[3].load(), w.change_ns[3].load() != 0 ? (now - w.change_ns[3].load()) / 1000000 : -1));
+	    w.changes[3].load(), w.change_flip[3].load(), w.change_ns[3].load() != 0 ? (now - w.change_ns[3].load()) / 1000000 : -1,
+	    pixel.images.size() > 2 ? pixel.images[2].desc.view_info.base_level : 0, pixel.images.size() > 2 ? pixel.images[2].desc.view_info.level_count : 0,
+	    pixel.images.size() > 2 ? pixel.images[2].desc.view_info.min_lod : 0, context.GetGraphics().has_view_min_lod ? 1 : 0));
 	if (Common::MemEvents::Enabled()) {
 		const auto probe = [&](const char* what, uint64_t a, uint64_t n) {
 			for (const auto& e: Common::MemEvents::Global().Query(a, n, 4)) {
