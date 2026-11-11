@@ -1186,17 +1186,23 @@ static void S533BeforeTargets(RenderContext& context, CommandBuffer& buffer, con
 	if (mode == GalaxyFeedback::Mode::Off) return;
 
 	const long guest = static_cast<long>(FrameTiming::GuestFlips() + 1);
-	static bool     was    = false;
-	static uint64_t hits_n = 0;
-	static uint64_t addr_n = 0;
-	static uint64_t splits = 0;
-	static uint64_t blends = 0;
-	static long     last   = -1;
+	static bool     was      = false;
+	static uint64_t hits_n   = 0;
+	static uint64_t addr_n   = 0;
+	static uint64_t splits   = 0;
+	static uint64_t blends   = 0;
+	static uint64_t color_n  = 0;
+	static uint64_t depth_n  = 0;
+	static uint64_t card_n   = 0;
+	static uint64_t card_dep = 0;
+	static long     last     = -1;
 	if (guest < GalaxyFeedback::kLo || guest > GalaxyFeedback::kHi) {
 		if (was && guest > GalaxyFeedback::kHi) {
 			was = false;
-			std::fprintf(stderr, "[s533-fb] done hits=%llu addr=%llu splits=%llu blend=%llu\n",
-			             static_cast<unsigned long long>(hits_n), static_cast<unsigned long long>(addr_n),
+			std::fprintf(stderr, "[s533-fb] done hits=%llu color=%llu depth=%llu card=%llu carddep=%llu addr=%llu splits=%llu blend=%llu\n",
+			             static_cast<unsigned long long>(hits_n), static_cast<unsigned long long>(color_n),
+			             static_cast<unsigned long long>(depth_n), static_cast<unsigned long long>(card_n),
+			             static_cast<unsigned long long>(card_dep), static_cast<unsigned long long>(addr_n),
 			             static_cast<unsigned long long>(splits), static_cast<unsigned long long>(blends));
 			std::fflush(stderr);
 		}
@@ -1283,12 +1289,24 @@ static void S533BeforeTargets(RenderContext& context, CommandBuffer& buffer, con
 	const uint32_t nalias = GalaxyFeedback::FindAddress(bounds, nbound, attachments, nlive, aliases, 16);
 	if (guest != last) {
 		last = guest;
-		std::fprintf(stderr, "[s533-fb] guest=%ld hits=%llu addr=%llu splits=%llu blend=%llu\n", guest,
-		             static_cast<unsigned long long>(hits_n), static_cast<unsigned long long>(addr_n),
-		             static_cast<unsigned long long>(splits), static_cast<unsigned long long>(blends));
+		std::fprintf(stderr, "[s533-fb] guest=%ld hits=%llu color=%llu depth=%llu card=%llu carddep=%llu blend=%llu\n", guest,
+		             static_cast<unsigned long long>(hits_n), static_cast<unsigned long long>(color_n),
+		             static_cast<unsigned long long>(depth_n), static_cast<unsigned long long>(card_n),
+		             static_cast<unsigned long long>(card_dep), static_cast<unsigned long long>(blends));
 	}
 	hits_n += nhit;
 	addr_n += nalias;
+	bool card_depth_hit = false;
+	for (uint32_t i = 0; i < nhit; i++) {
+		if (found[i].depth) {
+			depth_n++;
+			if (card >= 0) card_depth_hit = true;
+		} else {
+			color_n++;
+		}
+		if (found[i].attach == kCard) card_n++;
+	}
+	if (card_depth_hit) card_dep++;
 
 	struct Key {
 		uint64_t ps;
@@ -1313,6 +1331,13 @@ static void S533BeforeTargets(RenderContext& context, CommandBuffer& buffer, con
 			}
 		}
 		if (seen_n >= 80) return;
+		if (kind == 0 && hit.depth && hit.attach != 0x514080000ull) {
+			int depth_logged = 0;
+			for (int i = 0; i < seen_n; i++) {
+				if (seen[i].kind == 0 && seen[i].depth) depth_logged++;
+			}
+			if (depth_logged >= 8) return;
+		}
 		seen[seen_n++] = Key {ps, hit.address, hit.attach, hit.slot, hit.mip, hit.storage, hit.depth, hit.stage, kind};
 		std::fprintf(stderr,
 		             "[s533-fb] hit guest=%ld ps=0x%016llx slot=%u st=%s addr=0x%llx att=0x%llx mip=%u storage=%u depth=%u kind=%s\n",
