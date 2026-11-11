@@ -59,6 +59,7 @@
 #include <fmt/format.h>
 #include <unordered_map>
 #include <unordered_set>
+#include <xxhash.h>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -446,7 +447,7 @@ static void S537NoteTextures(RenderContext& context, const PreparedBindings& pix
 	static std::unordered_set<uint64_t> seen;
 	static uint32_t                     lines = 0;
 	const std::scoped_lock              lock(mutex);
-	if (lines >= 600) return;
+	if (lines >= 2000) return;
 	const auto now = std::chrono::duration_cast<std::chrono::milliseconds>(
 	                     std::chrono::steady_clock::now().time_since_epoch()).count();
 	for (uint32_t slot = 0; slot < pixel.images.size(); slot++) {
@@ -457,10 +458,19 @@ static void S537NoteTextures(RenderContext& context, const PreparedBindings& pix
 		                     (image.IsCpuDirty() ? 2u : 0u) ^ (image.usage.render_target ? 4u : 0u) ^ (image.diag.uploads << 20);
 		if (!seen.insert(key).second) continue;
 		lines++;
+		// Guest mip 0 now, to tell the same asset at another address from other content.
+		uint64_t   mip0_hash = 0;
+		const auto mip0      = image.info.mip_layout[0];
+		if (mip0.size != 0 && mip0.size <= (16u << 20)) {
+			std::vector<uint8_t> bytes(mip0.size);
+			if (LibKernel::Memory::TryReadBacking(image.info.data.address + mip0.offset, bytes.data(), bytes.size())) {
+				mip0_hash = XXH3_64bits(bytes.data(), bytes.size());
+			}
+		}
 		Log::WriteToConsoleAndLog(fmt::format(
-		    "[s537-tex] t_ms={} slot={} addr=0x{:x} serial={} {}x{}x{} gfmt={} vk={} view_addr=0x{:x} rt={} gpu_mod={} "
+		    "[s537-tex] t_ms={} flip={} mip0_xxh={:016x} slot={} addr=0x{:x} serial={} {}x{}x{} gfmt={} vk={} view_addr=0x{:x} rt={} gpu_mod={} "
 		    "cpu_dirty={} uploads={} upload_flip={} writes={} write_flip={}\n",
-		    now, slot, image.info.data.address, image.serial, image.info.extent.width, image.info.extent.height,
+		    now, flip, mip0_hash, slot, image.info.data.address, image.serial, image.info.extent.width, image.info.extent.height,
 		    image.info.extent.depth, static_cast<int>(image.info.guest_format), static_cast<int>(image.info.pixel_format),
 		    binding.desc.info.data.address, image.usage.render_target ? 1 : 0, image.IsGpuModified() ? 1 : 0,
 		    image.IsCpuDirty() ? 1 : 0, image.diag.uploads, image.diag.upload_flip, image.diag.writes, image.diag.write_flip));
