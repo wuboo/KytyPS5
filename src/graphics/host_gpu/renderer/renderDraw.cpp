@@ -455,7 +455,30 @@ static void S537NoteTextures(RenderContext& context, const PreparedBindings& pix
 		if (!binding.image_id) continue;
 		const auto& image = context.GetTextureCache().GetImage(binding.image_id);
 		const uint64_t key = (image.serial << 12) ^ (uint64_t {slot} << 4) ^ (image.IsGpuModified() ? 1u : 0u) ^
-		                     (image.IsCpuDirty() ? 2u : 0u) ^ (image.usage.render_target ? 4u : 0u) ^ (image.diag.uploads << 20);
+		                     (image.IsCpuDirty() ? 2u : 0u) ^ (image.usage.render_target ? 4u : 0u) ^ (image.diag.uploads << 20) ^
+		                     (uint64_t {binding.desc.view_info.min_lod} << 44);
+		const auto flip = FrameTiming::GuestFlips() + 1;
+		static uint64_t last_periodic = 0;
+		if (slot == 2 && flip >= 3990 && flip <= 4470 && flip % 10 == 0 && flip != last_periodic) {
+			// S537 DIAG: every 10 flips, the guest mip 0 of the bound slot-2 image (hash, zero 16-byte blocks).
+			last_periodic = flip;
+			const auto m0 = image.info.mip_layout[0];
+			std::vector<uint8_t> bytes(m0.size);
+			uint64_t hash = 0, zero = 0;
+			if (m0.size != 0 && m0.size <= (16u << 20) &&
+			    LibKernel::Memory::TryReadBacking(image.info.data.address + m0.offset, bytes.data(), bytes.size())) {
+				hash = XXH3_64bits(bytes.data(), bytes.size());
+				static const uint8_t z[16] {};
+				for (size_t b = 0; b + 16 <= bytes.size(); b += 16) zero += std::memcmp(bytes.data() + b, z, 16) == 0 ? 1 : 0;
+			}
+			Log::WriteToConsoleAndLog(fmt::format("[s537-per] flip={} addr=0x{:x} serial={} mip0_xxh={:016x} zero16={} uploads={} "
+			                                      "upload_flip={} cpu_dirty={} writes={} page_writes={} vbase={} vlev={} vmin={} native={} imglev={}\n",
+			                                      flip, image.info.data.address, image.serial, hash, zero, image.diag.uploads,
+			                                      image.diag.upload_flip, image.IsCpuDirty() ? 1 : 0, image.diag.writes,
+			                                      image.diag.page_writes, binding.desc.view_info.base_level,
+			                                      binding.desc.view_info.level_count, binding.desc.view_info.min_lod,
+			                                      context.GetGraphics().has_view_min_lod ? 1 : 0, image.info.resources.levels));
+		}
 		if (!seen.insert(key).second) continue;
 		lines++;
 		// Guest mip 0 now, to tell the same asset at another address from other content.
@@ -469,11 +492,13 @@ static void S537NoteTextures(RenderContext& context, const PreparedBindings& pix
 		}
 		Log::WriteToConsoleAndLog(fmt::format(
 		    "[s537-tex] t_ms={} flip={} mip0_xxh={:016x} slot={} addr=0x{:x} serial={} {}x{}x{} gfmt={} vk={} view_addr=0x{:x} rt={} gpu_mod={} "
-		    "cpu_dirty={} uploads={} upload_flip={} writes={} write_flip={}\n",
+		    "cpu_dirty={} uploads={} upload_flip={} writes={} write_flip={} vbase={} vlev={} vmin={} native={} imglev={}\n",
 		    now, flip, mip0_hash, slot, image.info.data.address, image.serial, image.info.extent.width, image.info.extent.height,
 		    image.info.extent.depth, static_cast<int>(image.info.guest_format), static_cast<int>(image.info.pixel_format),
 		    binding.desc.info.data.address, image.usage.render_target ? 1 : 0, image.IsGpuModified() ? 1 : 0,
-		    image.IsCpuDirty() ? 1 : 0, image.diag.uploads, image.diag.upload_flip, image.diag.writes, image.diag.write_flip));
+		    image.IsCpuDirty() ? 1 : 0, image.diag.uploads, image.diag.upload_flip, image.diag.writes, image.diag.write_flip,
+		    binding.desc.view_info.base_level, binding.desc.view_info.level_count, binding.desc.view_info.min_lod,
+		    context.GetGraphics().has_view_min_lod ? 1 : 0, image.info.resources.levels));
 	}
 }
 
