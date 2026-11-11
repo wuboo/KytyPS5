@@ -36,27 +36,6 @@ inline bool Force() {
 	return on;
 }
 
-// Where the CP took each PS user-data register from: the guest address of the value dword, the kind (1 SET_SH_REG in the
-// command buffer, 2 SET_SH_REG_INDIRECT pair table) and the value it read there (to tell a later packet from this draw's).
-struct UdSource {
-	std::atomic<uint64_t> addr[32] {};
-	std::atomic<uint64_t> packet[32] {}; // the packet header (1) / the pair table (2)
-	std::atomic<uint32_t> value[32] {};
-	std::atomic<uint8_t>  kind[32] {};
-};
-inline UdSource& PsUd() {
-	static UdSource source;
-	return source;
-}
-inline void NotePsUd(uint32_t slot, const uint32_t* where, uint32_t value, uint8_t kind, const void* packet) {
-	if (!On() || slot >= 32) return;
-	auto& s = PsUd();
-	s.addr[slot].store(reinterpret_cast<uint64_t>(where), std::memory_order_relaxed);
-	s.packet[slot].store(reinterpret_cast<uint64_t>(packet), std::memory_order_relaxed);
-	s.value[slot].store(value, std::memory_order_relaxed);
-	s.kind[slot].store(kind, std::memory_order_relaxed);
-}
-
 } // namespace Libs::Graphics::ShaderRecompiler::S538
 
 #endif /* KYTY_GRAPHICS_SHADER_RECOMPILER_S538DIAG_H_ */

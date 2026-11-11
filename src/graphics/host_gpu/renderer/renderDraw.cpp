@@ -684,7 +684,7 @@ inline void Force(const ShaderStageRuntime& ps) {
 }
 
 // After the bindings: the T# the renderer binds against guest memory now (KYTY_DIAG_S538=1).
-inline void Note(RenderContext& context, const ShaderStageRuntime& ps, const PreparedBindings& pixel) {
+inline void Note(RenderContext& context, const ShaderStageRuntime& ps, const PreparedBindings& pixel, const HW::PixelShaderInfo& ps_regs) {
 	const auto flip = FrameTiming::GuestFlips() + 1;
 	if (flip < 3300 || flip > 4480) return;
 	const auto& snap = *ps.resources;
@@ -705,7 +705,7 @@ inline void Note(RenderContext& context, const ShaderStageRuntime& ps, const Pre
 	}
 	uint64_t   off = 0, size = 0;
 	const auto mip0 = pixel.images.size() > 2 && pixel.images[2].image_id ? BoundMip0(context, pixel.images[2], flip, &off, &size) : 0;
-	uint64_t key = XXH3_64bits(t.data(), sizeof(t)) ^ (XXH3_64bits(snap.user_data.data(), snap.user_data.size() * 4) * 3) ^ (mip0 * 7);
+	const uint64_t key = XXH3_64bits(t.data(), sizeof(t)) ^ (mip0 * 7);
 	// One line per distinct (T#, user data, mip 0) per 10-flip bucket.
 	static std::unordered_set<uint64_t> seen;
 	static uint64_t                     bucket = 0;
@@ -718,26 +718,25 @@ inline void Note(RenderContext& context, const ShaderStageRuntime& ps, const Pre
 		draws_in_bucket = 0;
 	}
 	draws_in_bucket++;
-	if (!seen.insert(key).second || lines >= 6000) return;
+	if (!seen.insert(key).second || lines >= 20000 || (flip < 3900 && seen.size() > 12)) return;
 	lines++;
 	const auto now = FrameTiming::SteadyNowNs();
 	// The CP's source of PS user data 0..7 (the T# of slot 2 when the shader takes it from user data).
-	auto&       src = ShaderRecompiler::S538::PsUd();
 	std::string us;
 	uint64_t    ud0_addr = 0;
 	int         ud_mem_eq = 1, ud_val_eq = 1;
 	for (uint32_t i = 0; i < 8 && i < snap.user_data.size(); i++) {
-		const auto a = src.addr[i].load(std::memory_order_relaxed);
+		const auto a = ps_regs.s538_src[i];
 		uint32_t   m = 0;
 		const bool r = a != 0 && LibKernel::Memory::TryReadBacking(a, &m, 4);
 		if (!r || m != snap.user_data[i]) ud_mem_eq = 0;
-		if (src.value[i].load(std::memory_order_relaxed) != snap.user_data[i]) ud_val_eq = 0;
+		if (ps_regs.ps_user_sgpr.value[i] != snap.user_data[i]) ud_val_eq = 0;
 		if (i == 0) ud0_addr = a;
-		us += fmt::format("{}{}:0x{:x}:{:08x}", i ? "," : "", src.kind[i].load(std::memory_order_relaxed), a, r ? m : 0xdeadbeefu);
+		us += fmt::format("{}{}:0x{:x}:{:08x}", i ? "," : "", ps_regs.s538_kind[i], a, r ? m : 0xdeadbeefu);
 	}
 	if (ud0_addr != 0) {
 		auto& w0 = GetWatch();
-		const bool direct = src.kind[0].load(std::memory_order_relaxed) == 1;
+		const bool direct = ps_regs.s538_kind[0] == 1;
 		w0.addr[3].store(ud0_addr, std::memory_order_relaxed);
 		w0.len[3].store(direct ? 32u : 4u, std::memory_order_relaxed);
 	}
@@ -745,8 +744,7 @@ inline void Note(RenderContext& context, const ShaderStageRuntime& ps, const Pre
 	if (ud0_addr != 0 && described < 3 && (described == 0 || flip >= 3990)) {
 		described = described == 0 ? 1 : described + 1;
 		for (const auto& line: LibKernel::Memory::DiagDescribeRange(ud0_addr, 32)) {
-			Log::WriteToConsoleAndLog(fmt::format("[s538-range] flip={} ud0=0x{:x} pkt=0x{:x} {}\n", flip, ud0_addr,
-			                                      src.packet[0].load(), line));
+			Log::WriteToConsoleAndLog(fmt::format("[s538-range] flip={} ud0=0x{:x} kind={} {}\n", flip, ud0_addr, ps_regs.s538_kind[0], line));
 		}
 	}
 	std::string ud;
@@ -1643,7 +1641,7 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		PrepareGraphicsBindings(stages, std::span {state.color_info, state.color_count});
 		if (s538_card) {
 			S538Diag::Learn(m_context, state.ps_input_info.stage, bindings.pixel);
-			if (ShaderRecompiler::S538::On()) S538Diag::Note(m_context, state.ps_input_info.stage, bindings.pixel);
+			if (ShaderRecompiler::S538::On()) S538Diag::Note(m_context, state.ps_input_info.stage, bindings.pixel, buffer.GetShaders().GetPs());
 		}
 		return stages;
 	}();

@@ -560,6 +560,9 @@ struct VertexShaderInfo {
 struct PixelShaderInfo {
 	PsStageRegisters ps_regs;
 	UserSgprInfo     ps_user_sgpr;
+	// S538 DIAG (KYTY_DIAG_S538=1): the guest address each of user data 0..7 was read from, and how (1 SET_SH_REG, 2 indirect).
+	uint64_t         s538_src[8]  = {};
+	uint8_t          s538_kind[8] = {};
 };
 
 struct ComputeShaderInfo {
@@ -934,6 +937,12 @@ public:
 	void SetCsWaveSize(uint8_t wave_size) { m_cs.cs_regs.wave_size = wave_size; }
 
 	void SetPsUserSgpr(uint32_t id, uint32_t value) { m_ps.ps_user_sgpr.value[id] = value; }
+	void NotePsUserSgprSource(uint32_t id, uint64_t address, uint8_t kind) {
+		if (id < 8) {
+			m_ps.s538_src[id]  = address;
+			m_ps.s538_kind[id] = kind;
+		}
+	}
 	void SetCsUserSgpr(uint32_t id, uint32_t value) { m_cs.cs_user_sgpr.value[id] = value; }
 	void SetHsUserSgpr(uint32_t id, uint32_t value) { m_vs.hs_user_sgpr.value[id] = value; }
 	void SetGsUserSgpr(uint32_t id, uint32_t value) { m_vs.gs_user_sgpr.value[id] = value; }
