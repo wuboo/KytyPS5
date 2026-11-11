@@ -439,6 +439,8 @@ enum class Counter : uint32_t {
 	// S511 (KYTY_DEFER_WRITE_BARRIER): draws whose buffer-write barrier was left pending; times that
 	// barrier was recorded; flushes because the next draw may read; write-draws that kept the immediate pair.
 	DeferWriteDrawN, DeferWriteFlushN, DeferWriteReadN, DeferWriteNowN,
+	// S540 (KYTY_FLUSH_DRAWS): submits made every N draws.
+	FlushDrawsN,
 	Count,
 };
 

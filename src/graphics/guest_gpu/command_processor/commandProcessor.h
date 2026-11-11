@@ -9,12 +9,19 @@
 #include "graphics/host_gpu/renderer/renderContext.h"
 
 #include <cstdint>
+#include <cstdlib>
 #include <memory>
 #include <optional>
 #include <span>
 #include <vector>
 
 namespace Libs::Graphics {
+
+// S540 (KYTY_FLUSH_DRAWS=N, default 0 = off): read once per command processor.
+inline uint32_t FlushDrawsFromEnv() {
+	const char* value = std::getenv("KYTY_FLUSH_DRAWS");
+	return value != nullptr ? static_cast<uint32_t>(std::strtoul(value, nullptr, 10)) : 0u;
+}
 
 bool TestWaitRegMemValue(uint64_t value, uint64_t ref, uint64_t mask, uint32_t func);
 
@@ -135,6 +142,7 @@ private:
 	[[nodiscard]] HW::Shader&     ExecSh() { return m_exec_sh != nullptr ? *m_exec_sh : m_sh_ctx; }
 	[[nodiscard]] HW::UserConfig& ExecUcfg() { return m_exec_ucfg != nullptr ? *m_exec_ucfg : m_ucfg; }
 	void SuspendPm4();
+	void                CountDraw();
 	uint32_t            NumInstances();
 	const void*         IndexAddress(uint32_t first_index) const;
 	CommandScheduler&   GetScheduler() const { return m_renderer.GetCommandScheduler(); }
@@ -156,6 +164,8 @@ private:
 	uint64_t m_num_instances_addr = 0;
 
 	const int m_interrupt_event_id;
+	const uint32_t m_flush_draws = FlushDrawsFromEnv(); // S540 (KYTY_FLUSH_DRAWS), 0 is off
+	uint32_t  m_draws            = 0;                   // since the buffer start or CountDraw's flush
 	uint64_t  m_synthetic_occlusion_counter = 0;
 	bool      m_predicate_skip              = false;
 

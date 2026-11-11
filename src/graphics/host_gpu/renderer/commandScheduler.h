@@ -38,6 +38,8 @@ public:
 	// the end of every PM4 submission and ReleaseMem; batch those into one submit, made once
 	// enough are pending, after 1 ms, or when the GPU thread is about to wait.
 	void               RequestFlush();
+	// S540 (KYTY_FLUSH_DRAWS=N, port of upstream 7d4e0d9b): submit the recorded work every N draws; an open pass goes on with loadOp=LOAD.
+	void               FlushEveryDraws();
 	void               FlushPending();
 	[[nodiscard]] bool FlushRequested() const noexcept { return m_flush_requests != 0; }
 	void           FlushAndWait();

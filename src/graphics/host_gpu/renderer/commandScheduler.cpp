@@ -757,6 +757,15 @@ bool CommandScheduler::Eager3FlushNow() {
 	return true;
 }
 
+void CommandScheduler::FlushEveryDraws() {
+	if (!Active() || m_command.IsInvalid() || InDeferredOperation() || m_in_pre_submit || !m_command.m_recorded) return;
+	const bool        was_open = RenderingOpen();
+	const RenderState before   = was_open ? m_command.m_render_state : RenderState {};
+	Flush();
+	if (was_open) m_command.ArmReopenLoadIfSame(before);
+	FrameTiming::Add(FrameTiming::Counter::FlushDrawsN);
+}
+
 void CommandScheduler::MaybeEagerSplit() {
 	if (!EagerEnabled() || !Active() || m_command.IsInvalid() || InDeferredOperation() || m_in_pre_submit) return;
 	bool closed = false;

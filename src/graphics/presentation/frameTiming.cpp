@@ -711,6 +711,7 @@ constexpr const char* kCounterNames[] = {
     "defer_write_flush_n",
     "defer_write_read_n",
     "defer_write_now_n",
+    "flush_draws_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
