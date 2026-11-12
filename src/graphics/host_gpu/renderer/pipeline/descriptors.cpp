@@ -35,6 +35,7 @@
 #include <bit>
 #include <fmt/format.h>
 #include <limits>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -646,9 +647,13 @@ ImageId RenderExecutor::FindTextureImageId(const ShaderRecompiler::IR::ImageReso
                                            const ShaderTextureResource& descriptor,
                                            TextureCache::ImageDesc& desc, bool shader_conversion,
                                            Prospero::BufferFormat format, vk::Format pixel_format,
-                                           vk::Format view_format, bool storage) {
+                                           vk::Format view_format, bool storage,
+                                           TextureCache::FindImageInfo* found, ImageId* found_id) {
 	auto& texture_cache = m_context.GetTextureCache();
-	auto id = texture_cache.FindImage(desc, shader_conversion);
+	auto id = texture_cache.FindImage(desc, shader_conversion, found);
+	if (found_id != nullptr) {
+		*found_id = id;
+	}
 	if (!id) {
 		return id;
 	}
@@ -925,10 +930,28 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	}
 	// S560 (KYTY_CP_PREDECODE_SLIM=1): a predecoded image (KYTY_CP_PREDECODE=1, slot Ok) is bound in place, with one copy of its description.
 	const bool slim = pre != nullptr && !m_lod_stats && Predecode::EnvMode() == Predecode::Mode::On && Predecode::SlimEnabled();
+	// S562 (KYTY_TEX_SLOT_MEMO=1|shadow, texSlotMemo.h): such an image whose slot already holds its binding is kept; the others are bound in place.
+	const auto slot_memo_mode = TexSlotMemo::EnvMode();
+	const bool slot_memo = slot_memo_mode != TexSlotMemo::Mode::Off && pre != nullptr && !m_lod_stats && Predecode::EnvMode() == Predecode::Mode::On;
+	if (slot_memo) {
+		prepared.image_memo.resize(program.info.images.size());
+	} else if (!prepared.image_memo.empty()) {
+		prepared.image_memo.clear(); // the slots are written by another path now
+	}
+	TexSlotMemo::Counts memo_counts;
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
 		if (program.info.images[i].heap) {
 			prepared.images[i] = {};
+			if (slot_memo) prepared.image_memo[i].Clear();
 			continue;
+		}
+		if (slot_memo && pre->slots[i].status == Predecode::Status::Ok) {
+			BindPredecodedSlot(runtime, prepared, i, pre->slots[i], slot_memo_mode, memo_counts);
+			pre_counts.img++;
+			continue;
+		}
+		if (slot_memo) {
+			prepared.image_memo[i].Clear();
 		}
 		if (slim && pre->slots[i].status == Predecode::Status::Ok) {
 			const auto& slot = pre->slots[i];
@@ -963,12 +986,79 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 	if (program.bindings.descriptor_counts[static_cast<size_t>(BindingKind::Gds)] != 0) {
 		prepared.gds.buffer = m_context.GetBufferCache().GetGdsBuffer()->Handle();
 	}
+	if (slot_memo) {
+		using C = FrameTiming::Counter;
+		if (memo_counts.hit != 0) FrameTiming::Add(C::TexSlotMemoHitN, memo_counts.hit);
+		if (memo_counts.miss != 0) FrameTiming::Add(C::TexSlotMemoMissN, memo_counts.miss);
+		if (memo_counts.stale != 0) FrameTiming::Add(C::TexSlotMemoStaleN, memo_counts.stale);
+		if (memo_counts.ne != 0) FrameTiming::Add(C::TexSlotMemoNeN, memo_counts.ne);
+	}
 	if (predecode != nullptr) {
 		using C = FrameTiming::Counter;
 		if (pre_counts.img != 0) FrameTiming::Add(C::PredecodeImgN, pre_counts.img);
 		if (pre_counts.decline != 0) FrameTiming::Add(C::PredecodeDeclineN, pre_counts.decline);
 		if (pre_counts.nojob != 0) FrameTiming::Add(C::PredecodeNojobN, pre_counts.nojob);
 		if (pre_counts.ne != 0) FrameTiming::Add(C::PredecodeNeN, pre_counts.ne);
+	}
+}
+
+// S562 (KYTY_TEX_SLOT_MEMO): one predecoded image (slot Ok) of a draw stage. A hit keeps the binding the slot holds (texSlotMemo.h); otherwise the
+// binding is made in place as with KYTY_CP_PREDECODE_SLIM, and remembered when it may be.
+void RenderExecutor::BindPredecodedSlot(const ShaderStageRuntime& runtime, PreparedBindings& prepared, uint32_t i, const PreTex& slot,
+                                        TexSlotMemo::Mode mode, TexSlotMemo::Counts& counts) {
+	auto&       cache    = m_context.GetTextureCache();
+	auto&       memo     = prepared.image_memo[i];
+	auto&       out      = prepared.images[i];
+	const auto& resource = runtime.module->info.info.images[i];
+	bool        would_hit = false;
+	ImageId     memo_id;
+	std::optional<TextureCache::ImageDesc> memo_desc; // shadow only
+	if (memo.Matches(runtime.module, slot.descriptor, slot.shader_conversion, out.image_id)) {
+		const bool commit  = mode == TexSlotMemo::Mode::On;
+		const auto verdict = cache.ReuseImage(memo.entry, out.desc, memo.base_layer, commit);
+		if (verdict == TexMemo::Verdict::Hit) {
+			if (commit) {
+				TexSlotMemo::KeepBinding(out, vk::ImageLayout::eUndefined);
+				BindImage(out.image_id, false);
+				counts.hit++;
+				return;
+			}
+			would_hit = true;
+			memo_id   = out.image_id;
+			memo_desc = out.desc;
+		} else {
+			counts.stale++;
+		}
+	}
+	TextureCache::FindImageInfo found {};
+	ImageId                     found_id;
+	Predecode::FillBinding(out, slot.desc, vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral, [&](TextureCache::ImageDesc& desc) {
+		return FindTextureImageId(resource, slot.descriptor, desc, slot.shader_conversion, desc.info.guest_format, desc.info.pixel_format,
+		                          desc.info.pixel_format, false, &found, &found_id);
+	});
+	BindImage(out.image_id, out.desc.type == TextureCache::BindingType::Storage);
+	if (would_hit) {
+		const bool same = out.image_id == memo_id && SameImageInfo(out.desc.info, memo_desc->info) && out.desc.view_info == memo_desc->view_info &&
+		                  out.desc.type == memo_desc->type && out.desc.heap == memo_desc->heap;
+		if (same) {
+			counts.hit++;
+		} else {
+			counts.ne++;
+		}
+	} else {
+		counts.miss++;
+	}
+	TexSlotMemo::Store store;
+	store.found          = found;
+	store.same_id        = out.image_id && found_id == out.image_id;
+	store.depth          = out.image_id && cache.GetImage(out.image_id).info.IsDepth();
+	store.color_metadata = out.desc.info.metadata.kind == ImageMetadataKind::Dcc || out.desc.info.metadata.kind == ImageMetadataKind::Cmask;
+	store.texture        = out.desc.type == TextureCache::BindingType::Texture;
+	if (out.image_id && TexSlotMemo::CanStore(store)) {
+		memo.Set(runtime.module, slot.descriptor, slot.shader_conversion, out.image_id, slot.desc.view_info.base_layer,
+		         {found_id, found.generation, true});
+	} else {
+		memo.Clear();
 	}
 }
 
@@ -1109,6 +1199,9 @@ void RenderExecutor::RebindImages(PreparedBindings& prepared) {
 		auto& old_image = texture_cache.m_slot_images[images[i].image_id];
 		if (!old_image.registered || old_image.binding.needs_rebind) {
 			old_image.binding = {};
+			if (i < prepared.image_memo.size()) {
+				prepared.image_memo[i].Clear(); // S562: the slot no longer holds what the memo made
+			}
 			images[i] = ResolveTexture(program.info.images[i], snapshot.images[i]);
 			BindImage(images[i].image_id,
 			          images[i].desc.type == TextureCache::BindingType::Storage);

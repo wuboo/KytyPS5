@@ -15,6 +15,7 @@
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/host_gpu/renderer/depthPassMemo.h"
 #include "graphics/host_gpu/renderer/rtPassMemo.h"
 #include "graphics/host_gpu/renderer/pipeline/texResolveMemo.h"
 #include "graphics/host_gpu/renderer/w2Diag.h"
@@ -261,11 +262,15 @@ private:
 	                                              TextureCache::ImageDesc& desc, bool shader_conversion,
 	                                              Prospero::BufferFormat format, vk::Format pixel_format,
 	                                              vk::Format view_format, bool storage);
+	// S562: found / found_id (optional) receive what FindImage said and the id it returned (before a stencil association's redirect).
 	[[nodiscard]] ImageId FindTextureImageId(const ShaderRecompiler::IR::ImageResource& resource,
 	                                         const ShaderTextureResource& descriptor,
 	                                         TextureCache::ImageDesc& desc, bool shader_conversion,
 	                                         Prospero::BufferFormat format, vk::Format pixel_format,
-	                                         vk::Format view_format, bool storage);
+	                                         vk::Format view_format, bool storage,
+	                                         TextureCache::FindImageInfo* found = nullptr, ImageId* found_id = nullptr);
+	void BindPredecodedSlot(const ShaderStageRuntime& runtime, PreparedBindings& prepared, uint32_t i, const PreTex& slot,
+	                        TexSlotMemo::Mode mode, TexSlotMemo::Counts& counts);
 	[[nodiscard]] TextureBinding PredecodedTexture(const ShaderRecompiler::IR::ImageResource&   resource,
 	                                               const ShaderRecompiler::IR::DescriptorValue& value,
 	                                               const PreTex* slot, Predecode::Counts& counts);
@@ -337,6 +342,8 @@ private:
 		uint32_t                 metadata_base_layer = 0;
 	};
 	std::array<RtPassMemo::Slot<HW::RenderTarget, RtMemoValue>, RENDER_COLOR_ATTACHMENTS_MAX> m_rt_memo {};
+	// S562 (KYTY_DEPTH_PASS_MEMO): the last depth target ResolveRenderDepthTarget resolved, keyed by the DB registers (depthPassMemo.h).
+	DepthPassMemo::Slot<HW::DepthRenderTarget, TextureCache::ImageDesc, ImageId> m_depth_memo {};
 	PreparedBindings                     m_compute_bindings;
 	std::vector<ImageId>                  m_bound_images;
 	std::vector<vk::DescriptorImageInfo>  m_descriptor_images;

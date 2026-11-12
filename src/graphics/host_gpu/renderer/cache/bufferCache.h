@@ -88,9 +88,8 @@ public:
 	void FillBuffer(uint64_t vaddr, uint64_t size, uint32_t value, bool is_gds, bool force_gpu = false);
 	// KYTY_DCC_KNOWN=1: true when the newest GPU write to every byte of the range was one FillBuffer (any other GPU write,
 	// download or CPU write to the range hides it), so the bytes equal *value without a readback.
-	[[nodiscard]] bool LatestGpuWriteIsFill(uint64_t vaddr, uint64_t size, uint32_t* value) const {
-		return m_write_ledger.LatestIsFill(vaddr, size, value);
-	}
+	// S562 (KYTY_LEDGER_MEMO): through the ledger's per-thread memo.
+	[[nodiscard]] bool LatestGpuWriteIsFill(uint64_t vaddr, uint64_t size, uint32_t* value) const;
 	// KYTY_DCC_KNOWN=shadow: the dispatch that follows writes `value` over the range; the ledger records the fill when the
 	// dispatch binds exactly that range for writing (the dispatch itself still runs).
 	void NoteShadowFill(uint64_t vaddr, uint64_t size, uint32_t value) { m_shadow_fill = {vaddr, size, value}; }
@@ -142,7 +141,7 @@ private:
 	using PageTable = MultiLevelPageTable<BufferId, CACHING_PAGEBITS, 44, 20>;
 	static_assert(CACHING_PAGESIZE == (uint64_t {1} << PageTable::kPageBits));
 	void WriteDataBuffer(Buffer& buffer, uint64_t address, const void* source, uint64_t size);
-	void TouchBuffer(const Buffer& buffer);
+	void TouchBuffer(Buffer& buffer);
 	[[nodiscard]] OverlapResult ResolveOverlaps(uint64_t vaddr, uint64_t size);
 	void JoinOverlap(BufferId new_id, BufferId overlap_id, bool accumulate_stream_score);
 	[[nodiscard]] BufferId CreateBuffer(uint64_t vaddr, uint64_t size);
@@ -217,6 +216,7 @@ private:
 	uint64_t m_trigger_gc_memory  = 1ull * 1024 * 1024 * 1024;
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;
+	uint64_t m_stat_touch_skip    = 0; // S562 KYTY_BUF_TOUCH_SKIP: skips since start (added to FrameTiming per 1024)
 
 	struct EagerPage {
 		uint64_t tick = 0; // submission carrying the download; 0 when none is in flight

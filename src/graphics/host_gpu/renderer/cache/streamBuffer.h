@@ -72,6 +72,9 @@ public:
 	bool   is_deleted   = false;
 	int    stream_score = 0;
 	size_t lru_id       = 0;
+	// S562 (KYTY_BUF_TOUCH_SKIP, bufTouchSkip.h): the GC tick and LRU id of the last LRU touch.
+	uint64_t lru_touch_tick = UINT64_MAX;
+	size_t   lru_touch_id   = SIZE_MAX;
 
 protected:
 	[[nodiscard]] GraphicContext&   Graphics() const noexcept { return *m_graphics; }

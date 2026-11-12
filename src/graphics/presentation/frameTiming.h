@@ -472,6 +472,13 @@ enum class Counter : uint32_t {
 	W2HandleN, W2HandleOtherN, W2WaitCallN, W2WaitNotfreeN, W2WaitBlockN, W2WaitSubmitN,
 	W2WaitRfGpuN, W2WaitSpecN, W2WaitDccN, W2WaitReadMemN, W2WaitEagerN, W2WaitDeleteDrainN, W2WaitDrainN, W2WaitStreamN, W2WaitDescHeapN, W2WaitOtherN,
 	W2DestroyUnsubN, W2DestroyDeferredN, W2DestroyImmediateN, W2DestroyOtherThreadN,
+	// S562 recorder micro-levers (each 0|1|shadow; shadow counts would-be hits that agreed as hits):
+	// KYTY_TEX_SLOT_MEMO: predecoded draw-stage images kept in their slot, resolved in full, whose memo key matched a stale entry, shadow disagreements;
+	// KYTY_DEPTH_PASS_MEMO: depth targets served from the memo, resolved in full, shadow disagreements;
+	// KYTY_LEDGER_MEMO: GpuWriteLedger fill queries answered from the per-thread memo, scanned, shadow disagreements;
+	// KYTY_BUF_TOUCH_SKIP: buffer LRU touches skipped as no-ops, shadow disagreements.
+	TexSlotMemoHitN, TexSlotMemoMissN, TexSlotMemoStaleN, TexSlotMemoNeN, DepthMemoHitN, DepthMemoMissN, DepthMemoNeN, LedgerMemoHitN,
+	LedgerMemoMissN, LedgerMemoNeN, BufTouchSkipN, BufTouchSkipNeN,
 	Count,
 };
 

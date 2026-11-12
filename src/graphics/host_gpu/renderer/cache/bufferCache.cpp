@@ -19,6 +19,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/host_gpu/renderer/cache/bufTouchSkip.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
 #include "kernel/memory.h"
 
@@ -160,8 +161,16 @@ void BufferCache::ChangeRegister(BufferId id) {
 	}
 }
 
-void BufferCache::TouchBuffer(const Buffer& buffer) {
-	m_lru_cache.Touch(buffer.lru_id, m_gc_tick);
+void BufferCache::TouchBuffer(Buffer& buffer) {
+	// S562 (KYTY_BUF_TOUCH_SKIP): a touch with the tick and LRU id of the buffer's last touch is a no-op; counted in batches of 1024 (CP only).
+	BufTouchSkip::Stats stats;
+	BufTouchSkip::Touch(buffer, m_lru_cache, m_gc_tick, BufTouchSkip::EnvMode(), stats);
+	if (stats.skip != 0 && (++m_stat_touch_skip & 1023u) == 0) {
+		FrameTiming::Add(FrameTiming::Counter::BufTouchSkipN, 1024);
+	}
+	if (stats.ne != 0) {
+		FrameTiming::Add(FrameTiming::Counter::BufTouchSkipNeN);
+	}
 }
 
 void BufferCache::DeleteBuffer(BufferId id) {
@@ -1170,6 +1179,18 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 		}
 	});
 	return source.first->Handle();
+}
+
+bool BufferCache::LatestGpuWriteIsFill(uint64_t vaddr, uint64_t size, uint32_t* value) const {
+	const auto mode = LedgerMemo::EnvMode();
+	if (mode == LedgerMemo::Mode::Off) {
+		return m_write_ledger.LatestIsFill(vaddr, size, value);
+	}
+	LedgerMemo::Stats stats;
+	const bool        known = m_write_ledger.LatestIsFillMemo(vaddr, size, value, mode, stats);
+	FrameTiming::Add(stats.miss != 0 ? FrameTiming::Counter::LedgerMemoMissN
+	                                 : (stats.ne != 0 ? FrameTiming::Counter::LedgerMemoNeN : FrameTiming::Counter::LedgerMemoHitN));
+	return known;
 }
 
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t size,

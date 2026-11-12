@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "graphics/host_gpu/renderer/pipeline/texSlotMemo.h"
 #include "graphics/host_gpu/renderer/pipeline/texturePredecode.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
@@ -55,6 +56,9 @@ struct PreparedBindings {
 	std::vector<BufferSource>             buffer_sources;
 	std::vector<vk::DescriptorBufferInfo> buffers;
 	std::vector<TextureBinding>           images;
+	// S562 (KYTY_TEX_SLOT_MEMO, texSlotMemo.h): per image slot, what the binding in `images` was made from. Sized only while the memo is used;
+	// every path that writes a slot other than the memo's clears its entry.
+	std::vector<TexSlotMemo::Slot<ShaderTextureResource, ImageId>> image_memo;
 	std::vector<vk::Sampler>              samplers;
 	vk::DescriptorBufferInfo              gds {nullptr, 0, VK_WHOLE_SIZE};
 	vk::DescriptorBufferInfo              flattened_srt;
