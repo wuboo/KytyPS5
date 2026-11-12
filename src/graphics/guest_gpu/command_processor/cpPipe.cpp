@@ -7,6 +7,7 @@
 // CommandProcessor::Process is exactly what the old code left.
 
 #include "common/assert.h"
+#include "common/cpTuning.h"
 #include "common/diagOut.h"
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
@@ -47,6 +48,15 @@ size_t EnvWorkers() {
 		return static_cast<size_t>(value < 0 ? 0 : (value > 8 ? 8 : value));
 	}();
 	return workers;
+}
+
+// S543 (KYTY_CP_AFFINITY_PIPE=1, default off, needs KYTY_CP_AFFINITY=<lp>): the pipeline workers stay off the physical core of the CP thread, like the guest threads.
+bool EnvAffinityPipe() {
+	static const bool on = [] {
+		const char* text = std::getenv("KYTY_CP_AFFINITY_PIPE");
+		return text != nullptr && text[0] == '1' && text[1] == '\0';
+	}();
+	return on;
 }
 
 CpPipe::SignalPolicy EnvSignals() {
@@ -142,6 +152,7 @@ private:
 
 	void Run(size_t index) {
 		FrameTiming::SetThreadMute(true);
+		if (EnvAffinityPipe()) Common::CpTuning::ApplyToGuestThread();
 		Queue& queue = m_queues[m_shard ? index : 0];
 		for (;;) {
 			GfpJob* job = nullptr;
