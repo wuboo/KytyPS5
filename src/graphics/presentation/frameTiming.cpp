@@ -768,6 +768,18 @@ constexpr const char* kCounterNames[] = {
     "w2_destroy_deferred_n",
     "w2_destroy_immediate_n",
     "w2_destroy_other_thread_n",
+    "tex_slot_memo_hit_n",
+    "tex_slot_memo_miss_n",
+    "tex_slot_memo_stale_n",
+    "tex_slot_memo_ne_n",
+    "depth_memo_hit_n",
+    "depth_memo_miss_n",
+    "depth_memo_ne_n",
+    "ledger_memo_hit_n",
+    "ledger_memo_miss_n",
+    "ledger_memo_ne_n",
+    "buf_touch_skip_n",
+    "buf_touch_skip_ne_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

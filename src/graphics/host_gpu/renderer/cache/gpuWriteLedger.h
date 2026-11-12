@@ -1,11 +1,34 @@
 #ifndef KYTY_GRAPHICS_HOST_GPU_RENDERER_CACHE_GPUWRITELEDGER_H_
 #define KYTY_GRAPHICS_HOST_GPU_RENDERER_CACHE_GPUWRITELEDGER_H_
 
+#include "graphics/host_gpu/renderer/pipeline/texResolveMemo.h"
+
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <cstdlib>
 #include <mutex>
 
 namespace Libs::Graphics {
+
+// S562 KYTY_LEDGER_MEMO=0|1|shadow: GpuWriteLedger::LatestIsFill answered from a per-thread direct-mapped memo of (ledger, range) -> answer, valid
+// while the ledger's epoch (bumped under its mutex by every Push, Forget and Trim) is the one the answer was computed at (read under the same mutex).
+// MaterializeColorClear asks it for every DCC/CMASK slice of every colour target of every draw (~10 k/flip in the garden), and the ledger changes
+// only on GPU buffer writes, fills, CPU writes and downloads of GPU-written ranges. A lookup reads the epoch without the mutex: a write that is not
+// yet visible orders that lookup before the write, as the mutex would. Off: unchanged. shadow: scans as ever and compares (ledger_memo_ne_n).
+// Mutants (tests, WILL_FAIL): KYTY_LEDGER_MUTANT_MEMO_{NO_EPOCH, NO_OWNER}.
+namespace LedgerMemo {
+using Mode = TexMemo::Mode;
+[[nodiscard]] inline Mode EnvMode() {
+	static const Mode mode = TexMemo::ParseMode(std::getenv("KYTY_LEDGER_MEMO"));
+	return mode;
+}
+struct Stats {
+	uint64_t hit  = 0;
+	uint64_t miss = 0;
+	uint64_t ne   = 0;
+};
+} // namespace LedgerMemo
 
 // What the ledger knows about the bytes of a range (QueryFill).
 enum class FillKind : uint32_t {
@@ -35,6 +58,7 @@ public:
 	// bytes. The entries stay as writers, so they still hide older fills.
 	void Forget(uint64_t vaddr, uint64_t size) {
 		std::lock_guard lock(m_mutex);
+		Bump();
 		for (auto& entry: m_entries) {
 			if (entry.size != 0 && Overlaps(entry, vaddr, size)) {
 				entry.has_value = false;
@@ -47,6 +71,7 @@ public:
 	// represented in place) or none does, it stops describing bytes, as Forget does.
 	void Trim(uint64_t vaddr, uint64_t size) {
 		std::lock_guard lock(m_mutex);
+		Bump();
 		for (auto& entry: m_entries) {
 			if (entry.size == 0 || !entry.has_value || !Overlaps(entry, vaddr, size)) {
 				continue;
@@ -68,6 +93,79 @@ public:
 	// Walks the entries newest first. Known = the newest entry touching the range is one fill covering all of it.
 	[[nodiscard]] FillQuery QueryFill(uint64_t vaddr, uint64_t size) const {
 		std::lock_guard lock(m_mutex);
+		return QueryFillLocked(vaddr, size);
+	}
+
+	[[nodiscard]] bool LatestIsFill(uint64_t vaddr, uint64_t size, uint32_t* value) const {
+		const auto query = QueryFill(vaddr, size);
+		if (query.kind != FillKind::Known) {
+			return false;
+		}
+		*value = query.value;
+		return true;
+	}
+
+	// S562 (KYTY_LEDGER_MEMO): LatestIsFill through the per-thread memo (mode Off: LatestIsFill).
+	[[nodiscard]] bool LatestIsFillMemo(uint64_t vaddr, uint64_t size, uint32_t* value, LedgerMemo::Mode mode, LedgerMemo::Stats& stats) const {
+		if (mode == LedgerMemo::Mode::Off) {
+			return LatestIsFill(vaddr, size, value);
+		}
+		auto&      slot  = MemoSlot(vaddr, size);
+		const auto epoch = m_epoch.load(std::memory_order_acquire);
+		FillQuery  query {};
+#if defined(KYTY_LEDGER_MUTANT_MEMO_NO_EPOCH)
+		(void)epoch;
+		const bool same_epoch = true;
+#else
+		const bool same_epoch = slot.epoch == epoch;
+#endif
+#if defined(KYTY_LEDGER_MUTANT_MEMO_NO_OWNER)
+		const bool same_owner = slot.owner != 0;
+#else
+		const bool same_owner = slot.owner == m_id;
+#endif
+		if (same_owner && same_epoch && slot.vaddr == vaddr && slot.size == size) {
+			query = slot.query;
+			if (mode == LedgerMemo::Mode::Shadow) {
+				uint64_t  at = 0;
+				FillQuery fresh {};
+				{
+					std::lock_guard lock(m_mutex);
+					at    = m_epoch.load(std::memory_order_relaxed);
+					fresh = QueryFillLocked(vaddr, size);
+				}
+				if (at != slot.epoch) {
+					stats.miss++; // the ledger changed after the epoch was read: a miss now, not a disagreement
+					slot.epoch = at;
+					slot.query = fresh;
+				} else if (fresh.kind != query.kind || (fresh.kind == FillKind::Known && fresh.value != query.value)) {
+					stats.ne++;
+				} else {
+					stats.hit++;
+				}
+				query = fresh;
+			} else {
+				stats.hit++;
+			}
+		} else {
+			uint64_t at = 0;
+			{
+				std::lock_guard lock(m_mutex);
+				at    = m_epoch.load(std::memory_order_relaxed);
+				query = QueryFillLocked(vaddr, size);
+			}
+			slot = {m_id, vaddr, size, at, query};
+			stats.miss++;
+		}
+		if (query.kind != FillKind::Known) {
+			return false;
+		}
+		*value = query.value;
+		return true;
+	}
+
+private:
+	[[nodiscard]] FillQuery QueryFillLocked(uint64_t vaddr, uint64_t size) const {
 		FillQuery       query {};
 		bool            newer_seen = false;
 		for (uint32_t i = 0; i < Size; ++i) {
@@ -107,16 +205,27 @@ public:
 		return query;
 	}
 
-	[[nodiscard]] bool LatestIsFill(uint64_t vaddr, uint64_t size, uint32_t* value) const {
-		const auto query = QueryFill(vaddr, size);
-		if (query.kind != FillKind::Known) {
-			return false;
-		}
-		*value = query.value;
-		return true;
+	struct MemoEntry {
+		uint64_t  owner = 0; // m_id of the ledger (0: empty)
+		uint64_t  vaddr = 0;
+		uint64_t  size  = 0;
+		uint64_t  epoch = 0;
+		FillQuery query {};
+	};
+	static constexpr size_t kMemoSlots = 64;
+	[[nodiscard]] static MemoEntry& MemoSlot(uint64_t vaddr, uint64_t size) {
+		thread_local std::array<MemoEntry, kMemoSlots> table {};
+		auto hash = (vaddr >> 12u) ^ (size * 0x9e3779b97f4a7c15ull);
+		hash ^= hash >> 29u;
+		return table[hash % kMemoSlots];
 	}
+	[[nodiscard]] static uint64_t NextId() {
+		static std::atomic<uint64_t> next {1};
+		return next.fetch_add(1, std::memory_order_relaxed);
+	}
+	// Under m_mutex: the entries change.
+	void Bump() { m_epoch.store(m_epoch.load(std::memory_order_relaxed) + 1, std::memory_order_release); }
 
-private:
 	struct Entry {
 		uint64_t vaddr     = 0;
 		uint64_t size      = 0;
@@ -131,6 +240,7 @@ private:
 			return;
 		}
 		std::lock_guard lock(m_mutex);
+		Bump();
 		m_entries[m_next++ % Size] = entry;
 		m_next %= Size;
 	}
@@ -138,6 +248,10 @@ private:
 	mutable std::mutex      m_mutex;
 	std::array<Entry, Size> m_entries {};
 	uint32_t                m_next = 0;
+	// S562 (KYTY_LEDGER_MEMO): grows with every change of the entries (under m_mutex); the memo's answers are valid at their epoch.
+	std::atomic<uint64_t> m_epoch {1};
+	// Tells memo entries of a destroyed ledger from this one's.
+	const uint64_t m_id = NextId();
 };
 
 } // namespace Libs::Graphics

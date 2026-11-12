@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/vulkanCommon.h"
+#include "graphics/presentation/frameTiming.h"
 
 #include <algorithm>
 #include <array>
@@ -250,6 +251,20 @@ static TextureCache::ImageDesc MakeDepthTargetDesc(const CommandBuffer& buffer,
 	return desc;
 }
 
+// S562 shadow of KYTY_DEPTH_PASS_MEMO: the fields of a depth target description that the draw and the cache use.
+static bool SameDepthDesc(const TextureCache::ImageDesc& a, const TextureCache::ImageDesc& b) {
+	const auto& x = a.info;
+	const auto& y = b.info;
+	return a.type == b.type && a.heap == b.heap && a.view_info == b.view_info && x.data == y.data && x.stencil == y.stencil &&
+	       x.pixel_format == y.pixel_format && x.guest_format == y.guest_format && x.type == y.type && x.extent == y.extent &&
+	       x.resources == y.resources && x.pitch == y.pitch && x.bytes_per_block == y.bytes_per_block && x.samples == y.samples &&
+	       x.tile_mode == y.tile_mode && x.first_tail_level == y.first_tail_level && x.tiled_slice_stride == y.tiled_slice_stride &&
+	       x.linear_slice_stride == y.linear_slice_stride && x.htile_initial_clear == y.htile_initial_clear && x.metadata.range == y.metadata.range &&
+	       x.metadata.kind == y.metadata.kind && x.metadata.clear_word == y.metadata.clear_word &&
+	       x.metadata.compression == y.metadata.compression && x.metadata.stencil_compressed == y.metadata.stencil_compressed &&
+	       x.metadata.clear_register_valid == y.metadata.clear_register_valid;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepthInfo& r) {
 	KYTY_PROFILER_FUNCTION();
@@ -311,7 +326,18 @@ void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 	     rc.depth_clear_enable || rc.stencil_clear_enable)) {
 		DepthFatal("unsupported depth-to-color copy state");
 	}
-	r.desc = MakeDepthTargetDesc(buffer, z);
+	auto& cache = m_context.GetTextureCache();
+	// S562 (KYTY_DEPTH_PASS_MEMO): the same DB registers describe the same target while no registration touched its pages.
+	const auto memo_mode = DepthPassMemo::EnvMode();
+	auto*      memo      = memo_mode != DepthPassMemo::Mode::Off ? &m_depth_memo : nullptr;
+	struct Hooks {
+		TextureCache& cache;
+		TexMemo::Verdict Reuse(const TexMemo::Entry<ImageId>& entry, const TextureCache::ImageDesc& desc, bool commit) {
+			return cache.ReuseImage(entry, desc, desc.view_info.base_layer, commit);
+		}
+	} hooks {cache};
+	const auto probe = DepthPassMemo::Lookup(memo_mode, memo, z, hooks);
+	r.desc = probe.hit ? memo->value.desc : MakeDepthTargetDesc(buffer, z);
 	r.depth_clear_enable      = rc.depth_clear_enable;
 	r.depth_clear_value       = hw.GetDepthClearValue();
 	r.depth_test_enable       = dc.z_enable;
@@ -348,8 +374,20 @@ void RenderExecutor::ResolveRenderDepthTarget(CommandBuffer& buffer, RenderDepth
 			r.stencil_back = r.stencil_front;
 		}
 	}
-	auto& cache = m_context.GetTextureCache();
-	r.image_id = cache.FindImage(r.desc);
+	if (probe.hit) {
+		r.image_id = memo->value.entry.id;
+		FrameTiming::Add(FrameTiming::Counter::DepthMemoHitN);
+	} else {
+		TextureCache::FindImageInfo found {};
+		r.image_id = cache.FindImage(r.desc, false, memo != nullptr ? &found : nullptr);
+		if (memo != nullptr) {
+			DepthPassMemo::Counts counts;
+			DepthPassMemo::Finish(memo, probe, z, r.desc, r.image_id, found, found.generation, SameDepthDesc, counts);
+			if (counts.hit != 0) FrameTiming::Add(FrameTiming::Counter::DepthMemoHitN, counts.hit);
+			if (counts.miss != 0) FrameTiming::Add(FrameTiming::Counter::DepthMemoMissN, counts.miss);
+			if (counts.ne != 0) FrameTiming::Add(FrameTiming::Counter::DepthMemoNeN, counts.ne);
+		}
+	}
 	BindRenderTarget(r.image_id);
 }
 
