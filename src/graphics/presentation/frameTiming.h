@@ -456,6 +456,11 @@ enum class Counter : uint32_t {
 	// S552: FindImage keys answered by the direct-mapped front of m_exact_images and shadow disagreements (KYTY_EXACT_FRONT); image LRU
 	// touches skipped as no-ops and shadow disagreements (KYTY_LRU_TOUCH_SKIP).
 	ExactFrontHitN, ExactFrontNeN, LruSkipN, LruSkipNeN,
+	// S556 (KYTY_NARROW_BARRIER, counted in every mode): SynchronizeBuffer uploads (one before/after barrier pair each); bytes of the
+	// cache buffers they upload into (what the whole-buffer barrier of mode 0 covers); bytes the barriers actually cover; barriers
+	// recorded in a narrowed form (any site); write-hazard barriers before guest dispatches, those of them that write storage images
+	// (not narrowed by mode 1), and barriers after read-only dispatches (execution-only in mode 2).
+	UploadSyncN, UploadBufferBytes, UploadBarrierBytes, NarrowBarrierN, DispHazardN, DispHazardImgN, DispAccessRoN,
 	Count,
 };
 
