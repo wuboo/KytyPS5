@@ -551,6 +551,7 @@ namespace {
 thread_local const CommandProcessor* t_front_cp = nullptr; // the CP whose front this thread is
 
 enum : uint32_t { kSyncNone = 0, kSyncHandler = 1, kSyncCommands = 2, kSyncEnd = 3 };
+constexpr uint64_t kReleaseWindow = 24;
 
 uint64_t SnapshotHash(const PipeItem& it) {
 	uint64_t h = CpPipe::HashBytes(&it.ctx, sizeof(it.ctx));
@@ -581,6 +582,10 @@ void CommandProcessor::PipeFrontThread() {
 	uint32_t seen = 0;
 	for (;;) {
 		uint32_t go = p.front_go.load(std::memory_order_acquire);
+		for (uint32_t i = 0; go == seen && i < 8000u; i++) { // streams come in bursts: ~100 us of spinning before parking
+			CpPipe::FrontCpuRelax();
+			go = p.front_go.load(std::memory_order_acquire);
+		}
 		while (go == seen) {
 			p.front_go.wait(seen, std::memory_order_acquire);
 			go = p.front_go.load(std::memory_order_acquire);
@@ -765,7 +770,7 @@ void CommandProcessor::PipeFrontRun(Pm4Execution& execution, GuestGpu* gpu) {
 		}
 	};
 	for (uint64_t seq = ring.Done() + 1;; seq++) {
-		if (ring.Tail() < seq) {
+		if (!ring.HasItem(seq)) { // a real wait (the cached tail was refreshed first)
 			const auto t0 = FrameTiming::SteadyNowNs();
 			ring.WaitItem(seq, idle);
 			FrameTiming::Add(C::FrontRecWaitNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
@@ -785,7 +790,10 @@ void CommandProcessor::PipeFrontRelease(uint64_t done) {
 	auto& p    = *m_pipe;
 	auto& ring = *p.front;
 	if (p.rel_cursor <= done) p.rel_cursor = done + 1;
-	const uint64_t tail = ring.Tail();
+	// Only the next items: their slots were written long ago (no cross-core loads of what the front writes now); a held job further ahead has a later gate anyway
+	// or is released when the window reaches it, still ~24 items before its draw.
+	const uint64_t window = done + kReleaseWindow;
+	const uint64_t tail   = ring.TailSeen() < window ? ring.TailSeen() : window;
 	for (; p.rel_cursor <= tail; p.rel_cursor++) {
 		auto& it = p.items[ring.Slot(p.rel_cursor)];
 		if (it.sync_kind != kSyncNone || it.job.state.load(std::memory_order_acquire) != CpPipe::GfpJob::Held) continue;

@@ -519,9 +519,10 @@ public:
 		if (m_next <= m_capacity) return false;
 		const uint64_t need = m_next - m_capacity;
 		if (m_done.load(std::memory_order_acquire) >= need) return false;
-		// Park until `hysteresis` slots are free, not one: fewer wake-ups on the CP.
+		// Park at once until `hysteresis` slots are free, not one: no spinning on `done` (each of the recorder's stores would take the line from the spinner) and a
+		// burst of items per wake-up instead of a lock-step with the recorder.
 		const uint64_t target = need + m_hysteresis - 1u < m_next ? need + m_hysteresis - 1u : m_next - 1u;
-		Park(need, target);
+		Park(need, target, 0);
 		return true;
 #endif
 	}
@@ -534,7 +535,7 @@ public:
 	// Blocks until the recorder has executed item `seq`. A short tail is spun (a hand-over is on the CP's critical path), a long one parked.
 	bool WaitDone(uint64_t seq) {
 		if (m_done.load(std::memory_order_acquire) >= seq) return false;
-		Park(seq, seq > kSpinItems ? seq - kSpinItems : seq);
+		Park(seq, seq > kSpinItems ? seq - kSpinItems : seq, 2000);
 		return true;
 	}
 	[[nodiscard]] uint64_t Done() const { return m_done.load(std::memory_order_acquire); }
@@ -544,7 +545,8 @@ public:
 	template <class Idle>
 	uint64_t WaitItem(uint64_t seq, Idle&& idle) {
 		uint64_t polls = 0;
-		while (m_tail.load(std::memory_order_acquire) < seq) {
+		if (m_tail_seen >= seq) return 0;
+		while ((m_tail_seen = m_tail.load(std::memory_order_acquire)) < seq) {
 			FrontCpuRelax();
 			if ((++polls & 63u) == 0) idle();
 		}
@@ -557,13 +559,21 @@ public:
 		if (target != 0 && seq >= target && m_target.compare_exchange_strong(target, 0, std::memory_order_seq_cst)) m_done.notify_one();
 	}
 	[[nodiscard]] uint64_t Tail() const { return m_tail.load(std::memory_order_acquire); }
+	// The recorder's last look at `tail` (no cross-core load per item: refreshed only when it runs out of items).
+	[[nodiscard]] uint64_t TailSeen() const { return m_tail_seen; }
+	// True when item `seq` is committed; reloads `tail` only when the cached value is behind (never blocks).
+	bool HasItem(uint64_t seq) {
+		if (m_tail_seen >= seq) return true;
+		m_tail_seen = m_tail.load(std::memory_order_acquire);
+		return m_tail_seen >= seq;
+	}
 
 private:
-	static constexpr uint64_t kSpinItems = 2;
+	static constexpr uint64_t kSpinItems = 8; // ~80 us of items: a parked front is awake again before the recorder runs dry (S549 v2: 2 left it idle per drain)
 
 	// Waits for done >= need: spins while done >= park_until (the last items), parks before.
-	void Park(uint64_t need, uint64_t park_until) {
-		for (uint32_t i = 0; i < 2000u; i++) { // ~10-20 us of spinning first
+	void Park(uint64_t need, uint64_t park_until, uint32_t spins) {
+		for (uint32_t i = 0; i < spins; i++) { // a hand-over: ~10-20 us of spinning first
 			if (m_done.load(std::memory_order_acquire) >= need) return;
 			FrontCpuRelax();
 		}
@@ -582,12 +592,14 @@ private:
 		}
 	}
 
-	size_t                m_capacity;
-	uint64_t              m_hysteresis;
-	uint64_t              m_next = 1; // front-private
-	std::atomic<uint64_t> m_tail {0};
-	std::atomic<uint64_t> m_done {0};
-	std::atomic<uint64_t> m_target {0}; // != 0: the front is parked until done reaches it
+	// One cache line each: the front writes tail and target, the recorder done (S549 v2: they shared a line).
+	size_t                            m_capacity;
+	uint64_t                          m_hysteresis;
+	uint64_t                          m_next = 1; // front-private
+	alignas(64) std::atomic<uint64_t> m_tail {0};
+	alignas(64) std::atomic<uint64_t> m_done {0};
+	uint64_t                          m_tail_seen = 0; // recorder-private, next to what it writes
+	alignas(64) std::atomic<uint64_t> m_target {0};    // != 0: the front is parked until done reaches it
 };
 
 // KYTY_CP_PIPE_SIGNALS: how far a worker may read ahead of the writes still waiting in the FIFO. fifo (default): a draw's job starts only after every ordered item before
