@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cinttypes>
+#include <cstdio>
 
 namespace Libs::Graphics::W2Diag {
 
@@ -23,13 +24,14 @@ uint64_t                             g_last_dump_bucket = 0; // CP thread only
 constexpr uint64_t                   kDumpEvery         = 100; // guest flips
 constexpr size_t                     kDumpRows          = 48;
 
+// stderr, not LOGF: the bench log is the emulator's stderr (LOGF is silent there).
 void Dump(uint64_t flip) {
 	const auto rows  = Table().Snapshot();
 	uint64_t   total = 0;
 	for (const auto& r: rows) total += r.cp + r.other;
-	LOGF("[w2-diag] flip=%" PRIu64 " handle_total=%" PRIu64 " sites=%zu dropped=%" PRIu64 "\n", flip, total, rows.size(), Table().Dropped());
+	std::fprintf(stderr, "[w2-diag] flip=%" PRIu64 " handle_total=%" PRIu64 " sites=%zu dropped=%" PRIu64 "\n", flip, total, rows.size(), Table().Dropped());
 	for (size_t i = 0; i < rows.size() && i < kDumpRows; i++) {
-		LOGF("[w2-diag-site] flip=%" PRIu64 " rank=%zu cp=%" PRIu64 " other=%" PRIu64 " site=%s:%u\n", flip, i + 1, rows[i].cp, rows[i].other,
+		std::fprintf(stderr, "[w2-diag-site] flip=%" PRIu64 " rank=%zu cp=%" PRIu64 " other=%" PRIu64 " site=%s:%u\n", flip, i + 1, rows[i].cp, rows[i].other,
 		     rows[i].file.c_str(), rows[i].line);
 	}
 }
@@ -44,10 +46,11 @@ void NoteHandle(const char* file, uint32_t line) noexcept {
 	const uint64_t bucket = FrameTiming::GuestFlips() / kDumpEvery;
 	if (bucket != g_last_dump_bucket) {
 		if (g_last_dump_bucket == 0) {
-			LOGF("[w2-diag] on: Handle() sites, CP waits, destroy_unsub (KYTY_W2_DIAG=1), dump every %" PRIu64 " flips\n", kDumpEvery);
+			std::fprintf(stderr, "[w2-diag] on: Handle() sites, CP waits, destroy_unsub (KYTY_W2_DIAG=1), dump every %" PRIu64 " flips\n", kDumpEvery);
 		}
 		g_last_dump_bucket = bucket;
 		Dump(bucket * kDumpEvery);
+		std::fflush(stderr);
 	}
 }
 
@@ -87,7 +90,7 @@ void NoteDestroy(const char* kind) noexcept {
 	static uint32_t logged = 0; // CP thread only
 	if (logged < 32) {
 		logged++;
-		LOGF("[w2-diag-destroy] flip=%" PRIu64 " kind=%s cp_site=%s opcode=0x%x\n", FrameTiming::GuestFlips(), kind,
+		std::fprintf(stderr, "[w2-diag-destroy] flip=%" PRIu64 " kind=%s cp_site=%s opcode=0x%x\n", FrameTiming::GuestFlips(), kind,
 		     CpSampler::SiteName(CpSampler::CpSite().load(std::memory_order_relaxed)), CpSampler::CpOpcode().load(std::memory_order_relaxed));
 	}
 }
