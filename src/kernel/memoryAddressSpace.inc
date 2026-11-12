@@ -194,6 +194,17 @@ public:
 		return true;
 	}
 
+	// S546 (KYTY_BACKING_READ_NOLOCK=1): copies a range the page table shows fully backed without
+	// m_mutex (as TryReadBacking does). False, with nothing copied, when the switch is off or a page
+	// of the range is not backed.
+	bool TryReadNoLock(uint64_t vaddr, void* data, uint64_t size) const {
+		if (!BackingReadNoLock() || !IsBackedNoLock(vaddr, size)) {
+			return false;
+		}
+		ReadRunsNoLock(vaddr, data, size);
+		return true;
+	}
+
 	// S430 (KYTY_SPEC_READ_FAST): the sequence of the mappings (odd while a change is under way) and the backing of a whole page that one mapping covers.
 	[[nodiscard]] uint64_t MapSeq() const { return m_map_seq.load(std::memory_order_acquire); }
 
@@ -819,6 +830,19 @@ public:
 
 	template <bool copy_private>
 	bool CopySparseMemory(uint64_t vaddr, void* data, uint64_t size) {
+		// S546 (upstream 1b59ee62, KYTY_BACKING_READ_NOLOCK=1): a fully backed range is read without
+		// either lock. Backed pages lie in owned ranges and hold no private mapping, so Owns and the
+		// private-overlap check agree; a read racing an unmap copies the backing's bytes or zeros,
+		// as the locked walk does on one side of the unmap. Off: unchanged.
+		if (data != nullptr && m_backing->TryReadNoLock(vaddr, data, size)) {
+#if defined(KYTY_VIRTUAL_MEMORY_ALLOCATION_TESTS)
+			if (g_test_backing_read != nullptr) {
+				g_test_backing_read(vaddr, size);
+			}
+#endif
+			Graphics::FrameTiming::Add(Graphics::FrameTiming::Counter::BackingNolockReadN);
+			return true;
+		}
 		if (data == nullptr || !Owns(vaddr, size)) {
 			return false;
 		}

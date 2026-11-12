@@ -441,6 +441,10 @@ enum class Counter : uint32_t {
 	DeferWriteDrawN, DeferWriteFlushN, DeferWriteReadN, DeferWriteNowN,
 	// S540 (KYTY_FLUSH_DRAWS): submits made every N draws.
 	FlushDrawsN,
+	// S546: reads CopySparseMemory served without locks (KYTY_BACKING_READ_NOLOCK=1); graphics pipeline binds skipped because the
+	// command buffer already had that pipeline bound (KYTY_SKIP_SAME_PIPELINE=1); ImageInfo::UpdateSize served from / missed in the
+	// thread's memo, and shadow disagreements (KYTY_IMAGE_SIZE_MEMO=1|shadow).
+	BackingNolockReadN, PipelineSkipN, SizeMemoHitN, SizeMemoMissN, SizeMemoNeN,
 	Count,
 };
 
