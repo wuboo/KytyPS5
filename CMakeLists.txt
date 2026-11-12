@@ -396,8 +396,19 @@ if(APPLE)
 	list(APPEND kyty_emulator_src "${KYTY_KEEPWARM_MM}")
 endif()
 
+# Optional CPU tuning for the emulator sources only (e.g. -DKYTY_EMULATOR_MARCH=znver3), off by default.
+set(KYTY_EMULATOR_MARCH "" CACHE STRING "clang -march value applied to kyty_emulator sources only")
+set(KYTY_EMULATOR_MARCH_FLAG "")
+if (KYTY_EMULATOR_MARCH AND CLANG)
+	if (KYTY_CLANG_CL)
+		set(KYTY_EMULATOR_MARCH_FLAG " /clang:-march=${KYTY_EMULATOR_MARCH}")
+	else()
+		set(KYTY_EMULATOR_MARCH_FLAG " -march=${KYTY_EMULATOR_MARCH}")
+	endif()
+endif()
+
 if (KYTY_CLANG_CL)
-	set_source_files_properties(${kyty_emulator_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED")
+	set_source_files_properties(${kyty_emulator_src} PROPERTIES COMPILE_FLAGS "-Wno-pragma-pack -Wno-deprecated-declarations -D_TIMESPEC_DEFINED${KYTY_EMULATOR_MARCH_FLAG}")
 endif()
 
 set(kyty_emulator_link_libraries common Vulkan::Headers spirv-tools-opt spirv-tools SDL3::SDL3-static imgui xxhash FFmpeg::ffmpeg fmt::fmt nlohmann_json::nlohmann_json LibAtrac9 kyty_git_version Zydis::Zydis xbyak::xbyak opus OpenXR::openxr_loader libzstd_static)
