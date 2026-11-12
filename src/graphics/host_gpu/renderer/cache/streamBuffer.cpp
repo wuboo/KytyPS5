@@ -111,6 +111,7 @@ Buffer::Buffer(GraphicContext& graphics, CommandScheduler& scheduler, MemoryUsag
 Buffer::~Buffer() {
 	g_descriptor_resource_generation.fetch_add(1, std::memory_order_relaxed);
 	if (m_buffer != nullptr) {
+		if (W2Diag::Enabled()) W2Diag::NoteDestroy("buffer");
 		vmaDestroyBuffer(m_graphics->allocator, m_buffer, m_allocation);
 	}
 }

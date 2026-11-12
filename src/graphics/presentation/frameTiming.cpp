@@ -748,6 +748,26 @@ constexpr const char* kCounterNames[] = {
     "predecode_nojob_n",
     "predecode_ne_n",
     "predecode_worker_ns",
+    "w2_handle_n",
+    "w2_handle_other_n",
+    "w2_wait_call_n",
+    "w2_wait_notfree_n",
+    "w2_wait_block_n",
+    "w2_wait_submit_n",
+    "w2_wait_rf_gpu_n",
+    "w2_wait_spec_n",
+    "w2_wait_dcc_n",
+    "w2_wait_readmem_n",
+    "w2_wait_eager_n",
+    "w2_wait_delete_drain_n",
+    "w2_wait_drain_n",
+    "w2_wait_stream_n",
+    "w2_wait_desc_heap_n",
+    "w2_wait_other_n",
+    "w2_destroy_unsub_n",
+    "w2_destroy_deferred_n",
+    "w2_destroy_immediate_n",
+    "w2_destroy_other_thread_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
@@ -772,6 +792,17 @@ constexpr bool CpWaitColumnsMatch() {
 	return true;
 }
 static_assert(CpWaitColumnsMatch(), "frames.csv cp_wait_cause columns out of step with CpWait::Cause");
+// S560: w2_wait_<cause>_n are in CpWait::Cause order too.
+static_assert(static_cast<uint32_t>(Counter::W2WaitOtherN) - static_cast<uint32_t>(Counter::W2WaitRfGpuN) + 1 == CpWait::kCauseCount);
+constexpr bool W2WaitColumnsMatch() {
+	for (uint32_t cause = 0; cause < CpWait::kCauseCount; cause++) {
+		const std::string_view name   = kCounterNames[static_cast<uint32_t>(Counter::W2WaitRfGpuN) + cause];
+		const std::string_view column = CpWait::ColumnName(cause); // cp_wait_cause_<cause>_ns
+		if (name.substr(0, 8) != "w2_wait_" || name.substr(8, name.size() - 10) != column.substr(14, column.size() - 17)) return false;
+	}
+	return true;
+}
+static_assert(W2WaitColumnsMatch(), "frames.csv w2_wait_<cause>_n columns out of step with CpWait::Cause");
 static_assert(static_cast<uint32_t>(Counter::DispOther) - static_cast<uint32_t>(Counter::DispGuest) ==
               static_cast<uint32_t>(DispatchClass::Other));
 

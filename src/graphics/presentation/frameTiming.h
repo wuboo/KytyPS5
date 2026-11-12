@@ -465,6 +465,13 @@ enum class Counter : uint32_t {
 	// declined, that had no usable predecoded stage (no job, JoinJob rejected it, another snapshot); shadow disagreements; ns the workers spent
 	// predecoding (added by the recorder from the jobs it joined).
 	PredecodeImgN, PredecodeDeclineN, PredecodeNojobN, PredecodeNeN, PredecodeWorkerNs,
+	// S560 (KYTY_W2_DIAG=1, w2Diag.h): CommandBuffer::Handle() calls on the CP thread / on other threads; MasterSemaphore::Wait calls on the CP thread,
+	// those whose tick was not known free at the entry, those that blocked, those that first submitted the open buffer; the not-free ones by CpWait cause
+	// (CpWait::Cause order); image / buffer destructions: outside a deferred operation while the open buffer has recorded commands, in a deferred
+	// operation, outside one with nothing recorded, on another thread.
+	W2HandleN, W2HandleOtherN, W2WaitCallN, W2WaitNotfreeN, W2WaitBlockN, W2WaitSubmitN,
+	W2WaitRfGpuN, W2WaitSpecN, W2WaitDccN, W2WaitReadMemN, W2WaitEagerN, W2WaitDeleteDrainN, W2WaitDrainN, W2WaitStreamN, W2WaitDescHeapN, W2WaitOtherN,
+	W2DestroyUnsubN, W2DestroyDeferredN, W2DestroyImmediateN, W2DestroyOtherThreadN,
 	Count,
 };
 

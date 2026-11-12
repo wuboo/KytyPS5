@@ -80,6 +80,8 @@ public:
 	[[nodiscard]] static bool InDeferredOperation() noexcept;
 
 	[[nodiscard]] bool Active() const noexcept { return m_command.m_registers != nullptr; }
+	// S560 (KYTY_W2_DIAG): the open buffer has (possibly) recorded commands. Read on the recording thread only.
+	[[nodiscard]] bool OpenBufferRecorded() const noexcept { return !m_command.IsInvalid() && m_command.m_recorded; }
 	[[nodiscard]] bool RenderingOpen() const;
 	[[nodiscard]] bool RenderingAttaches(vk::ImageView view) const;
 	void                           CheckActive() const;

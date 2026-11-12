@@ -17,6 +17,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/rtPassMemo.h"
 #include "graphics/host_gpu/renderer/pipeline/texResolveMemo.h"
+#include "graphics/host_gpu/renderer/w2Diag.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
@@ -173,8 +174,12 @@ public:
 	void NoteGraphicsPipeline(vk::Pipeline pipeline) const noexcept { m_bound_graphics_pipeline = pipeline; }
 	void ForgetGraphicsPipeline() const noexcept { m_bound_graphics_pipeline = nullptr; }
 
-	[[nodiscard]] vk::CommandBuffer Handle() const noexcept {
+	// S560 (KYTY_W2_DIAG=1): the caller's file and line come in by default arguments; w2Diag.h counts the calls per site.
+	[[nodiscard]] vk::CommandBuffer Handle(const char* site_file = __builtin_FILE(), uint32_t site_line = __builtin_LINE()) const noexcept {
 		m_recorded = true;
+		if (W2Diag::Enabled()) [[unlikely]] {
+			W2Diag::NoteHandle(site_file, site_line);
+		}
 		return m_buffer;
 	}
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }

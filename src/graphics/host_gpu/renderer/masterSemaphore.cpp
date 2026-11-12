@@ -1,5 +1,6 @@
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
 #include "graphics/host_gpu/renderer/cpWaitDiag.h"
+#include "graphics/host_gpu/renderer/w2Diag.h"
 
 #include "common/assert.h"
 #include "common/debugCounters.h"
@@ -44,13 +45,18 @@ void MasterSemaphore::Refresh() {
 }
 
 void MasterSemaphore::Wait(uint64_t tick) {
+	// S560 (KYTY_W2_DIAG=1): CP-thread waits, those not known free at the entry, those that block.
+	const bool w2 = W2Diag::Enabled() && GuestGpu::IsGpuThread();
 	if (IsFree(tick)) {
+		if (w2) W2Diag::NoteWait(false, false);
 		return;
 	}
 	Refresh();
 	if (IsFree(tick)) {
+		if (w2) W2Diag::NoteWait(true, false);
 		return;
 	}
+	if (w2) W2Diag::NoteWait(true, true);
 
 	vk::SemaphoreWaitInfo wait_info {};
 	wait_info.semaphoreCount = 1;

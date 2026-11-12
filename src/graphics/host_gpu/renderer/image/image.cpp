@@ -840,6 +840,7 @@ uint64_t Image::HashGuestEdges() const {
 Image::~Image() {
 	KYTY_PROFILER_FUNCTION();
 	g_descriptor_resource_generation.fetch_add(1, std::memory_order_relaxed);
+	if (W2Diag::Enabled() && (backing.image != nullptr || !views.empty())) W2Diag::NoteDestroy("image");
 	for (const auto& cached: views) {
 		m_graphics.device.destroyImageView(cached.view, nullptr);
 	}

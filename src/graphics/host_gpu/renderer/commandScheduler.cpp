@@ -275,6 +275,7 @@ void CommandScheduler::FlushAndWait() {
 	m_next_reason = GpuDone::SubmitReason::Drain;
 	NoteDrainBegin();
 	const auto tick = Submit();
+	if (W2Diag::Enabled()) W2Diag::NoteSubmitWait();
 	m_master.Wait(tick);
 	BeginNext();
 	NoteDrainEnd();
@@ -288,6 +289,7 @@ void CommandScheduler::Finish() {
 	if (!m_command.IsInvalid()) {
 		m_next_reason = GpuDone::SubmitReason::Drain;
 		Submit();
+		if (W2Diag::Enabled()) W2Diag::NoteSubmitWait();
 	}
 	m_master.Wait(CurrentTick() - 1);
 	BeginNext();
@@ -306,6 +308,7 @@ void CommandScheduler::Wait(uint64_t tick) {
 		m_next_reason             = GpuDone::SubmitReason::Drain;
 		const auto submitted_tick = Submit();
 		EXIT_IF(submitted_tick != tick);
+		if (W2Diag::Enabled()) W2Diag::NoteSubmitWait();
 		m_master.Wait(tick);
 		BeginNext();
 		NoteDrainEnd();
@@ -670,6 +673,7 @@ uint64_t LowWaterUs() {
 } // namespace
 
 void CommandScheduler::EnableStarveDiag() {
+	W2Diag::SetRendererScheduler(this); // S560: only the renderer's scheduler calls this
 	const char* v = std::getenv("KYTY_DIAG_STARVE");
 	if (!FrameTiming::DiagFlagOn(v)) return;
 	if (!m_gpu_done) {
