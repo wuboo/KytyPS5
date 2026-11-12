@@ -471,6 +471,20 @@ static void S537NoteTextures(RenderContext& context, const PreparedBindings& pix
 				static const uint8_t z[16] {};
 				for (size_t b = 0; b + 16 <= bytes.size(); b += 16) zero += std::memcmp(bytes.data() + b, z, 16) == 0 ? 1 : 0;
 			}
+			std::string mips;
+			for (uint32_t level = 0; level < image.info.resources.levels && level < 12; level++) {
+				const auto& mip = image.info.mip_layout[level];
+				uint64_t    mh  = 0;
+				if (mip.size != 0 && mip.size <= (16u << 20)) {
+					std::vector<uint8_t> mb(mip.size);
+					if (LibKernel::Memory::TryReadBacking(image.info.data.address + mip.offset, mb.data(), mb.size())) {
+						mh = XXH3_64bits(mb.data(), mb.size());
+					}
+				}
+				mips += fmt::format(" m{}=0x{:x}+0x{:x}:{:08x}", level, mip.offset, mip.size, static_cast<uint32_t>(mh >> 32u));
+			}
+			Log::WriteToConsoleAndLog(fmt::format("[s551-mips] flip={} addr=0x{:x} size=0x{:x}{}\n", flip, image.info.data.address,
+			                                      image.info.data.size, mips));
 			Log::WriteToConsoleAndLog(fmt::format("[s537-per] flip={} addr=0x{:x} serial={} mip0_xxh={:016x} zero16={} uploads={} "
 			                                      "upload_flip={} cpu_dirty={} writes={} page_writes={} vbase={} vlev={} vmin={} native={} imglev={}\n",
 			                                      flip, image.info.data.address, image.serial, hash, zero, image.diag.uploads,
