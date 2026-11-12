@@ -161,6 +161,15 @@ public:
 		return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkCommandBuffer>(m_buffer)));
 	}
 
+	// S546 (KYTY_SKIP_SAME_PIPELINE): the graphics pipeline the draw path bound last in this recording (null after Begin() and after
+	// any other graphics bind, which calls ForgetGraphicsPipeline). Rebinding it changes no state: every game pipeline has the same
+	// dynamic state list, and descriptors / push constants do not depend on the bind.
+	[[nodiscard]] bool GraphicsPipelineBound(vk::Pipeline pipeline) const noexcept {
+		return m_bound_graphics_pipeline != nullptr && m_bound_graphics_pipeline == pipeline;
+	}
+	void NoteGraphicsPipeline(vk::Pipeline pipeline) const noexcept { m_bound_graphics_pipeline = pipeline; }
+	void ForgetGraphicsPipeline() const noexcept { m_bound_graphics_pipeline = nullptr; }
+
 	[[nodiscard]] vk::CommandBuffer Handle() const noexcept {
 		m_recorded = true;
 		return m_buffer;
@@ -198,6 +207,7 @@ private:
 	mutable int32_t     m_ts_slot       = -1;     // S477 D3 (KYTY_GPU_TIMESTAMPS): query slot of this buffer's start/end timestamps
 	// Set by Handle(): something (possibly) recorded since Begin(). Over-reporting is harmless.
 	mutable bool        m_recorded    = false;
+	mutable vk::Pipeline m_bound_graphics_pipeline = nullptr; // S546
 	HW::Context*        m_registers   = nullptr;
 	HW::UserConfig*     m_user_config = nullptr;
 	HW::Shader*         m_shaders     = nullptr;

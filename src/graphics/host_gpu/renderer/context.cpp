@@ -39,6 +39,7 @@ void CommandBuffer::Begin() {
 	m_recorded       = false;
 	m_t_first_rec    = 0;
 	m_reopen_if_same = false;
+	m_bound_graphics_pipeline = nullptr;
 	m_ts_slot        = GpuTs::OnBegin(m_graphics, buffer); // S477 D3 DIAG
 }
 

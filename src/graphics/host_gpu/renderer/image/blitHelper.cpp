@@ -170,6 +170,7 @@ void BlitHelper::ReinterpretColorAsMsDepth(Image& source, Image& destination) {
 	descriptor_write.pImageInfo      = &descriptor_image;
 	command.pushDescriptorSetKHR(vk::PipelineBindPoint::eGraphics, m_pipeline_layout, 0, 1,
 	                             &descriptor_write);
+	command_buffer.ForgetGraphicsPipeline(); // S546: KYTY_SKIP_SAME_PIPELINE
 	command.bindPipeline(vk::PipelineBindPoint::eGraphics,
 	                     GetPipeline({destination_info.samples, destination_info.pixel_format}));
 

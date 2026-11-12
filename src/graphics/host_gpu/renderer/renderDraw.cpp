@@ -46,6 +46,7 @@
 #include <bit>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -1429,7 +1430,17 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		}
 	}
 	buffer.BeginRendering(rendering);
-	vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+	// S546 (KYTY_SKIP_SAME_PIPELINE=1): the pipeline this recording already has bound is not bound again.
+	static const bool skip_same_pipeline = [] {
+		const char* text = std::getenv("KYTY_SKIP_SAME_PIPELINE");
+		return text != nullptr && std::strcmp(text, "1") == 0;
+	}();
+	if (skip_same_pipeline && buffer.GraphicsPipelineBound(pipeline.pipeline)) {
+		FrameTiming::Add(FrameTiming::Counter::PipelineSkipN);
+	} else {
+		vk_buffer.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline.pipeline);
+		buffer.NoteGraphicsPipeline(pipeline.pipeline);
+	}
 	auto&         occlusion_queries = m_context.GetOcclusionQueries();
 	const int32_t occlusion_query   = occlusion_queries.Begin(vk_buffer);
 	if (mesh_gpu) {
