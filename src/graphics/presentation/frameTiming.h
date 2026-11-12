@@ -472,6 +472,11 @@ enum class Counter : uint32_t {
 	W2HandleN, W2HandleOtherN, W2WaitCallN, W2WaitNotfreeN, W2WaitBlockN, W2WaitSubmitN,
 	W2WaitRfGpuN, W2WaitSpecN, W2WaitDccN, W2WaitReadMemN, W2WaitEagerN, W2WaitDeleteDrainN, W2WaitDrainN, W2WaitStreamN, W2WaitDescHeapN, W2WaitOtherN,
 	W2DestroyUnsubN, W2DestroyDeferredN, W2DestroyImmediateN, W2DestroyOtherThreadN,
+	// S561 (KYTY_CP_EMIT=sync|shadow, cpEmit.h): commands written to the IR, IR bytes, drains of a non-empty IR (all, then by reason: a site
+	// recording directly, a Cmd converted to the raw handle, end before submit, GPU wait, other), sampled ns writing the IR, ns in the drains
+	// (replay into Vulkan; shadow: into the digest), shadow drains whose digest differs, commands the IR could not hold.
+	EmitOpsN, EmitBytes, EmitDrainN, EmitDrainHandleN, EmitDrainConvN, EmitDrainSubmitN, EmitDrainWaitN, EmitDrainOtherN, EmitRecordNs, EmitReplayNs,
+	EmitNeN, EmitFallbackN,
 	Count,
 };
 

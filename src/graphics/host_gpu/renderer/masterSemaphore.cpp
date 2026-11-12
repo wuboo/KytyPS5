@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/masterSemaphore.h"
+#include "graphics/host_gpu/renderer/cpEmit.h"
 #include "graphics/host_gpu/renderer/cpWaitDiag.h"
 #include "graphics/host_gpu/renderer/w2Diag.h"
 
@@ -51,6 +52,8 @@ void MasterSemaphore::Wait(uint64_t tick) {
 		if (w2) W2Diag::NoteWait(false, false);
 		return;
 	}
+	// S561 (KYTY_CP_EMIT): a tick not known free may need commands still in this thread's IR (the emitter of W2 step 2 must have emitted them).
+	CpEmit::DrainThreadPending(CpEmit::Reason::Wait);
 	Refresh();
 	if (IsFree(tick)) {
 		if (w2) W2Diag::NoteWait(true, false);

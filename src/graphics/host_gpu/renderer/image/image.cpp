@@ -229,6 +229,18 @@ Image::Barriers Image::GetBarriers(vk::ImageLayout                      destinat
 
 void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
                     std::optional<ImageSubresourceRange> range, vk::CommandBuffer command_buffer) {
+	TransitTo(destination_layout, destination_access, range, command_buffer);
+}
+
+// S561 (KYTY_CP_EMIT): the same transition recorded through the IR handle of the command buffer.
+void Image::Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
+                    std::optional<ImageSubresourceRange> range, const CpEmit::Cmd& command_buffer) {
+	TransitTo(destination_layout, destination_access, range, command_buffer);
+}
+
+template <class Command>
+void Image::TransitTo(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
+                      std::optional<ImageSubresourceRange> range, const Command& command_buffer) {
 	CpPhases::Scope phase(CpPhases::Phase::Barrier);
 	const auto transfer_access =
 	    vk::AccessFlagBits2::eTransferRead | vk::AccessFlagBits2::eTransferWrite;

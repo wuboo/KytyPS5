@@ -38,12 +38,15 @@ public:
 	[[nodiscard]] bool Enabled() const { return m_pool != nullptr; }
 
 	// In the draw's rendering: the query that counts its samples, or -1.
-	[[nodiscard]] int32_t Begin(vk::CommandBuffer command) {
-		return m_open == 0 ? -1 : BeginQuery(command);
+	// S561: Command is vk::CommandBuffer or the IR handle CpEmit::Cmd, converted (drained) only when a query is recorded.
+	template <class Command>
+	[[nodiscard]] int32_t Begin(const Command& command) {
+		return m_open == 0 ? -1 : BeginQuery(static_cast<vk::CommandBuffer>(command));
 	}
-	void End(vk::CommandBuffer command, int32_t query) const {
+	template <class Command>
+	void End(const Command& command, int32_t query) const {
 		if (query >= 0) {
-			command.endQuery(m_pool, static_cast<uint32_t>(query));
+			static_cast<vk::CommandBuffer>(command).endQuery(m_pool, static_cast<uint32_t>(query));
 		}
 	}
 

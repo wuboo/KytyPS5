@@ -768,6 +768,18 @@ constexpr const char* kCounterNames[] = {
     "w2_destroy_deferred_n",
     "w2_destroy_immediate_n",
     "w2_destroy_other_thread_n",
+    "emit_ops_n",
+    "emit_bytes",
+    "emit_drain_n",
+    "emit_drain_handle_n",
+    "emit_drain_conv_n",
+    "emit_drain_submit_n",
+    "emit_drain_wait_n",
+    "emit_drain_other_n",
+    "emit_record_ns",
+    "emit_replay_ns",
+    "emit_ne_n",
+    "emit_fallback_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

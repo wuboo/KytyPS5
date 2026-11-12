@@ -1215,7 +1215,8 @@ void RenderExecutor::CommitBindings(CommandBuffer&                     buffer,
                                     const PipelineCache::Pipeline&     pipeline,
                                     std::span<PreparedBindings* const> prepared_bindings) {
 	KYTY_PROFILER_FUNCTION();
-	auto                           vk_buffer              = buffer.Handle();
+	// S561 (KYTY_CP_EMIT): IR site; barriers, push constants and descriptor binds go through the command buffer's IR handle.
+	const auto                     vk_buffer              = buffer.Emit();
 	size_t                         image_descriptor_count = 0;
 	ShaderRecompiler::IR::PushData push_data;
 	bool                           has_push_data = false;

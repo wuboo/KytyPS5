@@ -5,6 +5,15 @@
 namespace Libs::Graphics {
 
 void DynamicState::Commit(const GraphicContext& graphics, vk::CommandBuffer cmdbuf) {
+	CommitTo(graphics, cmdbuf);
+}
+
+void DynamicState::Commit(const GraphicContext& graphics, const CpEmit::Cmd& cmdbuf) {
+	CommitTo(graphics, cmdbuf);
+}
+
+template <class Command>
+void DynamicState::CommitTo(const GraphicContext& graphics, const Command& cmdbuf) {
 	if (dirty_state.viewports) {
 		dirty_state.viewports = false;
 		cmdbuf.setViewportWithCount(num_viewports, viewports.data());

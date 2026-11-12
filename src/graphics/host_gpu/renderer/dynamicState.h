@@ -2,6 +2,7 @@
 #define EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_DYNAMICSTATE_H_
 
 #include "common/assert.h"
+#include "graphics/host_gpu/renderer/cpEmit.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <algorithm>
@@ -96,6 +97,8 @@ struct DynamicState {
 
 	/// Commits the dynamic state to the provided command buffer.
 	void Commit(const GraphicContext& graphics, vk::CommandBuffer cmdbuf);
+	/// S561 (KYTY_CP_EMIT): the same through the command buffer's IR handle.
+	void Commit(const GraphicContext& graphics, const CpEmit::Cmd& cmdbuf);
 
 	/// Invalidates all dynamic state to be flushed into the next command buffer.
 	void Invalidate() { std::memset(&dirty_state, 0xFF, sizeof(dirty_state)); }
@@ -257,6 +260,10 @@ struct DynamicState {
 			dirty_state.feedback_loop_aspects = true;
 		}
 	}
+
+private:
+	template <class Command>
+	void CommitTo(const GraphicContext& graphics, const Command& cmdbuf);
 };
 
 } // namespace Libs::Graphics
