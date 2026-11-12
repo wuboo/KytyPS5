@@ -633,11 +633,24 @@ TextureBinding RenderExecutor::FindTextureImage(const ShaderRecompiler::IR::Imag
                                                 TextureCache::ImageDesc& desc, bool shader_conversion,
                                                 Prospero::BufferFormat format, vk::Format pixel_format,
                                                 vk::Format view_format, bool storage) {
-	auto& texture_cache = m_context.GetTextureCache();
-	auto id = texture_cache.FindImage(desc, shader_conversion);
+	const auto id = FindTextureImageId(resource, descriptor, desc, shader_conversion, format, pixel_format, view_format, storage);
 	if (!id) {
 		// Another extent at the address holds it; the heap retries once an image is created.
 		return {.desc = std::move(desc), .layout = vk::ImageLayout::eGeneral};
+	}
+	return {id, nullptr, std::move(desc)};
+}
+
+// S560: FindTextureImage without building the binding (null id: not found). KYTY_CP_PREDECODE_SLIM calls it on the binding slot's own description.
+ImageId RenderExecutor::FindTextureImageId(const ShaderRecompiler::IR::ImageResource& resource,
+                                           const ShaderTextureResource& descriptor,
+                                           TextureCache::ImageDesc& desc, bool shader_conversion,
+                                           Prospero::BufferFormat format, vk::Format pixel_format,
+                                           vk::Format view_format, bool storage) {
+	auto& texture_cache = m_context.GetTextureCache();
+	auto id = texture_cache.FindImage(desc, shader_conversion);
+	if (!id) {
+		return id;
 	}
 	auto*      image               = &texture_cache.GetImage(id);
 	const bool stencil_association = static_cast<bool>(image->depth_id);
@@ -659,7 +672,7 @@ TextureBinding RenderExecutor::FindTextureImage(const ShaderRecompiler::IR::Imag
 		(void)SelectSampledColorView(image->info.pixel_format, desc.view_info.format,
 		                             descriptor.DstSelXYZW());
 	}
-	return {id, nullptr, std::move(desc)};
+	return id;
 }
 
 // S558: ResolveTexture up to FindImage for the sampled colour subset, run by a pipeline worker on its job's snapshot. It may see T#s the recorder never
@@ -910,9 +923,23 @@ void RenderExecutor::PrepareBindings(const ShaderStageRuntime& runtime,
 		pre = Predecode::Usable(*predecode->stages, predecode->joined, runtime.module, runtime.resources,
 		                        program.info.images.size());
 	}
+	// S560 (KYTY_CP_PREDECODE_SLIM=1): a predecoded image (KYTY_CP_PREDECODE=1, slot Ok) is bound in place, with one copy of its description.
+	const bool slim = pre != nullptr && !m_lod_stats && Predecode::EnvMode() == Predecode::Mode::On && Predecode::SlimEnabled();
 	for (uint32_t i = 0; i < program.info.images.size(); i++) {
 		if (program.info.images[i].heap) {
 			prepared.images[i] = {};
+			continue;
+		}
+		if (slim && pre->slots[i].status == Predecode::Status::Ok) {
+			const auto& slot = pre->slots[i];
+			auto&       out  = prepared.images[i];
+			pre_counts.img++;
+			Predecode::FillBinding(out, slot.desc, vk::ImageLayout::eUndefined, vk::ImageLayout::eGeneral,
+			                       [&](TextureCache::ImageDesc& desc) {
+				                       return FindTextureImageId(program.info.images[i], slot.descriptor, desc, slot.shader_conversion,
+				                                                 desc.info.guest_format, desc.info.pixel_format, desc.info.pixel_format, false);
+			                       });
+			BindImage(out.image_id, out.desc.type == TextureCache::BindingType::Storage);
 			continue;
 		}
 		auto binding = predecode == nullptr ? ResolveTexture(program.info.images[i], snapshot.images[i])

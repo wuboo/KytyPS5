@@ -103,6 +103,32 @@ const Stage<Slot>* Usable(const std::array<Stage<Slot>, N>& stages, bool joined,
 	return nullptr;
 }
 
+// S560 (KYTY_CP_PREDECODE_SLIM=0|1, default 0): with KYTY_CP_PREDECODE=1 the binding of a predecoded image is built in place in the stage's binding slot
+// (FillBinding): one copy of the ~1.2 KB ImageDesc (slot -> binding) instead of three (slot -> local, local -> returned binding, returned -> slot).
+inline bool SlimEnabled() {
+	static const bool on = [] {
+		const char* v = std::getenv("KYTY_CP_PREDECODE_SLIM");
+		return v != nullptr && v[0] == '1' && v[1] == '\0';
+	}();
+	return on;
+}
+
+// The binding the recorder's returned-value path makes for a predecoded image, written into `out`, which holds the previous draw's binding of the
+// slot: the description copied, find(out.desc) -> image id (null: not found; it may change the description, as FindImage and the view format do),
+// layout `found` / `missing`, no image view, mip_views emptied (its capacity kept, as the swap in PrepareBindings keeps it). Every field the returned
+// binding sets is set, so nothing of the previous draw stays. Mutant KEEP_STALE (the view and the mip views of the previous draw stay) must fail.
+template <class Binding, class Desc, class Layout, class Find>
+void FillBinding(Binding& out, const Desc& desc, Layout found, Layout missing, Find&& find) {
+	out.desc = desc;
+#ifndef KYTY_PREDECODE_SLIM_MUTANT_KEEP_STALE
+	out.image_view = decltype(out.image_view) {};
+	out.mip_views.clear();
+#endif
+	const auto id = find(out.desc);
+	out.image_id  = id ? id : decltype(out.image_id) {};
+	out.layout    = id ? found : missing;
+}
+
 // Per PrepareBindings call, added to the FrameTiming columns once (predecode_img_n / _decline_n / _nojob_n / _ne_n).
 struct Counts {
 	uint64_t img     = 0; // slots taken from the worker (shadow: compared)

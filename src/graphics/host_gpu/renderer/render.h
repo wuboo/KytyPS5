@@ -261,6 +261,11 @@ private:
 	                                              TextureCache::ImageDesc& desc, bool shader_conversion,
 	                                              Prospero::BufferFormat format, vk::Format pixel_format,
 	                                              vk::Format view_format, bool storage);
+	[[nodiscard]] ImageId FindTextureImageId(const ShaderRecompiler::IR::ImageResource& resource,
+	                                         const ShaderTextureResource& descriptor,
+	                                         TextureCache::ImageDesc& desc, bool shader_conversion,
+	                                         Prospero::BufferFormat format, vk::Format pixel_format,
+	                                         vk::Format view_format, bool storage);
 	[[nodiscard]] TextureBinding PredecodedTexture(const ShaderRecompiler::IR::ImageResource&   resource,
 	                                               const ShaderRecompiler::IR::DescriptorValue& value,
 	                                               const PreTex* slot, Predecode::Counts& counts);

@@ -299,10 +299,10 @@ void CommandProcessor::PipeInit() {
 	LOGF("[cp-pipe] on: mode=%s depth=%zu workers=%zu shard=%d signals=%d\n", EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", m_pipe->depth, EnvWorkers(), EnvShard() ? 1 : 0, static_cast<int>(EnvSignals()));
 	// S558 (KYTY_CP_PREDECODE): the workers decode the T#s of the jobs they answer; the recorder takes them only with KYTY_CP_PIPE=1 (shadow: none used).
 	if (Predecode::EnvMode() != Predecode::Mode::Off) {
-		LOGF("[cp-predecode] on: mode=%s pipe=%s workers=%zu sizeof(PreTex)=%zu\n", Predecode::ModeName(Predecode::EnvMode()), EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1",
-		     EnvWorkers(), sizeof(PreTex));
-		std::fprintf(stderr, "[cp-predecode] on: mode=%s pipe=%s workers=%zu sizeof(PreTex)=%zu\n", Predecode::ModeName(Predecode::EnvMode()),
-		             EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", EnvWorkers(), sizeof(PreTex));
+		LOGF("[cp-predecode] on: mode=%s pipe=%s workers=%zu sizeof(PreTex)=%zu slim=%d\n", Predecode::ModeName(Predecode::EnvMode()),
+		     EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", EnvWorkers(), sizeof(PreTex), Predecode::SlimEnabled() ? 1 : 0);
+		std::fprintf(stderr, "[cp-predecode] on: mode=%s pipe=%s workers=%zu sizeof(PreTex)=%zu slim=%d\n", Predecode::ModeName(Predecode::EnvMode()),
+		             EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", EnvWorkers(), sizeof(PreTex), Predecode::SlimEnabled() ? 1 : 0);
 	}
 	// S549: the front thread (parked until the first stream). Not with the S479 shadow (it compares on the CP thread).
 	if (CpPipe::FrontEnvMode() != CpPipe::FrontMode::Off && EnvMode() == CpPipe::Mode::On) {
