@@ -1,6 +1,8 @@
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 
 #include "common/alignment.h"
+#include "graphics/host_gpu/renderer/image/imageSizeMemo.h"
+#include "graphics/presentation/frameTiming.h"
 
 namespace Libs::Graphics {
 namespace {
@@ -77,6 +79,20 @@ vk::Extent3D ImageInfo::MipExtent(uint32_t level) const {
 }
 
 void ImageInfo::UpdateSize() {
+	// S546 (KYTY_IMAGE_SIZE_MEMO=1|shadow, imageSizeMemo.h): the result for the same description is remembered per thread.
+	const auto mode = SizeMemo::EnvMode();
+	if (mode == SizeMemo::Mode::Off) {
+		UpdateSizeFull();
+		return;
+	}
+	switch (SizeMemo::Run(*this, [](ImageInfo& info) { info.UpdateSizeFull(); }, mode)) {
+		case SizeMemo::Result::Hit: FrameTiming::Add(FrameTiming::Counter::SizeMemoHitN); break;
+		case SizeMemo::Result::Miss: FrameTiming::Add(FrameTiming::Counter::SizeMemoMissN); break;
+		case SizeMemo::Result::Disagree: FrameTiming::Add(FrameTiming::Counter::SizeMemoNeN); break;
+	}
+}
+
+void ImageInfo::UpdateSizeFull() {
 	EXIT_IF(guest_format == Prospero::BufferFormat::kInvalid || extent.width == 0 ||
 	        extent.height == 0 || extent.depth == 0 || resources.levels == 0 ||
 	        resources.levels > mip_layout.size() || resources.layers == 0 || samples == 0 ||
