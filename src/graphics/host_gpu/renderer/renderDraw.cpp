@@ -19,6 +19,7 @@
 #include "graphics/host_gpu/renderer/drsNoZero.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/narrowBarrierVk.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/guest_gpu/command_processor/cpPipe.h"
 #include "graphics/guest_gpu/command_processor/cpPipeJob.h"
@@ -1424,7 +1425,14 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 		// As for dispatches, buffer writes wait for earlier accesses to the memory.
 		buffer.EndRendering();
 		m_pending_writes.clear();
-		ShaderWriteHazardBarrier(vk_buffer, shader_write_stages);
+		if (NarrowBarrier::NarrowWriteHazard(NarrowBarrier::Level(), false)) {
+			// S556 (KYTY_NARROW_BARRIER>=1): shader_write_stages come from buffer writes only, so the hazard is on buffer
+			// memory: execution on every stage that can touch a buffer, memory on buffer writes (narrowBarrierVk.h).
+			NarrowBarrier::WriteHazard(vk_buffer, NarrowBarrier::ToStages2(shader_write_stages));
+			FrameTiming::Add(FrameTiming::Counter::NarrowBarrierN);
+		} else {
+			ShaderWriteHazardBarrier(vk_buffer, shader_write_stages);
+		}
 		if (defer_on) {
 			FrameTiming::Add(FrameTiming::Counter::DeferWriteNowN);
 		}

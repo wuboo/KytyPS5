@@ -736,6 +736,13 @@ constexpr const char* kCounterNames[] = {
     "exact_front_ne_n",
     "lru_skip_n",
     "lru_skip_ne_n",
+    "upload_sync_n",
+    "upload_buffer_bytes",
+    "upload_barrier_bytes",
+    "narrow_barrier_n",
+    "disp_hazard_n",
+    "disp_hazard_img_n",
+    "disp_access_ro_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

@@ -1680,6 +1680,14 @@ foreach(mutant IN ITEMS NO_MASK PREFIX)
 	target_include_directories(rt_pass_memo_mutant_${mutant}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(rt_pass_memo_mutant_${mutant}_tests PRIVATE KYTY_RTMEMO_MUTANT_${mutant}=1)
 endforeach()
+# S556 KYTY_NARROW_BARRIER: header-only span of a narrowed upload barrier and the per-level decisions.
+add_executable(narrow_barrier_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/NarrowBarrierTests.cpp")
+target_include_directories(narrow_barrier_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS FIRST_ONLY ASSUME_SORTED IMAGES RO_LEVEL1)
+	add_executable(narrow_barrier_mutant_${mutant}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/NarrowBarrierTests.cpp")
+	target_include_directories(narrow_barrier_mutant_${mutant}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(narrow_barrier_mutant_${mutant}_tests PRIVATE KYTY_NARROW_MUTANT_${mutant}=1)
+endforeach()
 add_executable(drs_no_zero_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/DrsNoZeroTests.cpp")
 target_include_directories(drs_no_zero_tests PRIVATE ${inc_headers})
 target_link_libraries(drs_no_zero_tests Vulkan::Headers)
@@ -1970,6 +1978,11 @@ if(BUILD_TESTING)
 	foreach(mutant IN ITEMS NO_MASK PREFIX)
 		add_test(NAME rt_pass_memo_mutant_${mutant} COMMAND $<TARGET_FILE:rt_pass_memo_mutant_${mutant}_tests>)
 		set_tests_properties(rt_pass_memo_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME narrow_barrier COMMAND $<TARGET_FILE:narrow_barrier_tests>)
+	foreach(mutant IN ITEMS FIRST_ONLY ASSUME_SORTED IMAGES RO_LEVEL1)
+		add_test(NAME narrow_barrier_mutant_${mutant} COMMAND $<TARGET_FILE:narrow_barrier_mutant_${mutant}_tests>)
+		set_tests_properties(narrow_barrier_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
 	add_test(NAME drs_no_zero_mutant_zero_all COMMAND $<TARGET_FILE:drs_no_zero_mutant_zero_all_tests>)
 	set_tests_properties(drs_no_zero_mutant_zero_all PROPERTIES WILL_FAIL TRUE)
@@ -2687,6 +2700,8 @@ if(BUILD_TESTING)
 	                 drs_no_zero_tests drs_no_zero_mutant_zero_all_tests
 	                 image_size_memo_tests image_size_memo_mutant_NO_ADDRESS_tests image_size_memo_mutant_NO_SIZE_tests image_size_memo_mutant_NO_MIPS_tests
 	                 rt_pass_memo_tests rt_pass_memo_mutant_NO_MASK_tests rt_pass_memo_mutant_PREFIX_tests
+	                 narrow_barrier_tests narrow_barrier_mutant_FIRST_ONLY_tests narrow_barrier_mutant_ASSUME_SORTED_tests
+	                 narrow_barrier_mutant_IMAGES_tests narrow_barrier_mutant_RO_LEVEL1_tests
 	                 cp_phases_mutant_ignore_shader_tests cp_phases_mutant_ignore_generation_tests
 	                 cp_wait_diag_tests cp_wait_diag_mutant_no_cause_tests)
 	foreach(mutant IN LISTS KYTY_DCC_KNOWN_MUTANTS)

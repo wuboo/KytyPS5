@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 #include "graphics/host_gpu/renderer/commandScheduler.h"
 #include "graphics/host_gpu/renderer/cpWaitDiag.h"
+#include "graphics/host_gpu/renderer/narrowBarrierVk.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/host_gpu/renderer/wfDiag.h"
@@ -74,10 +75,14 @@ void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* 
 		EXIT_IF(destination_offset > buffer.Size() || chunk > buffer.Size() - destination_offset);
 		m_scheduler.EndRendering();
 		const auto command = m_scheduler.Current().Handle();
+		// S556 (KYTY_NARROW_BARRIER>=1): the range was already the chunk; the masks become the ones a cache buffer can
+		// be used with (narrowBarrierVk.h): WAR on every buffer stage (execution), WAW on buffer writes (memory).
+		const bool narrow = NarrowBarrier::NarrowBufferSync(NarrowBarrier::Level());
 		vk::BufferMemoryBarrier2 before {};
-		before.srcStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
-		before.srcAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
-		before.dstStageMask  = vk::PipelineStageFlagBits2::eTransfer;
+		before.srcStageMask  = narrow ? NarrowBarrier::kBufferStages : vk::PipelineStageFlagBits2::eAllCommands;
+		before.srcAccessMask = narrow ? NarrowBarrier::kBufferWrites
+		                              : vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
+		before.dstStageMask  = narrow ? NarrowBarrier::kCopyStage : vk::PipelineStageFlagBits2::eTransfer;
 		before.dstAccessMask = vk::AccessFlagBits2::eTransferWrite;
 		before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
 		before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -94,12 +99,16 @@ void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* 
 		               static_cast<uint32_t>(chunk >> 10u));
 		GpuLabel::NoteCause(GpuLabel::Cause::Upload);
 		auto after          = before;
-		after.srcStageMask  = vk::PipelineStageFlagBits2::eTransfer;
+		after.srcStageMask  = narrow ? NarrowBarrier::kCopyStage : vk::PipelineStageFlagBits2::eTransfer;
 		after.srcAccessMask = vk::AccessFlagBits2::eTransferWrite;
-		after.dstStageMask  = vk::PipelineStageFlagBits2::eAllCommands;
-		after.dstAccessMask = vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
+		after.dstStageMask  = narrow ? NarrowBarrier::kBufferStages : vk::PipelineStageFlagBits2::eAllCommands;
+		after.dstAccessMask = narrow ? NarrowBarrier::kBufferAccess
+		                             : vk::AccessFlagBits2::eMemoryRead | vk::AccessFlagBits2::eMemoryWrite;
 		dependency.pBufferMemoryBarriers = &after;
 		command.pipelineBarrier2(dependency);
+		if (narrow) {
+			FrameTiming::Add(FrameTiming::Counter::NarrowBarrierN, 2);
+		}
 		bytes += chunk;
 		address += chunk;
 		size -= chunk;
@@ -305,9 +314,21 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	before.buffer              = buffer.Handle();
 	before.offset              = 0;
 	before.size                = buffer.Size();
-	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
-	                       vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1, &before, 0,
-	                       nullptr);
+	if (NarrowBarrier::NarrowBufferSync(NarrowBarrier::Level())) {
+		// S556: the copy only reads, so only read-after-write matters: earlier buffer writes (shader / transfer
+		// stages, made available) before the copy reads exactly the bytes of its regions.
+		const auto span = NarrowBarrier::ReadSpan(std::span<const vk::BufferCopy>(copies));
+		NarrowBarrier::Record(native,
+		                      NarrowBarrier::BufferBarrier(buffer.Handle(), span.size != 0 ? span : NarrowBarrier::Span {0, buffer.Size()},
+		                                                   NarrowBarrier::kBufferWriteStages, NarrowBarrier::kBufferWrites,
+		                                                   NarrowBarrier::kCopyStage, vk::AccessFlagBits2::eTransferRead),
+		                      vk::DependencyFlags {});
+		FrameTiming::Add(FrameTiming::Counter::NarrowBarrierN);
+	} else {
+		native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
+		                       vk::PipelineStageFlagBits::eTransfer, {}, 0, nullptr, 1, &before, 0,
+		                       nullptr);
+	}
 	GpuLabel::With(native, GpuLabel::Class::Readback,
 	               [&] { native.copyBuffer(buffer.Handle(), download.Handle(), static_cast<uint32_t>(copies.size()), copies.data()); }, "I.rb.%ukb",
 	               static_cast<uint32_t>(buffer.Size() >> 10u));
@@ -1067,30 +1088,62 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 			FrameTiming::Add(FrameTiming::Counter::UploadPassBreakN);
 		}
 		command.EndRendering();
-		const auto              native = command.Handle();
-		vk::BufferMemoryBarrier before {};
-		before.srcAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite |
-		                       vk::AccessFlagBits::eTransferRead |
-		                       vk::AccessFlagBits::eTransferWrite;
-		before.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
-		before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-		before.buffer              = buffer.Handle();
-		before.offset              = 0;
-		before.size                = buffer.Size();
-		native.pipelineBarrier(
-		    vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer,
-		    vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &before, 0, nullptr);
-		GpuLabel::With(native, GpuLabel::Class::Upload,
-		               [&] { native.copyBuffer(source, buffer.Handle(), static_cast<uint32_t>(copies.size()), copies.data()); }, "I.up.n%u",
-		               static_cast<uint32_t>(copies.size()));
-		GpuLabel::NoteCause(GpuLabel::Cause::Upload);
-		auto after          = before;
-		after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
-		after.dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
-		native.pipelineBarrier(
-		    vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eAllCommands,
-		    vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &after, 0, nullptr);
+		const auto native = command.Handle();
+		FrameTiming::Add(FrameTiming::Counter::UploadSyncN);
+		FrameTiming::Add(FrameTiming::Counter::UploadBufferBytes, buffer.Size());
+		if (NarrowBarrier::NarrowBufferSync(NarrowBarrier::Level())) {
+			// S556 (KYTY_NARROW_BARRIER>=1). Range: the copy writes only [span.offset, span.offset + span.size), so
+			// only those bytes have a WAR/WAW hazard with earlier work and a RAW hazard with later work. The old
+			// whole-buffer range does not order anything else on its own: earlier shader writes elsewhere in the
+			// buffer are made visible by their writers' barriers (ShaderAccessBarrier after a dispatch, the
+			// immediate/deferred ShaderWriteBarrier of a draw, flushed by the EndRendering above), and other
+			// transfer writes carry their own after-barriers (CopyFrom/Fill/this function, all ranged or global).
+			// Masks (narrowBarrierVk.h): before = every stage that can touch a cache buffer (execution, for WAR)
+			// and the buffer writes (memory, for WAW) -> the copy's transfer write; after = the copy's write ->
+			// every stage and access a cache buffer can be used with (RAW/WAW of later work). eAllCommands and
+			// eMemoryRead|eMemoryWrite add only stages/accesses a VkBuffer of this usage cannot be part of.
+			auto span = NarrowBarrier::CopySpan(std::span<const vk::BufferCopy>(copies));
+			if (span.size == 0) {
+				span = {0, buffer.Size()};
+			}
+			FrameTiming::Add(FrameTiming::Counter::UploadBarrierBytes, span.size);
+			FrameTiming::Add(FrameTiming::Counter::NarrowBarrierN, 2);
+			NarrowBarrier::Record(native, NarrowBarrier::BufferBarrier(buffer.Handle(), span, NarrowBarrier::kBufferStages,
+			                                                           NarrowBarrier::kBufferWrites, NarrowBarrier::kCopyStage,
+			                                                           vk::AccessFlagBits2::eTransferWrite));
+			GpuLabel::With(native, GpuLabel::Class::Upload,
+			               [&] { native.copyBuffer(source, buffer.Handle(), static_cast<uint32_t>(copies.size()), copies.data()); }, "I.up.n%u",
+			               static_cast<uint32_t>(copies.size()));
+			GpuLabel::NoteCause(GpuLabel::Cause::Upload);
+			NarrowBarrier::Record(native, NarrowBarrier::BufferBarrier(buffer.Handle(), span, NarrowBarrier::kCopyStage,
+			                                                           vk::AccessFlagBits2::eTransferWrite, NarrowBarrier::kBufferStages,
+			                                                           NarrowBarrier::kBufferAccess));
+		} else {
+			FrameTiming::Add(FrameTiming::Counter::UploadBarrierBytes, buffer.Size());
+			vk::BufferMemoryBarrier before {};
+			before.srcAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite |
+			                       vk::AccessFlagBits::eTransferRead |
+			                       vk::AccessFlagBits::eTransferWrite;
+			before.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+			before.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			before.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+			before.buffer              = buffer.Handle();
+			before.offset              = 0;
+			before.size                = buffer.Size();
+			native.pipelineBarrier(
+			    vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer,
+			    vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &before, 0, nullptr);
+			GpuLabel::With(native, GpuLabel::Class::Upload,
+			               [&] { native.copyBuffer(source, buffer.Handle(), static_cast<uint32_t>(copies.size()), copies.data()); }, "I.up.n%u",
+			               static_cast<uint32_t>(copies.size()));
+			GpuLabel::NoteCause(GpuLabel::Cause::Upload);
+			auto after          = before;
+			after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+			after.dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+			native.pipelineBarrier(
+			    vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eAllCommands,
+			    vk::DependencyFlagBits::eByRegion, 0, nullptr, 1, &after, 0, nullptr);
+		}
 	}
 	if (is_texel_buffer && !is_written) {
 		return SynchronizeBufferFromImage(buffer, vaddr, size);

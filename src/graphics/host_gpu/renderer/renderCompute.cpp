@@ -17,6 +17,7 @@
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
+#include "graphics/host_gpu/renderer/narrowBarrierVk.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -281,14 +282,51 @@ static void BindSharedMemory(RenderContext& context, ShaderComputeInputInfo& inp
 	bindings.shared_memory = {storage.Handle(), 0, size};
 }
 
+static bool HasStorageImageWrites(const ShaderComputeInputInfo& input_info) {
+	const auto& images = input_info.stage.module->info.info.images;
+	return std::ranges::any_of(images, [](const auto& image) {
+		return image.written && image.resource_class == ShaderRecompiler::IR::ImageResourceClass::Storage;
+	});
+}
+
 static bool HasStorageWrites(const ShaderComputeInputInfo& input_info,
                              const PreparedBindings&       bindings) {
-	const auto& images = input_info.stage.module->info.info.images;
 	return bindings.shared_memory.buffer != nullptr || HasShaderBufferWrites(input_info.stage) ||
-	       std::ranges::any_of(images, [](const auto& image) {
-		       return image.written &&
-		              image.resource_class == ShaderRecompiler::IR::ImageResourceClass::Storage;
-	       });
+	       HasStorageImageWrites(input_info);
+}
+
+// S556 (KYTY_NARROW_BARRIER, narrowBarrier.h): the barriers around a guest dispatch. Level 0 records exactly the old pair.
+// Before (only when the dispatch writes): level 1 narrows it when the dispatch writes no storage image (buffers, LDS and
+// address writes only): every stage that can touch a buffer stays in the execution dependency (WAR), the buffer writes
+// stay in the memory dependency (WAW); colour/depth output and their caches cannot hold this memory. The dispatch's own
+// reads of earlier image writes are ordered by Image::Transit, as for a read-only dispatch (which has no barrier here).
+static void DispatchWriteHazard(vk::CommandBuffer vk_buffer, bool image_writes) {
+	FrameTiming::Add(FrameTiming::Counter::DispHazardN);
+	if (image_writes) {
+		FrameTiming::Add(FrameTiming::Counter::DispHazardImgN);
+	}
+	if (NarrowBarrier::NarrowWriteHazard(NarrowBarrier::Level(), image_writes)) {
+		NarrowBarrier::WriteHazard(vk_buffer, vk::PipelineStageFlagBits2::eComputeShader);
+		FrameTiming::Add(FrameTiming::Counter::NarrowBarrierN);
+	} else {
+		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	}
+}
+
+// After: a writing dispatch keeps the full barrier (its writes may be read by any later command, an image it wrote may
+// become an attachment). After a read-only dispatch the barrier only orders its reads before later writers (WAR): no
+// write is in its first scope, so level 2 records it without access masks (execution dependency only).
+static void DispatchAfter(vk::CommandBuffer vk_buffer, bool writes) {
+	if (!writes) {
+		FrameTiming::Add(FrameTiming::Counter::DispAccessRoN);
+		if (NarrowBarrier::ExecOnlyAfterReadOnlyDispatch(NarrowBarrier::Level())) {
+			vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eComputeShader, vk::PipelineStageFlagBits::eAllCommands,
+			                          vk::DependencyFlags {}, 0, nullptr, 0, nullptr, 0, nullptr);
+			FrameTiming::Add(FrameTiming::Counter::NarrowBarrierN);
+			return;
+		}
+	}
+	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 }
 
 void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x,
@@ -411,10 +449,11 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	const auto vk_buffer = buffer.Handle();
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
-	if (HasStorageWrites(input_info, bindings)) {
+	const bool storage_writes = HasStorageWrites(input_info, bindings);
+	if (storage_writes) {
 		// A host fence used to serialize every dispatch. Preserve its read-before-write ordering
 		// while allowing the queue to execute asynchronously.
-		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		DispatchWriteHazard(vk_buffer, HasStorageImageWrites(input_info));
 	}
 	if (Config::GraphicsDebugDumpEnabled()) {
 		const auto sampled_images = std::count_if(
@@ -504,7 +543,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Guest);
 
 	// The removed host fence also ordered read-only dispatches before later writers.
-	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	DispatchAfter(vk_buffer, storage_writes);
 	GpuLabel::NoteCause(GpuLabel::Cause::Cs);
 	ResetBindings();
 }
@@ -568,24 +607,37 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	}
 	KYTY_CP_SITE(DispRecord);
 	const auto vk_buffer = buffer.Handle();
-	if (HasStorageWrites(input_info, bindings)) {
-		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	const bool storage_writes = HasStorageWrites(input_info, bindings);
+	if (storage_writes) {
+		DispatchWriteHazard(vk_buffer, HasStorageImageWrites(input_info));
 	}
-	vk::MemoryBarrier barrier {};
-	barrier.srcAccessMask = vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite;
-	barrier.dstAccessMask = vk::AccessFlagBits::eIndirectCommandRead;
-	vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllGraphics |
-	                              vk::PipelineStageFlagBits::eComputeShader |
-	                              vk::PipelineStageFlagBits::eTransfer,
-	                          vk::PipelineStageFlagBits::eDrawIndirect, {},
-	                          1, &barrier, 0, nullptr, 0, nullptr);
+	if (NarrowBarrier::NarrowBufferSync(NarrowBarrier::Level())) {
+		// S556: the arguments are buffer memory, so only shader stores and copy/fill/update can have written them;
+		// eAllGraphics as the source also waited for colour/depth output, which cannot write a buffer.
+		vk::MemoryBarrier2 narrow {};
+		narrow.srcStageMask  = NarrowBarrier::kBufferWriteStages;
+		narrow.srcAccessMask = NarrowBarrier::kBufferWrites;
+		narrow.dstStageMask  = vk::PipelineStageFlagBits2::eDrawIndirect;
+		narrow.dstAccessMask = vk::AccessFlagBits2::eIndirectCommandRead;
+		NarrowBarrier::Record(vk_buffer, narrow);
+		FrameTiming::Add(FrameTiming::Counter::NarrowBarrierN);
+	} else {
+		vk::MemoryBarrier barrier {};
+		barrier.srcAccessMask = vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite;
+		barrier.dstAccessMask = vk::AccessFlagBits::eIndirectCommandRead;
+		vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllGraphics |
+		                              vk::PipelineStageFlagBits::eComputeShader |
+		                              vk::PipelineStageFlagBits::eTransfer,
+		                          vk::PipelineStageFlagBits::eDrawIndirect, {},
+		                          1, &barrier, 0, nullptr, 0, nullptr);
+	}
 	vk_buffer.bindPipeline(vk::PipelineBindPoint::eCompute, pipeline.pipeline);
 	GpuLabel::With(
 	    vk_buffer, GpuLabel::Class::GuestCs, [&] { vk_buffer.dispatchIndirect(args_buffer->Handle(), args_offset); },
 	    "G.cs.%08x.a%d.ind", static_cast<uint32_t>(program.shader_hash), async_compute ? 1 : 0);
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::Dispatches);
 	FrameTiming::NoteDispatch(FrameTiming::DispatchClass::Guest);
-	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	DispatchAfter(vk_buffer, storage_writes);
 	GpuLabel::NoteCause(GpuLabel::Cause::Cs);
 	ResetBindings();
 }
