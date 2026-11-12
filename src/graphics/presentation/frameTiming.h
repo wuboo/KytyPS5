@@ -479,6 +479,11 @@ enum class Counter : uint32_t {
 	// KYTY_BUF_TOUCH_SKIP: buffer LRU touches skipped as no-ops, shadow disagreements.
 	TexSlotMemoHitN, TexSlotMemoMissN, TexSlotMemoStaleN, TexSlotMemoNeN, DepthMemoHitN, DepthMemoMissN, DepthMemoNeN, LedgerMemoHitN,
 	LedgerMemoMissN, LedgerMemoNeN, BufTouchSkipN, BufTouchSkipNeN,
+	// S561 (KYTY_CP_EMIT=sync|shadow, cpEmit.h): commands written to the IR, IR bytes, drains of a non-empty IR (all, then by reason: a site
+	// recording directly, a Cmd converted to the raw handle, end before submit, GPU wait, other), sampled ns writing the IR, ns in the drains
+	// (replay into Vulkan; shadow: into the digest), shadow drains whose digest differs, commands the IR could not hold.
+	EmitOpsN, EmitBytes, EmitDrainN, EmitDrainHandleN, EmitDrainConvN, EmitDrainSubmitN, EmitDrainWaitN, EmitDrainOtherN, EmitRecordNs, EmitReplayNs,
+	EmitNeN, EmitFallbackN,
 	Count,
 };
 

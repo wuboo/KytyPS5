@@ -18,6 +18,7 @@
 #include "graphics/host_gpu/renderer/depthPassMemo.h"
 #include "graphics/host_gpu/renderer/rtPassMemo.h"
 #include "graphics/host_gpu/renderer/pipeline/texResolveMemo.h"
+#include "graphics/host_gpu/renderer/cpEmit.h"
 #include "graphics/host_gpu/renderer/w2Diag.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
@@ -176,13 +177,24 @@ public:
 	void ForgetGraphicsPipeline() const noexcept { m_bound_graphics_pipeline = nullptr; }
 
 	// S560 (KYTY_W2_DIAG=1): the caller's file and line come in by default arguments; w2Diag.h counts the calls per site.
+	// S561 (KYTY_CP_EMIT, cpEmit.h): a site that records directly; commands the IR sites wrote are replayed into the buffer first.
 	[[nodiscard]] vk::CommandBuffer Handle(const char* site_file = __builtin_FILE(), uint32_t site_line = __builtin_LINE()) const noexcept {
 		m_recorded = true;
 		if (W2Diag::Enabled()) [[unlikely]] {
 			W2Diag::NoteHandle(site_file, site_line);
 		}
-		return m_buffer;
+		return CpEmit::TakeRaw(m_emit, m_buffer);
 	}
+	// S561: the IR sites (Transit of the render targets, CommitBindings, the ExecutePreparedDraw seam, Begin/EndRendering) record through
+	// this; with KYTY_CP_EMIT=0 each command still goes straight to the buffer.
+	[[nodiscard]] CpEmit::Cmd Emit(const char* site_file = __builtin_FILE(), uint32_t site_line = __builtin_LINE()) const noexcept {
+		m_recorded = true;
+		if (W2Diag::Enabled()) [[unlikely]] {
+			W2Diag::NoteHandle(site_file, site_line);
+		}
+		return {&m_emit, m_buffer};
+	}
+	[[nodiscard]] bool EmitPending() const noexcept { return m_emit.Pending(); }
 	[[nodiscard]] GraphicContext&   GetGraphics() const noexcept { return m_graphics; }
 	[[nodiscard]] RenderContext&    GetContext() const noexcept { return m_context; }
 	[[nodiscard]] HW::Context&      GetRegisters() const noexcept { return *m_registers; }
@@ -199,6 +211,8 @@ private:
 
 	void Begin();
 	void End() const;
+	static void EmitDrainThunk(void* self, CpEmit::Reason why); // S561: the thread's pending slot (MasterSemaphore::Wait)
+	void        FlushEmitStats() const;                         // S561: the stream's counters into FrameTiming
 
 	RenderContext&      m_context;
 	GraphicContext&     m_graphics;
@@ -217,6 +231,7 @@ private:
 	// Set by Handle(): something (possibly) recorded since Begin(). Over-reporting is harmless.
 	mutable bool        m_recorded    = false;
 	mutable vk::Pipeline m_bound_graphics_pipeline = nullptr; // S546
+	mutable CpEmit::Stream m_emit;                            // S561: IR of the commands not yet in m_buffer (KYTY_CP_EMIT)
 	HW::Context*        m_registers   = nullptr;
 	HW::UserConfig*     m_user_config = nullptr;
 	HW::Shader*         m_shaders     = nullptr;

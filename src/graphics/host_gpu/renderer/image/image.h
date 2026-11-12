@@ -5,6 +5,7 @@
 #include "common/assert.h"
 #include "common/slotVector.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/cpEmit.h"
 #include "graphics/host_gpu/renderer/image/imageInfo.h"
 
 #include <atomic>
@@ -58,6 +59,9 @@ public:
 	                                   std::optional<ImageSubresourceRange> range);
 	void Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
 	             std::optional<ImageSubresourceRange> range, vk::CommandBuffer command_buffer);
+	// S561 (KYTY_CP_EMIT): recorded through the command buffer's IR handle (cpEmit.h).
+	void Transit(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
+	             std::optional<ImageSubresourceRange> range, const CpEmit::Cmd& command_buffer);
 	void Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,
 	            uint64_t size);
 	void Download(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffer, uint64_t offset,
@@ -168,6 +172,9 @@ private:
 	friend struct ImageTestAccess;
 
 	void NoteDiagWrite(bool definite);
+	template <class Command>
+	void TransitTo(vk::ImageLayout destination_layout, vk::AccessFlags2 destination_access,
+	               std::optional<ImageSubresourceRange> range, const Command& command_buffer);
 
 	[[nodiscard]] static vk::ImageAspectFlags FullAspectMask(vk::Format format) noexcept;
 	[[nodiscard]] static uint32_t             CopyRows(uint64_t row_size, uint32_t rows,

@@ -479,7 +479,7 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		image.Transit(layout, image.binding.attachment_access,
 		              ImageSubresourceRange {view.base_level, view.level_count, view.base_layer,
 		                                     view.layer_count},
-		              buffer.Handle());
+		              buffer.Emit()); // S561: IR site (KYTY_CP_EMIT)
 		const auto extent       = target.Extent();
 		state.width             = std::min(state.width, extent.width);
 		state.height            = std::min(state.height, extent.height);
@@ -542,7 +542,7 @@ RenderState RenderExecutor::AcquireRenderTargets(CommandBuffer& buffer, RenderCo
 		image.Transit(layout, access,
 		              ImageSubresourceRange {view.base_level, view.level_count, view.base_layer,
 		                                     view.layer_count},
-		              buffer.Handle());
+		              buffer.Emit()); // S561: IR site (KYTY_CP_EMIT)
 		state.width               = std::min(state.width, depth.desc.info.extent.width);
 		state.height              = std::min(state.height, depth.desc.info.extent.height);
 		state.num_layers          = std::min(state.num_layers, view.layer_count);
@@ -939,8 +939,9 @@ static PreparedIndexBuffer PrepareIndexBuffer(CommandBuffer&               buffe
 	return prepared;
 }
 
-static void CommitVertexBuffers(vk::CommandBuffer            vk_buffer,
-                                const PreparedVertexBuffers& prepared) {
+// S561: Command is vk::CommandBuffer or the IR handle CpEmit::Cmd (the seam of ExecutePreparedDraw).
+template <class Command>
+static void CommitVertexBuffers(const Command& vk_buffer, const PreparedVertexBuffers& prepared) {
 	if (prepared.count != 0) {
 		// Guest descriptor bounds must survive allocation merging in the cache.
 		vk_buffer.bindVertexBuffers2(0, prepared.count, prepared.buffers.data(),
@@ -948,7 +949,8 @@ static void CommitVertexBuffers(vk::CommandBuffer            vk_buffer,
 	}
 }
 
-static void CommitIndexBuffer(vk::CommandBuffer vk_buffer, const PreparedIndexBuffer& prepared) {
+template <class Command>
+static void CommitIndexBuffer(const Command& vk_buffer, const PreparedIndexBuffer& prepared) {
 	if (prepared.buffer == nullptr) {
 		return;
 	}
@@ -977,7 +979,8 @@ static void LogDrawStateIfNeeded(const CommandBuffer& buffer, const DrawCallInfo
 	                  index_addr);
 }
 
-static void EmitDrawPrimitives(const HW::UserConfig& ucfg, vk::CommandBuffer vk_buffer,
+template <class Command>
+static void EmitDrawPrimitives(const HW::UserConfig& ucfg, const Command& vk_buffer,
                                const DrawCallInfo& draw, const DrawEmitInfo& emit) {
 	switch (ucfg.GetPrimType()) {
 		case Prospero::PrimitiveType::kPointList:
@@ -1344,7 +1347,8 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	// Resource preparation above may synchronously finish and restart the scheduler. From this
 	// point onward, every operation targets the current command buffer and cannot touch guest
 	// memory.
-	auto vk_buffer = buffer.Handle();
+	// S561 (KYTY_CP_EMIT): the seam records through the IR handle; a helper below that takes vk::CommandBuffer converts it, which drains.
+	const auto vk_buffer = buffer.Emit();
 	if (mesh_prepared.ok) {
 		// The prepare compute runs outside a pass, before the draw: the draw takes its output as indirect args.
 		MeshIndirectRecorder recorder {m_context.GetCommandScheduler(), buffer, rendering, MeshIndirectRt(), mesh_prepared, vk_buffer};

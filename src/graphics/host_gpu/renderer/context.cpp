@@ -18,16 +18,56 @@
 #include "graphics/presentation/frameTiming.h"
 
 #include <algorithm>
+#include <atomic>
+#include <cstdio>
 #include <bit>
 #include <cstring>
 #include <utility>
 namespace Libs::Graphics {
 
 CommandBuffer::CommandBuffer(CommandScheduler& scheduler)
-    : m_context(scheduler.Context()), m_graphics(scheduler.Graphics()) {}
+    : m_context(scheduler.Context()), m_graphics(scheduler.Graphics()) {
+	m_emit.SetOwner(this, &CommandBuffer::EmitDrainThunk);
+	static std::atomic_bool logged = false;
+	if (!logged.exchange(true, std::memory_order_relaxed)) {
+		std::fprintf(stderr, "[cp-emit] mode=%s\n", CpEmit::ModeName(CpEmit::EnvMode()));
+	}
+}
+
+// S561: MasterSemaphore::Wait (or another stream of the thread) drains this buffer's IR through the thread's pending slot.
+void CommandBuffer::EmitDrainThunk(void* self, CpEmit::Reason why) {
+	const auto* buffer = static_cast<const CommandBuffer*>(self);
+	buffer->m_emit.Drain(buffer->m_buffer, why);
+}
+
+void CommandBuffer::FlushEmitStats() const {
+	if (m_emit.Current() == CpEmit::Mode::Off) return;
+	// The record and replay times are TSC ticks until the clock is calibrated (the first ~20 ms); kept until then.
+	static thread_local uint64_t carry_rec = 0, carry_replay = 0;
+	const auto stats = m_emit.TakeStats();
+	using FrameTiming::Counter;
+	FrameTiming::Add(Counter::EmitOpsN, stats.ops);
+	FrameTiming::Add(Counter::EmitBytes, stats.bytes);
+	FrameTiming::Add(Counter::EmitDrainN, stats.drains);
+	FrameTiming::Add(Counter::EmitDrainHandleN, stats.by[static_cast<size_t>(CpEmit::Reason::Handle)]);
+	FrameTiming::Add(Counter::EmitDrainConvN, stats.by[static_cast<size_t>(CpEmit::Reason::Conv)]);
+	FrameTiming::Add(Counter::EmitDrainSubmitN, stats.by[static_cast<size_t>(CpEmit::Reason::Submit)]);
+	FrameTiming::Add(Counter::EmitDrainWaitN, stats.by[static_cast<size_t>(CpEmit::Reason::Wait)]);
+	FrameTiming::Add(Counter::EmitDrainOtherN, stats.by[static_cast<size_t>(CpEmit::Reason::Other)]);
+	FrameTiming::Add(Counter::EmitNeN, stats.ne);
+	FrameTiming::Add(Counter::EmitFallbackN, stats.fallback);
+	carry_rec += stats.rec_ticks;
+	carry_replay += stats.replay_ticks;
+	if (const double ns_per_tick = CpEmit::NsPerTick(); ns_per_tick != 0.0) {
+		FrameTiming::Add(Counter::EmitRecordNs, static_cast<uint64_t>(static_cast<double>(carry_rec) * ns_per_tick));
+		FrameTiming::Add(Counter::EmitReplayNs, static_cast<uint64_t>(static_cast<double>(carry_replay) * ns_per_tick));
+		carry_rec    = 0;
+		carry_replay = 0;
+	}
+}
 
 void CommandBuffer::Begin() {
-	EXIT_IF(m_rendering || m_pending_shader_writes || IsInvalid());
+	EXIT_IF(m_rendering || m_pending_shader_writes || IsInvalid() || m_emit.Pending());
 	auto buffer = Handle();
 
 	vk::CommandBufferBeginInfo begin_info {};
@@ -45,6 +85,8 @@ void CommandBuffer::Begin() {
 
 void CommandBuffer::End() const {
 	EndRendering();
+	m_emit.Drain(m_buffer, CpEmit::Reason::Submit); // S561: everything the IR sites wrote, before the buffer ends
+	FlushEmitStats();
 	auto buffer = Handle();
 	GpuTs::OnEnd(m_graphics, buffer, m_ts_slot); // S477 D3 DIAG
 
@@ -113,8 +155,12 @@ void CommandBuffer::BeginRendering(const RenderState& wanted) const {
 	rendering.pColorAttachments    = colors.data();
 	rendering.pDepthAttachment     = depth_stencil.has_depth ? &depth : nullptr;
 	rendering.pStencilAttachment   = depth_stencil.has_stencil ? &stencil : nullptr;
-	{
-		static std::atomic<uint32_t> pass_id {0};
+	static std::atomic<uint32_t> pass_id {0};
+	if (CpEmit::PassToIr(m_emit) && !GpuLabel::Active(GpuLabel::Class::GuestRp)) {
+		// S561: the IR already holds commands, so the pass opens after them (no label: a labelled pass records directly below, which drains).
+		pass_id.fetch_add(1, std::memory_order_relaxed);
+		Emit().beginRendering(rendering);
+	} else {
 		GpuLabel::With(
 		    Handle(), GpuLabel::Class::GuestRp, [&] { Handle().beginRendering(rendering); }, "G.rp.%ux%u.%u.%u", state.width, state.height,
 		    state.num_color_attachments, pass_id.fetch_add(1, std::memory_order_relaxed));
@@ -130,7 +176,12 @@ void CommandBuffer::BeginRendering(const RenderState& wanted) const {
 void CommandBuffer::EndRendering() const {
 	if (m_rendering) {
 		m_strip_clears = false; // S328: a closed pass ends the reopen
-		Handle().endRendering();
+		// S561: to the IR only while it holds commands; callers holding a raw handle (Image::Transit) see an empty IR, so it records directly.
+		if (CpEmit::PassToIr(m_emit)) {
+			Emit().endRendering();
+		} else {
+			Handle().endRendering();
+		}
 		if (m_note_pass_end) {
 			m_note_pass_end = false;
 			m_pass_end_ns   = FrameTiming::SteadyNowNs();

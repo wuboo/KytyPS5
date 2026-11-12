@@ -446,9 +446,10 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	BindSharedMemory(m_context, input_info, bindings);
 	RebindBuffers(bindings);
 
-	const auto vk_buffer = buffer.Handle();
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
+	// S561 (KYTY_CP_EMIT): the raw handle is taken after CommitBindings (an IR site), so it drains what CommitBindings wrote.
+	const auto vk_buffer = buffer.Handle();
 	const bool storage_writes = HasStorageWrites(input_info, bindings);
 	if (storage_writes) {
 		// A host fence used to serialize every dispatch. Preserve its read-before-write ordering
