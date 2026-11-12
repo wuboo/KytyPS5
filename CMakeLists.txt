@@ -852,6 +852,16 @@ foreach(mutant IN ITEMS SIGNAL_AT_PARSE VIRTUAL_WAIT_IGNORES_MASK DRAIN_SKIPS_UN
 	target_include_directories(cp_pipe_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(cp_pipe_mutant_${mutant_lower}_tests PRIVATE KYTY_CPPIPE_MUTANT_${mutant}=1)
 endforeach()
+# S549 (KYTY_CP_FRONT_THREAD): the hand-over between the front thread and the recorder (header only). Mutants (each must be caught, WILL_FAIL): the recorder reads the
+# live draw state, the gate lets the recorder write the front's state, the front reuses a slot before its item ran.
+add_executable(cp_front_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpFrontTests.cpp")
+target_include_directories(cp_front_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS FRONT_LIVE_STATE RECORDER_WRITES_FRONT FRONT_EARLY_REUSE)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(cp_front_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpFrontTests.cpp")
+	target_include_directories(cp_front_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_front_mutant_${mutant_lower}_tests PRIVATE KYTY_CPPIPE_MUTANT_${mutant}=1)
+endforeach()
 # S479 (KYTY_CP_PIPE): the log of the writes into the guest's backing (header only). Mutants (each must be caught, WILL_FAIL): a running write is no danger, a wrapped ring
 # answers from what is left, the pages are not compared.
 add_executable(backing_write_log_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BackingWriteLogTests.cpp")
@@ -2010,6 +2020,11 @@ if(BUILD_TESTING)
 	foreach(mutant IN ITEMS ignore_running no_wrap_guard any_range no_fast_path_guard)
 		add_test(NAME backing_write_log_mutant_${mutant} COMMAND $<TARGET_FILE:backing_write_log_mutant_${mutant}_tests>)
 		set_tests_properties(backing_write_log_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME cp_front COMMAND $<TARGET_FILE:cp_front_tests>)
+	foreach(mutant IN ITEMS front_live_state recorder_writes_front front_early_reuse)
+		add_test(NAME cp_front_mutant_${mutant} COMMAND $<TARGET_FILE:cp_front_mutant_${mutant}_tests>)
+		set_tests_properties(cp_front_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
 	add_test(NAME cp_pipe COMMAND $<TARGET_FILE:cp_pipe_tests>)
 	foreach(mutant IN ITEMS signal_at_parse virtual_wait_ignores_mask drain_skips_unknown worker_writes_cp retire_all overlap_ignored gate_ignored pages_first_only)

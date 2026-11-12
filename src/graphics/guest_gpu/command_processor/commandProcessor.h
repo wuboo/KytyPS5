@@ -17,6 +17,8 @@
 
 namespace Libs::Graphics {
 
+class GuestGpu;
+
 // S540 (KYTY_FLUSH_DRAWS=N, default 0 = off): read once per command processor.
 inline uint32_t FlushDrawsFromEnv() {
 	const char* value = std::getenv("KYTY_FLUSH_DRAWS");
@@ -87,7 +89,7 @@ public:
 	void SetDrawIndirectArgsBaseAddress(uint64_t draw_indirect_args_base_addr);
 	void SetDispatchIndirectArgsBaseAddress(uint64_t dispatch_indirect_args_base_addr);
 	[[nodiscard]] uint64_t GetDispatchIndirectArgsBaseAddress() const {
-		return m_dispatch_indirect_args_base_addr;
+		return Ds().dispatch_indirect_base;
 	}
 	void SetNumInstances(uint32_t num_instances);
 	void DrawIndex(DrawIndexArgs args);
@@ -125,8 +127,10 @@ public:
 
 	Pm4ProcessResult Process(Pm4Execution& execution, std::span<const uint32_t> commands);
 
-	// S479 (KYTY_CP_PIPE, cpPipe.cpp): the FIFO between the front (the PM4 parser) and the recorder (the handlers that draw and signal). Both run on the CP thread.
+	// S479 (KYTY_CP_PIPE, cpPipe.cpp): the FIFO between the front (the PM4 parser) and the recorder (the handlers that draw and signal). Both run on the CP thread,
+	// or (S549, KYTY_CP_FRONT_THREAD) the front runs on its own thread and Thread_Gpu only records.
 	[[nodiscard]] bool PipeOn() const { return m_pipe != nullptr; }
+	[[nodiscard]] bool PipeFrontOn() const;
 	void               PipeDrain(unsigned reason, uint32_t key); // runs every item in the FIFO; reason: 0 an opcode that must see the draws done, 1 wait, 2 end of stream; key: what for (diag histogram)
 	void             ProcessIndirectBuffer(std::span<const uint32_t> commands, bool chain);
 
@@ -135,15 +139,32 @@ public:
 private:
 	void ProcessPm4(Pm4Execution& execution);
 	void PipeInit();
+	void FrontParse(Pm4Execution& execution); // S549: graphicsRun.cpp
+	// S549 (KYTY_CP_FRONT_THREAD, cpPipe.cpp): Thread_Gpu hands the stream to the front thread and executes the FIFO until the front's End item.
+	void     PipeFrontRun(Pm4Execution& execution, GuestGpu* gpu);
+	void     PipeFrontThread();
+	void     PipeFrontExecute(uint64_t seq);
+	void     PipeFrontRelease(uint64_t done);
+	// Front side: true when this thread is the front of this CP. A Sync item: the recorder runs `handler` on the live state while the front waits; returns its length.
+	[[nodiscard]] bool OnFrontThread() const;
+	uint32_t PipeFrontSync(uint32_t kind, uint32_t opcode, const uint32_t* packet, uint32_t remaining_dw, uint32_t total_dw);
+	void     PipeFrontDrain(unsigned reason, uint32_t key);
+	void     PipeFrontEnd();
+	void     PipeFrontEnqueue(CpPipe::OpClass cls, uint32_t opcode, const uint32_t* packet, uint32_t packet_dw);
+	[[nodiscard]] bool PipeFrontCommandsPending() const;
 	void PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const uint32_t* packet, uint32_t packet_dw);
 	void PipeExecuteFront();
 	bool PipeOverlaps(uint64_t address, uint64_t size) const;
 	bool PipeWaitVirtual(uint64_t address, uint64_t size, uint32_t func, uint64_t ref, uint64_t mask, bool* satisfied);
 	[[nodiscard]] HW::Shader&     ExecSh() { return m_exec_sh != nullptr ? *m_exec_sh : m_sh_ctx; }
 	[[nodiscard]] HW::UserConfig& ExecUcfg() { return m_exec_ucfg != nullptr ? *m_exec_ucfg : m_ucfg; }
+	// S549: the draw state of the item being executed (the recorder), else the CP's own.
+	[[nodiscard]] const CpPipe::CpDrawState& Ds() const { return CpPipe::SelectDrawState(m_exec_ds, m_ds); }
 	void SuspendPm4();
 	void                CountDraw();
 	uint32_t            NumInstances();
+	// S549: the executed item's instance count (the front resolved it at the snapshot), else NumInstances().
+	uint32_t ExecNumInstances() { return m_exec_ds != nullptr ? m_exec_ds->num_instances : NumInstances(); }
 	const void*         IndexAddress(uint32_t first_index) const;
 	CommandScheduler&   GetScheduler() const { return m_renderer.GetCommandScheduler(); }
 	CommandBuffer&      CurrentBuffer() { return GetScheduler().Current(); }
@@ -153,14 +174,10 @@ private:
 	std::optional<HW::Context> m_saved_ctx;
 	HW::UserConfig m_ucfg;
 	HW::Shader     m_sh_ctx;
-	uint32_t       m_index_type_and_size              = 0;
-	uint32_t       m_index_buffer_size                = 0;
-	uint64_t       m_index_base_addr                  = 0;
-	uint64_t       m_draw_indirect_args_base_addr     = 0;
-	uint64_t       m_dispatch_indirect_args_base_addr = 0;
+	// Index type, sizes, bases, instance count (S549: one struct, a FIFO item carries a copy).
+	CpPipe::CpDrawState m_ds;
 	// Persistent draw state. Indirect draws leave the address of their last instance count,
 	// read only when a later draw inherits it.
-	uint32_t m_num_instances      = 1;
 	uint64_t m_num_instances_addr = 0;
 
 	const int m_interrupt_event_id;
@@ -173,6 +190,7 @@ private:
 	std::unique_ptr<PipeState> m_pipe;
 	HW::Shader*                m_exec_sh   = nullptr; // S479: the snapshot of the deferred draw / dispatch being executed
 	HW::UserConfig*            m_exec_ucfg = nullptr;
+	const CpPipe::CpDrawState* m_exec_ds   = nullptr; // S549: the draw state of the item the recorder executes (front thread on)
 };
 
 } // namespace Libs::Graphics

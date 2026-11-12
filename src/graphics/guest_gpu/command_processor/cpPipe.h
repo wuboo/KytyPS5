@@ -12,11 +12,16 @@
 #include "graphics/guest_gpu/pm4.h"
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 #include <vector>
+#if defined(_MSC_VER) || defined(__x86_64__)
+#include <immintrin.h>
+#endif
 
 namespace Libs::Graphics::CpPipe {
 
@@ -220,6 +225,20 @@ public:
 #endif
 	}
 
+	// S549: the front thread retires lazily: every item up to `seq` has run (the recorder's `done`).
+	void RetireUpTo(uint64_t seq) {
+		if (m_writes.empty() || m_writes.front().seq > seq) return; // items retire in order and writes are noted in order
+#ifdef KYTY_CPPIPE_MUTANT_RETIRE_ALL
+		m_writes.clear();
+#else
+		size_t kept = 0;
+		for (const auto& w: m_writes) {
+			if (w.seq > seq) m_writes[kept++] = w;
+		}
+		m_writes.resize(kept);
+#endif
+	}
+
 	void Clear() { m_writes.clear(); }
 	[[nodiscard]] size_t Size() const { return m_writes.size(); }
 
@@ -261,25 +280,76 @@ private:
 
 // The state of the CP (index type, instance count, bases, registers) belongs to the CP thread. A worker gets a snapshot and never writes the CP: every setter
 // goes through this gate (S478: the scout's replay wrote m_index_type_and_size and the GPU ran twice as long).
-inline bool& WorkerThreadFlag() {
-	static thread_local bool on_worker = false;
-	return on_worker;
+// S549 (KYTY_CP_FRONT_THREAD): with the front on its own thread the state belongs to the front; the recorder (Thread_Gpu executing FIFO items) may touch it only inside a
+// handoff (a Sync item: the front waits for it). One thread-local byte, so the gate costs what it did: bit 0 = pipeline worker, bit 1 = recorder outside a handoff.
+inline uint8_t& CpGateFlags() {
+	static thread_local uint8_t flags = 0;
+	return flags;
+}
+inline constexpr uint8_t kGateWorker   = 1u;
+inline constexpr uint8_t kGateRecorder = 2u;
+
+inline bool WorkerThreadFlag() {
+	return (CpGateFlags() & kGateWorker) != 0;
 }
 
 class WorkerScope {
 public:
-	WorkerScope() { WorkerThreadFlag() = true; }
-	~WorkerScope() { WorkerThreadFlag() = false; }
+	WorkerScope() { CpGateFlags() |= kGateWorker; }
+	~WorkerScope() { CpGateFlags() &= static_cast<uint8_t>(~kGateWorker); }
 	WorkerScope(const WorkerScope&)            = delete;
 	WorkerScope& operator=(const WorkerScope&) = delete;
 };
 
+// S549: the recorder loop runs inside a RecorderScope; a Sync item (the front is parked) opens a HandoffScope.
+class RecorderScope {
+public:
+	RecorderScope() { CpGateFlags() |= kGateRecorder; }
+	~RecorderScope() { CpGateFlags() &= static_cast<uint8_t>(~kGateRecorder); }
+	RecorderScope(const RecorderScope&)            = delete;
+	RecorderScope& operator=(const RecorderScope&) = delete;
+};
+
+class HandoffScope {
+public:
+	HandoffScope() : m_saved(CpGateFlags()) { CpGateFlags() &= static_cast<uint8_t>(~kGateRecorder); }
+	~HandoffScope() { CpGateFlags() = m_saved; }
+	HandoffScope(const HandoffScope&)            = delete;
+	HandoffScope& operator=(const HandoffScope&) = delete;
+
+private:
+	uint8_t m_saved;
+};
+
 // True when the calling thread may write CP state.
 inline bool MayWriteCpState() {
-#ifdef KYTY_CPPIPE_MUTANT_WORKER_WRITES_CP
+#if defined(KYTY_CPPIPE_MUTANT_WORKER_WRITES_CP)
 	return true;
+#elif defined(KYTY_CPPIPE_MUTANT_RECORDER_WRITES_FRONT)
+	return (CpGateFlags() & kGateWorker) == 0;
 #else
-	return !WorkerThreadFlag();
+	return CpGateFlags() == 0;
+#endif
+}
+
+// S549: the draw state the front sets with INDEX_TYPE / INDEX_BASE / INDEX_BUFFER_SIZE / NUM_INSTANCES / SET_BASE. A FIFO item carries a copy; the recorder reads the
+// copy of the item it executes (SelectDrawState), never the CP's own (S478: the scout that read and wrote the CP's index type).
+struct CpDrawState {
+	uint32_t index_type_and_size    = 0;
+	uint32_t index_buffer_size      = 0;
+	uint64_t index_base_addr        = 0;
+	uint64_t draw_indirect_base     = 0;
+	uint64_t dispatch_indirect_base = 0;
+	uint32_t num_instances          = 1;
+};
+
+// Mutant KYTY_CPPIPE_MUTANT_FRONT_LIVE_STATE: the recorder reads the live (front) state instead of its item's copy.
+inline const CpDrawState& SelectDrawState(const CpDrawState* exec, const CpDrawState& live) {
+#ifdef KYTY_CPPIPE_MUTANT_FRONT_LIVE_STATE
+	(void)exec;
+	return live;
+#else
+	return exec != nullptr ? *exec : live;
 #endif
 }
 
@@ -387,6 +457,138 @@ inline WriteRange DecodeCopyData(const uint32_t* payload) {
 	return {payload[3] | (static_cast<uint64_t>(payload[4]) << 32u), ((payload[0] >> 16u) & 0x1u) != 0 ? 8u : 4u};
 }
 
+
+// S549 (KYTY_CP_FRONT_THREAD=0|1|shadow, default 0, needs KYTY_CP_PIPE=1): the PM4 front (parser, register handlers, snapshots, worker jobs, waits) runs on its own
+// thread; Thread_Gpu only executes the FIFO items (the recorder). Off: the S479 path, unchanged. shadow: on, and the recorder checks a hash of every item's snapshot.
+enum class FrontMode : uint8_t { Off, On, Shadow };
+
+inline FrontMode ParseFrontMode(const char* text) {
+	if (text == nullptr) return FrontMode::Off;
+	if (std::strcmp(text, "1") == 0) return FrontMode::On;
+	if (std::strcmp(text, "shadow") == 0) return FrontMode::Shadow;
+	return FrontMode::Off;
+}
+
+inline FrontMode FrontEnvMode() {
+	static const FrontMode mode = ParseFrontMode(std::getenv("KYTY_CP_FRONT_THREAD"));
+	return mode;
+}
+
+// 64-bit words of a snapshot, for the shadow check of the hand-over (the tail bytes are folded in one by one).
+inline uint64_t HashBytes(const void* data, size_t size, uint64_t h = 0xcbf29ce484222325ull) {
+	const auto* bytes = static_cast<const unsigned char*>(data);
+	size_t      i     = 0;
+	for (; i + 8u <= size; i += 8u) {
+		uint64_t word = 0;
+		std::memcpy(&word, bytes + i, 8u);
+		h = (h ^ word) * 0x100000001b3ull;
+		h ^= h >> 29u;
+	}
+	for (; i < size; i++) h = (h ^ bytes[i]) * 0x100000001b3ull;
+	return h;
+}
+
+inline void FrontCpuRelax() {
+#if defined(_MSC_VER) || defined(__x86_64__)
+	_mm_pause();
+#else
+	std::this_thread::yield();
+#endif
+}
+
+// S549: the hand-over of FIFO items between the front thread (producer) and the recorder (consumer). Items have sequence numbers 1, 2, ...; item s lives in slot
+// s % capacity, which the front may fill once item s - capacity has been executed (done >= s - capacity). The front parks on `done` (atomic wait) with a target; the
+// recorder notifies only when it reaches the target, so a full FIFO costs one wake-up per `hysteresis` items. The recorder never parks: it spins (the CP has a core
+// to itself) and calls `idle` while it waits, which is where Thread_Gpu runs the commands of guest threads (a front that faults waits for one of them).
+// Mutant KYTY_CPPIPE_MUTANT_FRONT_EARLY_REUSE: the front does not wait for the slot's previous item.
+class FrontRing {
+public:
+	explicit FrontRing(size_t capacity) : m_capacity(capacity < 2 ? 2 : capacity), m_hysteresis(m_capacity / 2 != 0 ? m_capacity / 2 : 1) {}
+
+	[[nodiscard]] size_t Capacity() const { return m_capacity; }
+	[[nodiscard]] size_t Slot(uint64_t seq) const { return static_cast<size_t>(seq % m_capacity); }
+
+	// --- front ---
+	[[nodiscard]] uint64_t NextSeq() const { return m_next; }
+	[[nodiscard]] uint64_t LastCommitted() const { return m_next - 1; }
+	// Blocks until the slot of NextSeq() may be written. Returns true when it had to wait.
+	bool WaitSlot() {
+#ifdef KYTY_CPPIPE_MUTANT_FRONT_EARLY_REUSE
+		return false;
+#else
+		if (m_next <= m_capacity) return false;
+		const uint64_t need = m_next - m_capacity;
+		if (m_done.load(std::memory_order_acquire) >= need) return false;
+		// Park until `hysteresis` slots are free, not one: fewer wake-ups on the CP.
+		const uint64_t target = need + m_hysteresis - 1u < m_next ? need + m_hysteresis - 1u : m_next - 1u;
+		Park(need, target);
+		return true;
+#endif
+	}
+	// Publishes item NextSeq() (its slot is filled) and returns its sequence number.
+	uint64_t Commit() {
+		const uint64_t seq = m_next++;
+		m_tail.store(seq, std::memory_order_release);
+		return seq;
+	}
+	// Blocks until the recorder has executed item `seq`. A short tail is spun (a hand-over is on the CP's critical path), a long one parked.
+	bool WaitDone(uint64_t seq) {
+		if (m_done.load(std::memory_order_acquire) >= seq) return false;
+		Park(seq, seq > kSpinItems ? seq - kSpinItems : seq);
+		return true;
+	}
+	[[nodiscard]] uint64_t Done() const { return m_done.load(std::memory_order_acquire); }
+
+	// --- recorder ---
+	// Blocks until item `seq` is committed; `idle()` runs between polls. Returns the polls that found nothing (0: no wait).
+	template <class Idle>
+	uint64_t WaitItem(uint64_t seq, Idle&& idle) {
+		uint64_t polls = 0;
+		while (m_tail.load(std::memory_order_acquire) < seq) {
+			FrontCpuRelax();
+			if ((++polls & 63u) == 0) idle();
+		}
+		return polls;
+	}
+	void MarkDone(uint64_t seq) {
+		m_done.store(seq, std::memory_order_seq_cst);
+		uint64_t target = m_target.load(std::memory_order_seq_cst);
+		// The CAS keeps a newer target the front set after a spurious wake-up (a plain store of 0 could erase it and leave the front parked for good).
+		if (target != 0 && seq >= target && m_target.compare_exchange_strong(target, 0, std::memory_order_seq_cst)) m_done.notify_one();
+	}
+	[[nodiscard]] uint64_t Tail() const { return m_tail.load(std::memory_order_acquire); }
+
+private:
+	static constexpr uint64_t kSpinItems = 2;
+
+	// Waits for done >= need: spins while done >= park_until (the last items), parks before.
+	void Park(uint64_t need, uint64_t park_until) {
+		for (uint32_t i = 0; i < 2000u; i++) { // ~10-20 us of spinning first
+			if (m_done.load(std::memory_order_acquire) >= need) return;
+			FrontCpuRelax();
+		}
+		for (;;) {
+			uint64_t done = m_done.load(std::memory_order_seq_cst);
+			if (done >= need) return;
+			if (done < park_until) {
+				m_target.store(park_until, std::memory_order_seq_cst);
+				done = m_done.load(std::memory_order_seq_cst);
+				if (done < park_until) m_done.wait(done, std::memory_order_seq_cst);
+				uint64_t mine = park_until;
+				m_target.compare_exchange_strong(mine, 0, std::memory_order_seq_cst);
+				continue;
+			}
+			FrontCpuRelax();
+		}
+	}
+
+	size_t                m_capacity;
+	uint64_t              m_hysteresis;
+	uint64_t              m_next = 1; // front-private
+	std::atomic<uint64_t> m_tail {0};
+	std::atomic<uint64_t> m_done {0};
+	std::atomic<uint64_t> m_target {0}; // != 0: the front is parked until done reaches it
+};
 
 // KYTY_CP_PIPE_SIGNALS: how far a worker may read ahead of the writes still waiting in the FIFO. fifo (default): a draw's job starts only after every ordered item before
 // it (CPU writes, dispatches, signals, barriers, flips) has run, which is the order the guest memory saw before the pipeline existed; it costs about 0.5 ms/flip (S479).

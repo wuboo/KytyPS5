@@ -445,6 +445,11 @@ enum class Counter : uint32_t {
 	// command buffer already had that pipeline bound (KYTY_SKIP_SAME_PIPELINE=1); ImageInfo::UpdateSize served from / missed in the
 	// thread's memo, and shadow disagreements (KYTY_IMAGE_SIZE_MEMO=1|shadow).
 	BackingNolockReadN, PipelineSkipN, SizeMemoHitN, SizeMemoMissN, SizeMemoNeN,
+	// S549 (KYTY_CP_FRONT_THREAD): FIFO items the recorder executed for the front thread; the front's wall time in ProcessPm4; its waits for a free slot (parks, ns);
+	// hand-overs to the recorder (Sync items: drain-class packets, guest commands) and their ns; drains (the front waits for the FIFO to empty) and their ns; the
+	// recorder's ns waiting for an item (on the CP); guest commands the waiting recorder ran; shadow hash checks of item snapshots and disagreements.
+	FrontItemsN, FrontRunNs, FrontFullWaitN, FrontFullWaitNs, FrontSyncN, FrontSyncNs, FrontDrainN, FrontDrainNs, FrontRecWaitNs, FrontIdleCmdN, FrontShadowN,
+	FrontShadowNeN,
 	Count,
 };
 

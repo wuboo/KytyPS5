@@ -42,6 +42,7 @@ inline int Affinity() {
 namespace Common::CpTuning {
 void ApplyToCpThread();    // once, on Thread_Gpu (also names the thread for the thread-cpu snapshot)
 void ApplyToGuestThread(); // at the start of every guest (kernel pthread) thread
+void ApplyToFrontThread(); // S549: the CP front thread (KYTY_CP_FRONT_THREAD): named "CpFront", kept off the CP's core like a guest thread
 } // namespace Common::CpTuning
 
 #endif /* KYTY_COMMON_CPTUNING_H_ */

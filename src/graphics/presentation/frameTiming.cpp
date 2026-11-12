@@ -717,6 +717,18 @@ constexpr const char* kCounterNames[] = {
     "size_memo_hit_n",
     "size_memo_miss_n",
     "size_memo_ne_n",
+    "front_items_n",
+    "front_run_ns",
+    "front_full_wait_n",
+    "front_full_wait_ns",
+    "front_sync_n",
+    "front_sync_ns",
+    "front_drain_n",
+    "front_drain_ns",
+    "front_rec_wait_ns",
+    "front_idle_cmd_n",
+    "front_shadow_n",
+    "front_shadow_ne_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

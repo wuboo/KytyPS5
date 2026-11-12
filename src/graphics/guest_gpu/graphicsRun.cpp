@@ -187,14 +187,9 @@ void CommandProcessor::Reset() {
 	m_ucfg.Reset();
 	m_ctx.Reset();
 	m_saved_ctx.reset();
-	m_index_type_and_size              = 0;
-	m_index_buffer_size                = 0;
-	m_index_base_addr                  = 0;
-	m_num_instances                    = 1;
-	m_num_instances_addr               = 0;
-	m_predicate_skip                   = false;
-	m_draw_indirect_args_base_addr     = 0;
-	m_dispatch_indirect_args_base_addr = 0;
+	m_ds                 = {};
+	m_num_instances_addr = 0;
+	m_predicate_skip     = false;
 }
 
 void CommandProcessor::ApplyContextStateOperation(ContextStateOperation operation) {
@@ -628,9 +623,22 @@ Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
 	} execution_scope(execution);
 
 	if (m_pipe == nullptr) PipeInit(); // S479 (KYTY_CP_PIPE)
-	ProcessPm4(execution);
+	if (PipeFrontOn()) {
+		PipeFrontRun(execution, g_gpu_state); // S549 (KYTY_CP_FRONT_THREAD): the front thread parses, this thread records
+	} else {
+		ProcessPm4(execution);
+	}
 	return execution.m_buffer_stack.empty() ? Pm4ProcessResult::Complete
 	                                        : Pm4ProcessResult::Blocked;
+}
+
+// S549: the front thread's entry for one stream (Process runs PipeFrontRun on Thread_Gpu meanwhile). The execution is shared: the front owns it until its End item.
+void CommandProcessor::FrontParse(Pm4Execution& execution) {
+	struct ExecutionScope {
+		explicit ExecutionScope(Pm4Execution& execution) { g_current_execution = &execution; }
+		~ExecutionScope() { g_current_execution = nullptr; }
+	} execution_scope(execution);
+	ProcessPm4(execution);
 }
 
 void CommandProcessor::ProcessIndirectBuffer(std::span<const uint32_t> commands, bool chain) {
@@ -653,8 +661,12 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 	}
 	if (RdHazard::Enabled()) RdHazard::MaybeDump(FrameTiming::GuestFlips()); // S477 D2 DIAG
 	const bool debug_dump = graphics_debug_dump_enabled();
+	const bool front      = OnFrontThread(); // S549: this is the front thread of a CP with KYTY_CP_FRONT_THREAD (g_gpu_state is null here)
 	while (!execution.m_buffer_stack.empty()) {
-		if (g_gpu_state != nullptr) {
+		if (front) {
+			// S479 rule on two threads: a guest command runs on Thread_Gpu after every item parsed before it (a Sync item).
+			if (PipeFrontCommandsPending()) PipeFrontSync(2, 0, nullptr, 0, 0);
+		} else if (g_gpu_state != nullptr) {
 			// S479: a command from a guest thread (a fault readback, an unmap) must see every draw parsed before it, as it did when draws ran where they were parsed.
 			if (m_pipe != nullptr && g_gpu_state->m_pending_commands.load(std::memory_order_acquire) != 0) PipeDrain(0, 0x1f0);
 			CpPhases::Scope phase(CpPhases::Phase::Cmds);
@@ -727,8 +739,28 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 				uint64_t table = 0, table_size = 0;
 				if (CpPipe::IndirectTableRange(packet + 1, &table, &table_size) && PipeOverlaps(table, table_size)) PipeDrain(0, opcode);
 			}
-			if (pipe_cls == CpPipe::OpClass::Drain) {
+			if (pipe_cls == CpPipe::OpClass::Drain && !front) {
 				PipeDrain(0, opcode == Pm4::IT_NOP ? 256u + KYTY_PM4_R(packet_header) : opcode);
+			}
+			if (front && pipe_cls == CpPipe::OpClass::Drain) {
+				// S549: a drain-class handler draws, signals or reads the predication on Thread_Gpu, on the front's live state, while the front waits.
+				const uint32_t packet_dw = PipeFrontSync(1, opcode, packet, remaining_dw, total_dw);
+				EXIT_IF(packet_dw > remaining_dw);
+				if (execution.m_suspended) {
+					if (RdHazard::Enabled()) RdHazard::AtCallEnd(); // S477 D2 DIAG
+					return;
+				}
+				cursor.offset_dw += packet_dw;
+				execution.m_made_progress = true;
+				if (!execution.m_next_buffer.empty()) {
+					if (execution.m_chain) {
+						cursor = {execution.m_next_buffer};
+					} else {
+						execution.m_buffer_stack.push_back({execution.m_next_buffer});
+					}
+					execution.m_next_buffer = {};
+				}
+				continue;
 			}
 		}
 
@@ -794,24 +826,24 @@ static void SetCpMember(T& member, V value) {
 }
 
 void CommandProcessor::SetIndexType(uint32_t index_type_and_size) {
-	SetCpMember(m_index_type_and_size, index_type_and_size & 0x3u);
+	SetCpMember(m_ds.index_type_and_size, index_type_and_size & 0x3u);
 }
 
 void CommandProcessor::SetIndexBaseAddress(uint64_t index_base_addr) {
-	SetCpMember(m_index_base_addr, index_base_addr);
+	SetCpMember(m_ds.index_base_addr, index_base_addr);
 }
 
 void CommandProcessor::SetIndexBufferSize(uint32_t index_buffer_size) {
-	SetCpMember(m_index_buffer_size, index_buffer_size);
+	SetCpMember(m_ds.index_buffer_size, index_buffer_size);
 }
 
 void CommandProcessor::SetDrawIndirectArgsBaseAddress(uint64_t draw_indirect_args_base_addr) {
-	SetCpMember(m_draw_indirect_args_base_addr, draw_indirect_args_base_addr);
+	SetCpMember(m_ds.draw_indirect_base, draw_indirect_args_base_addr);
 }
 
 void CommandProcessor::SetDispatchIndirectArgsBaseAddress(
     uint64_t dispatch_indirect_args_base_addr) {
-	SetCpMember(m_dispatch_indirect_args_base_addr, dispatch_indirect_args_base_addr);
+	SetCpMember(m_ds.dispatch_indirect_base, dispatch_indirect_args_base_addr);
 }
 
 void CommandProcessor::SetNumInstances(uint32_t num_instances) {
@@ -819,16 +851,16 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances) {
 		num_instances = 1;
 	}
 
-	SetCpMember(m_num_instances, num_instances);
+	SetCpMember(m_ds.num_instances, num_instances);
 	SetCpMember(m_num_instances_addr, uint64_t {0});
 }
 
 uint32_t CommandProcessor::NumInstances() {
 	if (m_num_instances_addr != 0) {
-		SetCpMember(m_num_instances, *reinterpret_cast<const uint32_t*>(m_num_instances_addr));
+		SetCpMember(m_ds.num_instances, *reinterpret_cast<const uint32_t*>(m_num_instances_addr));
 		SetCpMember(m_num_instances_addr, uint64_t {0});
 	}
-	return m_num_instances;
+	return m_ds.num_instances;
 }
 
 void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t wait_op,
@@ -887,22 +919,23 @@ void CommandProcessor::CountDraw() {
 
 void CommandProcessor::DrawIndex(DrawIndexArgs args) {
 	CountDraw();
-	args.index_type_and_size = m_index_type_and_size;
+	args.index_type_and_size = Ds().index_type_and_size;
 	if (args.instance_count == 0) {
-		args.instance_count = NumInstances();
+		args.instance_count = ExecNumInstances();
 	}
 	m_renderer.GetRenderExecutor().DrawIndex(CurrentBuffer(), args);
 }
 
 const void* CommandProcessor::IndexAddress(uint32_t first_index) const {
-	uint64_t index_size = 0;
-	switch (m_index_type_and_size) {
+	const auto& ds         = Ds(); // S549: the executed item's copy when the front runs on its own thread
+	uint64_t    index_size = 0;
+	switch (ds.index_type_and_size) {
 		case 0: index_size = 2; break;
 		case 1: index_size = 4; break;
 		case 2: index_size = 1; break;
-		default: EXIT("unknown index_type_and_size: %u\n", m_index_type_and_size);
+		default: EXIT("unknown index_type_and_size: %u\n", ds.index_type_and_size);
 	}
-	return reinterpret_cast<const void*>(m_index_base_addr + first_index * index_size);
+	return reinterpret_cast<const void*>(ds.index_base_addr + first_index * index_size);
 }
 
 void CommandProcessor::DrawIndexOffset(uint32_t index_offset, uint32_t index_count) {
@@ -961,7 +994,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
                                          uint32_t draw_initiator, bool indexed) {
 	CountDraw();
 	EXIT_NOT_IMPLEMENTED((draw_initiator & ~0x20u) != (indexed ? 0u : 2u));
-	EXIT_NOT_IMPLEMENTED(m_draw_indirect_args_base_addr == 0);
+	EXIT_NOT_IMPLEMENTED(m_ds.draw_indirect_base == 0);
 	// The guest records match Vulkan's indirect commands byte for byte.
 	EXIT_NOT_IMPLEMENTED((stride_in_bytes & 3u) != 0 ||
 	                     stride_in_bytes < (indexed ? sizeof(vk::DrawIndexedIndirectCommand)
@@ -976,7 +1009,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	Common::DebugCounters::Add(Common::DebugCounters::Counter::IndirectDraws, draw_count);
 
 	auto&      executor  = m_renderer.GetRenderExecutor();
-	const auto args_addr = m_draw_indirect_args_base_addr + data_offset;
+	const auto args_addr = m_ds.draw_indirect_base + data_offset;
 	// NUM_INSTANCES keeps the last draw's instance count.
 	m_num_instances_addr = args_addr + static_cast<uint64_t>(draw_count - 1) * stride_in_bytes +
 	                       offsetof(vk::DrawIndirectCommand, instanceCount);
@@ -984,18 +1017,18 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	// (no CPU read of the args). The executor declines every other draw (ig_request.declined); those take the records path below.
 	MeshIndirectRequest mesh_request;
 	mesh_request.mode              = MeshIndirect::EnvMode();
-	mesh_request.index_buffer_size = m_index_buffer_size;
+	mesh_request.index_buffer_size = m_ds.index_buffer_size;
 	if (mesh_request.mode == MeshIndirect::Mode::On && indexed && draw_count == 1 && count_addr == nullptr &&
 	    registers.vertex_offset == Pm4::SH_NOP && registers.instance_offset == Pm4::SH_NOP &&
-	    registers.index_offset == Pm4::SH_NOP && m_index_buffer_size != 0 && m_index_type_and_size < 2 &&
+	    registers.index_offset == Pm4::SH_NOP && m_ds.index_buffer_size != 0 && m_ds.index_type_and_size < 2 &&
 	    m_renderer.GetGraphics().draw_indirect_first_instance) {
 		IndirectGpuRequest ig_request;
 		ig_request.mode        = IndirectGpu::Mode::On;
 		ig_request.args_addr   = args_addr;
 		mesh_request.args_addr = args_addr;
 		FrameTiming::Add(FrameTiming::Counter::IndirectGpuCandidateN);
-		DrawIndex({.index_count    = m_index_buffer_size,
-		           .index_addr     = reinterpret_cast<const void*>(m_index_base_addr),
+		DrawIndex({.index_count    = m_ds.index_buffer_size,
+		           .index_addr     = reinterpret_cast<const void*>(m_ds.index_base_addr),
 		           .instance_count = 1,
 		           .offset_source  = DrawOffsetSource::IndirectArgs,
 		           .indirect_gpu   = &ig_request,
@@ -1012,16 +1045,16 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		if (!indexed && executor.DrawAuto(CurrentBuffer(), {.indirect = records})) {
 			return;
 		}
-		if (indexed && m_index_buffer_size != 0 &&
-		    executor.DrawIndex(CurrentBuffer(), {.index_count         = m_index_buffer_size,
+		if (indexed && m_ds.index_buffer_size != 0 &&
+		    executor.DrawIndex(CurrentBuffer(), {.index_count         = m_ds.index_buffer_size,
 		                                         .index_addr          = IndexAddress(0),
-		                                         .index_type_and_size = m_index_type_and_size,
+		                                         .index_type_and_size = m_ds.index_type_and_size,
 		                                         .indirect            = records})) {
 			return;
 		}
 	}
 
-	const uint32_t max_indices = m_index_buffer_size != 0 ? m_index_buffer_size : UINT32_MAX;
+	const uint32_t max_indices = m_ds.index_buffer_size != 0 ? m_ds.index_buffer_size : UINT32_MAX;
 	for (uint32_t i = 0; i < draw_count; i++) {
 		const auto addr = args_addr + static_cast<uint64_t>(i) * stride_in_bytes;
 		if (!indexed) {
@@ -1041,7 +1074,7 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 		executor.DrawIndex(CurrentBuffer(), {.index_count = std::min(args.indexCount, max_indices),
 		                                     .index_addr  = IndexAddress(args.firstIndex),
 		                                     .instance_count      = args.instanceCount,
-		                                     .index_type_and_size = m_index_type_and_size,
+		                                     .index_type_and_size = m_ds.index_type_and_size,
 		                                     .base_vertex         = args.vertexOffset,
 		                                     .first_instance      = args.firstInstance,
 		                                     .offset_source = DrawOffsetSource::IndirectArgs});
@@ -1075,7 +1108,7 @@ void CommandProcessor::DispatchIndirect(uint64_t args_addr, uint32_t mode) {
 void CommandProcessor::DrawIndexAuto(DrawAutoArgs args) {
 	CountDraw();
 	if (args.instance_count == 0) {
-		args.instance_count = NumInstances();
+		args.instance_count = ExecNumInstances();
 	}
 	m_renderer.GetRenderExecutor().DrawAuto(CurrentBuffer(), args);
 }

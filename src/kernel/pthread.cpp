@@ -4505,10 +4505,16 @@ void ApplyToGuestThread() {
 	if (mask != 0) SetThreadAffinityMask(GetCurrentThread(), static_cast<DWORD_PTR>(mask));
 }
 
+void ApplyToFrontThread() {
+	NameCurrentThreadWin("CpFront");
+	ApplyToGuestThread();
+}
+
 } // namespace Common::CpTuning
 #else
 namespace Common::CpTuning {
 void ApplyToCpThread() {}
 void ApplyToGuestThread() {}
+void ApplyToFrontThread() {}
 } // namespace Common::CpTuning
 #endif
