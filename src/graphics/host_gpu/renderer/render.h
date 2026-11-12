@@ -235,17 +235,30 @@ public:
 	void ProcessPssr(CommandBuffer& buffer, const Pssr::Request& request);
 
 
-	void PrepareBindings(const ShaderStageRuntime& runtime, PreparedBindings& prepared);
+	void PrepareBindings(const ShaderStageRuntime& runtime, PreparedBindings& prepared,
+	                     const PredecodeDraw* predecode = nullptr);
 	void                           FindBuffers(std::span<PreparedBindings* const> stages);
 	void                           RebindBuffers(PreparedBindings& bindings);
 	void                           RebindImages(PreparedBindings& bindings);
 	void CommitBindings(CommandBuffer& buffer, vk::PipelineBindPoint pipeline_bind_point,
 	                    const PipelineCache::Pipeline&     pipeline,
 	                    std::span<PreparedBindings* const> bindings);
+	// S558 shadow (KYTY_CP_PREDECODE=shadow): with `shadow`, the description computed before FindImage is compared with the worker's slot
+	// and *shadow_ne set when they differ; the result is the same as without.
 	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
-	                                            const ShaderRecompiler::IR::DescriptorValue& value);
+	                                            const ShaderRecompiler::IR::DescriptorValue& value,
+	                                            const PreTex* shadow = nullptr, bool* shadow_ne = nullptr);
 
 private:
+	// The part of ResolveTexture from FindImage on (S558: shared by the recorder's own decode and a worker's PreTex).
+	[[nodiscard]] TextureBinding FindTextureImage(const ShaderRecompiler::IR::ImageResource& resource,
+	                                              const ShaderTextureResource& descriptor,
+	                                              TextureCache::ImageDesc& desc, bool shader_conversion,
+	                                              Prospero::BufferFormat format, vk::Format pixel_format,
+	                                              vk::Format view_format, bool storage);
+	[[nodiscard]] TextureBinding PredecodedTexture(const ShaderRecompiler::IR::ImageResource&   resource,
+	                                               const ShaderRecompiler::IR::DescriptorValue& value,
+	                                               const PreTex* slot, Predecode::Counts& counts);
 	// False, with nothing drawn, when the draw's indirect records need CPU counts.
 	bool DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args);
 	bool DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args);
@@ -302,6 +315,8 @@ private:
 	// S511: guest ranges deferred buffer-writes cover, dropped when the barrier is recorded.
 	std::vector<DeferBarrier::Range>      m_pending_writes;
 	bool                                  m_lod_stats = Config::LodStatsEnabled();
+	// S558 (KYTY_CP_PREDECODE): JoinJob accepted the job of the draw PrepareDrawRenderState prepared last (its stages are bound right after).
+	bool                                  m_predecode_joined = false;
 	GraphicsBindings                     m_graphics_bindings;
 	// The current draw's targets; PrepareDrawRenderState resolves them again for each draw.
 	DrawTargets                           m_targets;

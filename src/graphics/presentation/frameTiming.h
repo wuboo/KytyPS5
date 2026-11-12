@@ -456,6 +456,10 @@ enum class Counter : uint32_t {
 	// S552: FindImage keys answered by the direct-mapped front of m_exact_images and shadow disagreements (KYTY_EXACT_FRONT); image LRU
 	// touches skipped as no-ops and shadow disagreements (KYTY_LRU_TOUCH_SKIP).
 	ExactFrontHitN, ExactFrontNeN, LruSkipN, LruSkipNeN,
+	// S558 (KYTY_CP_PREDECODE=1|shadow): draw-stage images whose description came from the pipeline worker (shadow: compared), that the worker
+	// declined, that had no usable predecoded stage (no job, JoinJob rejected it, another snapshot); shadow disagreements; ns the workers spent
+	// predecoding (added by the recorder from the jobs it joined).
+	PredecodeImgN, PredecodeDeclineN, PredecodeNojobN, PredecodeNeN, PredecodeWorkerNs,
 	Count,
 };
 

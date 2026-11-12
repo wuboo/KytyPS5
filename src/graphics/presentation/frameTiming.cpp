@@ -736,6 +736,11 @@ constexpr const char* kCounterNames[] = {
     "exact_front_ne_n",
     "lru_skip_n",
     "lru_skip_ne_n",
+    "predecode_img_n",
+    "predecode_decline_n",
+    "predecode_nojob_n",
+    "predecode_ne_n",
+    "predecode_worker_ns",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

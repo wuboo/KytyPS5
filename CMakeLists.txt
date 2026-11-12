@@ -1672,6 +1672,15 @@ foreach(mutant IN ITEMS NO_ADDRESS NO_SIZE NO_MIPS)
 	target_include_directories(image_size_memo_mutant_${mutant}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(image_size_memo_mutant_${mutant}_tests PRIVATE KYTY_SIZEMEMO_MUTANT_${mutant}=1)
 endforeach()
+# S558 KYTY_CP_PREDECODE: header-only protocol of the worker T# predecode (texturePredecode.h), fake jobs on two worker threads. Mutants (each must be
+# caught, WILL_FAIL): the worker decodes its previous job's snapshot; the recorder uses a job JoinJob rejected.
+add_executable(cp_predecode_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPredecodeTests.cpp")
+target_include_directories(cp_predecode_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS STALE_SNAPSHOT NO_JOIN)
+	add_executable(cp_predecode_mutant_${mutant}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPredecodeTests.cpp")
+	target_include_directories(cp_predecode_mutant_${mutant}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_predecode_mutant_${mutant}_tests PRIVATE KYTY_PREDECODE_MUTANT_${mutant}=1)
+endforeach()
 # S552 KYTY_RT_PASS_MEMO: header-only key of the colour-target slot memo, pinned with fake registers.
 add_executable(rt_pass_memo_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RtPassMemoTests.cpp")
 target_include_directories(rt_pass_memo_tests PRIVATE ${inc_headers})
@@ -1965,6 +1974,11 @@ if(BUILD_TESTING)
 	foreach(mutant IN ITEMS NO_ADDRESS NO_SIZE NO_MIPS)
 		add_test(NAME image_size_memo_mutant_${mutant} COMMAND $<TARGET_FILE:image_size_memo_mutant_${mutant}_tests>)
 		set_tests_properties(image_size_memo_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME cp_predecode COMMAND $<TARGET_FILE:cp_predecode_tests>)
+	foreach(mutant IN ITEMS STALE_SNAPSHOT NO_JOIN)
+		add_test(NAME cp_predecode_mutant_${mutant} COMMAND $<TARGET_FILE:cp_predecode_mutant_${mutant}_tests>)
+		set_tests_properties(cp_predecode_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
 	add_test(NAME rt_pass_memo COMMAND $<TARGET_FILE:rt_pass_memo_tests>)
 	foreach(mutant IN ITEMS NO_MASK PREFIX)
@@ -2687,6 +2701,7 @@ if(BUILD_TESTING)
 	                 drs_no_zero_tests drs_no_zero_mutant_zero_all_tests
 	                 image_size_memo_tests image_size_memo_mutant_NO_ADDRESS_tests image_size_memo_mutant_NO_SIZE_tests image_size_memo_mutant_NO_MIPS_tests
 	                 rt_pass_memo_tests rt_pass_memo_mutant_NO_MASK_tests rt_pass_memo_mutant_PREFIX_tests
+	                 cp_predecode_tests cp_predecode_mutant_STALE_SNAPSHOT_tests cp_predecode_mutant_NO_JOIN_tests
 	                 cp_phases_mutant_ignore_shader_tests cp_phases_mutant_ignore_generation_tests
 	                 cp_wait_diag_tests cp_wait_diag_mutant_no_cause_tests)
 	foreach(mutant IN LISTS KYTY_DCC_KNOWN_MUTANTS)
