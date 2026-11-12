@@ -1065,15 +1065,40 @@ void OnQueueSubmit() {
 }
 
 namespace {
-thread_local bool t_thread_mute = false; // S479: a pipeline worker's timers would add its time to the CP's columns
-}
+thread_local bool      t_thread_mute = false;  // S479: a pipeline worker's timers would add its time to the CP's columns
+thread_local uint64_t* t_thread_buf  = nullptr; // S549: the CP front thread adds here (its counters share cache lines with the recorder's)
+} // namespace
 
 void SetThreadMute(bool mute) {
 	t_thread_mute = mute;
 }
 
+void SetThreadBuffered(bool buffered) {
+	if (buffered && t_thread_buf == nullptr) {
+		t_thread_buf = new uint64_t[static_cast<size_t>(Counter::Count)](); // one per front thread, never freed (the thread never ends)
+	} else if (!buffered && t_thread_buf != nullptr) {
+		FlushThreadCounters();
+		delete[] t_thread_buf;
+		t_thread_buf = nullptr;
+	}
+}
+
+void FlushThreadCounters() {
+	if (t_thread_buf == nullptr) return;
+	for (size_t i = 0; i < static_cast<size_t>(Counter::Count); i++) {
+		if (t_thread_buf[i] != 0) {
+			g_counters[i].fetch_add(t_thread_buf[i], std::memory_order_relaxed);
+			t_thread_buf[i] = 0;
+		}
+	}
+}
+
 void Add(Counter counter, uint64_t value) {
 	if (t_thread_mute) return;
+	if (t_thread_buf != nullptr) {
+		t_thread_buf[static_cast<size_t>(counter)] += value;
+		return;
+	}
 	g_counters[static_cast<size_t>(counter)].fetch_add(value, std::memory_order_relaxed);
 }
 

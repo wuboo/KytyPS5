@@ -578,6 +578,7 @@ bool CommandProcessor::PipeFrontCommandsPending() const {
 void CommandProcessor::PipeFrontThread() {
 	t_front_cp = this;
 	Common::CpTuning::ApplyToFrontThread(); // named "CpFront" for the thread-cpu snapshot; off the CP's core when KYTY_CP_AFFINITY is set
+	FrameTiming::SetThreadBuffered(true);   // flushed at the end of every stream, before the End item
 	auto&    p    = *m_pipe;
 	uint32_t seen = 0;
 	for (;;) {
@@ -594,6 +595,7 @@ void CommandProcessor::PipeFrontThread() {
 		const auto t0 = FrameTiming::SteadyNowNs();
 		FrontParse(*p.front_exec);
 		FrameTiming::Add(FrameTiming::Counter::FrontRunNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
+		FrameTiming::FlushThreadCounters();
 		PipeFrontEnd();
 	}
 }

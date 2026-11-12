@@ -456,6 +456,9 @@ enum class Counter : uint32_t {
 void Add(Counter counter, uint64_t value = 1);
 // S479: on a muted thread (a pipeline worker) Add() does nothing; AddAlways() still counts.
 void SetThreadMute(bool mute);
+// S549: Add() on this thread goes to a thread-local table until FlushThreadCounters() (the CP front thread: no cache lines shared with the recorder per item).
+void SetThreadBuffered(bool buffered);
+void FlushThreadCounters();
 void AddAlways(Counter counter, uint64_t value = 1);
 
 // Stage index of the MatMemo columns: 0 = vs, 1 = ps, 2 = cs.
