@@ -5,10 +5,12 @@
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "graphics/host_gpu/renderer/pipeline/texturePredecode.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/shaderBindings.h"
 
+#include <array>
 #include <cstdint>
 #include <cstring>
 #include <type_traits>
@@ -75,6 +77,31 @@ template <typename T>
 	std::memcpy(&result, value.dwords.data(), sizeof(result));
 	return result;
 }
+
+// S558 (KYTY_CP_PREDECODE, texturePredecode.h): what a pipeline worker decoded of one sampled T# - the description ResolveTexture hands to
+// TextureCache::FindImage, the decoded descriptor and whether the format needs a shader conversion.
+struct PreTex {
+	Predecode::Status       status            = Predecode::Status::Decline;
+	bool                    shader_conversion = false;
+	ShaderTextureResource   descriptor;
+	TextureCache::ImageDesc desc;
+};
+using PreStages = std::array<Predecode::Stage<PreTex>, Predecode::kStages>;
+// What PrepareBindings gets for a draw stage when KYTY_CP_PREDECODE is on: the predecoded stages of the draw's job (null: the draw has no job) and
+// whether JoinJob accepted that job. Compute stages pass none.
+struct PredecodeDraw {
+	const PreStages* stages = nullptr;
+	bool             joined = false;
+};
+
+// The part of ResolveTexture before FindImage, for a thread that is not the CP: a pure function of the resource and the T# value (no cache, no guest
+// memory, no device state, no EXIT). Anything ResolveTexture would exit on, and every shape outside the sampled colour subset (storage, atomics, heap,
+// MSAA, depth), is Decline: the recorder then resolves the image as before.
+[[nodiscard]] Predecode::Status BuildTextureDesc(const ShaderRecompiler::IR::ImageResource&   resource,
+                                                 const ShaderRecompiler::IR::DescriptorValue& value, PreTex& out);
+// Shadow: the worker's slot against what the recorder computed before FindImage.
+[[nodiscard]] bool SamePreTex(const PreTex& pre, const ShaderTextureResource& descriptor, const TextureCache::ImageDesc& desc,
+                              bool shader_conversion);
 
 [[nodiscard]] bool IsSupportedDepthTextureEncoding(const ShaderTextureResource& descriptor,
                                                    bool r128 = false);

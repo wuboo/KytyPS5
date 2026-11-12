@@ -461,6 +461,10 @@ enum class Counter : uint32_t {
 	// recorded in a narrowed form (any site); write-hazard barriers before guest dispatches, those of them that write storage images
 	// (not narrowed by mode 1), and barriers after read-only dispatches (execution-only in mode 2).
 	UploadSyncN, UploadBufferBytes, UploadBarrierBytes, NarrowBarrierN, DispHazardN, DispHazardImgN, DispAccessRoN,
+	// S558 (KYTY_CP_PREDECODE=1|shadow): draw-stage images whose description came from the pipeline worker (shadow: compared), that the worker
+	// declined, that had no usable predecoded stage (no job, JoinJob rejected it, another snapshot); shadow disagreements; ns the workers spent
+	// predecoding (added by the recorder from the jobs it joined).
+	PredecodeImgN, PredecodeDeclineN, PredecodeNojobN, PredecodeNeN, PredecodeWorkerNs,
 	Count,
 };
 

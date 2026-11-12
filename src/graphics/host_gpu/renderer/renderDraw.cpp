@@ -852,6 +852,9 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	// cached, the pages the worker read are not GPU-dirty and nothing was written into them since: CpPipe::JoinJob).
 	CpPipe::GfpJob* const job      = CpPipe::CurrentJob();
 	const bool            job_used = job != nullptr && CpPipe::JoinJob(*job);
+	// S558: JoinJob waited for the worker (acquire), so its predecode is readable; the stages are bound by ExecutePreparedDraw of this draw.
+	m_predecode_joined = job_used;
+	if (job != nullptr && job->pre_ns != 0) FrameTiming::Add(FrameTiming::Counter::PredecodeWorkerNs, static_cast<uint64_t>(job->pre_ns));
 	if (job_used && CpPipe::EnvMode() == CpPipe::Mode::On) {
 		state.vertex_info[0] = job->out.vertex_info[0];
 		state.ps_input_info  = job->out.pixel_info;
@@ -1246,12 +1249,21 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	uint32_t                         stage_count = 0;
 	const auto stages = [&] {
 		CpPhases::Scope bind(CpPhases::Phase::DrawBind);
+		// S558 (KYTY_CP_PREDECODE): the predecoded stages of this draw's job (the FIFO item being executed owns it until the item has run).
+		PredecodeDraw        predecode_draw;
+		const PredecodeDraw* predecode = nullptr;
+		if (Predecode::EnvMode() != Predecode::Mode::Off) {
+			const CpPipe::GfpJob* const job = CpPipe::CurrentJob();
+			predecode_draw.stages = job != nullptr ? &job->pre : nullptr;
+			predecode_draw.joined = job != nullptr && m_predecode_joined;
+			predecode             = &predecode_draw;
+		}
 		for (uint32_t i = 0; i < vertex_stages.size(); i++) {
-			PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i]);
+			PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i], predecode);
 			descriptor_stages[stage_count++] = &bindings.vertex[i];
 		}
 		if (state.ps_active) {
-			PrepareBindings(state.ps_input_info.stage, bindings.pixel);
+			PrepareBindings(state.ps_input_info.stage, bindings.pixel, predecode);
 			descriptor_stages[stage_count++] = &bindings.pixel;
 		}
 		const auto stages = std::span {descriptor_stages.data(), stage_count};
@@ -1565,6 +1577,27 @@ void CpPipe::RunGfpJob(CpPipe::GfpJob& job) {
 	if (!answered) {
 		const uint32_t code = job.out.fail == 0 ? 10u : (job.out.fail > 11u ? 11u : job.out.fail);
 		FrameTiming::AddAlways(static_cast<FrameTiming::Counter>(static_cast<uint32_t>(FrameTiming::Counter::PipeFail1N) + code - 1u));
+	}
+	// S558 (KYTY_CP_PREDECODE): the T#s of the answered stages, decoded from the job's own snapshot into the job (texturePredecode.h). No guest
+	// memory, no cache, no CP state: BuildTextureDesc is a function of the program's image resource and the snapshot value.
+	if (Predecode::EnvMode() != Predecode::Mode::Off) {
+		job.pre[0].Clear();
+		job.pre[1].Clear();
+		job.pre_ns = 0;
+	}
+	if (answered && Predecode::EnvMode() != Predecode::Mode::Off) {
+		const int64_t tp  = FrameTiming::SteadyNowNs();
+		const auto    run = [&](size_t index, const ShaderStageRuntime& stage) {
+            if (!stage) return;
+            const auto& images = stage.module->info.info.images;
+            Predecode::RunStage(job.pre[index], index, stage.module, stage.resources, stage.resources->images, images.size(),
+                                [&](size_t i, const ShaderRecompiler::IR::DescriptorValue& value, PreTex& slot) {
+                                    return images[i].heap ? Predecode::Status::Decline : BuildTextureDesc(images[i], value, slot);
+                                });
+		};
+		run(0, job.out.vertex_info[0].stage);
+		if (job.out.ps_active) run(1, job.out.pixel_info.stage);
+		job.pre_ns = FrameTiming::SteadyNowNs() - tp;
 	}
 	job.answered  = answered;
 	job.worker_ns = FrameTiming::SteadyNowNs() - t0;

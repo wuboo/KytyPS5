@@ -6,6 +6,7 @@
 // programs itself as before.
 
 #include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/shader/scoutTableLog.h"
 #include "graphics/shader/shader.h"
@@ -40,6 +41,10 @@ struct GfpJob {
 	int64_t                                submit_ns = 0;
 	uint64_t                               write_seq = 0; // the log of backing writes when the worker started
 	uint64_t                               shard_key = 0;
+	// S558 (KYTY_CP_PREDECODE, texturePredecode.h): the worker's decode of the T#s of out.vs_res (pre[0]) and out.ps_res (pre[1]) and its ns. Written
+	// by the worker only (RunGfpJob, before state = Done), read by the recorder only after JoinJob.
+	PreStages pre;
+	int64_t   pre_ns = 0;
 };
 
 // The worker's body (renderDraw.cpp: it needs the draw's own register decoding).
