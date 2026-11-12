@@ -450,6 +450,12 @@ enum class Counter : uint32_t {
 	// recorder's ns waiting for an item (on the CP); guest commands the waiting recorder ran; shadow hash checks of item snapshots and disagreements.
 	FrontItemsN, FrontRunNs, FrontFullWaitN, FrontFullWaitNs, FrontSyncN, FrontSyncNs, FrontDrainN, FrontDrainNs, FrontRecWaitNs, FrontIdleCmdN, FrontShadowN,
 	FrontShadowNeN,
+	// S552 (KYTY_RT_PASS_MEMO=1|shadow): colour targets served from the slot memo (shadow: would have been, and agreed), resolved in full,
+	// and shadow disagreements.
+	RtMemoHitN, RtMemoMissN, RtMemoNeN,
+	// S552: FindImage keys answered by the direct-mapped front of m_exact_images and shadow disagreements (KYTY_EXACT_FRONT); image LRU
+	// touches skipped as no-ops and shadow disagreements (KYTY_LRU_TOUCH_SKIP).
+	ExactFrontHitN, ExactFrontNeN, LruSkipN, LruSkipNeN,
 	Count,
 };
 

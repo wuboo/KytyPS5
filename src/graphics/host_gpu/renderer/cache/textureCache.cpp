@@ -126,6 +126,20 @@ constexpr uint64_t SmallTiledReadbackTexels = 64 * 64;
 	return true;
 }
 
+// S552 switches (0|1|shadow, parsed like KYTY_TEX_RESOLVE_MEMO).
+[[nodiscard]] TexMemo::Mode ExactFrontMode() {
+	static const TexMemo::Mode mode = TexMemo::ParseMode(std::getenv("KYTY_EXACT_FRONT"));
+	return mode;
+}
+[[nodiscard]] TexMemo::Mode LruTouchSkipMode() {
+	static const TexMemo::Mode mode = TexMemo::ParseMode(std::getenv("KYTY_LRU_TOUCH_SKIP"));
+	return mode;
+}
+[[nodiscard]] bool ColorClearNoAlloc() {
+	static const bool on = TexMemo::ParseMode(std::getenv("KYTY_COLOR_CLEAR_NOALLOC")) == TexMemo::Mode::On;
+	return on;
+}
+
 } // namespace
 
 TextureCache::TextureCache(GraphicContext& graphics, CommandScheduler& scheduler,
@@ -338,7 +352,23 @@ void TextureCache::FreeImage(ImageId id) {
 
 void TextureCache::TouchImage(Image& image) {
 	if (image.registered) {
+		// S552 (KYTY_LRU_TOUCH_SKIP): an item already touched with this tick returns from Touch without change; the image remembers
+		// that touch, so the LRU item (a deque element, usually a cache miss) is not read again in the same GC tick.
+		const auto mode = LruTouchSkipMode();
+		if (mode != TexMemo::Mode::Off && image.lru_touch_tick == m_gc_tick && image.lru_touch_id == image.lru_id) {
+			if (mode == TexMemo::Mode::On) {
+				m_stat_lru_skip++;
+				return;
+			}
+			if (m_lru_cache.TickOf(image.lru_id) >= m_gc_tick) {
+				m_stat_lru_skip++;
+			} else {
+				FrameTiming::Add(FrameTiming::Counter::LruSkipNeN);
+			}
+		}
 		m_lru_cache.Touch(image.lru_id, m_gc_tick);
+		image.lru_touch_tick = m_gc_tick;
+		image.lru_touch_id   = image.lru_id;
 	}
 }
 
@@ -1152,21 +1182,32 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 	}
 	const auto slice_size = range.size / layers;
 	// KYTY_DCC_KNOWN=1: metadata written by a recognized fill is known without reading it back.
-	std::vector<uint32_t> known_values;
+	// S552 (KYTY_COLOR_CLEAR_NOALLOC=1): up to 16 slices use a stack buffer instead of a heap vector (one per call before).
+	std::array<uint32_t, 16> known_inline {};
+	std::vector<uint32_t>    known_heap;
+	const uint32_t*          known_values = nullptr;
 	if (DccFillPublish::EnvMode() == DccFillPublish::Mode::On) {
-		known_values.resize(count);
+		uint32_t* values = nullptr;
+		if (ColorClearNoAlloc() && count <= known_inline.size()) {
+			values = known_inline.data();
+		} else {
+			known_heap.resize(count);
+			values = known_heap.data();
+		}
+		bool all = count != 0;
 		for (uint32_t slice = 0; slice < count; slice++) {
 			if (!m_buffer_cache.LatestGpuWriteIsFill(range.address + slice_size * (first + slice), slice_size,
-			                                         &known_values[slice])) {
-				known_values.clear();
+			                                         &values[slice])) {
+				all = false;
 				break;
 			}
 		}
-		if (!known_values.empty()) {
+		if (all) {
+			known_values = values;
 			FrameTiming::Add(FrameTiming::Counter::DccKnownFromFill);
 		}
 	}
-	const bool known = !known_values.empty();
+	const bool known = known_values != nullptr;
 	// Each slice holds the viewed mip's metadata in one run; DCC mips past the first tail mip
 	// have none. FindImage moves base_level only for one-mip descriptors, which keep the slice.
 	TileSizeOffset mip {.size = static_cast<uint32_t>(slice_size)};
@@ -1410,7 +1451,8 @@ TexMemo::Verdict TextureCache::ReuseImage(const TexMemo::Entry<ImageId>& entry, 
 		}
 		void Touch(ImageId id) {
 			auto& image              = cache.m_slot_images[id];
-			image.tick_accessed_last = cache.m_scheduler.CurrentTick();
+			// Same tick as FindImage: the GC compares it with m_gc_tick (S552: was the scheduler tick).
+			image.tick_accessed_last = cache.m_gc_tick;
 			cache.TouchImage(image);
 		}
 		void ColorClear(ImageId id) { cache.MaterializeColorClear(id, desc, base_layer); }
@@ -1452,15 +1494,50 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format, FindImageInf
 		                         desc.info.type,
 		                         desc.type,
 		                         exact_format};
-		const auto          exact = m_exact_images.find(key);
-		const bool          known = exact != m_exact_images.end() &&
+		// S552 (KYTY_EXACT_FRONT): the direct-mapped front answers repeated keys without walking the map's bucket.
+		const auto      front_mode = ExactFrontMode();
+		ExactFrontSlot* front      = nullptr;
+		ExactImage      exact_value {};
+		bool            exact_found = false;
+		if (front_mode != TexMemo::Mode::Off) {
+			front = &m_exact_front[ExactImageKeyHash {}(key) % ExactFrontSlots];
+			if (front->valid && front->key == key) {
+				exact_value = front->value;
+				exact_found = true;
+				if (front_mode == TexMemo::Mode::Shadow) {
+					const auto it = m_exact_images.find(key);
+					const bool same = it != m_exact_images.end() && it->second.id == exact_value.id &&
+					                  it->second.generation == exact_value.generation;
+					if (same) {
+						m_stat_front_hit++;
+					} else {
+						FrameTiming::Add(FrameTiming::Counter::ExactFrontNeN);
+					}
+					if (!same) {
+						exact_found = it != m_exact_images.end();
+						if (exact_found) exact_value = it->second;
+					}
+				} else {
+					m_stat_front_hit++;
+				}
+			}
+		}
+		if (!exact_found) {
+			const auto exact = m_exact_images.find(key);
+			exact_found      = exact != m_exact_images.end();
+			if (exact_found) {
+				exact_value = exact->second;
+				if (front != nullptr) *front = {key, exact_value, true};
+			}
+		}
+		const bool          known = exact_found &&
 		                            !RegistrationsSince(desc.info.data.address, desc.info.data.size,
-		                                                exact->second.generation);
+		                                                exact_value.generation);
 		bool                exact_match = known;
 		bool                block_alias = false;
 		Common::SmallVector<ImageId, 8> candidates;
 		if (known) {
-			result = exact->second.id;
+			result = exact_value.id;
 		} else {
 			ForEachImageInRegion(desc.info.data.address, desc.info.data.size,
 			                     [&](ImageId id, Image&) { candidates.push_back(id); });
@@ -1559,8 +1636,10 @@ ImageId TextureCache::FindImage(ImageDesc& desc, bool exact_format, FindImageInf
 		if (exact_match && !known && !alias_left()) {
 			if (m_exact_images.size() >= MaxExactImages) {
 				m_exact_images.clear();
+				for (auto& slot: m_exact_front) slot.valid = false;
 			}
 			m_exact_images[key] = {result, m_registration_generation};
+			if (front != nullptr) *front = {key, {result, m_registration_generation}, true};
 		}
 		auto& image = m_slot_images[result];
 		if (info != nullptr) {
@@ -2299,6 +2378,9 @@ void TextureCache::UnmapMemory(uint64_t address, uint64_t size) {
 
 void TextureCache::RunGarbageCollector() {
 	std::scoped_lock lock {m_lock};
+	// S552: counts of the hot fast paths, kept in members under m_lock and published once per GC tick.
+	if (m_stat_lru_skip != 0) FrameTiming::Add(FrameTiming::Counter::LruSkipN, std::exchange(m_stat_lru_skip, 0));
+	if (m_stat_front_hit != 0) FrameTiming::Add(FrameTiming::Counter::ExactFrontHitN, std::exchange(m_stat_front_hit, 0));
 	const uint64_t   tick = m_gc_tick++;
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();

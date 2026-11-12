@@ -158,6 +158,9 @@ public:
 	ImageSubresourceRange stencil_subresources;
 	uint64_t         tick_accessed_last = 0;
 	size_t           lru_id             = 0;
+	// S552 (KYTY_LRU_TOUCH_SKIP): the GC tick and LRU id of the last LRU touch; a second touch with both unchanged is a no-op.
+	uint64_t         lru_touch_tick     = UINT64_MAX;
+	size_t           lru_touch_id       = SIZE_MAX;
 	// Resident image heap elements that select this image.
 	std::atomic<uint32_t> heap_refs {0};
 

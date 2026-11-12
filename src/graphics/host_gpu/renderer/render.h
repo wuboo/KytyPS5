@@ -14,6 +14,9 @@
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/renderTarget.h"
+#include "graphics/guest_gpu/hardwareContext.h"
+#include "graphics/host_gpu/renderer/rtPassMemo.h"
+#include "graphics/host_gpu/renderer/pipeline/texResolveMemo.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <array>
@@ -302,6 +305,13 @@ private:
 	GraphicsBindings                     m_graphics_bindings;
 	// The current draw's targets; PrepareDrawRenderState resolves them again for each draw.
 	DrawTargets                           m_targets;
+	// S552 (KYTY_RT_PASS_MEMO): the last colour target each slot resolved, keyed by the slot's CB registers (rtPassMemo.h).
+	struct RtMemoValue {
+		RenderColorInfo          info;
+		TexMemo::Entry<ImageId>  entry;
+		uint32_t                 metadata_base_layer = 0;
+	};
+	std::array<RtPassMemo::Slot<HW::RenderTarget, RtMemoValue>, RENDER_COLOR_ATTACHMENTS_MAX> m_rt_memo {};
 	PreparedBindings                     m_compute_bindings;
 	std::vector<ImageId>                  m_bound_images;
 	std::vector<vk::DescriptorImageInfo>  m_descriptor_images;

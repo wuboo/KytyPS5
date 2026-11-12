@@ -12,6 +12,7 @@
 #include "graphics/host_gpu/renderer/image/textureCommon.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
+#include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 
 #include <algorithm>
@@ -38,6 +39,23 @@ static bool DccAlphaOnMsb(const HW::ColorInfo& info) {
 	       info.channel_order == Prospero::ChannelOrder::kAlt;
 }
 
+// S552 shadow of KYTY_RT_PASS_MEMO: the fields of a resolved colour target that the draw and the cache use.
+static bool SameColorTarget(const RenderColorInfo& a, const RenderColorInfo& b) {
+	const auto& x = a.desc.info;
+	const auto& y = b.desc.info;
+	return a.image_id == b.image_id && a.target_slot == b.target_slot && a.guest_mip_level == b.guest_mip_level &&
+	       a.guest_array_layer == b.guest_array_layer && a.export_mapping.packed == b.export_mapping.packed &&
+	       a.desc.type == b.desc.type && a.desc.heap == b.desc.heap && a.desc.view_info == b.desc.view_info &&
+	       x.data == y.data && x.pixel_format == y.pixel_format && x.guest_format == y.guest_format && x.type == y.type &&
+	       x.extent == y.extent && x.resources == y.resources && x.pitch == y.pitch && x.bytes_per_block == y.bytes_per_block &&
+	       x.samples == y.samples && x.tile_mode == y.tile_mode && x.first_tail_level == y.first_tail_level &&
+	       x.tiled_slice_stride == y.tiled_slice_stride && x.linear_slice_stride == y.linear_slice_stride &&
+	       x.metadata.range == y.metadata.range && x.metadata.kind == y.metadata.kind &&
+	       x.metadata.clear_word == y.metadata.clear_word && x.metadata.compression == y.metadata.compression &&
+	       x.metadata.clear_register_valid == y.metadata.clear_register_valid &&
+	       x.metadata.dcc_alpha_msb == y.metadata.dcc_alpha_msb;
+}
+
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColorInfo& r,
                                               uint32_t rt_slot, bool ignore_target_mask,
@@ -49,6 +67,26 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 	auto        mask    = render_target_mask_slot(hw.GetRenderTargetMask(), rt_slot);
 	if (ignore_target_mask && rt.base.addr != 0 && mask == 0) {
 		mask = 0x0f;
+	}
+
+	// S552 (KYTY_RT_PASS_MEMO): the same registers resolve to the same target while no registration touched its pages.
+	const auto     memo_mode  = RtPassMemo::EnvMode();
+	auto*          memo       = memo_mode != RtPassMemo::Mode::Off && rt_slot < m_rt_memo.size() ? &m_rt_memo[rt_slot] : nullptr;
+	const uint32_t memo_flags = RtPassMemo::Flags(ignore_target_mask, exact_format);
+	bool           memo_would_hit = false;
+	if (memo != nullptr && rt.base.addr != 0 && mask != 0 && memo->Matches(rt, mask, memo_flags)) {
+		auto&      cache   = m_context.GetTextureCache();
+		const bool commit  = memo_mode == RtPassMemo::Mode::On;
+		const auto verdict = cache.ReuseImage(memo->value.entry, memo->value.info.desc, memo->value.metadata_base_layer, commit);
+		if (verdict == TexMemo::Verdict::Hit) {
+			if (commit) {
+				r = memo->value.info;
+				BindRenderTarget(r.image_id);
+				FrameTiming::Add(FrameTiming::Counter::RtMemoHitN);
+				return;
+			}
+			memo_would_hit = true;
+		}
 	}
 
 	r             = {};
@@ -255,9 +293,22 @@ void RenderExecutor::ResolveRenderColorTarget(CommandBuffer& buffer, RenderColor
 	auto& texture_cache        = m_context.GetTextureCache();
 	r.guest_mip_level          = mip;
 	r.guest_array_layer        = view.base_layer;
-	r.image_id                 = texture_cache.FindImage(r.desc, exact_format);
+	TextureCache::FindImageInfo found {};
+	r.image_id                 = texture_cache.FindImage(r.desc, exact_format, memo != nullptr ? &found : nullptr);
 	r.export_mapping           = target_format.export_mapping;
 	BindRenderTarget(r.image_id);
+	if (memo != nullptr) {
+		if (memo_would_hit) {
+			FrameTiming::Add(SameColorTarget(r, memo->value.info) ? FrameTiming::Counter::RtMemoHitN : FrameTiming::Counter::RtMemoNeN);
+		} else {
+			FrameTiming::Add(FrameTiming::Counter::RtMemoMissN);
+		}
+		if (r.image_id && TexMemo::CanStore(found)) {
+			memo->Store(rt, mask, memo_flags, RtMemoValue {r, {r.image_id, found.generation, true}, view.base_layer});
+		} else {
+			memo->Clear();
+		}
+	}
 }
 
 } // namespace Libs::Graphics

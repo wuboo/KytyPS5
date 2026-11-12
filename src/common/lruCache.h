@@ -35,6 +35,9 @@ public:
 		return id;
 	}
 
+	// S552 (KYTY_LRU_TOUCH_SKIP=shadow): the tick an item was last touched with.
+	[[nodiscard]] Tick TickOf(size_t id) const { return m_items[id].tick; }
+
 	void Touch(size_t id, Tick tick) {
 		auto& item = m_items[id];
 		if (item.tick >= tick) {

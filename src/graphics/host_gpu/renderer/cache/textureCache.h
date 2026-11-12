@@ -345,6 +345,17 @@ private:
 	// pages of the request and on fields fixed at their creation, so an entry holds until a
 	// registration on one of those pages changes.
 	std::unordered_map<ExactImageKey, ExactImage, ExactImageKeyHash> m_exact_images;
+	// S552 (KYTY_EXACT_FRONT): a direct-mapped copy of m_exact_images entries by key hash. Written only together with the map
+	// (store, lookup that found the entry) and cleared with it, so a slot holding a key always holds that key's map value.
+	struct ExactFrontSlot {
+		ExactImageKey key {};
+		ExactImage    value {};
+		bool          valid = false;
+	};
+	static constexpr size_t                                          ExactFrontSlots = 512;
+	std::array<ExactFrontSlot, ExactFrontSlots>                      m_exact_front {};
+	uint64_t                                                         m_stat_lru_skip  = 0;
+	uint64_t                                                         m_stat_front_hit = 0;
 	PageGenerations                                                  m_page_generations;
 	uint64_t                                                         m_registration_generation = 1;
 
