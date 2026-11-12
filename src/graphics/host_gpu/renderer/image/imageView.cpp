@@ -1,9 +1,13 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
 
 #include "common/assert.h"
+#include "common/logging/log.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/image/image.h"
 #include "graphics/host_gpu/renderer/image/minLodView.h"
+
+#include <atomic>
+#include <fmt/format.h>
 
 namespace Libs::Graphics {
 
@@ -335,6 +339,17 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 	if (normalized.min_lod != 0 && m_graphics.has_view_min_lod) {
 		min_lod.minLod = Libs::Graphics::ViewMinLodValue(normalized.base_level, normalized.min_lod);
 		usage.pNext    = &min_lod;
+	}
+	if (normalized.min_lod != 0) {
+		// S551 DIAG: views created with a T# MinLod (native clamp or dropped).
+		static std::atomic<uint32_t> s551_views {0};
+		const auto n = s551_views.fetch_add(1, std::memory_order_relaxed);
+		if (n < 40 || (n & (n - 1)) == 0) {
+			Log::WriteToConsoleAndLog(fmt::format("[s551-view] n={} fmt={} base={} levels={} min_lod={} native={} minLod={}\n", n,
+			                                      static_cast<int>(normalized.format), normalized.base_level,
+			                                      normalized.level_count, normalized.min_lod,
+			                                      usage.pNext == &min_lod ? 1 : 0, min_lod.minLod));
+		}
 	}
 	vk::ImageViewCreateInfo create {};
 	create.pNext                           = &usage;
