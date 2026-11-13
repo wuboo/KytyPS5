@@ -512,6 +512,14 @@ enum class Counter : uint32_t {
 	// drains here), consumers answered from the epoch memo, shadow comparisons, shadow mismatches (must stay 0), lazy reads of a record a GPU write
 	// had touched after its indirect draw (the case where 1 can differ from 0).
 	NumInstEagerN, NumInstLazySkipN, NumInstReadN, NumInstReadNs, NumInstHitN, NumInstShadowN, NumInstNeN, NumInstTaintUseN,
+	// S579 K-rf v2 (KYTY_RF_GPU_PATCH=superset*, rfGpuPatch.h): walker loads deferred as unknown (both successors); GPU-dirty walker faults that
+	// drained by the site's reason (loop, address, descriptor, output, derived flat, slots, phi address, other = not a resource walker site / dead
+	// / no load); superset walks that failed and walked again with the drain; faults drained in such a retry; superset_shadow: resources and
+	// written buffers the superset binds beyond the true walk, flat words beyond it, dispatches whose superset module differs from the true one;
+	// modules compiled while a load was deferred (new shader variants); slot words checked by the GPU readback.
+	Krf2DeferN, Krf2FallbackLoopN, Krf2FallbackAddressN, Krf2FallbackDescriptorN, Krf2FallbackOutputN, Krf2FallbackDerivedFlatN,
+	Krf2FallbackSlotsN, Krf2FallbackPhiAddressN, Krf2FallbackOtherN, Krf2FallbackWalkfailN, Krf2FallbackRetryN, Krf2ExtraResN, Krf2ExtraWrN,
+	Krf2ExtraFlatN, Krf2VariantN, Krf2CompileN, Krf2GpuCheckN,
 	Count,
 };
 

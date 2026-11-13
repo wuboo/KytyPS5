@@ -841,6 +841,23 @@ constexpr const char* kCounterNames[] = {
     "numinst_shadow_n",
     "numinst_ne_n",
     "numinst_taint_use_n",
+    "krf2_defer_n",
+    "krf2_fallback_loop_n",
+    "krf2_fallback_address_n",
+    "krf2_fallback_descriptor_n",
+    "krf2_fallback_output_n",
+    "krf2_fallback_derived_flat_n",
+    "krf2_fallback_slots_n",
+    "krf2_fallback_phi_address_n",
+    "krf2_fallback_other_n",
+    "krf2_fallback_walkfail_n",
+    "krf2_fallback_retry_n",
+    "krf2_extra_res_n",
+    "krf2_extra_wr_n",
+    "krf2_extra_flat_n",
+    "krf2_variant_n",
+    "krf2_compile_n",
+    "krf2_gpu_check_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

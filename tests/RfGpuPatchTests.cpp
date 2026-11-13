@@ -7,12 +7,20 @@
 //   - a model of the two paths (drain: the CPU reads the GPU's value; patch: the walker gets the stale one, the copy writes the GPU's value
 //     into the uploaded slot) ends with the same uploaded words.
 // Mutants (WILL_FAIL): KYTY_RFPATCH_MUTANT_DIRECT_USES_ONLY, _IGNORE_DIRTY, _IGNORE_ADDRESS_BASE, _NO_DEDUPE.
+// S579 K-rf v2 (superset): a model of the SRT walker (three-valued nodes: known / unknown / deferred, monotonic reachability to a fixpoint, an
+// unknown condition reaches SuccessorsWhenUnknown, a Phi over reached predecessors, flat slots and resources of reached blocks, a failed walk
+// retried with the drain) driven by the production pieces (SupersetLoads, DecideSuperset, DeferredStateByte, SupersetEntrySlots, Pending,
+// SupersetRetry, SupersetCover*). Plans: K2 simple (4928...), K2 through a control Phi with dead users (c5ee...), a load in an address, a
+// load in a loop, K2 with its own flat slot (GPU copy), derived flat, descriptor, control-Phi address (K1), a failing superset walk, and 3000
+// random plans: the superset (after the GPU copy) always holds what the synchronous walk does.
+// Mutants (WILL_FAIL): _SKIP_SUCCESSOR, _COND_AS_TAKEN, _NO_FLAT_COPY, _DEFER_ADDRESS, _DEFER_LOOP, _COVER_MISSES_ONE, _CPHI_ADDRESS.
 
 #include "graphics/shader/recompiler/ir/passes/rfGpuPatch.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <random>
 #include <vector>
 
 using namespace Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch;
@@ -242,6 +250,691 @@ void TestModel() {
 	Check(SnapshotsAgree(std::vector<uint32_t> {0xAA, stale, 0xBB}, drained, p), "model: the walks agree beyond the slot");
 }
 
+
+// ==== S579 K-rf v2: the walker model ===========================================================================================================
+namespace krf2 {
+
+constexpr uint32_t kNone = UINT32_MAX;
+
+enum class Op : uint8_t { Const, User, Load, Add, Ule, Not, Phi };
+
+struct MNode {
+	Op                                        op    = Op::Const;
+	uint32_t                                  a     = kNone; // operands (Load: its address operand, dword index added to base)
+	uint32_t                                  b     = kNone;
+	uint32_t                                  value = 0;     // Const value, User index
+	uint64_t                                  base  = 0;     // Load
+	std::vector<std::pair<uint32_t, uint32_t>> phi;           // (predecessor block, node)
+	bool                                      cyclic = false; // as the walker compiler's node.referenced
+};
+
+struct MBlock {
+	uint32_t              cond = kNone; // kNone: every successor
+	std::vector<uint32_t> succ;
+	std::vector<uint32_t> resources;
+	std::vector<uint32_t> slots;
+};
+
+struct MPlan {
+	std::vector<MNode>    nodes;
+	std::vector<MBlock>   blocks;
+	std::vector<uint32_t> resources; // descriptor node per resource; a resource no block lists is always active
+	std::vector<uint32_t> slots;     // node per flat slot
+	std::vector<uint32_t> user;
+};
+
+struct Cell {
+	uint32_t stale = 0, fresh = 0;
+	bool     dirty = false;
+};
+using Memory = std::map<uint64_t, Cell>;
+
+struct MDesc {
+	std::array<uint32_t, 8> dwords {};
+	uint32_t                dword_count = 1;
+	bool                    operator==(const MDesc&) const = default;
+};
+
+struct Result {
+	bool                  ok = false;
+	std::vector<bool>     reach;
+	std::vector<MDesc>    resources;
+	std::vector<uint32_t> flat;     // what the CPU uploads
+	std::vector<uint32_t> uploaded; // after the GPU copies of the pending entries
+	uint32_t              defers = 0, drains = 0, walkfail = 0, retry = 0;
+	std::map<SupersetWhy, uint32_t> fallback;
+};
+
+std::vector<GraphNode> Graph(const MPlan& p) {
+	std::vector<GraphNode> g(p.nodes.size());
+	for (size_t i = 0; i < p.nodes.size(); ++i) {
+		const auto& n = p.nodes[i];
+		auto&       x = g[i];
+		if (n.a != kNone) x.deps.push_back(n.a);
+		if (n.b != kNone) x.deps.push_back(n.b);
+		for (const auto& [block, node]: n.phi) x.deps.push_back(node);
+		x.read        = n.op == Op::Load;
+		x.emits_load  = x.read;
+		x.cyclic      = n.cyclic;
+		x.control_phi = n.op == Op::Phi;
+	}
+	return g;
+}
+
+std::vector<SupersetWhy> Classify(const MPlan& p) {
+	std::vector<Root> roots;
+	for (const auto& b: p.blocks) {
+		if (b.cond != kNone) roots.push_back({b.cond, RootKind::Condition});
+	}
+	for (const auto r: p.resources) roots.push_back({r, RootKind::Descriptor});
+	return SupersetLoads(Graph(p), roots, p.slots);
+}
+
+std::vector<uint32_t> SlotsOf(const MPlan& p, uint32_t node) {
+	std::vector<uint32_t> out;
+	for (uint32_t s = 0; s < p.slots.size(); ++s) {
+		if (p.slots[s] == node) out.push_back(s);
+	}
+	return out;
+}
+
+class Walker {
+public:
+	Walker(const MPlan& plan, Memory& memory, bool superset): m_p(plan), m_mem(memory), m_superset(superset), m_why(Classify(plan)) {}
+
+	Result Run() {
+		Result r = Once();
+		if (!r.ok && m_superset && SupersetRetry()) {
+			const auto defers = r.defers;
+			const auto fall   = r.fallback;
+			r                 = Once();
+			r.walkfail        = 1;
+			r.defers += defers;
+			for (const auto& [k, v]: fall) r.fallback[k] += v;
+		}
+		r.uploaded = r.flat;
+		const auto& pending = ThreadPending();
+		for (uint32_t i = 0; i < pending.count; ++i) {
+			const auto& e = pending.entries[i];
+			for (uint32_t k = 0; k < e.slot_count; ++k) {
+				if (e.slots[k] < r.uploaded.size()) r.uploaded[e.slots[k]] = m_mem[e.address].fresh; // the GPU copy: the buffer's real bytes
+			}
+		}
+		return r;
+	}
+
+private:
+	Result Once() {
+		Result r;
+		m_r = &r;
+		r.reach.assign(m_p.blocks.size(), false);
+		if (!r.reach.empty()) r.reach[0] = true;
+		for (bool changed = true; changed;) {
+			changed = false;
+			Reset();
+			for (uint32_t b = 0; b < m_p.blocks.size(); ++b) {
+				if (!r.reach[b]) continue;
+				const auto& block = m_p.blocks[b];
+				const auto  mark  = [&](uint32_t s) {
+                    if (s < r.reach.size() && !r.reach[s]) r.reach[s] = changed = true;
+				};
+				if (block.cond != kNone) {
+					Eval(block.cond);
+					if (m_state[block.cond] == kKnownState) {
+						mark(block.succ[m_value[block.cond] != 0 ? 0 : 1]);
+						continue;
+					}
+				}
+				for (const auto s: SuccessorsWhenUnknown(std::span<const uint32_t>(block.succ))) mark(s);
+			}
+		}
+		r.ok = true;
+		r.flat.assign(m_p.slots.size(), 0u);
+		std::vector<bool> slot_reached(m_p.slots.size(), false);
+		for (uint32_t b = 0; b < m_p.blocks.size(); ++b) {
+			if (!r.reach[b]) continue;
+			for (const auto s: m_p.blocks[b].slots) slot_reached[s] = true;
+		}
+		for (uint32_t s = 0; s < m_p.slots.size(); ++s) {
+			if (!slot_reached[s]) continue;
+			const auto node = m_p.slots[s];
+			Eval(node);
+			const bool direct_deferred = m_state[node] == DeferredStateByte() && m_why[node] == SupersetWhy::Superset;
+			if (m_state[node] != kKnownState && !direct_deferred) {
+				r.ok = false;
+				continue;
+			}
+			r.flat[s] = m_value[node];
+		}
+		r.resources.assign(m_p.resources.size(), MDesc {});
+		for (uint32_t res = 0; res < m_p.resources.size(); ++res) {
+			bool listed = false, active = false;
+			for (uint32_t b = 0; b < m_p.blocks.size(); ++b) {
+				const auto& list = m_p.blocks[b].resources;
+				if (std::find(list.begin(), list.end(), res) == list.end()) continue;
+				listed = true;
+				active |= r.reach[b];
+			}
+			if (listed && !active) continue;
+			const auto node = m_p.resources[res];
+			Eval(node);
+			if (m_state[node] != kKnownState) {
+				r.ok = false;
+				continue;
+			}
+			r.resources[res].dwords[0] = m_value[node];
+		}
+		return r;
+	}
+
+	void Reset() {
+		m_state.assign(m_p.nodes.size(), 0);
+		m_value.assign(m_p.nodes.size(), 0);
+	}
+
+	bool Known(uint32_t i) {
+		Eval(i);
+		return m_state[i] == kKnownState;
+	}
+
+	void Eval(uint32_t i) {
+		if (m_state[i] != 0) return;
+		m_state[i] = 1;
+		const auto& n = m_p.nodes[i];
+		const auto  known = [&](uint32_t v) {
+            m_value[i] = v;
+            m_state[i] = kKnownState;
+		};
+		switch (n.op) {
+			case Op::Const: known(n.value); return;
+			case Op::User: known(m_p.user[n.value]); return;
+			case Op::Add:
+				if (Known(n.a) && Known(n.b)) known(m_value[n.a] + m_value[n.b]);
+				return;
+			case Op::Not:
+				if (Known(n.a)) known(m_value[n.a] == 0 ? 1u : 0u);
+				return;
+			case Op::Ule:
+				// As the walker: a zero bound decides alone (0 <= x).
+				if (Known(n.a) && m_value[n.a] == 0) {
+					known(1u);
+					return;
+				}
+				if (Known(n.a) && Known(n.b)) known(m_value[n.a] <= m_value[n.b] ? 1u : 0u);
+				return;
+			case Op::Phi: {
+				bool     any = false;
+				uint32_t v   = 0;
+				for (const auto& [block, node]: n.phi) {
+					if (!m_r->reach[block]) continue;
+					if (!Known(node)) return;
+					if (any && m_value[node] != v) return;
+					any = true;
+					v   = m_value[node];
+				}
+				if (any) known(v);
+				return;
+			}
+			case Op::Load: {
+				uint64_t address = n.base;
+				if (n.a != kNone) {
+					if (!Known(n.a)) return;
+					address += uint64_t {m_value[n.a]} * 4u;
+				}
+				auto& cell = m_mem[address];
+				if (cell.dirty) {
+					// The exception handler (runtimeLinker.cpp TrySupersetDefer).
+					auto&            pending = ThreadPending();
+					SupersetQuery    q;
+					const auto       slots = SlotsOf(m_p, i);
+					q.armed                = m_superset && pending.armed;
+					q.gpu_thread           = true;
+					q.site                 = true;
+					q.why                  = m_why[i];
+					q.slots                = static_cast<uint32_t>(slots.size());
+					q.queried              = true;
+					q.dirty                = true;
+					q.room                 = pending.Room();
+					q.disabled             = pending.superset_off;
+					const auto decision    = DecideSuperset(q);
+					if (decision == SupersetReject::None &&
+					    pending.Add(address, cell.stale, SupersetEntrySlots(std::span<const uint32_t>(slots)))) {
+						++pending.superset_defers;
+						++m_r->defers;
+						m_value[i] = cell.stale;
+						m_state[i] = DeferredStateByte();
+						return;
+					}
+					if (decision == SupersetReject::Static) ++m_r->fallback[q.why];
+					if (decision == SupersetReject::Retry) ++m_r->retry;
+					// The drain: the whole queue, every GPU-written dword lands in the backing.
+					++m_r->drains;
+					for (auto& [a, c]: m_mem) {
+						if (c.dirty) {
+							c.stale = c.fresh;
+							c.dirty = false;
+						}
+					}
+				}
+				known(cell.dirty ? cell.stale : cell.fresh);
+				return;
+			}
+		}
+	}
+
+	const MPlan&             m_p;
+	Memory&                  m_mem;
+	bool                     m_superset;
+	std::vector<SupersetWhy> m_why;
+	std::vector<uint8_t>     m_state;
+	std::vector<uint32_t>    m_value;
+	Result*                  m_r = nullptr;
+};
+
+// The synchronous walk (every fault drains) and the superset walk on the same memory; each in its own Scope.
+struct Pair {
+	Result                  sync, superset;
+	Pending                 pending; // the superset's entries
+	std::vector<uint32_t>   fresh;   // per entry, the drained dword
+};
+
+Pair RunBoth(const MPlan& plan, const Memory& memory) {
+	Pair   out;
+	Memory a = memory, b = memory;
+	{
+		Scope scope(true);
+		out.sync = Walker(plan, a, false).Run();
+	}
+	{
+		Scope scope(true);
+		out.superset = Walker(plan, b, true).Run();
+		out.pending  = ThreadPending();
+	}
+	for (uint32_t i = 0; i < out.pending.count; ++i) out.fresh.push_back(memory.at(out.pending.entries[i].address).fresh);
+	return out;
+}
+
+// The superset holds every resource and flat word of the synchronous walk, after the GPU copy; reachability only grows.
+bool Covers(const Pair& r, uint32_t* extra = nullptr) {
+	if (!r.sync.ok || !r.superset.ok) return false;
+	for (size_t b = 0; b < r.sync.reach.size(); ++b) {
+		if (r.sync.reach[b] && !r.superset.reach[b]) return false;
+	}
+	const auto res  = SupersetCoverResources(std::span<const MDesc>(r.sync.resources), std::span<const MDesc>(r.superset.resources));
+	const auto flat = SupersetCoverFlat(r.sync.flat, r.superset.flat, r.pending, r.fresh);
+	if (extra != nullptr) *extra = res.extra;
+	bool words = true;
+	for (size_t s = 0; s < r.sync.flat.size(); ++s) {
+		if (r.sync.flat[s] != 0 && r.superset.uploaded[s] != r.sync.flat[s]) words = false;
+	}
+	for (size_t i = 0; i < r.sync.resources.size(); ++i) {
+		if (r.sync.resources[i].dwords[0] != 0 && !(r.superset.resources[i] == r.sync.resources[i])) words = false;
+	}
+	return res.agree && flat.agree && words;
+}
+
+uint32_t Add(MPlan& p, MNode n) {
+	p.nodes.push_back(std::move(n));
+	return static_cast<uint32_t>(p.nodes.size() - 1);
+}
+MNode Const(uint32_t v) {
+	return {.op = Op::Const, .value = v};
+}
+MNode User(uint32_t k) {
+	return {.op = Op::User, .value = k};
+}
+MNode LoadAt(uint64_t base, uint32_t address = kNone) {
+	return {.op = Op::Load, .a = address, .base = base};
+}
+MNode Ule(uint32_t a, uint32_t b) {
+	return {.op = Op::Ule, .a = a, .b = b};
+}
+MNode Not(uint32_t a) {
+	return {.op = Op::Not, .a = a};
+}
+MNode Sum(uint32_t a, uint32_t b) {
+	return {.op = Op::Add, .a = a, .b = b};
+}
+
+constexpr uint64_t kA = 0x57954027c, kB = 0x5794bf8fc;
+
+// 4928273de21f1aa0: N2 ReadConstBuffer@+0x1c -> N1 ULessThanEqual32 -> N0 LogicalNot -> cond1. A: stale 0x20, fresh 4 (S574).
+// Block 0: cond, true -> 1 (resource 1), false -> 2 (resource 2); both -> 3. Resource 0 is always active.
+MPlan PlanK2Simple(uint32_t* load) {
+	MPlan p;
+	p.user          = {8};
+	const auto u    = Add(p, User(0));
+	*load           = Add(p, LoadAt(kA));
+	const auto ule  = Add(p, Ule(*load, u));
+	const auto cond = Add(p, Not(ule));
+	p.resources     = {Add(p, Const(0x11)), Add(p, Const(0x22)), Add(p, Const(0x33))};
+	p.blocks        = {{.cond = cond, .succ = {1, 2}}, {.succ = {3}, .resources = {1}}, {.succ = {3}, .resources = {2}}, {}};
+	return p;
+}
+
+void TestK2Simple() {
+	uint32_t   load = 0;
+	const auto plan = PlanK2Simple(&load);
+	Check(Classify(plan)[load] == SupersetWhy::Superset, "krf2 K2 simple: the condition-only load is a superset load");
+	const Memory mem {{kA, {.stale = 0x20, .fresh = 4, .dirty = true}}};
+	const auto   r = RunBoth(plan, mem);
+	uint32_t     extra = 0;
+	Check(r.sync.drains == 1 && r.sync.defers == 0, "krf2 K2 simple: the synchronous walk drains");
+	Check(r.superset.defers >= 1 && r.superset.drains == 0, "krf2 K2 simple: the superset walk does not drain");
+	Check(r.superset.reach[1] && r.superset.reach[2], "krf2 K2 simple: both successors reached");
+	Check(!r.sync.reach[1] && r.sync.reach[2], "krf2 K2 simple: the true value (4 <= 8) takes the false successor");
+	Check(Covers(r, &extra), "krf2 K2 simple: the superset covers the synchronous walk");
+	Check(extra == 1, "krf2 K2 simple: one extra resource (the true successor's)");
+	Check(r.pending.count == 1 && r.pending.entries[0].slot_count == 0, "krf2 K2 simple: one entry, nothing to copy");
+	// A clean load is not a fault: the superset changes nothing.
+	const auto clean = RunBoth(plan, Memory {{kA, {.stale = 4, .fresh = 4, .dirty = false}}});
+	Check(clean.superset.defers == 0 && clean.superset.reach == clean.sync.reach && Covers(clean), "krf2 K2 simple: clean bytes, same walk");
+}
+
+// c5ee521b8849cf83: N10 ReadConstBuffer@+0x1c -> N9 Phi -> N8 ULessThanEqual32 -> N7 LogicalNot -> cond3, and dead users of N10 (a Phi and
+// a ReadConstBuffer whose address uses it, that nothing reads).
+MPlan PlanK2Phi(uint32_t* load) {
+	MPlan p;
+	p.user           = {0, 8};
+	const auto sel   = Add(p, User(0));
+	const auto c0    = Add(p, Not(sel)); // user 0 = 0: true -> block 1
+	*load            = Add(p, LoadAt(kA));
+	const auto other = Add(p, Const(0x100));
+	MNode      phi {.op = Op::Phi};
+	phi.phi          = {{1, *load}, {2, other}};
+	const auto n9    = Add(p, phi);
+	const auto n8    = Add(p, Ule(n9, Add(p, User(1))));
+	const auto n7    = Add(p, Not(n8));
+	MNode      dead_phi {.op = Op::Phi};
+	dead_phi.phi     = {{1, *load}};
+	(void)Add(p, dead_phi);
+	(void)Add(p, LoadAt(kB, *load)); // a dead read whose address is the load
+	p.resources      = {Add(p, Const(0x44)), Add(p, Const(0x55))};
+	p.blocks         = {{.cond = c0, .succ = {1, 2}}, {.succ = {3}}, {.succ = {3}}, {.cond = n7, .succ = {4, 5}}, {.resources = {0}}, {.resources = {1}}};
+	return p;
+}
+
+void TestK2Phi() {
+	uint32_t   load = 0;
+	const auto plan = PlanK2Phi(&load);
+	const auto why  = Classify(plan);
+	Check(why[load] == SupersetWhy::Superset, "krf2 K2 Phi: the load behind a control Phi is a superset load (dead users ignored)");
+	// The S570 graph counts the dead read and Phi as users: not patchable, as S571/S574 saw.
+	std::vector<uint32_t> structural, flat;
+	for (const auto& b: plan.blocks) {
+		if (b.cond != kNone) structural.push_back(b.cond);
+	}
+	Check(!PatchableLoads(Graph(plan), structural, flat)[load], "krf2 K2 Phi: K-rf v1 rejects it");
+	const auto r = RunBoth(plan, Memory {{kA, {.stale = 0x20, .fresh = 4, .dirty = true}}, {kB + 16, {.stale = 1, .fresh = 1}}});
+	uint32_t   extra = 0;
+	Check(r.superset.drains == 0 && r.superset.defers >= 1, "krf2 K2 Phi: no drain");
+	Check(r.superset.reach[4] && r.superset.reach[5] && !r.superset.reach[2], "krf2 K2 Phi: the Phi's condition reaches both successors");
+	Check(Covers(r, &extra) && extra == 1, "krf2 K2 Phi: covers, one extra resource");
+}
+
+void TestAddressFallback() {
+	MPlan p;
+	p.user          = {8};
+	const auto l1   = Add(p, LoadAt(kA));
+	const auto l2   = Add(p, LoadAt(kB, l1)); // the dirty dword is l2's dword index
+	const auto cond = Add(p, Not(Add(p, Ule(l2, Add(p, User(0))))));
+	p.resources     = {Add(p, Const(0x11)), Add(p, Const(0x22))};
+	p.blocks        = {{.cond = cond, .succ = {1, 2}}, {.resources = {0}}, {.resources = {1}}};
+	const auto why  = Classify(p);
+	Check(why[l1] == SupersetWhy::Address, "krf2 address: a load whose value is another load's address drains");
+	Check(why[l2] == SupersetWhy::Superset, "krf2 address: the second load itself is a superset load");
+	Memory mem {{kA, {.stale = 2, .fresh = 3, .dirty = true}}};
+	for (uint32_t k = 0; k < 8; ++k) mem[kB + k * 4] = {.stale = k * 3, .fresh = k * 3};
+	const auto r = RunBoth(p, mem);
+	Check(r.superset.defers == 0 && r.superset.drains == 1, "krf2 address: the fault drains");
+	const auto f = r.superset.fallback.find(SupersetWhy::Address);
+	Check(f != r.superset.fallback.end() && f->second == 1 && r.superset.walkfail == 0, "krf2 address: counted as address, no retry");
+	Check(r.superset.reach == r.sync.reach && Covers(r), "krf2 address: the walk is the synchronous one");
+}
+
+void TestLoopFallback() {
+	// Block 0 -> 1; block 1: i = Phi(0 from block 0, i + load from block 2); cond i <= user -> 2 (loop body, -> 1) or 3.
+	MPlan p;
+	p.user          = {8};
+	const auto zero = Add(p, Const(0));
+	const auto load = Add(p, LoadAt(kA));
+	MNode      phi {.op = Op::Phi, .cyclic = true};
+	const auto i    = Add(p, phi);
+	const auto next = Add(p, Sum(load, i)); // the load first: the walker evaluates it before it meets the cycle
+	p.nodes[i].phi  = {{0, zero}, {2, next}};
+	const auto cond = Add(p, Not(Add(p, Ule(Add(p, User(0)), i))));
+	p.resources     = {Add(p, Const(0x11))};
+	p.blocks        = {{.succ = {1}}, {.cond = cond, .succ = {2, 3}}, {.succ = {1}}, {.resources = {0}}};
+	Check(Classify(p)[load] == SupersetWhy::Loop, "krf2 loop: a loop-carried load drains");
+	const auto r = RunBoth(p, Memory {{kA, {.stale = 0x20, .fresh = 4, .dirty = true}}});
+	const auto f = r.superset.fallback.find(SupersetWhy::Loop);
+	Check(r.superset.defers == 0 && f != r.superset.fallback.end() && f->second >= 1, "krf2 loop: the fault drains, counted as loop");
+	Check(r.superset.reach == r.sync.reach && Covers(r), "krf2 loop: the walk is the synchronous one");
+}
+
+void TestFlatCopy() {
+	uint32_t load = 0;
+	auto     p    = PlanK2Simple(&load);
+	p.slots       = {load, Add(p, Const(7))};
+	p.blocks[0].slots = {0};
+	p.blocks[2].slots = {1};
+	Check(Classify(p)[load] == SupersetWhy::Superset, "krf2 flat: a load in a condition and its own flat slot is a superset load");
+	const auto r = RunBoth(p, Memory {{kA, {.stale = 0x20, .fresh = 4, .dirty = true}}});
+	Check(r.superset.drains == 0 && r.pending.count == 1 && r.pending.entries[0].slot_count == 1 && r.pending.entries[0].slots[0] == 0,
+	      "krf2 flat: the entry carries the slot");
+	Check(r.superset.flat[0] == 0x20 && r.superset.uploaded[0] == 4 && r.sync.flat[0] == 4, "krf2 flat: stale upload, the GPU copy gives 4");
+	Check(Covers(r), "krf2 flat: covers after the copy");
+}
+
+void TestStaticFallbacks() {
+	{
+		uint32_t load = 0;
+		auto     p    = PlanK2Simple(&load);
+		p.slots       = {Add(p, Sum(load, Add(p, Const(1))))};
+		p.blocks[0].slots = {0};
+		Check(Classify(p)[load] == SupersetWhy::DerivedFlat, "krf2: a value computed from the load in a flat slot drains (derived_flat)");
+	}
+	{
+		uint32_t load = 0;
+		auto     p    = PlanK2Simple(&load);
+		p.resources.push_back(Add(p, Sum(load, Add(p, Const(1)))));
+		Check(Classify(p)[load] == SupersetWhy::Descriptor, "krf2: a load in a descriptor drains (descriptor)");
+	}
+	{
+		uint32_t load = 0;
+		auto     p    = PlanK2Simple(&load);
+		p.slots.assign(kMaxSlots + 1, load);
+		p.blocks[0].slots = {0, 1, 2, 3, 4};
+		Check(Classify(p)[load] == SupersetWhy::TooManySlots, "krf2: more flat slots than an entry holds drain (slots)");
+	}
+	{
+		// The address of a load with a flat slot through a control Phi (K1): drains; without the flat slot it may defer.
+		MPlan p;
+		p.user          = {0, 1, 2, 8};
+		const auto c0   = Add(p, Not(Add(p, User(0))));
+		MNode      phi {.op = Op::Phi};
+		phi.phi         = {{1, Add(p, User(1))}, {2, Add(p, User(2))}};
+		const auto ph   = Add(p, phi);
+		const auto load = Add(p, LoadAt(kA, ph));
+		const auto cond = Add(p, Not(Add(p, Ule(load, Add(p, User(3))))));
+		p.resources     = {Add(p, Const(0x11)), Add(p, Const(0x22))};
+		p.blocks        = {{.cond = c0, .succ = {1, 2}}, {.succ = {3}}, {.succ = {3}}, {.cond = cond, .succ = {4, 5}, .slots = {0}},
+		                   {.resources = {0}}, {.resources = {1}}};
+		auto q          = p;
+		p.slots         = {load};
+		Check(Classify(p)[load] == SupersetWhy::PhiAddress, "krf2 K1: a flat-slot load with a control-Phi address drains (phi_address)");
+		q.blocks[3].slots.clear();
+		Check(Classify(q)[load] == SupersetWhy::Superset, "krf2 K1: without a flat slot the control-Phi address does not matter");
+		const auto r = RunBoth(q, Memory {{kA + 4, {.stale = 0x20, .fresh = 4, .dirty = true}}});
+		Check(r.superset.drains == 0 && Covers(r), "krf2 K1: the condition-only load through a Phi address covers");
+	}
+	{
+		// Dead: a load nothing reads; a folded load (no guest load).
+		std::vector<GraphNode> g(2);
+		g[0] = Load();
+		g[1] = Load();
+		g[1].emits_load = false;
+		const std::vector<Root>     roots;
+		const std::vector<uint32_t> flat {1};
+		const auto                  why = SupersetLoads(g, roots, flat);
+		Check(why[0] == SupersetWhy::Dead && why[1] == SupersetWhy::NoLoad, "krf2: dead and folded loads");
+	}
+}
+
+void TestWalkFailRetry() {
+	// Block 2 (only the superset reaches it) has a flat slot whose value is unknown in that walk: a Phi of a block never reached.
+	uint32_t load = 0;
+	auto     p    = PlanK2Simple(&load);
+	MNode phi {.op = Op::Phi};
+	phi.phi       = {{4, Add(p, Const(9))}}; // block 4 has no predecessor
+	p.blocks.push_back({});
+	p.slots           = {Add(p, phi)};
+	p.blocks[1].slots = {0}; // block 1 is the stale value's successor, not the true one
+	p.blocks[3].succ.clear();
+	const auto r = RunBoth(p, Memory {{kA, {.stale = 0x20, .fresh = 4, .dirty = true}}});
+	Check(r.sync.ok && !r.sync.reach[1], "krf2 retry: the synchronous walk does not reach the failing block");
+	Check(r.superset.walkfail == 1 && r.superset.retry == 1 && r.superset.drains == 1, "krf2 retry: the failed superset walks again and drains");
+	Check(r.superset.reach == r.sync.reach && Covers(r), "krf2 retry: the retried walk is the synchronous one");
+}
+
+void TestCover() {
+	const std::vector<MDesc> truth {{{1}}, {{2}}};
+	std::vector<MDesc>       superset {{{1}}, {{2}}};
+	Check(SupersetCoverResources(std::span<const MDesc>(truth), std::span<const MDesc>(superset)).agree, "krf2 cover: equal");
+	superset[1] = MDesc {};
+	Check(!SupersetCoverResources(std::span<const MDesc>(truth), std::span<const MDesc>(superset)).agree,
+	      "krf2 cover: a resource of the true walk the superset lacks (the last one)");
+	const std::vector<MDesc> truth2 {{{1}}, MDesc {}};
+	const std::vector<MDesc> superset2 {{{1}}, {{5}}};
+	const auto               c = SupersetCoverResources(std::span<const MDesc>(truth2), std::span<const MDesc>(superset2));
+	Check(c.agree && c.extra == 1, "krf2 cover: an extra resource");
+	Pending p;
+	const uint32_t s[] {1};
+	p.Add(0x100, 0x20, s);
+	const std::vector<uint32_t> fresh {4};
+	Check(SupersetCoverFlat(std::vector<uint32_t> {7, 4, 0}, std::vector<uint32_t> {7, 0x20, 9}, p, fresh).agree, "krf2 cover: flat");
+	Check(!SupersetCoverFlat(std::vector<uint32_t> {7, 5, 0}, std::vector<uint32_t> {7, 0x20, 9}, p, fresh).agree,
+	      "krf2 cover: the patched slot must hold the drained dword");
+	Check(SupersetCoverFlat(std::vector<uint32_t> {7, 0, 0}, std::vector<uint32_t> {7, 0x20, 9}, p, fresh).agree,
+	      "krf2 cover: a patched slot the true walk does not reach");
+	Check(!SupersetCoverFlat(std::vector<uint32_t> {7, 4, 3}, std::vector<uint32_t> {7, 0x20, 9}, p, fresh).agree,
+	      "krf2 cover: a word the true walk reached differs");
+	const std::vector<std::pair<uint64_t, uint64_t>> r1 {{1, 4}}, r2 {{2, 4}, {1, 4}};
+	Check(SupersetCoverRanges(std::span(r1), std::span(r2)) && !SupersetCoverRanges(std::span(r2), std::span(r1)), "krf2 cover: ranges");
+}
+
+void TestDecideSuperset() {
+	SupersetQuery ok;
+	ok.armed      = true;
+	ok.gpu_thread = true;
+	ok.site       = true;
+	ok.why        = SupersetWhy::Superset;
+	ok.queried    = true;
+	ok.dirty      = true;
+	ok.room       = true;
+	Check(DecideSuperset(ok) == SupersetReject::None, "krf2 decide: defer");
+	auto q = ok;
+	q.dirty = false;
+	Check(DecideSuperset(q) == SupersetReject::NotDirty, "krf2 decide: clean bytes, the ordinary path");
+	q     = ok;
+	q.why = SupersetWhy::Address;
+	Check(DecideSuperset(q) == SupersetReject::Static, "krf2 decide: a static reason");
+	q          = ok;
+	q.disabled = true;
+	Check(DecideSuperset(q) == SupersetReject::Retry, "krf2 decide: a retried scope drains");
+	q              = ok;
+	q.slots        = 1;
+	q.address_base = true;
+	Check(DecideSuperset(q) == SupersetReject::AddressBase, "krf2 decide: a flat slot that is an address base");
+	q.slots = 0;
+	Check(DecideSuperset(q) == SupersetReject::None, "krf2 decide: no slot, the address base does not matter");
+	q          = ok;
+	q.inflight = true;
+	Check(DecideSuperset(q) == SupersetReject::Inflight, "krf2 decide: in flight");
+	q      = ok;
+	q.site = false;
+	Check(DecideSuperset(q) == SupersetReject::NotSite, "krf2 decide: not a resource walker site");
+	q       = ok;
+	q.armed = false;
+	Check(DecideSuperset(q) == SupersetReject::NotArmed, "krf2 decide: outside DISPATCH_INDIRECT");
+	q      = ok;
+	q.room = false;
+	Check(DecideSuperset(q) == SupersetReject::Full, "krf2 decide: full");
+	Check(ParseMode("superset") == Mode::Superset && ParseMode("superset_shadow") == Mode::SupersetShadow && IsSuperset(Mode::SupersetShadow) &&
+	          !IsSuperset(Mode::On),
+	      "krf2: modes parsed");
+}
+
+// Random acyclic plans: forward edges, conditions over loads / user data, loads addressed by other values, resources and flat slots per block.
+void TestRandom() {
+	std::mt19937 rng(579);
+	uint32_t     covered = 0, deferred = 0, retried = 0;
+	for (int iter = 0; iter < 3000; ++iter) {
+		MPlan      p;
+		const auto pick = [&](uint32_t n) { return static_cast<uint32_t>(rng() % n); };
+		p.user          = {pick(6), pick(6), pick(6)};
+		Memory     mem;
+		const auto node = [&](int depth, auto&& self) -> uint32_t {
+			const auto kind = depth > 2 ? pick(3) : pick(7);
+			switch (kind) {
+				case 0: return Add(p, Const(pick(6)));
+				case 1: return Add(p, User(pick(3)));
+				case 2:
+				case 3: {
+					const uint64_t base = 0x1000 + uint64_t {pick(4)} * 0x100;
+					const uint32_t addr = depth < 2 && pick(3) == 0 ? self(depth + 1, self) : kNone;
+					for (uint32_t k = 0; k < 8; ++k) {
+						const uint32_t fresh = pick(6), stale = pick(3) == 0 ? pick(6) : fresh;
+						mem.emplace(base + k * 4, Cell {.stale = stale, .fresh = fresh, .dirty = pick(2) == 0});
+					}
+					return Add(p, LoadAt(base, addr));
+				}
+				case 4: return Add(p, Ule(self(depth + 1, self), self(depth + 1, self)));
+				case 5: return Add(p, Not(self(depth + 1, self)));
+				default: return Add(p, Sum(self(depth + 1, self), self(depth + 1, self)));
+			}
+		};
+		const uint32_t blocks = 2 + pick(5);
+		for (uint32_t r = 0; r < blocks + 1; ++r) p.resources.push_back(pick(4) == 0 ? node(1, node) : Add(p, Const(0x10 + r)));
+		for (uint32_t b = 0; b < blocks; ++b) {
+			MBlock block;
+			if (b + 1 < blocks) {
+				const uint32_t t = b + 1 + pick(blocks - b - 1), f = b + 1 + pick(blocks - b - 1);
+				block.succ       = {t, f};
+				if (pick(4) != 0) block.cond = node(0, node);
+			}
+			if (pick(2) == 0) block.resources.push_back(b);
+			if (pick(3) == 0) {
+				p.slots.push_back(pick(2) == 0 ? node(1, node) : Add(p, Const(pick(6) + 1)));
+				block.slots.push_back(static_cast<uint32_t>(p.slots.size() - 1));
+			}
+			p.blocks.push_back(block);
+		}
+		const auto r = RunBoth(p, mem);
+		if (!r.sync.ok) continue; // a plan the walker cannot walk at all: not a superset question
+		deferred += r.superset.defers != 0 ? 1u : 0u;
+		retried += r.superset.walkfail;
+		if (Covers(r)) {
+			++covered;
+		} else {
+			Check(false, "krf2 random: the superset covers the synchronous walk");
+			std::fprintf(stderr, "krf2 random iter=%d sync.ok=%d sup.ok=%d defers=%u drains=%u walkfail=%u\n", iter, r.sync.ok, r.superset.ok,
+			             r.superset.defers, r.superset.drains, r.superset.walkfail);
+			for (size_t b = 0; b < p.blocks.size(); ++b)
+				std::fprintf(stderr, "  block %zu reach sync=%d sup=%d cond=%u\n", b, int(r.sync.reach[b]), int(r.superset.reach[b]), p.blocks[b].cond);
+			for (size_t i = 0; i < r.sync.resources.size(); ++i)
+				std::fprintf(stderr, "  res %zu sync=%x sup=%x\n", i, r.sync.resources[i].dwords[0], r.superset.resources[i].dwords[0]);
+			for (size_t i = 0; i < r.sync.flat.size(); ++i)
+				std::fprintf(stderr, "  flat %zu sync=%x sup=%x up=%x\n", i, r.sync.flat[i], r.superset.flat[i], r.superset.uploaded[i]);
+			break;
+		}
+	}
+	Check(covered > 1000 && deferred > 200, "krf2 random: enough plans walked and deferred");
+	std::printf("RfGpuPatchTests: krf2 random covered=%u deferred=%u retried=%u\n", covered, deferred, retried);
+}
+
+} // namespace krf2
+
 } // namespace
 
 int main() {
@@ -250,6 +943,16 @@ int main() {
 	TestPending();
 	TestAgree();
 	TestModel();
+	krf2::TestK2Simple();
+	krf2::TestK2Phi();
+	krf2::TestAddressFallback();
+	krf2::TestLoopFallback();
+	krf2::TestFlatCopy();
+	krf2::TestStaticFallbacks();
+	krf2::TestWalkFailRetry();
+	krf2::TestCover();
+	krf2::TestDecideSuperset();
+	krf2::TestRandom();
 	if (g_failures != 0) {
 		std::fprintf(stderr, "RfGpuPatchTests: %d failure(s)\n", g_failures);
 		return 1;

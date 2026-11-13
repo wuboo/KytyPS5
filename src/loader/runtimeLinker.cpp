@@ -1005,12 +1005,75 @@ static void RfOracleLearn() {
 	++e->drains;
 }
 
+// S579 K-rf v2 (KYTY_RF_GPU_PATCH=superset*, rfGpuPatch.h): a fault of a walker load that only reaches block conditions (and its own flat slots),
+// on GPU-dirty bytes, inside RenderExecutor::DispatchIndirect: the load completes with the stale dword and its node is marked deferred (unknown
+// for the walk: both successors of a condition on it are reached). Every other case drains as before and counts its reason.
+static void Krf2CountFallback(Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch::SupersetWhy why) {
+	using W = Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch::SupersetWhy;
+	using C = Libs::Graphics::FrameTiming::Counter;
+	C counter = C::Krf2FallbackOtherN;
+	switch (why) {
+		case W::Loop: counter = C::Krf2FallbackLoopN; break;
+		case W::Address: counter = C::Krf2FallbackAddressN; break;
+		case W::Descriptor: counter = C::Krf2FallbackDescriptorN; break;
+		case W::Output: counter = C::Krf2FallbackOutputN; break;
+		case W::DerivedFlat: counter = C::Krf2FallbackDerivedFlatN; break;
+		case W::TooManySlots: counter = C::Krf2FallbackSlotsN; break;
+		case W::PhiAddress: counter = C::Krf2FallbackPhiAddressN; break;
+		default: break;
+	}
+	Libs::Graphics::FrameTiming::Add(counter);
+}
+
+static bool TrySupersetDefer(const Common::HostException::ExceptionInfo* info, uint32_t length) {
+	namespace P = Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch;
+	using C     = Libs::Graphics::FrameTiming::Counter;
+	auto&                              pending = P::ThreadPending();
+	std::array<uint32_t, P::kMaxSlots> slots {};
+	uint8_t                            why = 0;
+	P::SupersetQuery                   q;
+	q.armed      = pending.armed;
+	q.gpu_thread = Libs::Graphics::GuestGpu::IsGpuThread();
+	q.site       = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerSupersetSite(info->exception_address, slots, &q.slots, &q.address_base, &why);
+	q.why        = static_cast<P::SupersetWhy>(why);
+	// The walker's address is r10 (LoadGuest: lea r10, [...]; mov eax, [r10]), dword aligned, so the fault is at r10.
+	const uint64_t address = info->r10;
+	bool           dirty = true, inflight = true, busy = true;
+	if (q.armed && q.gpu_thread && (address & 3u) == 0 && (info->access_violation_vaddr & ~uint64_t {3}) == address) {
+		q.queried = Libs::LibKernel::Memory::QueryGuestFaultBytes(address, 4, &dirty, &inflight, &busy) && !busy;
+	}
+	q.dirty    = dirty;
+	q.inflight = inflight;
+	q.room     = pending.Room();
+	q.disabled = pending.superset_off || (q.site && Libs::Graphics::ShaderRecompiler::IR::SrtWalkerSupersetBanned());
+	switch (P::DecideSuperset(q)) {
+		case P::SupersetReject::None: break;
+		case P::SupersetReject::NotArmed: return false;
+		case P::SupersetReject::NotDirty: Libs::Graphics::FrameTiming::Add(C::RfPatchRejectNotDirtyN); return false;
+		case P::SupersetReject::Inflight: Libs::Graphics::FrameTiming::Add(C::RfPatchRejectInflightN); return false;
+		case P::SupersetReject::NotSite: Krf2CountFallback(P::SupersetWhy::NotLoad); return false;
+		case P::SupersetReject::Static: Krf2CountFallback(q.why); return false;
+		case P::SupersetReject::Retry: Libs::Graphics::FrameTiming::Add(C::Krf2FallbackRetryN); return false;
+		case P::SupersetReject::AddressBase: Libs::Graphics::FrameTiming::Add(C::RfPatchRejectAddressBaseN); return false;
+		case P::SupersetReject::Full: Libs::Graphics::FrameTiming::Add(C::RfPatchRejectFullN); return false;
+	}
+	uint32_t stale = 0;
+	if (!Libs::LibKernel::Memory::TryReadBacking(address, &stale, sizeof(stale))) return false;
+	if (!pending.Add(address, stale, P::SupersetEntrySlots(std::span<const uint32_t>(slots.data(), q.slots)))) return false;
+	if (!Libs::Graphics::ShaderRecompiler::IR::SrtWalkerSupersetDefer(info->exception_address)) return false;
+	++pending.superset_defers;
+	Loader::X64InstructionEmulator::CompleteLoad(info->native_context, length, stale);
+	Libs::Graphics::FrameTiming::Add(C::Krf2DeferN);
+	return true;
+}
+
 bool TryRfGpuPatch(const Common::HostException::ExceptionInfo* info, uint32_t length) {
 	namespace P = Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch;
 	using C     = Libs::Graphics::FrameTiming::Counter;
 	const auto mode = P::EnvMode();
 	t_rf_oracle_armed = 0;
 	if (mode == P::Mode::Off || length == 0) return false;
+	if (P::IsSuperset(mode)) return TrySupersetDefer(info, length);
 	auto& pending = P::ThreadPending();
 	if (!pending.armed) return false;
 	std::array<uint32_t, P::kMaxSlots> slots {};

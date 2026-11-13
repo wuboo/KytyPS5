@@ -41,14 +41,21 @@ namespace Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch {
 // DISPATCH_INDIRECT completes with the backing's (stale) dword, patchable or not, with no drain and no GPU copy. It measures the ceiling of any
 // lever on these waits (and where the wait goes next: guest fault lambdas, the next sync), not a fix. rf_patch_defer_n counts the completions,
 // rf_patch_stale_ne_n the ones whose stale dword differs from the previous completion at the same address (the value is not constant).
-enum class Mode : uint8_t { Off, On, Shadow, Oracle };
+// S579 K-rf v2 (KYTY_RF_GPU_PATCH=superset | superset_shadow): see the block "K-rf v2" below.
+enum class Mode : uint8_t { Off, On, Shadow, Oracle, Superset, SupersetShadow };
 
 inline Mode ParseMode(const char* text) {
 	if (text == nullptr) return Mode::Off;
 	if (std::strcmp(text, "1") == 0) return Mode::On;
 	if (std::strcmp(text, "shadow") == 0) return Mode::Shadow;
 	if (std::strcmp(text, "oracle") == 0) return Mode::Oracle;
+	if (std::strcmp(text, "superset") == 0) return Mode::Superset;
+	if (std::strcmp(text, "superset_shadow") == 0) return Mode::SupersetShadow;
 	return Mode::Off;
+}
+
+inline bool IsSuperset(Mode mode) {
+	return mode == Mode::Superset || mode == Mode::SupersetShadow;
 }
 
 inline int& OverrideRef() {
@@ -71,6 +78,7 @@ struct GraphNode {
 	bool                  read       = false;
 	bool                  emits_load = false;
 	bool                  cyclic     = false; // referenced while it was being analysed: its value feeds itself
+	bool                  control_phi = false; // S579: an evaluated control Phi (its value depends on the blocks the walk reached)
 };
 
 // `structural`: the nodes the CPU reads after the walk (conditions, descriptor dwords, walked outputs). `flat`: per flat read slot, the
@@ -235,6 +243,9 @@ struct Pending {
 	bool                            armed = false;
 	uint32_t                        count = 0;
 	std::array<Entry, kMaxEntries>  entries {};
+	// S579 K-rf v2: loads deferred as unknown in this scope; set after a failed superset walk (SupersetRetry): the scope drains from then on.
+	uint32_t                        superset_defers = 0;
+	bool                            superset_off    = false;
 
 	[[nodiscard]] bool Room() const { return count < kMaxEntries; }
 	// Adds the read; the same address again (a walk restarted by a control phi) only adds new slots. False when full.
@@ -277,7 +288,9 @@ public:
 		if (!m_on) return;
 		auto& p = ThreadPending();
 		p.Clear();
-		p.armed = true;
+		p.superset_defers = 0;
+		p.superset_off    = false;
+		p.armed           = true;
 	}
 	~Scope() {
 		if (m_on) ThreadPending().armed = false;
@@ -307,6 +320,310 @@ inline bool SnapshotsAgree(std::span<const uint32_t> a, std::span<const uint32_t
 		if (!patched[i] && a[i] != b[i]) return false;
 	}
 	return true;
+}
+
+
+// ==== S579 K-rf v2 "superset" (KYTY_RF_GPU_PATCH=superset | superset_shadow) ======================================================================
+// S574: all 4 sync_rf_gpu per garden flip are class K2: a walker load (ReadConstBuffer of CB0, GPU-dirty) whose value only reaches a block
+// condition (ULessThanEqual32 > LogicalNot > cond, in c5ee... through a control Phi first). The shader itself evaluates that condition on the GPU
+// from the real bytes; the CPU only needs it to know which blocks may run, i.e. which resources and flat slots to prepare.
+// The superset: such a load does not wait. The exception handler completes it with the stale backing dword and marks its node "deferred"
+// (state byte kDeferredState instead of 2 = known). For the walker a deferred node is unknown, exactly as a value it cannot evaluate: a condition
+// that depends on it is unknown and both successors are reached (SuccessorsWhenUnknown), a Phi over it is unknown, and so on; reachability only
+// grows. So the walk prepares every resource and flat slot that any value of the dword could need: a superset of the true walk's, with the same
+// descriptors (no descriptor depends on the load). The GPU runs the true branch with the true value. A flat slot that stores the deferred dword
+// itself (the only flat use allowed) holds the stale dword after the upload and gets the GPU's bytes by a 4-byte copy (the S570 path).
+// When the plan does not allow it, the load drains as before and the fault counts its reason (krf2_fallback_<why>_n):
+//   loop        the load, a value it reaches or its address is cyclic (loop-carried);
+//   address     its value reaches the address, offset or guard of another load (K4);
+//   descriptor  its value reaches a descriptor dword (K3);
+//   output      its value reaches a walked output (indirect key count, selector, uniform fill);
+//   derived_flat a value computed from it is stored in a flat slot (a copy cannot produce it);
+//   slots       more flat slots than an entry holds;
+//   phi_address it has flat slots and its address depends on an evaluated control Phi (a restarted walk can load it from elsewhere: K1);
+//   other       not a registered load site of a resource walker (call targets), dead or no guest load.
+// A superset walk that fails where the true one may not (a flat read or descriptor of a block only the superset reaches is unknown, an invalid
+// descriptor there) walks again with the drain (SupersetRetry, krf2_fallback_walkfail_n; pipelineCache.cpp) and its plan drains from then on
+// (SrtWalkerSupersetBan; those faults: krf2_fallback_retry_n). Only the uses the walker actually evaluates count: the
+// graph's deps are runtime deps (a node that folded to a constant or to unknown does not read its args), and nodes no root and no flat slot
+// reaches (dead) are ignored.
+// superset_shadow: the superset walk, then each deferred dword drained and the program walked again with the fresh bytes; SupersetCover* checks
+// that every resource / flat word of the true walk is in the superset unchanged (extra ones counted: krf2_extra_res_n / _wr_n / _flat_n), and
+// a GPU readback checks the copied slots against the drained dwords. Mismatches: rf_patch_ne_n (must stay 0).
+// Mutants (tests, WILL_FAIL): KYTY_RFPATCH_MUTANT_SKIP_SUCCESSOR (an unknown condition reaches one successor), _COND_AS_TAKEN (the deferred
+// dword is taken as known), _NO_FLAT_COPY (no GPU copy into the slot), _DEFER_ADDRESS (a load that reaches an address defers), _DEFER_LOOP
+// (a loop-carried load defers), _COVER_MISSES_ONE (the shadow check ignores the last resource), _CPHI_ADDRESS (a flat-slot load with a control-Phi
+// dependent address defers).
+
+constexpr uint8_t kKnownState    = 2;
+constexpr uint8_t kDeferredState = 4;
+
+// The state byte the handler gives a deferred load's node.
+inline uint8_t DeferredStateByte() {
+#if defined(KYTY_RFPATCH_MUTANT_COND_AS_TAKEN)
+	return kKnownState; // mutant: the stale dword reads as the known value (one successor, the stale one's)
+#else
+	return kDeferredState;
+#endif
+}
+
+// The successors a block with an unknown (or empty) condition reaches. Used by the walker compiler for every such block.
+template <class T>
+inline std::span<const T> SuccessorsWhenUnknown(std::span<const T> successors) {
+#if defined(KYTY_RFPATCH_MUTANT_SKIP_SUCCESSOR)
+	return successors.size() > 1 ? successors.first(1) : successors;
+#else
+	return successors;
+#endif
+}
+
+enum class RootKind : uint8_t { Condition, Descriptor, Output };
+struct Root {
+	uint32_t node = UINT32_MAX;
+	RootKind kind = RootKind::Condition;
+};
+
+enum class SupersetWhy : uint8_t { Superset, NotLoad, NoLoad, Dead, Loop, Address, Descriptor, Output, DerivedFlat, TooManySlots, PhiAddress };
+
+inline const char* SupersetWhyName(SupersetWhy why) {
+	switch (why) {
+		case SupersetWhy::Superset: return "superset";
+		case SupersetWhy::NotLoad: return "not_a_load";
+		case SupersetWhy::NoLoad: return "no_guest_load";
+		case SupersetWhy::Dead: return "dead";
+		case SupersetWhy::Loop: return "loop";
+		case SupersetWhy::Address: return "address";
+		case SupersetWhy::Descriptor: return "descriptor";
+		case SupersetWhy::Output: return "output";
+		case SupersetWhy::DerivedFlat: return "derived_flat";
+		case SupersetWhy::TooManySlots: return "slots";
+		case SupersetWhy::PhiAddress: return "phi_address";
+	}
+	return "?";
+}
+
+// `nodes`: the walker graph with RUNTIME deps (a node's operands when it evaluates itself, the node it folded into, nothing when it folded to a
+// constant or unknown). `roots`: what the CPU reads after the walk, with its kind. `flat`: per flat read slot the node it stores (UINT32_MAX none).
+// Result: per node, whether a fault of its guest load may defer as unknown, or why not.
+inline std::vector<SupersetWhy> SupersetLoads(std::span<const GraphNode> nodes, std::span<const Root> roots, std::span<const uint32_t> flat) {
+	const size_t n = nodes.size();
+	// Live: needed by a root or a flat slot (the walker only runs thunks something it reads calls).
+	std::vector<bool>     live(n, false);
+	std::vector<uint32_t> stack;
+	for (const auto& r: roots) {
+		if (r.node < n) stack.push_back(r.node);
+	}
+	for (const auto f: flat) {
+		if (f < n) stack.push_back(f);
+	}
+	while (!stack.empty()) {
+		const auto i = stack.back();
+		stack.pop_back();
+		if (live[i]) continue;
+		live[i] = true;
+		for (const auto d: nodes[i].deps) {
+			if (d < n && !live[d]) stack.push_back(d);
+		}
+	}
+	std::vector<std::vector<uint32_t>> users(n);
+	for (uint32_t i = 0; i < n; ++i) {
+		if (!live[i]) continue;
+		for (const auto d: nodes[i].deps) {
+			if (d < n && d != i && (users[d].empty() || users[d].back() != i)) users[d].push_back(i);
+		}
+	}
+	std::vector<bool>     cond(n, false), desc(n, false), out(n, false);
+	std::vector<uint32_t> slots(n, 0);
+	for (const auto& r: roots) {
+		if (r.node >= n) continue;
+		(r.kind == RootKind::Condition ? cond : r.kind == RootKind::Descriptor ? desc : out)[r.node] = true;
+	}
+	for (const auto f: flat) {
+		if (f < n) ++slots[f];
+	}
+	std::vector<SupersetWhy> result(n, SupersetWhy::NotLoad);
+	std::vector<uint8_t>     mark(n, 0);
+	for (uint32_t l = 0; l < n; ++l) {
+		const auto& node = nodes[l];
+		auto&       why  = result[l];
+		if (!node.read) continue;
+		if (!node.emits_load) {
+			why = SupersetWhy::NoLoad;
+			continue;
+		}
+		if (!live[l]) {
+			why = SupersetWhy::Dead;
+			continue;
+		}
+		// T: every live node computed from the load (forward); A: what its address is computed from (backward).
+		std::fill(mark.begin(), mark.end(), uint8_t {0});
+		std::vector<uint32_t> forward, backward;
+		bool                  self_loop = false; // the load's value reaches its own address (or itself)
+		for (const auto u: users[l]) stack.push_back(u);
+		while (!stack.empty()) {
+			const auto i = stack.back();
+			stack.pop_back();
+			if (i == l) self_loop = true;
+			if ((mark[i] & 1u) != 0 || i == l) continue;
+			mark[i] |= 1u;
+			forward.push_back(i);
+			for (const auto u: users[i]) stack.push_back(u);
+		}
+		for (const auto d: node.deps) {
+			if (d < n) stack.push_back(d);
+		}
+		while (!stack.empty()) {
+			const auto i = stack.back();
+			stack.pop_back();
+			if ((mark[i] & 2u) != 0) continue;
+			mark[i] |= 2u;
+			backward.push_back(i);
+			for (const auto d: nodes[i].deps) {
+				if (d < n) stack.push_back(d);
+			}
+		}
+		const auto any = [](const std::vector<uint32_t>& set, const auto& pred) { return std::any_of(set.begin(), set.end(), pred); };
+		bool loop = node.cyclic || self_loop || any(forward, [&](uint32_t i) { return nodes[i].cyclic; }) ||
+		            any(backward, [&](uint32_t i) { return nodes[i].cyclic; });
+#if defined(KYTY_RFPATCH_MUTANT_DEFER_LOOP)
+		loop = false; // mutant: a loop-carried load defers
+#endif
+		bool address = any(forward, [&](uint32_t i) { return nodes[i].read; });
+#if defined(KYTY_RFPATCH_MUTANT_DEFER_ADDRESS)
+		address = false; // mutant: a load that reaches another load's address defers
+#endif
+		bool phi_address = slots[l] != 0 && any(backward, [&](uint32_t i) { return nodes[i].control_phi; });
+#if defined(KYTY_RFPATCH_MUTANT_CPHI_ADDRESS)
+		phi_address = false; // mutant: K1 ignored for a load with flat slots
+#endif
+		if (loop) why = SupersetWhy::Loop;
+		else if (address) why = SupersetWhy::Address;
+		else if (desc[l] || any(forward, [&](uint32_t i) { return desc[i]; })) why = SupersetWhy::Descriptor;
+		else if (out[l] || any(forward, [&](uint32_t i) { return out[i]; })) why = SupersetWhy::Output;
+		else if (any(forward, [&](uint32_t i) { return slots[i] != 0; })) why = SupersetWhy::DerivedFlat;
+		else if (slots[l] > kMaxSlots) why = SupersetWhy::TooManySlots;
+		else if (phi_address) why = SupersetWhy::PhiAddress;
+		else why = SupersetWhy::Superset;
+	}
+	return result;
+}
+
+// The flat slots a deferred load's pending entry carries (the GPU copies the bytes into them).
+inline std::span<const uint32_t> SupersetEntrySlots(std::span<const uint32_t> slots) {
+#if defined(KYTY_RFPATCH_MUTANT_NO_FLAT_COPY)
+	return slots.first(0); // mutant: no copy, the slot keeps the stale dword
+#else
+	return slots;
+#endif
+}
+
+// ---- fault decision in superset mode (exception handler, CP thread) ---------------------------------------------------------------------------
+
+struct SupersetQuery {
+	bool        armed        = false; // inside a Scope on this thread
+	bool        gpu_thread   = false;
+	bool        site         = false; // a registered load site of the running resource walker
+	SupersetWhy why          = SupersetWhy::NotLoad;
+	uint32_t    slots        = 0;
+	bool        address_base = false;
+	bool        queried      = false;
+	bool        dirty        = false;
+	bool        inflight     = false;
+	bool        room         = false;
+	bool        disabled     = false; // the scope retries a failed superset walk with the drain
+};
+
+// Why a fault does not defer. NotDirty / NotArmed: no wait anyway (or not ours), not a fallback. Static: the site's SupersetWhy.
+enum class SupersetReject : uint8_t { None, NotArmed, NotDirty, Inflight, NotSite, Static, Retry, AddressBase, Full };
+
+inline SupersetReject DecideSuperset(const SupersetQuery& q) {
+	if (!q.armed || !q.gpu_thread) return SupersetReject::NotArmed;
+	// Clean bytes need no wait (the ordinary fault path reads them); bytes in flight are about to change in the backing.
+	if (!q.queried || !q.dirty) return SupersetReject::NotDirty;
+	if (q.inflight) return SupersetReject::Inflight;
+	if (!q.site) return SupersetReject::NotSite;
+	if (q.why != SupersetWhy::Superset) return SupersetReject::Static;
+	if (q.disabled) return SupersetReject::Retry;
+	if (q.slots != 0 && q.address_base) return SupersetReject::AddressBase;
+	if (!q.room) return SupersetReject::Full;
+	return SupersetReject::None;
+}
+
+// A superset walk (or its materialization) failed: when this scope deferred a load, the caller walks again with the drain (true).
+inline bool SupersetRetry() {
+	auto& p = ThreadPending();
+	if (!p.armed || p.superset_defers == 0) return false;
+	p.superset_off    = true;
+	p.superset_defers = 0;
+	p.Clear();
+	return true;
+}
+
+// ---- superset_shadow: the true walk (fresh bytes) against the superset walk -------------------------------------------------------------------
+
+struct Cover {
+	bool     agree = true;
+	uint32_t extra = 0; // resources / words the superset prepares that the true walk does not
+};
+
+// R: a descriptor (dwords, dword_count). The true walk's resource is all zero when it is not active (unreached block) or null; the superset's
+// must be equal wherever the true one is not zero.
+template <class R>
+inline Cover SupersetCoverResources(std::span<const R> truth, std::span<const R> superset, std::vector<uint32_t>* extra_indices = nullptr) {
+	Cover c;
+	if (truth.size() != superset.size()) return {.agree = false};
+	size_t end = truth.size();
+#if defined(KYTY_RFPATCH_MUTANT_COVER_MISSES_ONE)
+	if (end != 0) --end; // mutant: the last resource is not checked
+#endif
+	const auto zero = [](const R& r) { return std::all_of(r.dwords.begin(), r.dwords.end(), [](uint32_t w) { return w == 0; }); };
+	for (size_t i = 0; i < end; ++i) {
+		if (truth[i] == superset[i]) continue;
+		if (zero(truth[i]) && truth[i].dword_count == superset[i].dword_count) {
+			++c.extra;
+			if (extra_indices != nullptr) extra_indices->push_back(static_cast<uint32_t>(i));
+			continue;
+		}
+		c.agree = false;
+	}
+	return c;
+}
+
+// Flat words: equal, or zero in the true walk (a slot of a block it does not reach). A patched slot must hold the drained dword in the true walk,
+// or zero there (a slot of the load in a block the true walk does not reach; the copy writes the real dword into it, which nothing reads); the
+// superset's has the stale one until the GPU copy (checked on the GPU).
+inline Cover SupersetCoverFlat(std::span<const uint32_t> truth, std::span<const uint32_t> superset, const Pending& pending,
+                               std::span<const uint32_t> fresh) {
+	Cover c;
+	if (truth.size() != superset.size()) return {.agree = false};
+	std::vector<int32_t> patched(truth.size(), -1);
+	for (uint32_t i = 0; i < pending.count; ++i) {
+		const auto& e = pending.entries[i];
+		for (uint32_t k = 0; k < e.slot_count; ++k) {
+			if (e.slots[k] < truth.size()) patched[e.slots[k]] = static_cast<int32_t>(i);
+		}
+	}
+	for (size_t i = 0; i < truth.size(); ++i) {
+		if (patched[i] >= 0) {
+			if (static_cast<size_t>(patched[i]) >= fresh.size() || (truth[i] != 0 && truth[i] != fresh[static_cast<size_t>(patched[i])]))
+				c.agree = false;
+			continue;
+		}
+		if (truth[i] == superset[i]) continue;
+		if (truth[i] == 0) {
+			++c.extra;
+			continue;
+		}
+		c.agree = false;
+	}
+	return c;
+}
+
+// Every range the true walk read is read by the superset walk too.
+template <class P>
+inline bool SupersetCoverRanges(std::span<const P> truth, std::span<const P> superset) {
+	return std::all_of(truth.begin(), truth.end(),
+	                   [&](const P& r) { return std::find(superset.begin(), superset.end(), r) != superset.end(); });
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch

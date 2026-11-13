@@ -719,10 +719,14 @@ struct ResourcePlan {
 	uint32_t                              srt_captures  = 0; // Scratch offset of loaded addresses.
 	// S570 (KYTY_RF_GPU_PATCH, rfGpuPatch.h): the walker loads whose value only reaches flattened SRT slots, by the code offset of their
 	// guest load (ascending), with those slots (dword indices of flattened_srt) in srt_patch_slots.
+	// S579 K-rf v2 (KYTY_RF_GPU_PATCH=superset*): every load site of a resource walker, with its RfGpuPatch::SupersetWhy (why) and, when it may
+	// defer as unknown (why 0), the scratch offset of its node's state byte (defer_state, nonzero).
 	struct SrtPatchSite {
 		uint32_t code_offset = 0;
 		uint32_t slot_begin  = 0;
 		uint32_t slot_count  = 0;
+		uint32_t defer_state = 0;
+		uint8_t  why         = 0;
 	};
 	std::vector<SrtPatchSite>             srt_patch_sites;
 	std::vector<uint32_t>                 srt_patch_slots;

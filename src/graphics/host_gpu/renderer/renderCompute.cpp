@@ -610,6 +610,7 @@ static void RfPatchRecord(const Command& vk_buffer, std::span<const std::pair<vk
 	uint32_t copies = 0;
 	for (uint32_t i = 0; i < pending.count && i < sources.size(); ++i) {
 		const auto& e = pending.entries[i];
+		if (e.slot_count == 0) continue; // S579: a superset load that only reaches conditions has nothing to copy
 		std::array<vk::BufferCopy, P::kMaxSlots> regions {};
 		for (uint32_t k = 0; k < e.slot_count; ++k) {
 			regions[k] = vk::BufferCopy(sources[i].second, flat.offset + uint64_t {e.slots[k]} * sizeof(uint32_t), sizeof(uint32_t));
@@ -624,6 +625,119 @@ static void RfPatchRecord(const Command& vk_buffer, std::span<const std::pair<vk
 	                          nullptr);
 	FrameTiming::Add(FrameTiming::Counter::RfPatchCopyN, copies);
 	FrameTiming::Add(FrameTiming::Counter::RfPatchDispatchN);
+}
+
+// S579 K-rf v2 (KYTY_RF_GPU_PATCH=superset_shadow, rfGpuPatch.h): the superset walk is the one GetComputeProgram just did (deferred loads
+// unknown). Drain each deferred dword, walk again with the fresh bytes (the true walk: the scope is disarmed) and check that the superset holds
+// every resource, flat word and read range of the true walk unchanged (the extra ones are counted), the patched slots aside (their drained dword
+// is in `fresh`; the GPU copy is checked by Krf2GpuCheck). On agreement the dispatch goes on with the superset snapshot and module (the
+// production path, its bindings and copies); a disagreement counts rf_patch_ne_n and the dispatch uses the true walk.
+static bool Krf2Shadow(RenderContext& context, ShaderComputeInputInfo& input_info, const HW::ComputeShaderInfo& cs_regs,
+                       std::array<uint32_t, ShaderRecompiler::IR::RfGpuPatch::kMaxEntries>& fresh) {
+	namespace P = ShaderRecompiler::IR::RfGpuPatch;
+	auto&       pending = P::ThreadPending();
+	const auto* module  = input_info.stage.module;
+	auto        first   = *input_info.stage.resources; // copy: the true walk rewrites the program's snapshot
+	for (uint32_t i = 0; i < pending.count; ++i) {
+		const auto& e = pending.entries[i];
+		(void)context.GetBufferCache().ReadMemory(e.address, sizeof(uint32_t));
+		if (!LibKernel::Memory::TryReadBacking(e.address, &fresh[i], sizeof(uint32_t))) fresh[i] = e.stale;
+		if (fresh[i] != e.stale) FrameTiming::Add(FrameTiming::Counter::RfPatchStaleNeN);
+	}
+	FrameTiming::Add(FrameTiming::Counter::RfPatchShadowN);
+	if (!context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) {
+		FrameTiming::Add(FrameTiming::Counter::RfPatchNeN);
+		return false;
+	}
+	const auto&           truth = *input_info.stage.resources;
+	std::vector<uint32_t> extra_buffers;
+	const auto            buffers  = P::SupersetCoverResources(std::span(truth.buffers), std::span<const ShaderRecompiler::IR::DescriptorValue>(first.buffers), &extra_buffers);
+	const auto            images   = P::SupersetCoverResources(std::span(truth.images), std::span<const ShaderRecompiler::IR::DescriptorValue>(first.images));
+	const auto            samplers = P::SupersetCoverResources(std::span(truth.samplers), std::span<const ShaderRecompiler::IR::DescriptorValue>(first.samplers));
+	const auto            flat     = P::SupersetCoverFlat(truth.flattened_srt, first.flattened_srt, pending, std::span(fresh).first(pending.count));
+	const bool            ranges   = P::SupersetCoverRanges(std::span(truth.specialization_reads),
+	                                                        std::span<const std::pair<uint64_t, uint64_t>>(first.specialization_reads));
+	const bool agree = buffers.agree && images.agree && samplers.agree && flat.agree && ranges && truth.uniform_fill == first.uniform_fill &&
+	                   truth.user_data == first.user_data;
+	FrameTiming::Add(FrameTiming::Counter::Krf2ExtraResN, buffers.extra + images.extra + samplers.extra);
+	FrameTiming::Add(FrameTiming::Counter::Krf2ExtraFlatN, flat.extra);
+	if (module != nullptr) {
+		uint32_t written = 0;
+		for (const auto i: extra_buffers) {
+			if (i < module->info.info.buffers.size() && module->info.info.buffers[i].written) ++written;
+		}
+		FrameTiming::Add(FrameTiming::Counter::Krf2ExtraWrN, written);
+	}
+	if (input_info.stage.module != module) FrameTiming::Add(FrameTiming::Counter::Krf2VariantN);
+	if (!agree) {
+		FrameTiming::Add(FrameTiming::Counter::RfPatchNeN);
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+			LOGF("[krf2] shadow: the superset misses a resource of the true walk (shader=0x%016" PRIx64
+			     " entries=%u buffers=%d images=%d samplers=%d flat=%d ranges=%d)\n",
+			     module != nullptr ? static_cast<uint64_t>(module->info.shader_hash) : 0ull, pending.count, buffers.agree ? 1 : 0,
+			     images.agree ? 1 : 0, samplers.agree ? 1 : 0, flat.agree ? 1 : 0, ranges ? 1 : 0);
+		}
+		return true; // the true walk's snapshot and module stay
+	}
+	// The superset again: the snapshot the stage points to is the program's own (non-const) one.
+	*const_cast<ShaderRecompiler::IR::ResourceSnapshot*>(input_info.stage.resources) = std::move(first);
+	input_info.stage.module                                                             = module;
+	return true;
+}
+
+// S579 superset_shadow: after RfPatchRecord, the patched slots of the uploaded SRT go to the download ring; once the GPU is done with the
+// submission, each must equal the dword the shadow drained (krf2_gpu_check_n words checked, rf_patch_ne_n otherwise).
+template <class Command>
+static void Krf2GpuCheck(RenderContext& context, const Command& vk_buffer, const vk::DescriptorBufferInfo& flat,
+                         const std::array<uint32_t, ShaderRecompiler::IR::RfGpuPatch::kMaxEntries>& fresh) {
+	namespace P         = ShaderRecompiler::IR::RfGpuPatch;
+	const auto& pending = P::ThreadPending();
+	std::array<vk::BufferCopy, P::kMaxEntries * P::kMaxSlots> regions {};
+	std::array<uint32_t, P::kMaxEntries * P::kMaxSlots>       expected {};
+	uint32_t                                                  n = 0;
+	auto&      stream          = context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Download);
+	uint32_t   words           = 0;
+	for (uint32_t i = 0; i < pending.count; ++i) words += pending.entries[i].slot_count;
+	if (words == 0) return;
+	auto [mapped, offset] = stream.Map(uint64_t {words} * sizeof(uint32_t), sizeof(uint32_t), false);
+	if (mapped == nullptr) return;
+	stream.Commit();
+	for (uint32_t i = 0; i < pending.count; ++i) {
+		const auto& e = pending.entries[i];
+		for (uint32_t k = 0; k < e.slot_count; ++k, ++n) {
+			regions[n]  = vk::BufferCopy(flat.offset + uint64_t {e.slots[k]} * sizeof(uint32_t), offset + uint64_t {n} * sizeof(uint32_t),
+                                        sizeof(uint32_t));
+			expected[n] = fresh[i];
+		}
+	}
+	vk::MemoryBarrier before {};
+	before.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+	before.dstAccessMask = vk::AccessFlagBits::eTransferRead;
+	vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eTransfer, {}, 1, &before, 0, nullptr, 0,
+	                          nullptr);
+	vk_buffer.copyBuffer(flat.buffer, stream.Handle(), n, regions.data());
+	vk::MemoryBarrier after {};
+	after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+	after.dstAccessMask = vk::AccessFlagBits::eHostRead;
+	vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eHost, {}, 1, &after, 0, nullptr, 0, nullptr);
+	context.GetCommandScheduler().DeferOperation([&stream, mapped, offset, n, expected] {
+		stream.Invalidate(offset, uint64_t {n} * sizeof(uint32_t));
+		uint32_t bad = 0;
+		for (uint32_t i = 0; i < n; ++i) {
+			uint32_t word = 0;
+			std::memcpy(&word, mapped + uint64_t {i} * sizeof(uint32_t), sizeof(word));
+			if (word != expected[i]) ++bad;
+		}
+		FrameTiming::Add(FrameTiming::Counter::Krf2GpuCheckN, n);
+		if (bad != 0) {
+			FrameTiming::Add(FrameTiming::Counter::RfPatchNeN);
+			static std::atomic<uint32_t> logged {0};
+			if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+				LOGF("[krf2] shadow: %u of %u copied slot words differ from the drained dwords\n", bad, n);
+			}
+		}
+	});
 }
 
 void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
@@ -667,6 +781,11 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	const auto& rf_pending = RfPatch::ThreadPending();
 	const bool  rf_patched = rf_patch != RfPatch::Mode::Off && rf_pending.count != 0;
 	if (rf_patched && rf_patch == RfPatch::Mode::Shadow && !RfPatchShadow(m_context, input_info, cs_regs)) return;
+	// S579 K-rf v2: superset entries that only reached conditions have no slot: no copy, no barrier.
+	uint32_t rf_copy_slots = 0;
+	for (uint32_t i = 0; rf_patched && i < rf_pending.count; ++i) rf_copy_slots += rf_pending.entries[i].slot_count;
+	std::array<uint32_t, RfPatch::kMaxEntries> krf2_fresh {};
+	if (rf_patched && rf_patch == RfPatch::Mode::SupersetShadow && !Krf2Shadow(m_context, input_info, cs_regs, krf2_fresh)) return;
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
 	auto& bindings = m_compute_bindings;
@@ -687,8 +806,9 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	// S570: the patch sources first (a buffer they create or merge cannot replace the arguments' buffer afterwards), then again after the
 	// arguments (they exist now: no merge).
 	std::array<std::pair<vk::Buffer, uint64_t>, RfPatch::kMaxEntries> rf_sources {};
-	if (rf_patched) {
+	if (rf_copy_slots != 0) {
 		for (uint32_t i = 0; i < rf_pending.count; ++i) {
+			if (rf_pending.entries[i].slot_count == 0) continue;
 			(void)m_context.GetBufferCache().ObtainBuffer(rf_pending.entries[i].address, sizeof(uint32_t), false);
 		}
 	}
@@ -696,8 +816,9 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF((args_offset & 3u) != 0);
-	if (rf_patched) {
+	if (rf_copy_slots != 0) {
 		for (uint32_t i = 0; i < rf_pending.count; ++i) {
+			if (rf_pending.entries[i].slot_count == 0) continue;
 			const auto [source, offset] = m_context.GetBufferCache().ObtainBuffer(rf_pending.entries[i].address, sizeof(uint32_t), false);
 			rf_sources[i]               = {source->Handle(), offset};
 		}
@@ -710,9 +831,10 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	}
 	KYTY_CP_SITE(DispRecord);
 	const auto vk_buffer = buffer.EmitIfPending(); // S565: as DispatchDirect
-	if (rf_patched) {
+	if (rf_copy_slots != 0) {
 		EXIT_IF(!bindings.flattened_srt.buffer);
 		RfPatchRecord(vk_buffer, std::span(rf_sources.data(), rf_pending.count), bindings.flattened_srt);
+		if (rf_patch == RfPatch::Mode::SupersetShadow) Krf2GpuCheck(m_context, vk_buffer, bindings.flattened_srt, krf2_fresh);
 	}
 	const bool storage_writes = HasStorageWrites(input_info, bindings);
 	if (storage_writes) {

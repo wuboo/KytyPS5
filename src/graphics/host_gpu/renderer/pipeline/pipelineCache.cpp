@@ -19,6 +19,9 @@
 #include "graphics/shader/recompiler/ShaderRecompiler.h"
 #include "graphics/shader/recompiler/Tessellation.h"
 #include "graphics/shader/recompiler/ir/Serialize.h"
+#include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
+#include "graphics/shader/recompiler/ir/passes/rfGpuPatch.h"
+#include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/scoutTableLog.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/memory.h"
@@ -288,11 +291,23 @@ bool PipelineCache::Program::RefreshCallSource(const ShaderRecompiler::IR::SrtRu
 	return revision != call_source->revision;
 }
 
+// S579 K-rf v2 (KYTY_RF_GPU_PATCH=superset*, rfGpuPatch.h): a walk that deferred a load as unknown reaches every block a value of it could
+// reach, and can fail where the true walk does not (a flat read or a descriptor of a block only the superset reaches is unknown or invalid):
+// then walk again with the drain (SupersetRetry disables the deferral for the rest of the scope). Otherwise as MaterializeResources.
+static bool MaterializeSupersetRetry(const ShaderRecompiler::IR::ResourcePlan& plan, const ShaderRecompiler::IR::SrtRuntime& runtime,
+                                     ShaderRecompiler::IR::ResourceSnapshot&       snapshot,
+                                     ShaderRecompiler::IR::ResourceSpecialization& specialization) {
+	if (ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization)) return true;
+	if (!ShaderRecompiler::IR::RfGpuPatch::SupersetRetry()) return false;
+	FrameTiming::Add(FrameTiming::Counter::Krf2FallbackWalkfailN);
+	ShaderRecompiler::IR::SrtWalkerSupersetBan(plan);
+	return ShaderRecompiler::IR::MaterializeResources(plan, runtime, snapshot, specialization);
+}
+
 template <bool HasCalls>
 ShaderModule* PipelineCache::Program::FindModule(const ShaderRecompiler::IR::SrtRuntime& runtime,
                                                  uint32_t push_data_cursor) {
-	EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(resource_plan, runtime, resources,
-	                                                    specialization));
+	EXIT_IF(!MaterializeSupersetRetry(resource_plan, runtime, resources, specialization));
 	for (auto& candidate: modules) {
 		const auto& layout = candidate.info.bindings;
 		if (layout.push_data_start_dword != ShaderRecompiler::IR::PushData::StartFor(
@@ -315,6 +330,9 @@ ShaderModule& PipelineCache::CompileModule(Program& program, const ProgramKey& k
 	Common::DebugCounters::ScopedTimer timer(Common::DebugCounters::Counter::ShadersCompiled,
 	                                         Common::DebugCounters::Counter::ShaderCompileNs,
 	                                         Common::DebugCounters::Peak::ShaderCompileNs);
+	if (const auto& rf = ShaderRecompiler::IR::RfGpuPatch::ThreadPending(); rf.armed && rf.superset_defers != 0) {
+		FrameTiming::Add(FrameTiming::Counter::Krf2CompileN); // S579: a shader variant for a superset's resources
+	}
 	const auto profile = SpirvProfile(m_graphics);
 	options.profile    = &profile;
 	auto result = ShaderRecompiler::CompileProgram(std::move(translated), options,
@@ -474,8 +492,7 @@ const ShaderModule* PipelineCache::GetProgram(const ShaderParams& params, InputI
 			entry = m_program_cache.emplace(m_lookup_key, std::move(fresh)).first;
 		}
 		auto& program = entry->second;
-		EXIT_IF(!ShaderRecompiler::IR::MaterializeResources(
-		    program.resource_plan, runtime, program.resources, program.specialization));
+		EXIT_IF(!MaterializeSupersetRetry(program.resource_plan, runtime, program.resources, program.specialization));
 	} else if (source_changed) {
 		entry->second.resource_plan = ShaderRecompiler::IR::ExtractResourcePlan(translated.program);
 		if (const auto* module = entry->second.FindModule<true>(runtime, push_data_cursor)) {

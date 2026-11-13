@@ -89,6 +89,16 @@ uint32_t SrtWalkerLoadLength(uint64_t rip);
 // S570 (KYTY_RF_GPU_PATCH): when the walker load at rip (running on this thread) only feeds flattened SRT slots, writes them to `slots` and
 // returns their number (0 otherwise); *address_base: one of them is a global address base the CPU reads (BackAddressBases).
 uint32_t SrtWalkerPatchSlots(uint64_t rip, std::span<uint32_t> slots, bool* address_base);
+// S579 K-rf v2 (KYTY_RF_GPU_PATCH=superset*): the walker load at rip (running on this thread) as a superset site: false when it is not a
+// registered site of a resource walker. *why: its RfGpuPatch::SupersetWhy (0 = may defer as unknown); then slots / *slot_count: the flat
+// slots it stores directly, *address_base: one of them is a global address base.
+bool SrtWalkerSupersetSite(uint64_t rip, std::span<uint32_t> slots, uint32_t* slot_count, bool* address_base, uint8_t* why);
+// Marks the superset load at rip deferred in this thread's running walk (its node's state byte = RfGpuPatch::DeferredStateByte()); false
+// when it is not one. The exception handler then completes the load with the stale dword.
+bool SrtWalkerSupersetDefer(uint64_t rip);
+// A superset walk of the plan failed: its loads drain from then on (on this thread). Banned: the running plan is.
+void SrtWalkerSupersetBan(const ResourcePlan& plan);
+bool SrtWalkerSupersetBanned();
 // S573 DIAG (KYTY_DIAG_RF_WHY=1): the description of the walker load whose mov is at rip (registered when the walker was compiled: plan, load
 // node and its address operands, why it is or is not patchable, its structural roots and users) and how often it was asked for; false when off
 // or unknown.

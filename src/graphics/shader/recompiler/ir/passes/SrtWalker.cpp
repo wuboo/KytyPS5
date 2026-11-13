@@ -190,6 +190,7 @@ std::unordered_map<uint64_t, WhySite>& WhySites() {
 
 thread_local const Xbyak::CodeGenerator* t_running_walker = nullptr;
 thread_local const ResourcePlan*         t_running_plan   = nullptr; // S570 (KYTY_RF_GPU_PATCH): the plan of t_running_walker
+thread_local uint8_t*                    t_running_scratch = nullptr; // S579: its scratch (rdx), where a deferred load's state byte lives
 
 // Every guest load is mov eax, [r10] (41 8b 02), so a fault completes it as a zero read. Returns the code offset of the mov.
 size_t LoadGuest(Xbyak::CodeGenerator& code, const Xbyak::RegExp& address) {
@@ -460,6 +461,12 @@ private:
 	void EmitStrict(const Node& node);
 	void FindPatchableLoads(std::span<const Operand> conditions, std::span<const std::vector<Operand>> descriptors,
 	                        std::span<const Operand> outputs, std::span<const Operand> reads);
+	void FindSupersetLoads(std::span<const Operand> conditions, std::span<const std::vector<Operand>> descriptors,
+	                       std::span<const Operand> outputs, std::span<const Operand> reads);
+	[[nodiscard]] bool SupersetNode(uint32_t index) const {
+		return m_superset && index < m_superset_why.size() && m_superset_why[index] == RfGpuPatch::SupersetWhy::Superset;
+	}
+	void StoreLoad(const Node& node);
 	void NotePatchSite(size_t code_offset);
 	// S573 DIAG (KYTY_DIAG_RF_WHY=1)
 	[[nodiscard]] std::string WhyOperand(const Operand& operand, int depth) const;
@@ -481,6 +488,9 @@ private:
 	// S570 (KYTY_RF_GPU_PATCH): per node, the flat slots of a load nothing else uses (empty: not patchable); the node being emitted.
 	std::vector<std::vector<uint32_t>> m_patch_slots;
 	uint32_t                           m_emitting = UINT32_MAX;
+	// S579 K-rf v2 (KYTY_RF_GPU_PATCH=superset*, resource walkers only): per node its SupersetWhy (m_patch_slots then holds a superset load's slots).
+	bool                                 m_superset = false;
+	std::vector<RfGpuPatch::SupersetWhy> m_superset_why;
 	// S573 DIAG: (code offset of the mov, node) of every guest load; per node its explanation; the plan's header.
 	std::vector<std::pair<uint32_t, uint32_t>> m_why_sites;
 	std::vector<std::string>                   m_why_text;
@@ -1010,11 +1020,28 @@ void WalkerCompiler::EmitRead(const Node& node) {
 		++m_captures;
 		c.mov(c.qword[c.r8], c.r10);
 		c.add(c.r8, 8);
-		Store(node);
+		StoreLoad(node);
 	}
 	c.L(zero);
 	c.xor_(c.eax, c.eax);
 	Store(node);
+}
+
+// S579 K-rf v2: a superset load keeps the state byte the exception handler gave it (kDeferredState: unknown to every reader but its own flat
+// slots); otherwise (no fault, a drain, a zero read) the value is known as before.
+void WalkerCompiler::StoreLoad(const Node& node) {
+	auto& c = m_code;
+	if (!SupersetNode(m_emitting)) {
+		Store(node);
+		return;
+	}
+	Xbyak::Label deferred;
+	c.mov(c.qword[c.rdx + node.slot], c.rax);
+	c.cmp(c.byte[c.rdx + node.state], 1);
+	c.jne(deferred, Near);
+	c.mov(c.byte[c.rdx + node.state], RfGpuPatch::kKnownState);
+	c.L(deferred);
+	c.ret();
 }
 
 void WalkerCompiler::EmitStrict(const Node& node) {
@@ -1242,6 +1269,7 @@ void WalkerCompiler::Compile(std::span<const Value> values) {
 	const auto& sources   = m_plan.descriptor_sources;
 	const auto& blocks    = m_plan.control_flow;
 	const bool  resources = values.empty();
+	m_superset            = resources && RfGpuPatch::IsSuperset(RfGpuPatch::EnvMode());
 	std::vector<std::vector<uint32_t>> gates(sources.size());
 	if (resources) Consume(gates);
 	for (const auto value: values) AddOutput(value, UINT32_MAX);
@@ -1313,7 +1341,7 @@ void WalkerCompiler::Compile(std::span<const Value> values) {
 					c.jmp(next, Near);
 					c.L(both);
 				}
-				for (const auto successor: successors) mark(successor);
+				for (const auto successor: RfGpuPatch::SuccessorsWhenUnknown(std::span<const uint32_t>(successors))) mark(successor);
 			}
 			c.L(next);
 		}
@@ -1325,7 +1353,21 @@ void WalkerCompiler::Compile(std::span<const Value> values) {
 				c.jmp(fail, Near);
 				return;
 			}
-			Fetch(reads[slot], fail);
+			if (reads[slot].kind == Kind::Node && SupersetNode(static_cast<uint32_t>(reads[slot].value))) {
+				// S579: the slot of a superset load takes its dword deferred or known (a deferred one is the stale dword; the GPU copies the
+				// real bytes over it before the dispatch).
+				const auto& node = m_nodes[reads[slot].value];
+				Xbyak::Label ok;
+				c.call(node.label);
+				c.cmp(c.byte[c.rdx + node.state], RfGpuPatch::kKnownState);
+				c.je(ok, Near);
+				c.cmp(c.byte[c.rdx + node.state], RfGpuPatch::DeferredStateByte());
+				c.jne(fail, Near);
+				c.L(ok);
+				c.mov(c.rax, c.qword[c.rdx + node.slot]);
+			} else {
+				Fetch(reads[slot], fail);
+			}
 			c.mov(c.dword[c.rsi + offset * sizeof(uint32_t)], c.eax);
 		};
 		if (blocks.empty()) {
@@ -1422,7 +1464,9 @@ void WalkerCompiler::FindPatchableLoads(std::span<const Operand> conditions, std
 		if (node.inst->GetOpcode() == ValueOpcode::Phi && node.result == Operand {Kind::Node, index}) ++control_phis;
 	}
 	const bool why = P::WhyEnabled();
-	if (control_phis != 0 && !why) return;
+	// S579 K-rf v2: the superset classification owns m_patch_slots; the S570 graph below then only serves the DIAG text.
+	if (m_superset) FindSupersetLoads(conditions, descriptors, outputs, reads);
+	if ((control_phis != 0 || m_superset) && !why) return;
 	std::vector<P::GraphNode> graph(m_nodes.size());
 	for (uint32_t index = 0; index < m_nodes.size(); ++index) {
 		const auto& node = m_nodes[index];
@@ -1455,7 +1499,7 @@ void WalkerCompiler::FindPatchableLoads(std::span<const Operand> conditions, std
 		if (reads[slot].kind == Kind::Node) flat[slot] = static_cast<uint32_t>(reads[slot].value);
 	}
 	if (why) WhyExplain(graph, structural, root_names, flat, control_phis);
-	if (control_phis != 0) return; // DIAG only: the exclusion above, after the explanation
+	if (control_phis != 0 || m_superset) return; // DIAG only: the exclusion above, after the explanation
 	const auto patchable = P::PatchableLoads(graph, structural, flat);
 	for (size_t slot = 0; slot < reads.size(); ++slot) {
 		const auto node = flat[slot];
@@ -1466,8 +1510,68 @@ void WalkerCompiler::FindPatchableLoads(std::span<const Operand> conditions, std
 	}
 }
 
+// S579 K-rf v2 (KYTY_RF_GPU_PATCH=superset*): which loads may defer as unknown (RfGpuPatch::SupersetLoads on the graph of runtime deps), and the
+// flat slots each one stores directly (the GPU copies into them).
+void WalkerCompiler::FindSupersetLoads(std::span<const Operand> conditions, std::span<const std::vector<Operand>> descriptors,
+                                       std::span<const Operand> outputs, std::span<const Operand> reads) {
+	namespace P = RfGpuPatch;
+	std::vector<P::GraphNode> graph(m_nodes.size());
+	for (uint32_t index = 0; index < m_nodes.size(); ++index) {
+		const auto& node = m_nodes[index];
+		auto&       g    = graph[index];
+		const bool  self = node.result == Operand {Kind::Node, index};
+		// A thunk of its own evaluates its operands; one that folded into another node only fetches that node; one that folded to a constant
+		// or to unknown reads nothing (references to it get its result, not it).
+		if (self) {
+			for (const auto& arg: node.args) {
+				if (arg.kind == Kind::Node) g.deps.push_back(static_cast<uint32_t>(arg.value));
+			}
+		} else if (node.result.kind == Kind::Node) {
+			g.deps.push_back(static_cast<uint32_t>(node.result.value));
+		}
+		const auto op = node.inst->GetOpcode();
+		g.read        = op == ValueOpcode::LoadAddressU32 || op == ValueOpcode::ReadConstBuffer || op == ValueOpcode::LoadBufferU32;
+		g.emits_load  = g.read && self && (op == ValueOpcode::LoadBufferU32 ? node.args.size() > 1 : !node.args.empty());
+		g.cyclic      = node.referenced;
+		g.control_phi = op == ValueOpcode::Phi && self;
+	}
+	std::vector<P::Root> roots;
+	const auto           root = [&](const Operand& operand, P::RootKind kind) {
+        if (operand.kind == Kind::Node) roots.push_back({.node = static_cast<uint32_t>(operand.value), .kind = kind});
+	};
+	for (const auto& condition: conditions) root(condition, P::RootKind::Condition);
+	for (const auto& words: descriptors) {
+		for (const auto& word: words) root(word, P::RootKind::Descriptor);
+	}
+	for (const auto& output: outputs) root(output, P::RootKind::Output);
+	std::vector<uint32_t> flat(reads.size(), UINT32_MAX);
+	for (size_t slot = 0; slot < reads.size(); ++slot) {
+		if (reads[slot].kind == Kind::Node) flat[slot] = static_cast<uint32_t>(reads[slot].value);
+	}
+	m_superset_why = P::SupersetLoads(graph, roots, flat);
+	for (size_t slot = 0; slot < reads.size(); ++slot) {
+		const auto node = flat[slot];
+		if (node < m_superset_why.size() && m_superset_why[node] == P::SupersetWhy::Superset)
+			m_patch_slots[node].push_back(m_plan.srt_reads[slot].flat_offset);
+	}
+}
+
 void WalkerCompiler::NotePatchSite(size_t code_offset) {
 	if (RfGpuPatch::WhyEnabled() && m_emitting < m_nodes.size()) m_why_sites.emplace_back(static_cast<uint32_t>(code_offset), m_emitting);
+	if (m_superset) {
+		// S579: every load site, with its reason; a superset one with its state byte and slots.
+		if (m_emitting >= m_nodes.size()) return;
+		const bool  superset = SupersetNode(m_emitting);
+		const auto& slots    = m_patch_slots[m_emitting];
+		m_plan.srt_patch_sites.push_back(
+		    {.code_offset = static_cast<uint32_t>(code_offset),
+		     .slot_begin  = static_cast<uint32_t>(m_plan.srt_patch_slots.size()),
+		     .slot_count  = superset ? static_cast<uint32_t>(slots.size()) : 0u,
+		     .defer_state = superset ? m_nodes[m_emitting].state : 0u,
+		     .why = static_cast<uint8_t>(m_emitting < m_superset_why.size() ? m_superset_why[m_emitting] : RfGpuPatch::SupersetWhy::NotLoad)});
+		if (superset) m_plan.srt_patch_slots.insert(m_plan.srt_patch_slots.end(), slots.begin(), slots.end());
+		return;
+	}
 	if (m_emitting >= m_patch_slots.size() || m_patch_slots[m_emitting].empty()) return;
 	const auto& slots = m_patch_slots[m_emitting];
 	m_plan.srt_patch_sites.push_back({.code_offset = static_cast<uint32_t>(code_offset),
@@ -1560,6 +1664,7 @@ void WalkerCompiler::WhyRegister(bool resources) {
 		site.code  = base;
 		site.text  = fmt::format("{} site=+{:#x} load={} {}", header, offset, WhyNode(node, 4),
 		                         node < m_why_text.size() && !m_why_text[node].empty() ? m_why_text[node] : std::string("why=n/a"));
+		if (m_superset && node < m_superset_why.size()) site.text += fmt::format(" krf2={}", RfGpuPatch::SupersetWhyName(m_superset_why[node]));
 	}
 }
 
@@ -1598,12 +1703,14 @@ bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<ui
 	flat.assign(plan.srt_reads.size(), 0u);
 	using Walker = const uint64_t* KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*, uint64_t*, uint64_t);
 	auto& srt = plan.scratch().srt;
-	t_running_walker = plan.srt_code.get();
-	t_running_plan   = &plan;
+	t_running_walker  = plan.srt_code.get();
+	t_running_plan    = &plan;
+	t_running_scratch = reinterpret_cast<uint8_t*>(srt.data());
 	const auto* end = plan.srt_code->getCode<Walker>()(runtime.user_data.data(), flat.data(),
 	                                                     srt.data(), runtime.shader_base);
-	t_running_walker = nullptr;
-	t_running_plan   = nullptr;
+	t_running_walker  = nullptr;
+	t_running_plan    = nullptr;
+	t_running_scratch = nullptr;
 	if (end == nullptr) return false;
 	if (reads != nullptr) {
 		for (auto* read = srt.data() + plan.srt_captures / 8u; read != end; ++read)
@@ -1695,6 +1802,60 @@ uint32_t SrtWalkerPatchSlots(uint64_t rip, std::span<uint32_t> slots, bool* addr
 		}
 	}
 	return it->slot_count;
+}
+
+namespace {
+const ResourcePlan::SrtPatchSite* RunningSite(uint64_t rip) {
+	if (t_running_walker == nullptr || t_running_plan == nullptr || SrtWalkerLoadLength(rip) == 0) return nullptr;
+	const auto  offset = rip - reinterpret_cast<uint64_t>(t_running_walker->getCode());
+	const auto& sites  = t_running_plan->srt_patch_sites;
+	const auto  it     = std::lower_bound(sites.begin(), sites.end(), offset,
+	                                      [](const ResourcePlan::SrtPatchSite& site, uint64_t at) { return site.code_offset < at; });
+	return it == sites.end() || it->code_offset != offset ? nullptr : &*it;
+}
+} // namespace
+
+bool SrtWalkerSupersetSite(uint64_t rip, std::span<uint32_t> slots, uint32_t* slot_count, bool* address_base, uint8_t* why) {
+	*slot_count   = 0;
+	*address_base = false;
+	*why          = static_cast<uint8_t>(RfGpuPatch::SupersetWhy::NotLoad);
+	const auto* site = RunningSite(rip);
+	if (site == nullptr) return false;
+	*why = site->why;
+	if (site->defer_state == 0) return true;
+	if (site->slot_count > slots.size()) {
+		*why = static_cast<uint8_t>(RfGpuPatch::SupersetWhy::TooManySlots);
+		return true;
+	}
+	for (uint32_t i = 0; i < site->slot_count; ++i) {
+		const auto slot = t_running_plan->srt_patch_slots[site->slot_begin + i];
+		slots[i]        = slot;
+		for (const auto& base: t_running_plan->info.address_bases) {
+			if (base[0] == slot || base[1] == slot) *address_base = true;
+		}
+	}
+	*slot_count = site->slot_count;
+	return true;
+}
+
+namespace {
+// Plans (scratch_key) whose superset walk failed once on this thread: their loads drain from then on (one stderr line and one retry per plan).
+thread_local std::unordered_set<uint64_t> t_superset_banned;
+} // namespace
+
+void SrtWalkerSupersetBan(const ResourcePlan& plan) {
+	t_superset_banned.insert(plan.scratch_key);
+}
+
+bool SrtWalkerSupersetBanned() {
+	return t_running_plan != nullptr && !t_superset_banned.empty() && t_superset_banned.contains(t_running_plan->scratch_key);
+}
+
+bool SrtWalkerSupersetDefer(uint64_t rip) {
+	const auto* site = RunningSite(rip);
+	if (site == nullptr || site->defer_state == 0 || t_running_scratch == nullptr) return false;
+	t_running_scratch[site->defer_state] = RfGpuPatch::DeferredStateByte();
+	return true;
 }
 
 uint32_t SrtWalkerLoadLength(uint64_t rip) {
