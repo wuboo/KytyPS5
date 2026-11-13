@@ -319,8 +319,9 @@ void CommandProcessor::PipeInit() {
 		m_pipe->front        = std::make_unique<CpPipe::FrontRing>(m_pipe->depth);
 		m_pipe->front_shadow = CpPipe::FrontEnvMode() == CpPipe::FrontMode::Shadow;
 		std::thread([this] { PipeFrontThread(); }).detach(); // never ends: the graphics CP lives as long as the process
-		LOGF("[cp-front] on: mode=%s depth=%zu\n", m_pipe->front_shadow ? "shadow" : "1", m_pipe->depth);
-		std::fprintf(stderr, "[cp-front] on: mode=%s depth=%zu\n", m_pipe->front_shadow ? "shadow" : "1", m_pipe->depth);
+		LOGF("[cp-front] on: mode=%s depth=%zu numinst_lazy=%s\n", m_pipe->front_shadow ? "shadow" : "1", m_pipe->depth, NumInstLazy::ModeName(NumInstLazy::EnvMode()));
+		std::fprintf(stderr, "[cp-front] on: mode=%s depth=%zu numinst_lazy=%s\n", m_pipe->front_shadow ? "shadow" : "1", m_pipe->depth,
+		             NumInstLazy::ModeName(NumInstLazy::EnvMode()));
 	}
 }
 
@@ -642,9 +643,7 @@ void CommandProcessor::PipeFrontEnqueue(CpPipe::OpClass cls, uint32_t opcode, co
 		it.ctx                       = m_ctx;
 		it.sh                        = m_sh_ctx;
 		it.ucfg                      = m_ucfg;
-		const uint32_t num_instances = NumInstances(); // resolves an inherited count now, as the unpiped path does at the draw
-		it.ds                        = m_ds;
-		it.ds.num_instances          = num_instances;
+		SnapshotNumInstances(it.ds); // S577: 0 resolves an inherited count now; KYTY_NUMINST_LAZY=1 leaves it to the recorder
 	}
 	if (cls == CpPipe::OpClass::Draw && CpPipe::IsGraphicsDraw(opcode) && EnvWorkers() != 0) {
 		it.job.cache     = &m_renderer.GetPipelineCache();
@@ -709,6 +708,17 @@ void CommandProcessor::PipeFrontEnqueue(CpPipe::OpClass cls, uint32_t opcode, co
 			break;
 		default: break;
 	}
+}
+
+// S577 (KYTY_NUMINST_LAZY, numInstLazy.h). Off: NumInstances() as before (the read of an indirect draw's record faults when the GPU wrote it).
+// 1: the item carries {address, epoch}, the recorder reads at the first item that inherits the count. shadow: both.
+void CommandProcessor::SnapshotNumInstances(CpPipe::CpDrawState& ds) {
+	const auto snap     = NumInstLazy::TakeSnapshot(NumInstLazy::EnvMode(), m_ni_front, m_ds.num_instances, [this] { return NumInstances(); });
+	ds                  = m_ds;
+	ds.num_instances    = snap.value;
+	ds.ni_addr          = snap.addr;
+	ds.ni_epoch         = snap.epoch;
+	if (snap.skipped) FrameTiming::Add(FrameTiming::Counter::NumInstLazySkipN);
 }
 
 uint32_t CommandProcessor::PipeFrontSync(uint32_t kind, uint32_t opcode, const uint32_t* packet, uint32_t remaining_dw, uint32_t total_dw) {

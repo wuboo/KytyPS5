@@ -189,6 +189,7 @@ void CommandProcessor::Reset() {
 	m_saved_ctx.reset();
 	m_ds                 = {};
 	m_num_instances_addr = 0;
+	m_ni_front.pending_addr = 0; // S577: the epoch keeps counting (the recorder's memo is keyed by it)
 	m_predicate_skip     = false;
 }
 
@@ -318,6 +319,7 @@ void CommandProcessor::WriteData(uint32_t* dst, const uint32_t* src, uint32_t dw
 	if (dw_num == 0) {
 		return;
 	}
+	NumInstLazy::NoteGpuWrite(reinterpret_cast<uint64_t>(dst), write_one_address ? 4u : static_cast<uint64_t>(dw_num) * 4u); // S577
 	Common::MemEvents::Record(Common::MemEvents::Kind::GpuWriteData, reinterpret_cast<uint64_t>(dst), write_one_address ? 4u : static_cast<uint64_t>(dw_num) * 4u,
 	                          dw_num, dst_sel);
 
@@ -391,6 +393,7 @@ void CommandProcessor::DmaData(uint8_t dst_sel, uint64_t dst_address_or_offset, 
 		EXIT("unsupported dmaData destination selector 0x%02" PRIx8 "\n", dst_sel);
 	}
 	if (!dst_gds) {
+		NumInstLazy::NoteGpuWrite(dst_address_or_offset, num_bytes); // S577 (ObtainBuffer notes it too)
 		Common::MemEvents::Record(Common::MemEvents::Kind::GpuDma, dst_address_or_offset, num_bytes, src_address_or_offset_or_immediate, src_sel,
 		                          src_sel == 2 ? "fill" : "copy");
 	}
@@ -854,14 +857,54 @@ void CommandProcessor::SetNumInstances(uint32_t num_instances) {
 
 	SetCpMember(m_ds.num_instances, num_instances);
 	SetCpMember(m_num_instances_addr, uint64_t {0});
+	m_ni_front.OnPacket(); // S577 (the gate let SetCpMember through: the front's state): the lazy view forgets the indirect draw's record too
 }
 
 uint32_t CommandProcessor::NumInstances() {
 	if (m_num_instances_addr != 0) {
+		FrameTiming::Add(FrameTiming::Counter::NumInstEagerN);
 		SetCpMember(m_ds.num_instances, *reinterpret_cast<const uint32_t*>(m_num_instances_addr));
 		SetCpMember(m_num_instances_addr, uint64_t {0});
+		// S577: with KYTY_NUMINST_LAZY=1 the front never gets here; a draw outside the front's items (none known) resolved the register, so the lazy view
+		// must not read the record a second time. shadow keeps it: its front reads here on purpose.
+		if (NumInstLazy::EnvMode() == NumInstLazy::Mode::On) m_ni_front.pending_addr = 0;
 	}
 	return m_ds.num_instances;
+}
+
+// S577 (KYTY_NUMINST_LAZY=1|shadow, numInstLazy.h): the recorder executes the first item of an epoch that inherits the count. The read is the one the
+// unpiped CP does at the draw (it may fault and drain the GPU queue, on this thread); every later item of the epoch takes the memo.
+uint32_t CommandProcessor::ResolveLazyNumInstances(const CpPipe::CpDrawState& ds) {
+	using C        = FrameTiming::Counter;
+	auto&      watch   = NumInstLazy::GlobalWatch();
+	const bool tainted = watch.TaintedFor(ds.ni_epoch);
+	bool       did_read = false;
+	const auto t0       = FrameTiming::SteadyNowNs();
+	const uint32_t lazy = m_ni_resolver.Resolve(
+	    ds.ni_addr, ds.ni_epoch, [](uint64_t addr) { return *reinterpret_cast<const volatile uint32_t*>(addr); }, &did_read);
+	if (did_read) {
+		FrameTiming::Add(C::NumInstReadN);
+		FrameTiming::Add(C::NumInstReadNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
+		if (tainted) FrameTiming::Add(C::NumInstTaintUseN);
+		if (watch.epoch.load(std::memory_order_relaxed) == ds.ni_epoch) watch.Disarm();
+	} else {
+		FrameTiming::Add(C::NumInstHitN);
+	}
+	if (NumInstLazy::EnvMode() == NumInstLazy::Mode::Shadow) {
+		FrameTiming::Add(C::NumInstShadowN);
+		if (lazy != ds.num_instances) {
+			FrameTiming::Add(C::NumInstNeN);
+			static std::atomic<uint32_t> logged {0};
+			if (logged.fetch_add(1) < 16) {
+				LOGF("[numinst-lazy] shadow: addr=0x%" PRIx64 " epoch=%" PRIu64 " eager=%u lazy=%u read=%d tainted=%d\n", ds.ni_addr, ds.ni_epoch,
+				     ds.num_instances, lazy, did_read ? 1 : 0, tainted ? 1 : 0);
+				std::fprintf(stderr, "[numinst-lazy] shadow: addr=0x%" PRIx64 " epoch=%" PRIu64 " eager=%u lazy=%u read=%d tainted=%d\n", ds.ni_addr,
+				             ds.ni_epoch, ds.num_instances, lazy, did_read ? 1 : 0, tainted ? 1 : 0);
+			}
+		}
+		return ds.num_instances; // shadow draws with the old value
+	}
+	return lazy;
 }
 
 void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t wait_op,
@@ -1014,6 +1057,15 @@ void CommandProcessor::DrawIndirectMulti(uint32_t data_offset, uint32_t max_coun
 	// NUM_INSTANCES keeps the last draw's instance count.
 	m_num_instances_addr = args_addr + static_cast<uint64_t>(draw_count - 1) * stride_in_bytes +
 	                       offsetof(vk::DrawIndirectCommand, instanceCount);
+	// S577 (KYTY_NUMINST_LAZY): the lazy view gets a new epoch; the watch over the record is armed once this draw is recorded (GPU writes after it
+	// are the ones the old path's read did not see).
+	m_ni_front.OnIndirectDraw(m_num_instances_addr);
+	struct ArmWatch {
+		uint64_t addr, epoch;
+		~ArmWatch() {
+			if (NumInstLazy::EnvMode() != NumInstLazy::Mode::Off) NumInstLazy::GlobalWatch().Arm(addr, epoch);
+		}
+	} const arm_watch {m_num_instances_addr, m_ni_front.epoch};
 	// S472 (KYTY_INDIRECT_GPU_MESH=1): an indexed one-draw indirect whose host shader is a mesh shader is drawn from the guest args on the GPU
 	// (no CPU read of the args). The executor declines every other draw (ig_request.declined); those take the records path below.
 	MeshIndirectRequest mesh_request;

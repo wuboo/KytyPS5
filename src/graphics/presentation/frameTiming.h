@@ -507,6 +507,11 @@ enum class Counter : uint32_t {
 	// S570 micro (gpuDirtyRanges.h): KYTY_DIRTY_ADD_MEMO adds skipped / done / shadow mismatches; KYTY_DIRTY_QUERY_MEMO answers from the
 	// memo / computed / shadow mismatches. Hits are added in batches (flushed by BufferCache::RunGarbageCollector).
 	DirtyAddMemoHitN, DirtyAddMemoMissN, DirtyAddMemoNeN, DirtyQueryMemoHitN, DirtyQueryMemoMissN, DirtyQueryMemoNeN,
+	// S577 (KYTY_NUMINST_LAZY, numInstLazy.h): eager reads of an indirect draw's record (NumInstances(), every mode), front snapshots that left the
+	// read to the recorder (once per epoch: the reads 0 would have done), the recorder's lazy reads and the ns they took (a GPU-written record
+	// drains here), consumers answered from the epoch memo, shadow comparisons, shadow mismatches (must stay 0), lazy reads of a record a GPU write
+	// had touched after its indirect draw (the case where 1 can differ from 0).
+	NumInstEagerN, NumInstLazySkipN, NumInstReadN, NumInstReadNs, NumInstHitN, NumInstShadowN, NumInstNeN, NumInstTaintUseN,
 	Count,
 };
 

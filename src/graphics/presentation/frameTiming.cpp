@@ -833,6 +833,14 @@ constexpr const char* kCounterNames[] = {
     "dirty_query_memo_hit_n",
     "dirty_query_memo_miss_n",
     "dirty_query_memo_ne_n",
+    "numinst_eager_n",
+    "numinst_lazy_skip_n",
+    "numinst_read_n",
+    "numinst_read_ns",
+    "numinst_hit_n",
+    "numinst_shadow_n",
+    "numinst_ne_n",
+    "numinst_taint_use_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

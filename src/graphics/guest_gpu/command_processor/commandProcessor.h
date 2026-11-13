@@ -3,6 +3,7 @@
 
 #include "common/assert.h"
 #include "graphics/guest_gpu/command_processor/cpPipe.h"
+#include "graphics/guest_gpu/command_processor/numInstLazy.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pssr.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -163,8 +164,15 @@ private:
 	void SuspendPm4();
 	void                CountDraw();
 	uint32_t            NumInstances();
-	// S549: the executed item's instance count (the front resolved it at the snapshot), else NumInstances().
-	uint32_t ExecNumInstances() { return m_exec_ds != nullptr ? m_exec_ds->num_instances : NumInstances(); }
+	// S549: the executed item's instance count (the front resolved it at the snapshot), else NumInstances(). S577 (KYTY_NUMINST_LAZY): an item whose
+	// copy carries a record address resolves it here, on the recorder (graphicsRun.cpp).
+	uint32_t ExecNumInstances() {
+		if (m_exec_ds == nullptr) return NumInstances();
+		return m_exec_ds->ni_addr != 0 ? ResolveLazyNumInstances(*m_exec_ds) : m_exec_ds->num_instances;
+	}
+	uint32_t ResolveLazyNumInstances(const CpPipe::CpDrawState& ds);
+	// S577: the front's NUM_INSTANCES snapshot for a Draw/Dispatch item of the front thread (cpPipe.cpp).
+	void SnapshotNumInstances(CpPipe::CpDrawState& ds);
 	const void*         IndexAddress(uint32_t first_index) const;
 	CommandScheduler&   GetScheduler() const { return m_renderer.GetCommandScheduler(); }
 	CommandBuffer&      CurrentBuffer() { return GetScheduler().Current(); }
@@ -179,6 +187,10 @@ private:
 	// Persistent draw state. Indirect draws leave the address of their last instance count,
 	// read only when a later draw inherits it.
 	uint64_t m_num_instances_addr = 0;
+	// S577 (KYTY_NUMINST_LAZY): the front's lazy view of the register (set with m_num_instances_addr by an indirect draw, cleared by NUM_INSTANCES and
+	// Reset, never by a read) and the recorder's memo of the resolved epoch.
+	NumInstLazy::FrontState m_ni_front;
+	NumInstLazy::Resolver   m_ni_resolver;
 
 	const int m_interrupt_event_id;
 	const uint32_t m_flush_draws = FlushDrawsFromEnv(); // S540 (KYTY_FLUSH_DRAWS), 0 is off

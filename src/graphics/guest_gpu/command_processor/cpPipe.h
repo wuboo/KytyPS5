@@ -341,6 +341,9 @@ struct CpDrawState {
 	uint64_t draw_indirect_base     = 0;
 	uint64_t dispatch_indirect_base = 0;
 	uint32_t num_instances          = 1;
+	// S577 (KYTY_NUMINST_LAZY, numInstLazy.h): the inherited count's record address and epoch, set only in an item's copy by the front; 0 = num_instances holds it.
+	uint64_t ni_addr  = 0;
+	uint64_t ni_epoch = 0;
 };
 
 // Mutant KYTY_CPPIPE_MUTANT_FRONT_LIVE_STATE: the recorder reads the live (front) state instead of its item's copy.

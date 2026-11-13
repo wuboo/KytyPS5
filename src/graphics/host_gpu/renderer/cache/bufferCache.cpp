@@ -6,6 +6,7 @@
 #include "common/debugCounters.h"
 #include "common/logging/log.h"
 #include "common/profiler.h"
+#include "graphics/guest_gpu/command_processor/numInstLazy.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/hotPages.h"
@@ -1220,6 +1221,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	TouchBuffer(buffer);
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
+		NumInstLazy::NoteGpuWrite(vaddr, size); // S577: a GPU write over a pending NUM_INSTANCES record (one relaxed load when nothing is armed)
 		ForgetColorMetadataChecks(vaddr, size);
 		m_gpu_modified_ranges.Add(vaddr, size);
 		if (DccFillPublish::EnvMode() != DccFillPublish::Mode::Off) {
