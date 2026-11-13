@@ -524,6 +524,19 @@ enum class Counter : uint32_t {
 	// banned by the guest page guard, bans it would make with banning off (KYTY_KRF3=inflight), walker faults drained on a banned page, trials
 	// after a ban; guest read faults on a page of a deferred dword and their wait (the guest's side of what the drain used to clean).
 	Krf3InflightDeferN, Krf3PageBanN, Krf3PageWouldBanN, Krf3PageDrainN, Krf3PageTrialN, Krf3GuestPageN, Krf3GuestPageWaitNs,
+	// S585 (KYTY_GUEST_WAIT, guestWait.h): VEX.128 loads served with the AVX component in its init state (Windows); spin queries of the buffer
+	// cache state that did not get the lock at once / gave up; byte waits (for the copy of the bytes) and their time, of them with the GPU done,
+	// with a newer page tick (today's wait would have been longer), loads served after one, refused after one (bytes dirty again / still in
+	// flight), in-flight bytes whose copy was not submitted (today's path), shadow mismatches of byte-wait loads.
+	GfEmuVexInitN, GwSpinN, GwSpinBusyN, GwByteWaitN, GwByteWaitNs, GwByteDoneN, GwByteOlderN, GwByteServedN, GwByteRefusedN,
+	GwByteUnsubmittedN, GwByteShadowNeN,
+	// S585 DIAG U5 (KYTY_DIAG_GUEST_STALE): guest read faults on GPU-dirty / in-flight bytes sampled, backing before != after the drain, of them
+	// in flight (not dirty), the drain left the bytes dirty / in flight (fresh not comparable), the state query gave up.
+	DiagGsN, DiagGsNeN, DiagGsInflightN, DiagGsUnsettledN, DiagGsBusyN,
+	// S585: the presenter thread. Present() calls that submitted, their time, the acquire (slot wait + vkAcquireNextImageKHR), the slot wait alone
+	// (the previous present submit of the semaphore slot still in the queue) and how often it blocked, vkQueuePresentKHR with the queue lock,
+	// present submits not done when the next one is submitted (sum; / present_n = average).
+	PresentN, PresentNs, PresentAcquireNs, PresentSlotWaitNs, PresentSlotWaitN, PresentQueueNs, PresentInflightSum,
 	Count,
 };
 

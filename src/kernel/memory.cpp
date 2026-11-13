@@ -1209,6 +1209,18 @@ bool QueryGuestFaultBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* infl
 	return true;
 }
 
+int WaitGuestFaultBytes(uint64_t vaddr, uint64_t size) noexcept {
+	if (size == 0 || g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
+		return -1;
+	}
+	bool       busy     = false;
+	const auto decision = g_gpu_resources->GetBufferCache().GuestByteWait(vaddr, size, &busy);
+	if (busy) {
+		return -1;
+	}
+	return decision.action == Graphics::GuestWait::ByteAction::Ordinary ? 0 : 1; // Wait done, or Serve (published meanwhile): query again
+}
+
 struct PrtAperture {
 	uint64_t address = 0;
 	uint64_t size    = 0;

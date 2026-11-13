@@ -18,6 +18,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/pageManager.h"
 #include "graphics/host_gpu/renderer/gfDiag.h"
+#include "graphics/host_gpu/renderer/cache/guestWait.h"
 #include "graphics/host_gpu/renderer/cache/landSync.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
@@ -694,10 +695,26 @@ static bool IsReadableRange(uint64_t addr, uint64_t size) {
 // KYTY_GF_EMULATE when it is set, otherwise the landing package (KYTY_LAND_SYNC). Both call sites
 // have to use this: the backing read used to consult only KYTY_GF_EMULATE and then label every
 // clean byte as inflight, so the package never served a load.
+// S585: and when both are off, KYTY_GUEST_WAIT=clean|1 turns the emulator on (guestWait.h).
 static Loader::GuestReadEmulator::Mode GuestFaultMode() {
 	const auto resolved = Libs::Graphics::LandSync::ResolveGuestEmu(static_cast<uint8_t>(Loader::GuestReadEmulator::EnvMode()),
 	                                                                Libs::Graphics::LandSync::GuestMode());
-	return static_cast<Loader::GuestReadEmulator::Mode>(resolved);
+	return static_cast<Loader::GuestReadEmulator::Mode>(Libs::Graphics::GuestWait::ResolveEmu(resolved, Libs::Graphics::GuestWait::EnvMode()));
+}
+
+// S585: KYTY_GUEST_WAIT=clean|1 serves VEX.128 loads whose saved context has the AVX component in its init state (guestReadEmulator.h YmmhState).
+static Loader::GuestReadEmulator::Options GfEmuOptions() {
+	Loader::GuestReadEmulator::Options options;
+	options.vex_init_zero = Libs::Graphics::GuestWait::CleanOn(Libs::Graphics::GuestWait::EnvMode());
+	return options;
+}
+
+// S585: the spin statistics of this fault's buffer cache queries (GuestWait::ThreadSpin) into gw_spin_n / gw_spin_busy_n.
+static void GwTakeSpinStats() {
+	auto& stats = Libs::Graphics::GuestWait::ThreadSpin();
+	if (stats.spun != 0) Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GwSpinN, stats.spun);
+	if (stats.busy != 0) Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GwSpinBusyN, stats.busy);
+	stats = {};
 }
 
 static Loader::GuestReadEmulator::BackingResult GfEmuReadBacking(uint64_t address, uint64_t size, void* dst) {
@@ -779,8 +796,31 @@ static void GfEmuLogInstruction(void* native_context, uint64_t fault_vaddr, uint
 
 struct GfEmuShadow {
 	Loader::GuestReadEmulator::Attempt attempt;
-	bool                               pending = false;
+	bool                               pending    = false;
+	bool                               from_bytes = false; // S585: served after a byte wait (KYTY_GUEST_WAIT=1)
 };
+
+// S585 (KYTY_GUEST_WAIT=1): bytes in flight wait for their own copy, then the load is prepared again; true when it can be served now.
+static bool GwByteWaitRetry(const Common::HostException::ExceptionInfo* info, Loader::GuestReadEmulator::Attempt* attempt) {
+	using namespace Loader::GuestReadEmulator;
+	using C = Libs::Graphics::FrameTiming::Counter;
+	if (!Libs::Graphics::GuestWait::BytesOn(Libs::Graphics::GuestWait::EnvMode()) || attempt->plan.why != Why::BackingInflight ||
+	    attempt->plan.size == 0) {
+		return false;
+	}
+	if (Libs::LibKernel::Memory::WaitGuestFaultBytes(attempt->plan.address, attempt->plan.size) != 1) {
+		return false; // nothing to wait for that would help (copy not submitted, lock spin gave up): the ordinary path
+	}
+	Attempt again;
+	if (Prepare(info->native_context, info->access_violation_vaddr, GfEmuReadBacking, &again, GfEmuOptions())) {
+		*attempt = again;
+		Libs::Graphics::FrameTiming::Add(C::GwByteServedN);
+		return true;
+	}
+	Libs::Graphics::FrameTiming::Add(C::GwByteRefusedN); // dirty again / a newer copy in flight: today's path from here
+	*attempt = again;
+	return false;
+}
 
 // True when the fault was served here (mode 1). In shadow mode the emulated bytes are kept in `shadow` and compared after the ordinary path.
 static bool TryGuestReadEmulation(const Common::HostException::ExceptionInfo* info, GfEmuShadow* shadow) {
@@ -790,12 +830,27 @@ static bool TryGuestReadEmulation(const Common::HostException::ExceptionInfo* in
 	if (mode == Mode::Off || Libs::Graphics::GuestGpu::IsGpuThread()) {
 		return false;
 	}
-	Attempt attempt;
-	if (!Prepare(info->native_context, info->access_violation_vaddr, GfEmuReadBacking, &attempt)) {
+	Attempt    attempt;
+	bool       from_bytes = false;
+	const bool prepared   = Prepare(info->native_context, info->access_violation_vaddr, GfEmuReadBacking, &attempt, GfEmuOptions()) ||
+	                      (from_bytes = GwByteWaitRetry(info, &attempt));
+	// S585: the access the instruction makes, for the KYTY_DIAG_GUEST_STALE line of the ordinary path.
+	auto& hint = Libs::Graphics::GuestWait::ThreadHint();
+	hint       = {attempt.plan.address, attempt.plan.size, attempt.plan.size != 0 && attempt.plan.address != 0};
+	if (!prepared) {
+		GwTakeSpinStats();
 		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuFallbackN);
 		GfEmuCountFallback(attempt.plan.why); // S428
 		if (attempt.plan.why == Why::VexNoAvx) {
 			Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuVexNoAvxN); // S427
+			// S585: why the context has no usable upper halves (Windows: CONTEXT_XSTATE, XSTATE mask, AVX area), <= 8 lines.
+			static std::atomic<uint32_t> vex_logged {0};
+			if ((Libs::Graphics::GuestWait::CleanOn(Libs::Graphics::GuestWait::EnvMode()) || Libs::Graphics::GuestFault::Enabled()) &&
+			    vex_logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+				char text[200] = {};
+				(void)DescribeContext(info->native_context, text, sizeof(text));
+				LOGF("[gf-vex-ctx] pc=0x%016" PRIx64 " addr=0x%016" PRIx64 " %s\n", info->exception_address, info->access_violation_vaddr, text);
+			}
 		}
 		static std::atomic<uint32_t> logged {0};
 		if (logged.fetch_add(1, std::memory_order_relaxed) < 50) {
@@ -805,9 +860,14 @@ static bool TryGuestReadEmulation(const Common::HostException::ExceptionInfo* in
 		}
 		return false;
 	}
+	GwTakeSpinStats();
+	if (attempt.plan.vex_init) {
+		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuVexInitN); // S585
+	}
 	if (mode == Mode::Shadow) {
-		shadow->attempt = attempt;
-		shadow->pending = true;
+		shadow->attempt    = attempt;
+		shadow->pending    = true;
+		shadow->from_bytes = from_bytes;
 		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuN);
 		return false;
 	}
@@ -833,11 +893,27 @@ static void GfEmuShadowFinish(const GfEmuShadow& shadow) {
 		return;
 	}
 	Libs::Graphics::FrameTiming::Add(C::GfEmuNeN);
+	if (shadow.from_bytes) {
+		Libs::Graphics::FrameTiming::Add(C::GwByteShadowNeN); // S585: may also be a newer write landed during the ordinary path's wait
+	}
 	static std::atomic<uint32_t> logged {0};
 	if (logged.fetch_add(1, std::memory_order_relaxed) < 20) {
 		LOGF("[gf-emu-ne] addr=0x%016" PRIx64 " size=%u mnemonic=%s\n", shadow.attempt.plan.address,
 		     static_cast<unsigned>(shadow.attempt.plan.size), shadow.attempt.plan.mnemonic);
 	}
+}
+
+// S585 DIAG (KYTY_DIAG_GUEST_STALE): with the emulator off nothing decoded the load; decode it here for the width of the stale/fresh compare.
+static void GwStaleHint(const Common::HostException::ExceptionInfo* info) {
+	if (!Libs::Graphics::GuestWait::Stale().on || Libs::Graphics::GuestGpu::IsGpuThread()) {
+		return;
+	}
+	auto& hint = Libs::Graphics::GuestWait::ThreadHint();
+	if (GuestFaultMode() != Loader::GuestReadEmulator::Mode::Off) {
+		return; // TryGuestReadEmulation set it for this fault
+	}
+	const auto plan = Loader::GuestReadEmulator::Decode(info->native_context, info->access_violation_vaddr, GfEmuOptions());
+	hint            = {plan.address, plan.size, plan.size != 0 && plan.address != 0};
 }
 
 static bool SignalCensusResolve(uint64_t rip, char* module, size_t module_size, uint64_t* offset);
@@ -1248,6 +1324,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 				Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultHandled);
 				return true;
 			}
+			GwStaleHint(info); // S585 DIAG
 		}
 		// S570: who reads a GPU-dirty page on the CP thread (rf_gpu_walker_n / rf_gpu_other_n in RenderContext::HandleFault).
 		Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch::FaultFromWalker() =

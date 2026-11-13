@@ -276,13 +276,14 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size     = 0;
 	const auto                  buffer_address = buffer.CpuAddress();
+	const auto                  copy_tick      = m_scheduler.CurrentTick(); // S585: the submission the copy is recorded into
 	m_memory_tracker.ForEachDownloadRange<false>(
 	    vaddr, size, [&](uint64_t address, uint64_t bytes) noexcept {
 		    m_memory_tracker.ValidateGpuDirtyPages(m_gpu_modified_ranges.Set(), address, bytes,
 		                                           "buffer download");
 		    // S428 (B2): every piece becomes "in flight" before the range stops being "dirty" (before: dirty -> neither -> in flight, a window in
 		    // which a guest thread's fault handler saw clean bytes and a stale backing); the whole step is under the dirty-set lock.
-		    m_gpu_modified_ranges.BeginDownloadCopy(m_inflight_download_ranges, address, bytes, [&](uint64_t start, uint64_t end) {
+		    m_gpu_modified_ranges.BeginDownloadCopyAt(m_inflight_download_ranges, copy_tick, address, bytes, [&](uint64_t start, uint64_t end) {
 			    copies.emplace_back(start - buffer_address, total_size, end - start);
 			    // Start each packed range on its own 64-byte cache line.
 			    total_size += Common::AlignUp(end - start, 64);
@@ -1403,12 +1404,63 @@ bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 }
 
 bool BufferCache::TryQueryGuestFault(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight) const {
+	// S585 (KYTY_GUEST_WAIT=clean|1): a bounded spin on each lock instead of one try (S495: lockbusy 180-272 per landing).
+	if (GuestWait::CleanOn(GuestWait::EnvMode())) {
+		return QueryGuestBytes(vaddr, size, dirty, inflight);
+	}
 	// Dirty first, in flight second: BeginDownloadCopy adds to in-flight before it removes from dirty, so "not dirty" followed by "not in flight"
 	// means the copy has been published (or never existed).
 	if (!m_gpu_modified_ranges.TryIntersects(vaddr, size, dirty)) {
 		return false;
 	}
 	return m_inflight_download_ranges.TryIntersects(vaddr, size, inflight);
+}
+
+bool BufferCache::QueryGuestBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight, uint64_t* copy_tick) const {
+	// The same order as TryQueryGuestFault, each lock taken with GuestWait::SpinTryLock.
+	if (!m_gpu_modified_ranges.TryIntersectsSpin(vaddr, size, dirty)) {
+		return false;
+	}
+	return m_inflight_download_ranges.TryIntersectsSpin(vaddr, size, inflight, copy_tick);
+}
+
+GuestWait::ByteDecision BufferCache::GuestByteWait(uint64_t vaddr, uint64_t size, bool* busy) {
+	*busy = false;
+	if (GuestGpu::IsGpuThread() || CommandScheduler::InDeferredOperation()) {
+		return {};
+	}
+	GuestWait::ByteState state;
+	if (!QueryGuestBytes(vaddr, size, &state.dirty, &state.inflight, &state.copy_tick)) {
+		*busy = true;
+		return {};
+	}
+	{
+		std::lock_guard lock(m_eager_mutex);
+		const auto      found = m_eager_pages.find(Common::AlignDown(vaddr, TRACKER_PAGE_SIZE));
+		state.page_tick       = found == m_eager_pages.end() ? 0 : found->second.tick;
+	}
+	state.current_tick   = m_scheduler.CurrentTick();
+	state.known_gpu_tick = m_scheduler.GetMasterSemaphore().KnownGpuTick();
+	const auto decision  = GuestWait::DecideBytes(state);
+	if (decision.action != GuestWait::ByteAction::Wait) {
+		if (!state.dirty && state.inflight && decision.action == GuestWait::ByteAction::Ordinary) {
+			FrameTiming::Add(FrameTiming::Counter::GwByteUnsubmittedN);
+		}
+		return decision;
+	}
+	FrameTiming::Add(FrameTiming::Counter::GwByteWaitN);
+	if (state.known_gpu_tick >= decision.tick) {
+		FrameTiming::Add(FrameTiming::Counter::GwByteDoneN); // the GPU was done: only the publish is waited for
+	}
+	if (state.page_tick > decision.tick) {
+		FrameTiming::Add(FrameTiming::Counter::GwByteOlderN); // today's path would have waited for the newer page tick
+	}
+	const CpWait::CauseScope wait_cause(CpWait::Cause::Eager);
+	const auto               begin = FrameTiming::SteadyNowNs();
+	m_scheduler.GetMasterSemaphore().Wait(decision.tick);
+	m_scheduler.WaitPriorityOperations(decision.tick);
+	FrameTiming::Add(FrameTiming::Counter::GwByteWaitNs, static_cast<uint64_t>(FrameTiming::ElapsedNs(begin, FrameTiming::SteadyNowNs())));
+	return decision;
 }
 
 bool BufferCache::HasInflightDownloadBytes(uint64_t vaddr, uint64_t size) const {

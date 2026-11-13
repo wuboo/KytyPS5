@@ -18,6 +18,7 @@
 
 #include "graphics/host_gpu/rangeSet.h"
 #include "kernel/specPageCache.h"
+#include "graphics/host_gpu/renderer/cache/guestWait.h"
 #include "graphics/host_gpu/renderer/cache/inflightRanges.h"
 
 #include <array>
@@ -133,12 +134,31 @@ public:
 		*out = m_set.Intersects(address, size);
 		return true;
 	}
+	// S585 (KYTY_GUEST_WAIT): TryIntersects with a bounded spin on the lock (GuestWait::SpinTryLock): a lock the CP holds for an Add or a
+	// hand-over is waited out instead of answering "busy" at once; still never blocks without bound. False when the spin gave up.
+	[[nodiscard]] bool TryIntersectsSpin(uint64_t address, uint64_t size, bool* out, int tries = GuestWait::kSpinTries) const {
+		int spins = 0;
+		if (!GuestWait::SpinTryLock(m_mutex, tries, &spins)) {
+			GuestWait::ThreadSpin().busy++;
+#if defined(KYTY_GUESTWAIT_MUTANT_BUSY_AS_CLEAN)
+			*out = false;
+			return true;
+#else
+			return false;
+#endif
+		}
+		std::lock_guard lock(m_mutex, std::adopt_lock);
+		if (spins != 0) GuestWait::ThreadSpin().spun++;
+		*out = m_set.Intersects(address, size);
+		return true;
+	}
 
 	// The GPU-modified pieces of [address, address + size) are handed to a recorded GPU->host copy: `piece(start, end)` is called for each (the caller
 	// builds its copy list there), every piece is added to `inflight` BEFORE the whole range leaves the dirty set. `between` runs after the in-flight
 	// entries exist and before the dirty set changes (tests look at the state in the window).
+	// S585: `tick` = the submission the copy is recorded into (InflightRanges::Add), 0 = unknown.
 	template <typename Piece, typename Between>
-	void BeginDownloadCopy(InflightRanges& inflight, uint64_t address, uint64_t size, Piece&& piece, Between&& between) {
+	void BeginDownloadCopy(InflightRanges& inflight, uint64_t address, uint64_t size, Piece&& piece, Between&& between, uint64_t tick = 0) {
 		std::lock_guard lock(m_mutex);
 #if defined(KYTY_GUESTFAULTSYNC_MUTANT_SUBTRACT_FIRST)
 		std::vector<std::pair<uint64_t, uint64_t>> pieces;
@@ -147,12 +167,12 @@ public:
 		between();
 		for (const auto& [start, end]: pieces) {
 			piece(start, end);
-			inflight.Add(start, end - start);
+			inflight.Add(start, end - start, tick);
 		}
 #else
 		m_set.ForEachInRange(address, size, [&](uint64_t start, uint64_t end) {
 			piece(start, end);
-			inflight.Add(start, end - start);
+			inflight.Add(start, end - start, tick);
 		});
 		between();
 		m_set.Subtract(address, size);
@@ -162,6 +182,10 @@ public:
 	template <typename Piece>
 	void BeginDownloadCopy(InflightRanges& inflight, uint64_t address, uint64_t size, Piece&& piece) {
 		BeginDownloadCopy(inflight, address, size, static_cast<Piece&&>(piece), [] {});
+	}
+	template <typename Piece>
+	void BeginDownloadCopyAt(InflightRanges& inflight, uint64_t tick, uint64_t address, uint64_t size, Piece&& piece) {
+		BeginDownloadCopy(inflight, address, size, static_cast<Piece&&>(piece), [] {}, tick);
 	}
 
 	// Tests: the lock the command processor holds while it changes the set.

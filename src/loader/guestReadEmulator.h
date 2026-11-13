@@ -57,6 +57,30 @@ enum class Fallback : uint8_t { Dirty, Inflight, Vex, Form, LockBusy };
 // Pure: Vex = VEX.L = 1 / EVEX / vvvv != 1111b (Why::Vex), VexNoAvx stays Form (it has its own column); everything the decoder refuses is Form.
 [[nodiscard]] Fallback ClassifyFallback(Why why);
 
+// S585 (KYTY_GUEST_WAIT=clean|1): the upper YMM halves of a saved context. Present = writable in the context; InitZero = the context carries
+// the AVX component (Windows: CONTEXT_XSTATE, LocateXStateFeature(XSTATE_AVX) != null) but its XSTATE_BV bit is clear: the component is in its
+// init state, every upper half is zero, and the restore re-initialises it, so a VEX.128 load needs no write there; Unknown = no such state
+// (Why::VexNoAvx). Pure: `xstate` = the context has an extended area, `mask_ok` = its feature mask could be read, `avx_bit` = the AVX bit of
+// that mask, `located` = the AVX area exists in the context, `init_ok` = the caller allows InitZero.
+enum class YmmhState : uint8_t { Present, InitZero, Unknown };
+// Mutant (tests/GuestWaitTests.cpp, WILL_FAIL): KYTY_GUESTREAD_MUTANT_VEX_INIT_NO_XSTATE (a context without an extended area counts as init state).
+[[nodiscard]] constexpr YmmhState ClassifyYmmh(bool xstate, bool mask_ok, bool avx_bit, bool located, bool init_ok) {
+#if defined(KYTY_GUESTREAD_MUTANT_VEX_INIT_NO_XSTATE)
+	if (!xstate || !mask_ok) return init_ok ? YmmhState::InitZero : YmmhState::Unknown;
+#endif
+	if (!xstate || !mask_ok || !located) {
+		return YmmhState::Unknown;
+	}
+	if (avx_bit) {
+		return YmmhState::Present;
+	}
+	return init_ok ? YmmhState::InitZero : YmmhState::Unknown;
+}
+
+struct Options {
+	bool vex_init_zero = false; // S585: serve VEX.128 loads in YmmhState::InitZero
+};
+
 struct Plan {
 	bool     ok        = false;
 	Why      why       = Why::None;
@@ -66,13 +90,18 @@ struct Plan {
 	uint8_t  dst       = 0; // register index (GPR 0..15 in encoding order, XMM 0..15)
 	uint8_t  dst_bytes = 0; // GPR kinds: width of the destination register
 	bool     vex       = false; // VEX.128 form: bits 128..255 of the YMM register are zeroed (S427)
+	bool     vex_init  = false; // S585: ... and they are already zero (YmmhState::InitZero), Commit leaves them
 	uint64_t address   = 0; // effective address of the memory operand
 	char     mnemonic[16] = {};
 	char     operands[48] = {}; // "r32, m32" style shape for the DIAG line (no code bytes)
 };
 
 // Decode the instruction at the saved RIP and compute its memory operand. Does not touch the context.
-[[nodiscard]] Plan Decode(void* native_context, uint64_t fault_address);
+// S585: a VexNoAvx refusal still carries `address` / `size` when they could be computed (the DIAG of KYTY_DIAG_GUEST_STALE reads them).
+[[nodiscard]] Plan Decode(void* native_context, uint64_t fault_address, const Options& options = {});
+
+// S585 DIAG: the saved context's extended-state facts behind YmmhState (Windows: flags, XSTATE mask, enabled features, AVX area), one line.
+int DescribeContext(void* native_context, char* text, size_t size);
 
 // Write the loaded bytes into the destination register and move RIP past the instruction.
 void Commit(void* native_context, const Plan& plan, const uint8_t* bytes);
@@ -102,7 +131,7 @@ struct Attempt {
 
 // Decode + read the backing. On true, `attempt` holds everything Commit needs; on false attempt.plan.why says why (BackingRefused / BackingDirty /
 // BackingInflight / LockBusy when only the backing read failed).
-[[nodiscard]] bool Prepare(void* native_context, uint64_t fault_address, ReadBackingFn read, Attempt* attempt);
+[[nodiscard]] bool Prepare(void* native_context, uint64_t fault_address, ReadBackingFn read, Attempt* attempt, const Options& options = {});
 
 } // namespace Loader::GuestReadEmulator
 

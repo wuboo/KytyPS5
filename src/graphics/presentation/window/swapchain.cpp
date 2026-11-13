@@ -19,6 +19,7 @@
 #include "graphics/presentation/systemOverlay.h"
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window/frameDumpFlips.h"
+#include "graphics/presentation/window/presentModeEnv.h"
 #include "graphics/presentation/window/presentRect.h"
 #include "graphics/presentation/window/windowInternal.h"
 
@@ -439,7 +440,9 @@ void Swapchain::Create() {
 	create_info.imageSharingMode = vk::SharingMode::eExclusive;
 	create_info.preTransform     = transform;
 	create_info.compositeAlpha   = composite;
-	switch (Config::GetPresentMode()) {
+	// S585: KYTY_PRESENT_MODE overrides --present-mode when set (presentModeEnv.h).
+	const auto present_mode = PresentModeEnv::Resolve(Config::GetPresentMode(), PresentModeEnv::Env());
+	switch (present_mode) {
 		case Config::PresentMode::Mailbox:
 			create_info.presentMode = vk::PresentModeKHR::eMailbox;
 			break;
@@ -453,6 +456,9 @@ void Swapchain::Create() {
 	              create_info.presentMode) == surface.present_modes.end()) {
 		LOGF("warning: requested present mode is unavailable; falling back to Fifo\n");
 		create_info.presentMode = vk::PresentModeKHR::eFifo;
+	}
+	if (PresentModeEnv::Env() != PresentModeEnv::Override::None) {
+		LOGF("Vulkan present mode: %s (KYTY_PRESENT_MODE)\n", vk::to_string(create_info.presentMode).c_str());
 	}
 	create_info.clipped = VK_TRUE;
 	RequireVulkanSuccess(graphics.device.createSwapchainKHR(&create_info, nullptr, &m_handle),
@@ -584,7 +590,15 @@ bool Swapchain::NeedsResize() const {
 Swapchain::Status Swapchain::AcquireNextImage(CommandScheduler& scheduler) {
 	// Repeated frames can wrap the semaphore ring without acquiring a new source frame.
 	// Wait for the submission that consumed this slot before signaling it again.
-	scheduler.Wait(m_image_acquired_ticks[m_frame_index]);
+	// S585: present_slot_wait_ns / _n: that submission still in the queue (e.g. behind its own acquire semaphore).
+	const auto slot_tick = m_image_acquired_ticks[m_frame_index];
+	if (!scheduler.IsFree(slot_tick)) {
+		const auto begin = FrameTiming::SteadyNowNs();
+		scheduler.Wait(slot_tick);
+		FrameTiming::Add(FrameTiming::Counter::PresentSlotWaitN);
+		FrameTiming::Add(FrameTiming::Counter::PresentSlotWaitNs, static_cast<uint64_t>(FrameTiming::ElapsedNs(begin, FrameTiming::SteadyNowNs())));
+	}
+	scheduler.Wait(slot_tick);
 	const auto result = m_window.graphic_ctx.device.acquireNextImageKHR(
 	    m_handle, std::numeric_limits<uint64_t>::max(), m_image_acquired[m_frame_index], nullptr,
 	    &m_image_index);
@@ -934,6 +948,10 @@ void Swapchain::RecordPresentCommands(CommandBuffer& command, Presenter::Frame* 
 }
 
 uint64_t Swapchain::Submit(CommandScheduler& scheduler) {
+	// S585: present submits of this scheduler not known done (present_inflight_sum / present_n).
+	const auto known = scheduler.GetMasterSemaphore().KnownGpuTick();
+	const auto next  = scheduler.CurrentTick();
+	FrameTiming::Add(FrameTiming::Counter::PresentInflightSum, next > known + 1 ? next - known - 1 : 0);
 	SubmitInfo submit;
 	submit.AddWait(m_image_acquired[m_frame_index], 1, vk::PipelineStageFlagBits::eTransfer);
 	submit.AddSignal(m_render_complete[m_image_index]);
@@ -953,10 +971,12 @@ Swapchain::Status Swapchain::Present() {
 	present.waitSemaphoreCount = 1;
 
 	vk::Result result;
+	const auto queue_begin = FrameTiming::SteadyNowNs();
 	{
 		Common::LockGuard lock(m_window.graphic_ctx.queue_mutex);
 		result = m_window.graphic_ctx.queue.presentKHR(&present);
 	}
+	FrameTiming::Add(FrameTiming::Counter::PresentQueueNs, static_cast<uint64_t>(FrameTiming::ElapsedNs(queue_begin, FrameTiming::SteadyNowNs())));
 	switch (result) {
 		case vk::Result::eSuccess: break;
 		case vk::Result::eSuboptimalKHR:
@@ -1187,6 +1207,11 @@ void Presenter::Impl::Present() {
 	using Common::DebugCounters::Counter;
 	using Common::DebugCounters::ScopedTimer;
 	ScopedTimer present_time(Counter::PresentNs);
+	// S585: the same times into frames.csv (present_ns, present_acquire_ns), any exit of this function.
+	struct PresentNsScope {
+		int64_t begin = FrameTiming::SteadyNowNs();
+		~PresentNsScope() { FrameTiming::Add(FrameTiming::Counter::PresentNs, static_cast<uint64_t>(FrameTiming::ElapsedNs(begin, FrameTiming::SteadyNowNs()))); }
+	} present_ns_scope;
 
 	const auto overlay_visual = GetSystemOverlayVisualState();
 	// Keep black/blank flips in the current color space; only real main-bus frames switch it.
@@ -1205,7 +1230,10 @@ void Presenter::Impl::Present() {
 	for (uint32_t attempt = 0; attempt < 2; attempt++) {
 		auto status = [&] {
 			ScopedTimer acquire_time(Counter::PresentAcquireNs);
-			return swapchain.AcquireNextImage(present_scheduler);
+			const auto  begin  = FrameTiming::SteadyNowNs();
+			const auto  result = swapchain.AcquireNextImage(present_scheduler);
+			FrameTiming::Add(FrameTiming::Counter::PresentAcquireNs, static_cast<uint64_t>(FrameTiming::ElapsedNs(begin, FrameTiming::SteadyNowNs())));
+			return result;
 		}();
 		if (status != Swapchain::Status::Success) {
 			RecoverSwapchain(status);
@@ -1254,6 +1282,7 @@ void Presenter::Impl::Present() {
 			                                 &to_host, 0, nullptr);
 		}
 		const auto tick = swapchain.Submit(present_scheduler);
+		FrameTiming::Add(FrameTiming::Counter::PresentN);
 		for (const auto& layer: layers) {
 			if (layer.frame != nullptr) {
 				layer.frame->present_tick = tick;

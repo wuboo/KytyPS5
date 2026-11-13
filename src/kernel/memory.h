@@ -176,6 +176,11 @@ void                   InstallGpuResources(Graphics::RenderContext* renderer) no
 // caches (or the buffer cache state is being changed: then *busy = true); else *dirty = GPU-written bytes the backing does not have yet, *inflight = a
 // GPU->host copy of them is not published yet. S428: never blocks (try_lock), safe in a signal handler.
 [[nodiscard]] bool QueryGuestFaultBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight, bool* busy) noexcept;
+// S585 (KYTY_GUEST_WAIT=1, guestWait.h): a guest thread's read fault on bytes that are not GPU-dirty but whose copy is in flight waits for that
+// copy's tick and its publish (not for a newer download of the page). Returns 1 when the bytes may be clean now (it waited, or the copy was
+// published meanwhile: the caller queries them again), 0 when today's path applies (dirty, copy not submitted), -1 when the range is not
+// tracked or a lock spin gave up.
+[[nodiscard]] int WaitGuestFaultBytes(uint64_t vaddr, uint64_t size) noexcept;
 
 int KYTY_SYSV_ABI KernelMapNamedFlexibleMemory(void** addr_in_out, size_t len, int prot, int flags,
                                                const char* name);

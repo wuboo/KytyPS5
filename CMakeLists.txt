@@ -757,6 +757,12 @@ if(WIN32)
 	target_link_libraries(land_guest_win_mutant_win_no_regs_tests common fmt::fmt Zydis::Zydis)
 	target_include_directories(land_guest_win_mutant_win_no_regs_tests PRIVATE ${inc_headers})
 	target_compile_definitions(land_guest_win_mutant_win_no_regs_tests PRIVATE KYTY_GUESTREAD_MUTANT_WIN_NO_REGS=1)
+	# S585: a real VEX.128 access violation after vzeroupper: what the vectored handler's CONTEXT says about the AVX init state.
+	add_executable(guest_wait_win_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/GuestWaitWinTests.cpp"
+		"${KYTY_SOURCE_DIR}/loader/guestReadEmulator.cpp")
+	target_link_libraries(guest_wait_win_tests common fmt::fmt Zydis::Zydis)
+	target_include_directories(guest_wait_win_tests PRIVATE ${inc_headers})
 endif()
 
 add_executable(guest_driver_memory_tests EXCLUDE_FROM_ALL
@@ -1018,6 +1024,20 @@ foreach(mutant IN ITEMS SUBTRACT_FIRST BLOCKING_QUERY)
 	target_link_libraries(guest_fault_sync_mutant_${mutant_lower}_tests common fmt::fmt)
 	target_include_directories(guest_fault_sync_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(guest_fault_sync_mutant_${mutant_lower}_tests PRIVATE KYTY_GUESTFAULTSYNC_MUTANT_${mutant}=1)
+endforeach()
+# S585 KYTY_GUEST_WAIT (guestWait.h): the byte-wait decision, a model of a guest float next to a GPU-written neighbour, guest threads against the
+# CP (the bounded spin loses no write), copy ticks, env parsers, the YMM init-state rule. Mutants (WILL_FAIL): the five KYTY_GUESTWAIT_MUTANT_*
+# and KYTY_GUESTREAD_MUTANT_VEX_INIT_NO_XSTATE.
+add_executable(guest_wait_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GuestWaitTests.cpp")
+target_link_libraries(guest_wait_tests common fmt::fmt)
+target_include_directories(guest_wait_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS GUESTWAIT_MUTANT_INFLIGHT_SERVES GUESTWAIT_MUTANT_CLEAN_WAITS_PAGE GUESTWAIT_MUTANT_UNDONE_SERVES GUESTWAIT_MUTANT_WAITS_NEWEST
+                        GUESTWAIT_MUTANT_BUSY_AS_CLEAN GUESTREAD_MUTANT_VEX_INIT_NO_XSTATE)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(guest_wait_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GuestWaitTests.cpp")
+	target_link_libraries(guest_wait_${mutant_lower}_tests common fmt::fmt)
+	target_include_directories(guest_wait_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(guest_wait_${mutant_lower}_tests PRIVATE KYTY_${mutant}=1)
 endforeach()
 
 add_executable(shader_vertex_metadata_tests EXCLUDE_FROM_ALL
@@ -2195,6 +2215,13 @@ if(BUILD_TESTING)
 		add_test(NAME guest_fault_sync_mutant_${mutant} COMMAND $<TARGET_FILE:guest_fault_sync_mutant_${mutant}_tests>)
 		set_tests_properties(guest_fault_sync_mutant_${mutant} PROPERTIES TIMEOUT 30 WILL_FAIL TRUE)
 	endforeach()
+	add_test(NAME guest_wait COMMAND $<TARGET_FILE:guest_wait_tests>)
+	set_tests_properties(guest_wait PROPERTIES TIMEOUT 60)
+	foreach(mutant IN ITEMS guestwait_mutant_inflight_serves guestwait_mutant_clean_waits_page guestwait_mutant_undone_serves guestwait_mutant_waits_newest
+	                        guestwait_mutant_busy_as_clean guestread_mutant_vex_init_no_xstate)
+		add_test(NAME guest_wait_${mutant} COMMAND $<TARGET_FILE:guest_wait_${mutant}_tests>)
+		set_tests_properties(guest_wait_${mutant} PROPERTIES TIMEOUT 60 WILL_FAIL TRUE)
+	endforeach()
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
 	add_test(NAME build_flags COMMAND $<TARGET_FILE:build_flags_tests>)
 	add_test(NAME archive_file COMMAND $<TARGET_FILE:archive_file_tests>)
@@ -2315,6 +2342,8 @@ if(BUILD_TESTING)
 		set_tests_properties(land_sync_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
 	if(WIN32)
+		add_test(NAME guest_wait_win COMMAND $<TARGET_FILE:guest_wait_win_tests>)
+		set_tests_properties(guest_wait_win PROPERTIES TIMEOUT 30)
 		add_test(NAME land_guest_win COMMAND $<TARGET_FILE:land_guest_win_tests>)
 		set_tests_properties(land_guest_win PROPERTIES TIMEOUT 30)
 		add_test(NAME land_guest_win_mutant_win_no_regs COMMAND $<TARGET_FILE:land_guest_win_mutant_win_no_regs_tests>)

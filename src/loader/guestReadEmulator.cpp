@@ -123,6 +123,10 @@ struct Regs {
 	}
 	// Upper YMM halves exist only in the AVX layout of the saved context; the size of the saved context says which one the kernel (Rosetta) wrote.
 	[[nodiscard]] bool HasYmmh() const { return Valid() && native->uc_mcsize >= sizeof(_STRUCT_MCONTEXT_AVX64); }
+	[[nodiscard]] YmmhState State(bool) const { return HasYmmh() ? YmmhState::Present : YmmhState::Unknown; }
+	[[nodiscard]] int       Describe(char* text, size_t size) const {
+		return std::snprintf(text, size, "mcsize=%u", Valid() ? static_cast<unsigned>(native->uc_mcsize) : 0u);
+	}
 	[[nodiscard]] void* Ymmh(uint8_t index) const {
 		auto* fs = &reinterpret_cast<_STRUCT_MCONTEXT_AVX64*>(native->uc_mcontext)->__fs;
 		switch (index) {
@@ -161,6 +165,8 @@ struct Regs {
 	}
 	[[nodiscard]] bool  HasYmmh() const { return false; }
 	[[nodiscard]] void* Ymmh(uint8_t) const { return nullptr; }
+	[[nodiscard]] YmmhState State(bool) const { return YmmhState::Unknown; }
+	[[nodiscard]] int       Describe(char* text, size_t size) const { return std::snprintf(text, size, "linux"); }
 #endif
 };
 constexpr bool kHaveRegs = true;
@@ -206,6 +212,33 @@ struct Regs {
 		}
 		return &ymm[index];
 	}
+	// S585: the inputs of ClassifyYmmh from the CONTEXT of the vectored handler. A clear AVX bit in the XSTATE mask of a context that carries the
+	// AVX area means the component was in its init state when the exception was dispatched (XSAVE* write XSTATE_BV[i] = 0 only then).
+	[[nodiscard]] YmmhState State(bool init_ok) const {
+		if (!Valid()) {
+			return YmmhState::Unknown;
+		}
+		const bool xstate   = (native->ContextFlags & CONTEXT_XSTATE) == CONTEXT_XSTATE;
+		DWORD64    features = 0;
+		const bool mask_ok  = xstate && GetXStateFeaturesMask(native, &features) != FALSE;
+		DWORD      size     = 0;
+		const bool located  = mask_ok && LocateXStateFeature(native, XSTATE_AVX, &size) != nullptr && size >= 16 * sizeof(M128A);
+		return ClassifyYmmh(xstate, mask_ok, (features & XSTATE_MASK_AVX) != 0, located, init_ok);
+	}
+	[[nodiscard]] int Describe(char* text, size_t size) const {
+		if (!Valid()) {
+			return std::snprintf(text, size, "no-context");
+		}
+		DWORD64    features = 0;
+		const bool xstate   = (native->ContextFlags & CONTEXT_XSTATE) == CONTEXT_XSTATE;
+		const bool mask_ok  = xstate && GetXStateFeaturesMask(native, &features) != FALSE;
+		DWORD      length   = 0;
+		const bool located  = mask_ok && LocateXStateFeature(native, XSTATE_AVX, &length) != nullptr;
+		return std::snprintf(text, size, "flags=0x%08lx xstate=%d mask_ok=%d features=0x%llx enabled=0x%llx avx_located=%d avx_len=%lu",
+		                     static_cast<unsigned long>(native->ContextFlags), xstate ? 1 : 0, mask_ok ? 1 : 0,
+		                     static_cast<unsigned long long>(features), static_cast<unsigned long long>(GetEnabledXStateFeatures()),
+		                     located ? 1 : 0, static_cast<unsigned long>(length));
+	}
 };
 constexpr bool kHaveRegs = true;
 #else
@@ -218,6 +251,8 @@ struct Regs {
 	[[nodiscard]] void*     Xmm(uint8_t) const { return nullptr; }
 	[[nodiscard]] bool      HasYmmh() const { return false; }
 	[[nodiscard]] void*     Ymmh(uint8_t) const { return nullptr; }
+	[[nodiscard]] YmmhState State(bool) const { return YmmhState::Unknown; }
+	[[nodiscard]] int       Describe(char* text, size_t size) const { return std::snprintf(text, size, "none"); }
 };
 constexpr bool kHaveRegs = false;
 #endif
@@ -258,7 +293,7 @@ void SetShape(Plan& plan, const ZydisDecodedInstruction& instruction, const Zydi
 
 } // namespace
 
-Plan Decode(void* native_context, uint64_t fault_address) {
+Plan Decode(void* native_context, uint64_t fault_address, const Options& options) {
 	Plan plan;
 	if (!kHaveRegs) {
 		return Refuse(plan, Why::NoContext);
@@ -400,8 +435,17 @@ Plan Decode(void* native_context, uint64_t fault_address) {
 		default: return Refuse(plan, Why::NotALoad);
 	}
 	plan.dst_bytes = dst_is_gpr ? static_cast<uint8_t>(operands[0].size / 8) : 16;
+	bool vex_no_avx = false;
 	if (plan.vex && (!dst_is_xmm || !regs.HasYmmh())) {
-		return Refuse(plan, dst_is_xmm ? Why::VexNoAvx : Why::NotALoad);
+		if (!dst_is_xmm) {
+			return Refuse(plan, Why::NotALoad);
+		}
+		// S585: the upper halves are all zero already (init state): nothing to write there.
+		if (options.vex_init_zero && regs.State(true) == YmmhState::InitZero) {
+			plan.vex_init = true;
+		} else {
+			vex_no_avx = true; // refused below, after the address (same Why as before; the address is for the DIAG)
+		}
 	}
 
 	ZydisRegisterContext registers {};
@@ -412,9 +456,12 @@ Plan Decode(void* native_context, uint64_t fault_address) {
 	}
 	uint64_t address = 0;
 	if (!ZYAN_SUCCESS(ZydisCalcAbsoluteAddressEx(&instruction, &operands[1], rip, &registers, &address))) {
-		return Refuse(plan, Why::DecodeFailed);
+		return Refuse(plan, vex_no_avx ? Why::VexNoAvx : Why::DecodeFailed);
 	}
 	plan.address = address;
+	if (vex_no_avx) {
+		return Refuse(plan, Why::VexNoAvx);
+	}
 	if (aligned_only && (address & 15u) != 0) {
 		return Refuse(plan, Why::Misaligned);
 	}
@@ -462,7 +509,7 @@ void Commit(void* native_context, const Plan& plan, const uint8_t* bytes) {
 				std::memcpy(value, bytes, plan.size);
 				std::memcpy(xmm, value, sizeof(value));
 			}
-			if (plan.vex && kZeroUpper) {
+			if (plan.vex && !plan.vex_init && kZeroUpper) {
 				if (void* ymmh = regs.Ymmh(plan.dst); ymmh != nullptr) {
 					std::memset(ymmh, 0, 16); // VEX.128 zeroes bits 128..255; legacy SSE leaves them
 				}
@@ -473,8 +520,12 @@ void Commit(void* native_context, const Plan& plan, const uint8_t* bytes) {
 	regs.Advance(plan.length);
 }
 
-bool Prepare(void* native_context, uint64_t fault_address, ReadBackingFn read, Attempt* attempt) {
-	attempt->plan = Decode(native_context, fault_address);
+int DescribeContext(void* native_context, char* text, size_t size) {
+	return MakeRegs(native_context).Describe(text, size);
+}
+
+bool Prepare(void* native_context, uint64_t fault_address, ReadBackingFn read, Attempt* attempt, const Options& options) {
+	attempt->plan = Decode(native_context, fault_address, options);
 	if (!attempt->plan.ok) {
 		return false;
 	}

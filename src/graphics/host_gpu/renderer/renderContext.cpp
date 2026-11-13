@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/gfDiag.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
+#include "graphics/host_gpu/renderer/cache/guestWait.h"
 #include "kernel/memory.h"
 #include "graphics/shader/recompiler/ir/passes/srtProtAvoid.h"
 #include "graphics/shader/recompiler/ir/passes/rfGpuPatch.h"
@@ -21,6 +22,7 @@
 #include <cinttypes>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <mutex>
 #include <unordered_set>
 
@@ -37,6 +39,12 @@ RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::pa
       m_image_heap(*this, m_page_manager), m_occlusion_queries(graphics, m_command_scheduler) {
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	LandSync::Announce(); // S495
+	// S585: read KYTY_GUEST_WAIT / KYTY_DIAG_GUEST_STALE here, not first inside a fault handler; one line when either is set.
+	if (GuestWait::EnvMode() != GuestWait::Mode::Off || GuestWait::Stale().on) {
+		std::printf("Environment: KYTY_GUEST_WAIT=%s guest_stale=%d filter=0x%016" PRIx64 "\n", GuestWait::ModeName(GuestWait::EnvMode()),
+		            GuestWait::Stale().on ? 1 : 0, GuestWait::Stale().filter);
+		std::fflush(stdout);
+	}
 	m_command_scheduler.EnableAsyncSubmit();
 	m_command_scheduler.EnableStarveDiag(); // S410
 	m_command_scheduler.EnableEmitThread(); // S565
@@ -99,6 +107,51 @@ const char* WfThreadName() {
 }
 
 // S444 (KYTY_DIAG_WRITE_FAULT): a write fault on a page kept unprotected for its flip: print who put the host protection back (ring of protection changes).
+// S585 DIAG U5 (KYTY_DIAG_GUEST_STALE): a guest read fault on GPU-dirty / in-flight bytes, the backing before the ordinary drain and after it.
+struct GuestStale {
+	bool     on       = false;
+	bool     inflight = false; // not dirty, a copy in flight
+	bool     stale_ok = false;
+	uint64_t address  = 0;
+	uint64_t size     = 0;
+	uint8_t  stale[16] {};
+	int64_t  begin = 0;
+};
+
+void GuestStaleLine(const GuestStale& g, const uint8_t* fresh, bool settled, int64_t wait_ns, bool eager) {
+	namespace GW = Libs::Graphics::GuestWait;
+	if (!GW::StaleLineWanted(GW::Stale(), g.address, g.size)) {
+		return;
+	}
+	static std::atomic<uint64_t> outside {0};
+	static std::atomic<uint64_t> inside {0};
+	const auto flip      = FrameTiming::GuestFlips();
+	const bool in_window = GuestFault::InWindow(flip);
+	if (!GW::StaleShouldLog(outside.load(std::memory_order_relaxed), inside.load(std::memory_order_relaxed), in_window)) {
+		return;
+	}
+	(in_window ? inside : outside).fetch_add(1, std::memory_order_relaxed);
+	char stale_hex[40] = {}, fresh_hex[40] = {};
+	for (uint64_t i = 0; i < g.size && i < 16; i++) {
+		std::snprintf(stale_hex + 2 * i, 3, "%02x", g.stale[i]);
+		std::snprintf(fresh_hex + 2 * i, 3, "%02x", fresh[i]);
+	}
+	char  values[96] = {};
+	if (g.size == 4) {
+		float a = 0, b = 0;
+		std::memcpy(&a, g.stale, 4);
+		std::memcpy(&b, fresh, 4);
+		const float denom = b != 0.0f ? (b < 0 ? -b : b) : 1.0f;
+		const float diff  = a - b;
+		std::snprintf(values, sizeof(values), " stale_f=%g fresh_f=%g rel=%g", static_cast<double>(a), static_cast<double>(b),
+		              static_cast<double>((diff < 0 ? -diff : diff) / denom));
+	}
+	LOGF("[gs-stale] flip=%u tid=%u addr=0x%016" PRIx64 " size=%u cls=%s stale=%s fresh=%s eq=%d settled=%d eager=%d wait_us=%" PRId64 "%s\n",
+	     static_cast<uint32_t>(flip), static_cast<uint32_t>(SyncCensus::ThreadId()), g.address, static_cast<unsigned>(g.size),
+	     g.inflight ? "inflight" : "dirty", g.stale_ok ? stale_hex : "-", fresh_hex, std::memcmp(g.stale, fresh, g.size) == 0 ? 1 : 0,
+	     settled ? 1 : 0, eager ? 1 : 0, wait_ns / 1000, values);
+}
+
 void StickyRefaultLine(uint64_t page, uint32_t flip, uint32_t sticky_flip) {
 	if (ProtectRing::LinesPrinted().fetch_add(1, std::memory_order_relaxed) >= ProtectRing::kMaxLines) {
 		return;
@@ -242,7 +295,42 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		const bool krf3_page   = !on_gpu_thread && access == PageFaultAccess::Read && RfP::Krf3EnvMode().Any() && RfP::IsSuperset(RfP::EnvMode()) &&
 		                       RfP::GuestGuard().NoteGuestRead(fault_vaddr);
 		const auto krf3_begin  = krf3_page ? FrameTiming::SteadyNowNs() : int64_t {0};
+		// S585 DIAG U5 (KYTY_DIAG_GUEST_STALE): the bytes the guest reads, if GPU-dirty or in flight, before the ordinary path.
+		GuestStale stale;
+		uint64_t   stale_eager_before = 0;
+		if (!on_gpu_thread && access == PageFaultAccess::Read && GuestWait::Stale().on) {
+			GuestWait::StaleRange(GuestWait::ThreadHint(), fault_vaddr, &stale.address, &stale.size);
+			GuestWait::ThreadHint() = {};
+			bool dirty = false, inflight = false;
+			const bool queried = m_buffer_cache.QueryGuestBytes(stale.address, stale.size, &dirty, &inflight);
+			GuestWait::ThreadSpin() = {}; // the DIAG's own spins are not gw_spin_n
+			if (!queried) {
+				FrameTiming::Add(FrameTiming::Counter::DiagGsBusyN);
+			} else if (dirty || inflight) {
+				stale.on           = true;
+				stale.inflight     = !dirty;
+				stale.stale_ok     = LibKernel::Memory::TryReadBacking(stale.address, stale.stale, stale.size);
+				stale.begin        = FrameTiming::SteadyNowNs();
+				stale_eager_before = FrameTiming::Get(FrameTiming::Counter::ReadbackEagerHits);
+			}
+		}
 		const bool downloaded = m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		if (stale.on) {
+			const auto wait_ns   = FrameTiming::ElapsedNs(stale.begin, FrameTiming::SteadyNowNs());
+			uint8_t    fresh[16] = {};
+			bool       dirty = false, inflight = false;
+			const bool settled = m_buffer_cache.QueryGuestBytes(stale.address, stale.size, &dirty, &inflight) && !dirty && !inflight &&
+			                     LibKernel::Memory::TryReadBacking(stale.address, fresh, stale.size);
+			GuestWait::ThreadSpin() = {};
+			FrameTiming::Add(FrameTiming::Counter::DiagGsN);
+			if (stale.inflight) FrameTiming::Add(FrameTiming::Counter::DiagGsInflightN);
+			if (!settled || !stale.stale_ok) {
+				FrameTiming::Add(FrameTiming::Counter::DiagGsUnsettledN);
+			} else if (std::memcmp(stale.stale, fresh, stale.size) != 0) {
+				FrameTiming::Add(FrameTiming::Counter::DiagGsNeN);
+			}
+			GuestStaleLine(stale, fresh, settled, wait_ns, FrameTiming::Get(FrameTiming::Counter::ReadbackEagerHits) != stale_eager_before);
+		}
 		if (krf3_page) {
 			FrameTiming::Add(FrameTiming::Counter::Krf3GuestPageN);
 			FrameTiming::Add(FrameTiming::Counter::Krf3GuestPageWaitNs, static_cast<uint64_t>(FrameTiming::ElapsedNs(krf3_begin, FrameTiming::SteadyNowNs())));

@@ -8,6 +8,7 @@
 // Remove(a, n) takes away exactly one Add(a, n). Add runs on the GPU thread, Remove on the priority-operation thread, hence the mutex.
 // Pure part; tests/InflightRangesTests.cpp pins it.
 
+#include "graphics/host_gpu/renderer/cache/guestWait.h"
 #include "kernel/specPageCache.h"
 
 #include <algorithm>
@@ -19,10 +20,11 @@ namespace Libs::Graphics {
 
 class InflightRanges final {
 public:
-	void Add(uint64_t address, uint64_t size) {
+	// S585: `tick` = the submission the copy is recorded into (0 = unknown); only the guest byte wait (KYTY_GUEST_WAIT=1) reads it.
+	void Add(uint64_t address, uint64_t size, uint64_t tick = 0) {
 		if (size == 0) return;
 		std::lock_guard lock(m_mutex);
-		m_entries.push_back({address, address + size});
+		m_entries.push_back({address, address + size, tick});
 		// S430 (KYTY_SPEC_READ_FAST): pages of this range are no longer quiet.
 #if !defined(KYTY_SPECFAST_MUTANT_NO_INFLIGHT_INVALIDATE) && !defined(KYTY_SPECFAST_MUTANT_FAST_NO_INVALIDATE_ON_WRITE)
 		Libs::LibKernel::Memory::SpecPageCache::OnRangeBecameBusy(address, size);
@@ -58,6 +60,42 @@ public:
 		return true;
 	}
 
+	// S585 (KYTY_GUEST_WAIT): TryIntersects with a bounded spin on the lock; *max_tick = the newest tick of the overlapping copies, 0 when one of
+	// them has an unknown tick (or none overlaps). False when the spin gave up.
+	[[nodiscard]] bool TryIntersectsSpin(uint64_t address, uint64_t size, bool* out, uint64_t* max_tick = nullptr,
+	                                     int tries = GuestWait::kSpinTries) const {
+		int spins = 0;
+		if (!GuestWait::SpinTryLock(m_mutex, tries, &spins)) {
+			GuestWait::ThreadSpin().busy++;
+#if defined(KYTY_GUESTWAIT_MUTANT_BUSY_AS_CLEAN)
+			*out = false;
+			if (max_tick != nullptr) *max_tick = 0;
+			return true;
+#else
+			return false;
+#endif
+		}
+		std::lock_guard lock(m_mutex, std::adopt_lock);
+		if (spins != 0) GuestWait::ThreadSpin().spun++;
+		bool     any     = false;
+		bool     unknown = false;
+		uint64_t newest  = 0;
+		for (const auto& e: m_entries) {
+			if (size != 0 && e.begin < address + size && address < e.end) {
+				any = true;
+				if (max_tick == nullptr) break;
+				unknown |= e.tick == 0;
+				newest = std::max(newest, e.tick);
+			}
+		}
+		*out = any;
+		if (max_tick != nullptr) *max_tick = unknown ? 0 : newest;
+		return true;
+	}
+
+	// Tests: the lock Add / Remove hold.
+	[[nodiscard]] std::mutex& MutexForTest() const { return m_mutex; }
+
 	[[nodiscard]] size_t Count() const {
 		std::lock_guard lock(m_mutex);
 		return m_entries.size();
@@ -67,6 +105,7 @@ private:
 	struct Entry {
 		uint64_t begin;
 		uint64_t end;
+		uint64_t tick = 0;
 	};
 	mutable std::mutex m_mutex;
 	std::vector<Entry> m_entries;
