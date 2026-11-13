@@ -29,6 +29,7 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -531,6 +532,7 @@ struct SupersetQuery {
 	bool        inflight     = false;
 	bool        room         = false;
 	bool        disabled     = false; // the scope retries a failed superset walk with the drain
+	bool        inflight_ok  = false; // S581 K-rf v3 (KYTY_KRF3=1|inflight): GPU-dirty bytes with an older download in flight defer too
 };
 
 // Why a fault does not defer. NotDirty / NotArmed: no wait anyway (or not ours), not a fallback. Static: the site's SupersetWhy.
@@ -540,7 +542,13 @@ inline SupersetReject DecideSuperset(const SupersetQuery& q) {
 	if (!q.armed || !q.gpu_thread) return SupersetReject::NotArmed;
 	// Clean bytes need no wait (the ordinary fault path reads them); bytes in flight are about to change in the backing.
 	if (!q.queried || !q.dirty) return SupersetReject::NotDirty;
-	if (q.inflight) return SupersetReject::Inflight;
+#if defined(KYTY_RFPATCH_MUTANT_KRF3_INFLIGHT_DRAINS)
+	if (q.inflight) return SupersetReject::Inflight; // mutant: v2's drain of re-dirtied bytes whose older download is in flight
+#else
+	// S581: the deferred value is never used (unknown for the walk; a flat slot gets the GPU buffer's bytes by the copy), so an older download
+	// of the same bytes in flight does not matter. v2 drained here, and in the desert that drain waited ~22 ms (S580: 482 of 493 drains).
+	if (q.inflight && !q.inflight_ok) return SupersetReject::Inflight;
+#endif
 	if (!q.site) return SupersetReject::NotSite;
 	if (q.why != SupersetWhy::Superset) return SupersetReject::Static;
 	if (q.disabled) return SupersetReject::Retry;
@@ -624,6 +632,197 @@ template <class P>
 inline bool SupersetCoverRanges(std::span<const P> truth, std::span<const P> superset) {
 	return std::all_of(truth.begin(), truth.end(),
 	                   [&](const P& r) { return std::find(superset.begin(), superset.end(), r) != superset.end(); });
+}
+
+// ==== S581 K-rf v3 (KYTY_KRF3=0|1|inflight|page, only with KYTY_RF_GPU_PATCH=superset | superset_shadow) =====================================
+// S580: the superset keeps its garden gain (-3.3 / -3.0 ms cp_frame) but the desert is vetoed (hitches > 33 ms 5 -> 67 and 4 -> 40). Per flip of
+// the desert CSVs (S581 notes): the drain of the deferred dword did two jobs. (1) It made the CPU wait for the value (the cost K-rf removes).
+// (2) It downloaded the dword's 4 KiB page, so the guest's later reads of that page did not fault. Without it the page stays GPU-dirty: guest
+// read faults rise 1.3 -> 3.0 per flip (+1.7 ~ the 1.8 drains removed; the rise follows the defers flip bucket by bucket and is gone in the
+// buckets where the guest stops reading, while the defers go on) and each waits 8-10 ms instead of 2 (readback_wait of guest threads 2.6 ->
+// 30 ms/flip). The page is hot, so every GPU write to it queues an eager download; a walker fault on bytes re-dirtied after such a download
+// (dirty + in flight) was rejected by v2 and drained, ~22 ms each (0.2 per flip), and 58 of 67 / 38 of 40 hitch rows have one within 2 rows.
+// superset_shadow (which drains the deferred dwords) and the base have neither.
+//   inflight: such a fault defers as well (DecideSuperset, inflight_ok). Safe: the stale dword is unknown for the walk, a flat slot gets the GPU
+//             buffer's bytes by the copy, and the download in flight only writes the backing.
+//   page:     the guest read faults on the page of a deferred dword are counted (GuestPageGuard::NoteGuestRead, guest threads); per window of
+//             `window` defers of one page, at least one guest fault per `hit_div` defers bans deferring on that page for `ban` flips (the walker
+//             drains there as in the base, which also cleans the page for the guest), doubling up to `ban_max` while trials (`trial_window`
+//             defers) keep failing and back to `ban_min` after a clean trial window. The garden's pages see ~0.1 guest faults per 6 defers per flip; the desert's ~3 per 2.6.
+//   1 = inflight + page. inflight alone still tracks the pages and counts what page would do (krf3_page_would_ban_n) without banning.
+struct Krf3Mode {
+	bool inflight = false;
+	bool page     = false;
+	[[nodiscard]] bool Any() const { return inflight || page; }
+};
+
+inline Krf3Mode ParseKrf3(const char* text) {
+	Krf3Mode m;
+	if (text == nullptr) return m;
+	if (std::strcmp(text, "1") == 0) {
+		m.inflight = true;
+		m.page     = true;
+	} else if (std::strcmp(text, "inflight") == 0) {
+		m.inflight = true;
+	} else if (std::strcmp(text, "page") == 0) {
+		m.page = true;
+	}
+	return m;
+}
+
+inline Krf3Mode Krf3EnvMode() {
+	static const Krf3Mode mode = ParseKrf3(std::getenv("KYTY_KRF3"));
+	return mode;
+}
+
+// Pages of deferred dwords and the guest's read faults on them. OnDefer runs on the CP thread (the walker's fault handler), NoteGuestRead on any
+// guest thread (its read fault handler): the page key and the hit count are atomics, the rest belongs to the CP thread (a second CP thread that
+// finds the guard busy defers without accounting).
+class GuestPageGuard {
+public:
+	static constexpr uint32_t kEntries  = 16;
+	static constexpr uint64_t kPageSize = 4096;
+
+	struct Config {
+		uint32_t window  = 32;   // defers of one page per decision
+		uint32_t trial_window = 8; // ... after a ban ran out (a trial decides fast: a desert page costs ~8 defers, not 32)
+		uint32_t hit_div = 4;    // ban when hits * hit_div >= defers of the window
+		uint64_t ban_min = 128;  // flips
+		uint64_t ban_max = 4096; // flips
+	};
+
+	struct Result {
+		bool drain        = false; // the walker drains this fault (the page is banned, or was banned just now)
+		bool banned_now   = false; // this defer closed a window that bans the page
+		bool would_ban    = false; // the same, with banning off (inflight only): counted, the defer goes on
+		bool trial        = false; // a ban ran out: deferring on the page is tried again
+	};
+
+	GuestPageGuard() = default;
+	explicit GuestPageGuard(Config c): m_config(c) {}
+
+	static uint64_t PageOf(uint64_t address) {
+#if defined(KYTY_RFPATCH_MUTANT_KRF3_ADDRESS_KEY)
+		return address; // mutant: keyed by the dword, a guest read of another byte of the page is not seen
+#else
+		return address & ~(kPageSize - 1);
+#endif
+	}
+
+	// CP thread: a superset defer of `address` at guest flip `flip`. may_ban = false only counts (would_ban).
+	Result OnDefer(uint64_t address, uint64_t flip, bool may_ban) {
+		Result r;
+		if (m_busy.test_and_set(std::memory_order_acquire)) return r;
+		const auto page = PageOf(address);
+		auto*      s    = Find(page);
+		if (s == nullptr) s = Allocate(page);
+		s->last_flip = flip;
+		if (s->banned) {
+#if defined(KYTY_RFPATCH_MUTANT_KRF3_NO_EXPIRY)
+			const bool expired = false; // mutant: a ban never runs out (a page the guest stopped reading is lost for good)
+#else
+			const bool expired = flip >= s->ban_until;
+#endif
+			if (!expired) {
+				r.drain = true;
+				m_busy.clear(std::memory_order_release);
+				return r;
+			}
+			s->banned = false;
+			s->trial  = true;
+			s->defers = 0;
+			s->hits.store(0, std::memory_order_relaxed);
+			r.trial = true;
+		}
+		if (++s->defers >= (s->trial ? m_config.trial_window : m_config.window)) {
+			const uint32_t hits   = s->hits.exchange(0, std::memory_order_relaxed);
+			const uint32_t defers = s->defers;
+			s->defers             = 0;
+			if (uint64_t {hits} * m_config.hit_div >= defers) {
+				if (may_ban) {
+					s->banned    = true;
+					s->ban_until = flip + s->ban_len;
+					s->ban_len   = std::min(s->ban_len * 2, m_config.ban_max);
+					s->trial     = false;
+					r.drain      = true;
+					r.banned_now = true;
+				} else {
+					r.would_ban = true;
+				}
+			} else if (s->trial) {
+				s->trial   = false;
+				s->ban_len = m_config.ban_min;
+			}
+		}
+		m_busy.clear(std::memory_order_release);
+		return r;
+	}
+
+	// Any guest thread, its read fault on `address`: true (and one hit) when the page holds a deferred dword.
+	bool NoteGuestRead(uint64_t address) {
+		const auto page = PageOf(address);
+		for (auto& s: m_slots) {
+			if (s.page.load(std::memory_order_acquire) != page) continue;
+#if !defined(KYTY_RFPATCH_MUTANT_KRF3_NO_GUEST_HITS)
+			s.hits.fetch_add(1, std::memory_order_relaxed);
+#endif
+			return true;
+		}
+		return false;
+	}
+
+	[[nodiscard]] bool Banned(uint64_t address, uint64_t flip) {
+		const auto* s = Find(PageOf(address));
+		return s != nullptr && s->banned && flip < s->ban_until;
+	}
+
+private:
+	struct Slot {
+		std::atomic<uint64_t> page {0}; // 0 = free (a deferred dword is never at guest address 0)
+		std::atomic<uint32_t> hits {0};
+		uint32_t              defers    = 0;
+		uint64_t              ban_until = 0;
+		uint64_t              ban_len   = 0;
+		uint64_t              last_flip = 0;
+		bool                  banned    = false;
+		bool                  trial     = false;
+	};
+
+	Slot* Find(uint64_t page) {
+		for (auto& s: m_slots) {
+			if (s.page.load(std::memory_order_relaxed) == page) return &s;
+		}
+		return nullptr;
+	}
+	// A free slot, else the least recently deferred one that is not banned, else the least recently deferred one.
+	Slot* Allocate(uint64_t page) {
+		Slot* best = nullptr;
+		for (auto& s: m_slots) {
+			if (s.page.load(std::memory_order_relaxed) == 0) {
+				best = &s;
+				break;
+			}
+			if (best == nullptr || (best->banned && !s.banned) || (best->banned == s.banned && s.last_flip < best->last_flip)) best = &s;
+		}
+		best->page.store(0, std::memory_order_relaxed);
+		best->hits.store(0, std::memory_order_relaxed);
+		best->defers    = 0;
+		best->ban_until = 0;
+		best->ban_len   = m_config.ban_min;
+		best->banned    = false;
+		best->trial     = false;
+		best->page.store(page, std::memory_order_release);
+		return best;
+	}
+
+	Config                       m_config {};
+	std::array<Slot, kEntries>   m_slots {};
+	std::atomic_flag             m_busy = ATOMIC_FLAG_INIT;
+};
+
+inline GuestPageGuard& GuestGuard() {
+	static GuestPageGuard guard;
+	return guard;
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch

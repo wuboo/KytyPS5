@@ -1046,6 +1046,8 @@ static bool TrySupersetDefer(const Common::HostException::ExceptionInfo* info, u
 	q.inflight = inflight;
 	q.room     = pending.Room();
 	q.disabled = pending.superset_off || (q.site && Libs::Graphics::ShaderRecompiler::IR::SrtWalkerSupersetBanned());
+	const auto krf3 = P::Krf3EnvMode(); // S581 K-rf v3
+	q.inflight_ok   = krf3.inflight;
 	switch (P::DecideSuperset(q)) {
 		case P::SupersetReject::None: break;
 		case P::SupersetReject::NotArmed: return false;
@@ -1057,6 +1059,17 @@ static bool TrySupersetDefer(const Common::HostException::ExceptionInfo* info, u
 		case P::SupersetReject::AddressBase: Libs::Graphics::FrameTiming::Add(C::RfPatchRejectAddressBaseN); return false;
 		case P::SupersetReject::Full: Libs::Graphics::FrameTiming::Add(C::RfPatchRejectFullN); return false;
 	}
+	// S581 K-rf v3 (KYTY_KRF3=page|1): a page the guest reads is drained as in the base (the drain also cleans it for the guest's reads).
+	if (krf3.Any()) {
+		const auto g = P::GuestGuard().OnDefer(address, Libs::Graphics::FrameTiming::GuestFlips(), krf3.page);
+		if (g.trial) Libs::Graphics::FrameTiming::Add(C::Krf3PageTrialN);
+		if (g.banned_now) Libs::Graphics::FrameTiming::Add(C::Krf3PageBanN);
+		if (g.would_ban) Libs::Graphics::FrameTiming::Add(C::Krf3PageWouldBanN);
+		if (g.drain) {
+			Libs::Graphics::FrameTiming::Add(C::Krf3PageDrainN);
+			return false;
+		}
+	}
 	uint32_t stale = 0;
 	if (!Libs::LibKernel::Memory::TryReadBacking(address, &stale, sizeof(stale))) return false;
 	if (!pending.Add(address, stale, P::SupersetEntrySlots(std::span<const uint32_t>(slots.data(), q.slots)))) return false;
@@ -1064,6 +1077,7 @@ static bool TrySupersetDefer(const Common::HostException::ExceptionInfo* info, u
 	++pending.superset_defers;
 	Loader::X64InstructionEmulator::CompleteLoad(info->native_context, length, stale);
 	Libs::Graphics::FrameTiming::Add(C::Krf2DeferN);
+	if (q.inflight) Libs::Graphics::FrameTiming::Add(C::Krf3InflightDeferN); // S581: v2 drained these
 	return true;
 }
 

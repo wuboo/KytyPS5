@@ -520,6 +520,10 @@ enum class Counter : uint32_t {
 	Krf2DeferN, Krf2FallbackLoopN, Krf2FallbackAddressN, Krf2FallbackDescriptorN, Krf2FallbackOutputN, Krf2FallbackDerivedFlatN,
 	Krf2FallbackSlotsN, Krf2FallbackPhiAddressN, Krf2FallbackOtherN, Krf2FallbackWalkfailN, Krf2FallbackRetryN, Krf2ExtraResN, Krf2ExtraWrN,
 	Krf2ExtraFlatN, Krf2VariantN, Krf2CompileN, Krf2GpuCheckN,
+	// S581 K-rf v3 (KYTY_KRF3, rfGpuPatch.h): superset defers of GPU-dirty bytes with an older download in flight (v2 drained them); pages
+	// banned by the guest page guard, bans it would make with banning off (KYTY_KRF3=inflight), walker faults drained on a banned page, trials
+	// after a ban; guest read faults on a page of a deferred dword and their wait (the guest's side of what the drain used to clean).
+	Krf3InflightDeferN, Krf3PageBanN, Krf3PageWouldBanN, Krf3PageDrainN, Krf3PageTrialN, Krf3GuestPageN, Krf3GuestPageWaitNs,
 	Count,
 };
 

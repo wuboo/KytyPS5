@@ -14,6 +14,12 @@
 // load in a loop, K2 with its own flat slot (GPU copy), derived flat, descriptor, control-Phi address (K1), a failing superset walk, and 3000
 // random plans: the superset (after the GPU copy) always holds what the synchronous walk does.
 // Mutants (WILL_FAIL): _SKIP_SUCCESSOR, _COND_AS_TAKEN, _NO_FLAT_COPY, _DEFER_ADDRESS, _DEFER_LOOP, _COVER_MISSES_ONE, _CPHI_ADDRESS.
+// S581 K-rf v3 (KYTY_KRF3): ParseKrf3; DecideSuperset defers dirty bytes with an older download in flight only with inflight_ok; the guest page
+// guard (GuestPageGuard) on models of the S580 runs: the desert (the guest reads one page of the deferred dwords whenever it is left dirty) bans
+// that page within a window and keeps the other page deferring, trials stay rare; the garden (a burst of guest reads at the level entry, then
+// ~2 % of flips) defers again long before F10+330; a scene change (the guest stops reading) gets the page back; inflight only counts would-bans;
+// eviction keeps banned pages; guest threads hammering NoteGuestRead while the CP defers.
+// Mutants (WILL_FAIL): _KRF3_INFLIGHT_DRAINS, _KRF3_NO_GUEST_HITS, _KRF3_NO_EXPIRY, _KRF3_ADDRESS_KEY.
 
 #include "graphics/shader/recompiler/ir/passes/rfGpuPatch.h"
 
@@ -21,6 +27,7 @@
 #include <cstdlib>
 #include <map>
 #include <random>
+#include <thread>
 #include <vector>
 
 using namespace Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch;
@@ -935,6 +942,189 @@ void TestRandom() {
 
 } // namespace krf2
 
+namespace krf3 {
+
+void TestParse() {
+	const auto off = ParseKrf3(nullptr);
+	Check(!off.Any() && !ParseKrf3("0").Any() && !ParseKrf3("x").Any(), "krf3 parse: unset / 0 / unknown = off");
+	const auto all = ParseKrf3("1");
+	Check(all.inflight && all.page, "krf3 parse: 1 = inflight + page");
+	Check(ParseKrf3("inflight").inflight && !ParseKrf3("inflight").page, "krf3 parse: inflight");
+	Check(ParseKrf3("page").page && !ParseKrf3("page").inflight, "krf3 parse: page");
+}
+
+void TestDecide() {
+	SupersetQuery q;
+	q.armed      = true;
+	q.gpu_thread = true;
+	q.site       = true;
+	q.why        = SupersetWhy::Superset;
+	q.queried    = true;
+	q.dirty      = true;
+	q.inflight   = true;
+	q.room       = true;
+	Check(DecideSuperset(q) == SupersetReject::Inflight, "krf3 decide: v2 (inflight_ok off) drains re-dirtied bytes in flight");
+	q.inflight_ok = true;
+	Check(DecideSuperset(q) == SupersetReject::None, "krf3 decide: inflight_ok defers dirty bytes with a download in flight");
+	q.dirty = false;
+	Check(DecideSuperset(q) == SupersetReject::NotDirty, "krf3 decide: clean bytes in flight keep the ordinary path");
+	q.dirty = true;
+	q.why   = SupersetWhy::Descriptor;
+	Check(DecideSuperset(q) == SupersetReject::Static, "krf3 decide: inflight_ok does not defer a static fallback");
+	q.why      = SupersetWhy::Superset;
+	q.disabled = true;
+	Check(DecideSuperset(q) == SupersetReject::Retry, "krf3 decide: inflight_ok does not defer in a retried scope");
+}
+
+void TestPageKey() {
+	GuestPageGuard g;
+	(void)g.OnDefer(0x571b2effcull, 1, true);
+	Check(g.NoteGuestRead(0x571b2e080ull), "krf3 key: a guest read of another byte of the deferred dword's page is seen");
+	Check(g.NoteGuestRead(0x571b2effcull), "krf3 key: the dword itself");
+	Check(!g.NoteGuestRead(0x571b2f03cull), "krf3 key: the next page is not tracked");
+	Check(!g.NoteGuestRead(0x555f41dd0ull), "krf3 key: an unrelated page is not tracked");
+}
+
+// S580 desert: deferred dwords on two pages (e000 once, f000 twice per flip); the guest reads page e000 three times per flip whenever the walker
+// left it dirty (deferred) in that flip; a drain cleans it (no guest fault).
+struct DesertStats {
+	uint32_t first_ban_flip = UINT32_MAX;
+	uint32_t e_defer_flips  = 0; // flips of [500, 2500) in which page e000 was deferred (trials)
+	uint32_t f_drains       = 0;
+	uint32_t trials         = 0;
+	uint32_t guest_faults   = 0; // over [500, 2500)
+};
+DesertStats RunDesert(GuestPageGuard& g, uint32_t flips, uint32_t stop_reading_at = UINT32_MAX, uint32_t* resumed_at = nullptr) {
+	DesertStats st;
+	for (uint32_t f = 0; f < flips; ++f) {
+		const auto e = g.OnDefer(0x571b2effcull, f, true);
+		const auto f1 = g.OnDefer(0x571b2f03cull, f, true);
+		const auto f2 = g.OnDefer(0x571b2f07cull, f, true);
+		if (e.banned_now && st.first_ban_flip == UINT32_MAX) st.first_ban_flip = f;
+		st.trials += (e.trial ? 1u : 0u) + (f1.trial ? 1u : 0u) + (f2.trial ? 1u : 0u);
+		st.f_drains += (f1.drain ? 1u : 0u) + (f2.drain ? 1u : 0u);
+		if (!e.drain && f >= 500 && f < 2500) ++st.e_defer_flips;
+		if (!e.drain && f >= stop_reading_at && resumed_at != nullptr && *resumed_at == UINT32_MAX && f > stop_reading_at + 64) *resumed_at = f;
+		if (!e.drain && f < stop_reading_at) {
+			for (int k = 0; k < 3; ++k) {
+				(void)g.NoteGuestRead(0x571b2e080ull + 0x40u * k);
+				if (f >= 500 && f < 2500) ++st.guest_faults;
+			}
+		}
+	}
+	return st;
+}
+
+void TestDesert() {
+	GuestPageGuard g;
+	const auto     st = RunDesert(g, 2600);
+	Check(st.first_ban_flip < 40, "krf3 desert: the page the guest reads is banned within the first window");
+	Check(st.e_defer_flips * 20 <= 2000, "krf3 desert: the read page defers in <= 5 % of the flips (trials only)");
+	Check(st.f_drains == 0, "krf3 desert: the page the guest does not read keeps deferring");
+	Check(st.trials >= 1 && st.trials <= 6, "krf3 desert: a few trials, the ban doubles");
+	Check(st.guest_faults <= 3u * 100u, "krf3 desert: guest faults on the page stay at trial level");
+	std::printf("krf3 desert: first ban at flip %u, read page deferred in %u of 2000 flips, %u trials, %u guest faults\n", st.first_ban_flip,
+	            st.e_defer_flips, st.trials, st.guest_faults);
+}
+
+// S580 garden: 6 defers per flip on two pages; a burst of 30 guest reads on the first page at the level entry (flips 10..12), then a guest read on
+// it in ~2 % of the flips. The measurement window starts at F10+330.
+void TestGarden() {
+	GuestPageGuard g;
+	std::mt19937   rng(581);
+	uint32_t       window_drains = 0, window_flips = 0, bans = 0;
+	for (uint32_t f = 0; f < 1400; ++f) {
+		bool any_drain = false;
+		for (int k = 0; k < 3; ++k) {
+			const auto a = g.OnDefer(0x57954027cull, f, true);
+			const auto b = g.OnDefer(0x5794bf8fcull, f, true);
+			any_drain    = any_drain || a.drain || b.drain;
+			bans += (a.banned_now ? 1u : 0u) + (b.banned_now ? 1u : 0u);
+		}
+		if (f >= 10 && f <= 12) {
+			for (int k = 0; k < 10; ++k) (void)g.NoteGuestRead(0x579540264ull);
+		} else if (rng() % 50 == 0) {
+			(void)g.NoteGuestRead(0x579540264ull);
+		}
+		if (f >= 330) {
+			++window_flips;
+			if (any_drain) ++window_drains;
+		}
+	}
+	Check(bans <= 1, "krf3 garden: at most the entry burst bans");
+	Check(window_drains == 0, "krf3 garden: no drain in F10+330..+1330 (the gain stays)");
+	std::printf("krf3 garden: %u ban(s), %u of %u window flips drained\n", bans, window_drains, window_flips);
+}
+
+// The guest stops reading the page: the ban runs out and the page defers again for good.
+void TestSceneChange() {
+	GuestPageGuard g;
+	uint32_t       resumed = UINT32_MAX;
+	(void)RunDesert(g, 9000, 600, &resumed);
+	Check(resumed != UINT32_MAX && resumed < 600 + 4096 + 200, "krf3 scene change: the page defers again after the last ban");
+	bool drained_late = false;
+	for (uint32_t f = 9000; f < 9300; ++f) drained_late = drained_late || g.OnDefer(0x571b2effcull, f, true).drain;
+	Check(!drained_late, "krf3 scene change: and stays deferring");
+}
+
+// KYTY_KRF3=inflight: the guard counts what it would ban, never drains.
+void TestWouldBan() {
+	GuestPageGuard g;
+	uint32_t       would = 0, drains = 0;
+	for (uint32_t f = 0; f < 200; ++f) {
+		const auto r = g.OnDefer(0x571b2effcull, f, false);
+		would += r.would_ban ? 1u : 0u;
+		drains += r.drain ? 1u : 0u;
+		(void)g.NoteGuestRead(0x571b2e080ull);
+	}
+	Check(would >= 5 && drains == 0, "krf3 inflight only: would-bans counted, no drain");
+}
+
+// 17 pages: the least recently deferred page that is not banned makes room; a banned page stays banned.
+void TestEviction() {
+	GuestPageGuard::Config c;
+	c.window = 4;
+	GuestPageGuard g(c);
+	for (uint32_t k = 0; k < 4; ++k) {
+		(void)g.OnDefer(0x100000ull, 1, true);
+		(void)g.NoteGuestRead(0x100010ull);
+	}
+	Check(g.Banned(0x100000ull, 2), "krf3 eviction: the read page is banned");
+	for (uint64_t p = 1; p <= 16; ++p) (void)g.OnDefer(0x100000ull + p * 0x1000ull, 2 + p, true);
+	Check(g.Banned(0x100000ull, 20), "krf3 eviction: the banned page survives 16 newer pages");
+	Check(g.NoteGuestRead(0x110000ull), "krf3 eviction: the newest page is tracked");
+}
+
+// Guest threads count hits while the CP thread defers (no lost page, no crash; hits only on tracked pages).
+void TestThreads() {
+	GuestPageGuard        g;
+	std::atomic<bool>     stop {false};
+	std::atomic<uint64_t> seen {0};
+	std::atomic<uint64_t> calls {0};
+	// The pages are tracked before the guest threads start (the CP loop below may otherwise finish before a thread runs, S581 PC run).
+	for (uint64_t p = 0; p < 16; ++p) (void)g.OnDefer(0x200000ull + p * 0x1000ull, 0, true);
+	std::vector<std::thread> threads;
+	for (int t = 0; t < 4; ++t) {
+		threads.emplace_back([&, t] {
+			uint64_t n = 0, i = 0;
+			while (!stop.load(std::memory_order_relaxed)) {
+				n += g.NoteGuestRead(0x200000ull + static_cast<uint64_t>((i++ + t) % 24) * 0x1000ull + 0x80) ? 1u : 0u;
+				calls.fetch_add(1, std::memory_order_relaxed);
+			}
+			seen.fetch_add(n);
+		});
+	}
+	// The CP defers until the guest threads made calls meanwhile (at least 20000 defers).
+	for (uint32_t f = 0; f < 20000 || calls.load(std::memory_order_relaxed) < 40000; ++f) {
+		(void)g.OnDefer(0x200000ull + static_cast<uint64_t>(f % 20) * 0x1000ull, f / 20, true);
+	}
+	stop.store(true);
+	for (auto& t: threads) t.join();
+	Check(seen.load() > 0, "krf3 threads: guest hits seen while the CP defers");
+}
+
+} // namespace krf3
+
 } // namespace
 
 int main() {
@@ -953,6 +1143,15 @@ int main() {
 	krf2::TestCover();
 	krf2::TestDecideSuperset();
 	krf2::TestRandom();
+	krf3::TestParse();
+	krf3::TestDecide();
+	krf3::TestPageKey();
+	krf3::TestDesert();
+	krf3::TestGarden();
+	krf3::TestSceneChange();
+	krf3::TestWouldBan();
+	krf3::TestEviction();
+	krf3::TestThreads();
 	if (g_failures != 0) {
 		std::fprintf(stderr, "RfGpuPatchTests: %d failure(s)\n", g_failures);
 		return 1;

@@ -237,7 +237,16 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		const bool why_guest  = !on_gpu_thread && ShaderRecompiler::IR::RfGpuPatch::WhyEnabled();
 		const bool why_dirty  = why_guest && m_buffer_cache.HasGpuDirtyBytes(fault_vaddr & ~uint64_t {3}, 4);
 		const auto why_begin  = why_guest ? FrameTiming::SteadyNowNs() : int64_t {0};
+		// S581 K-rf v3 (KYTY_KRF3, rfGpuPatch.h GuestPageGuard): a guest read fault on the page of a deferred walker dword (one hit for the guard).
+		namespace RfP          = ShaderRecompiler::IR::RfGpuPatch;
+		const bool krf3_page   = !on_gpu_thread && access == PageFaultAccess::Read && RfP::Krf3EnvMode().Any() && RfP::IsSuperset(RfP::EnvMode()) &&
+		                       RfP::GuestGuard().NoteGuestRead(fault_vaddr);
+		const auto krf3_begin  = krf3_page ? FrameTiming::SteadyNowNs() : int64_t {0};
 		const bool downloaded = m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		if (krf3_page) {
+			FrameTiming::Add(FrameTiming::Counter::Krf3GuestPageN);
+			FrameTiming::Add(FrameTiming::Counter::Krf3GuestPageWaitNs, static_cast<uint64_t>(FrameTiming::ElapsedNs(krf3_begin, FrameTiming::SteadyNowNs())));
+		}
 		if (why_guest) {
 			static std::atomic<uint32_t> why_lines {0};
 			const auto                   n = why_lines.fetch_add(1, std::memory_order_relaxed);

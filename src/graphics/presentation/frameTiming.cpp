@@ -858,6 +858,13 @@ constexpr const char* kCounterNames[] = {
     "krf2_variant_n",
     "krf2_compile_n",
     "krf2_gpu_check_n",
+    "krf3_inflight_defer_n",
+    "krf3_page_ban_n",
+    "krf3_page_would_ban_n",
+    "krf3_page_drain_n",
+    "krf3_page_trial_n",
+    "krf3_guest_page_n",
+    "krf3_guest_page_wait_ns",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
