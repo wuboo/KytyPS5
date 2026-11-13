@@ -797,8 +797,8 @@ public:
 	void Stop() {
 		if (!m_thread.joinable()) return;
 		(void)WaitIdle();
+		(void)Push(0, nullptr, 0); // a stop marker, before the flag: the emitter replays it before it can see the stop with nothing left
 		m_stop.store(true, std::memory_order_seq_cst);
-		(void)Push(0, nullptr, 0); // a stop marker
 		m_target.store(0, std::memory_order_seq_cst);
 		Wake();
 		m_thread.join();

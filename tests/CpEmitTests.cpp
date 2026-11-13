@@ -530,7 +530,12 @@ int main() {
 				}
 				for (size_t k = 0; k < static_cast<size_t>(Reason::Full); k++) Check(st.by[k] == sync_stats.by[k], "thread drains where sync does");
 				Check(st.drains == sync_stats.drains && st.ops == sync_stats.ops, "thread: the same IR as sync");
-				Check(st.publishes >= 1 && es.segments + st.steal_segs == st.publishes + 1, "every segment (and the stop marker) replayed once");
+				if (st.publishes == 0 || es.segments + st.steal_segs != st.publishes + 1) {
+					std::fprintf(stderr, "CpEmitTests: case publish %u batch %u steal %d: emitter %llu + recorder %llu segments, %llu pushed + stop marker\n",
+					             c.publish, c.batch, c.steal ? 1 : 0, static_cast<unsigned long long>(es.segments),
+					             static_cast<unsigned long long>(st.steal_segs), static_cast<unsigned long long>(st.publishes));
+					Check(false, "every segment (and the stop marker) replayed once");
+				}
 				if (!c.steal) Check(st.steal_segs == 0 && es.segments >= st.publishes, "no stealing: the emitter replayed every segment");
 				by_emitter += es.segments;
 				stolen += st.steal_segs;
