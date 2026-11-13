@@ -82,6 +82,29 @@ void TestPatchable() {
 	Check(!p[10], "a cyclic load is not patchable");
 	Check(!p[11], "a load without a flat slot is not patchable");
 	Check(!p[13], "a load another node folded into is structural");
+
+	// S573 DIAG: Explain agrees with PatchableLoads and names the reason.
+	const auto e = Explain(g, structural, flat);
+	Check(e.size() == g.size(), "Explain: one entry per node");
+	for (size_t i = 0; i < g.size(); ++i) {
+		Check((e[i].why == Why::Patchable) == p[i], "Explain: patchable exactly when PatchableLoads says so");
+	}
+	Check(e[1].why == Why::Node && e[1].users.size() == 1 && e[1].users[0] == 2, "Explain: load 1 is used by op 2");
+	Check(e[2].why == Why::NotLoad && e[2].roots.size() == 1 && structural[e[2].roots[0]] == 2, "Explain: op 2 is a root");
+	Check(e[3].why == Why::Node && e[3].flat_slots == 1, "Explain: load 3 is another load's address and has a flat slot");
+	Check(e[7].why == Why::Node && e[7].users.size() == 1 && e[7].users[0] == 5, "Explain: the second dependency is a use");
+	Check(e[8].why == Why::Root, "Explain: an output root");
+	Check(e[9].why == Why::NoLoad, "Explain: a folded load");
+	Check(e[10].why == Why::Cyclic, "Explain: a cyclic load");
+	Check(e[11].why == Why::NotStored, "Explain: a load without a flat slot");
+	Check(e[13].why == Why::Node, "Explain: a load another node folded into");
+	// Too many slots: patchable for PatchableLoads, but the walker compiler drops it (kMaxSlots).
+	std::vector<GraphNode> g2(1);
+	g2[0] = Load();
+	const std::vector<uint32_t> none;
+	const std::vector<uint32_t> five(kMaxSlots + 1, 0u);
+	Check(Explain(g2, none, five)[0].why == Why::TooManySlots, "Explain: more flat slots than an entry holds");
+	Check(Explain(g2, none, std::vector<uint32_t>(kMaxSlots, 0u))[0].why == Why::Patchable, "Explain: kMaxSlots slots are fine");
 }
 
 void TestDecide() {
@@ -125,6 +148,23 @@ void TestDecide() {
 	q      = ok;
 	q.room = false;
 	Check(Decide(q) == Reject::Full, "no room: drain");
+	// S573 Oracle (DIAG only): patchability, address base and room do not matter; armed, CP thread and the bytes' state do.
+	auto o = ok;
+	o.mode = Mode::Oracle;
+	o.slots = 0;
+	o.address_base = true;
+	o.room = false;
+	Check(Decide(o) == Reject::None, "oracle: a structural load on dirty bytes is completed");
+	auto o2 = o;
+	o2.dirty = false;
+	Check(Decide(o2) == Reject::NotDirty, "oracle: clean bytes take the ordinary path");
+	o2 = o;
+	o2.inflight = true;
+	Check(Decide(o2) == Reject::Inflight, "oracle: bytes in flight drain");
+	o2 = o;
+	o2.armed = false;
+	Check(Decide(o2) == Reject::NotArmed, "oracle: only inside DISPATCH_INDIRECT");
+	Check(ParseMode("oracle") == Mode::Oracle && ParseMode("0") == Mode::Off, "oracle: parsed");
 }
 
 void TestPending() {

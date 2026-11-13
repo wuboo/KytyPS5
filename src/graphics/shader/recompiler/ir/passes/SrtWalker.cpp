@@ -5,13 +5,19 @@
 #include "common/assert.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 
+#include <fmt/format.h>
 #include <xbyak/xbyak.h>
 
 #include <algorithm>
 #include <bit>
 #include <cstring>
 #include <deque>
+#include <cinttypes>
+#include <cstdio>
 #include <map>
+#include <mutex>
+#include <string>
+#include <unordered_map>
 #include <unordered_set>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
@@ -165,6 +171,21 @@ uint32_t OutputOffset(const ResourcePlan& plan) {
 
 const uint8_t* Scratch(const ResourcePlan& plan) {
 	return reinterpret_cast<const uint8_t*>(plan.scratch().srt.data());
+}
+
+// S573 DIAG (KYTY_DIAG_RF_WHY=1): description of every guest load site of every compiled walker, by the absolute address of its mov.
+struct WhySite {
+	std::string text;
+	uint64_t    code = 0; // the walker's code base: the sites of one plan share it
+	uint32_t    hits = 0;
+};
+std::mutex&                              WhyMutex() {
+	static std::mutex mutex;
+	return mutex;
+}
+std::unordered_map<uint64_t, WhySite>& WhySites() {
+	static std::unordered_map<uint64_t, WhySite> sites;
+	return sites;
 }
 
 thread_local const Xbyak::CodeGenerator* t_running_walker = nullptr;
@@ -440,6 +461,12 @@ private:
 	void FindPatchableLoads(std::span<const Operand> conditions, std::span<const std::vector<Operand>> descriptors,
 	                        std::span<const Operand> outputs, std::span<const Operand> reads);
 	void NotePatchSite(size_t code_offset);
+	// S573 DIAG (KYTY_DIAG_RF_WHY=1)
+	[[nodiscard]] std::string WhyOperand(const Operand& operand, int depth) const;
+	[[nodiscard]] std::string WhyNode(uint32_t index, int depth) const;
+	void                      WhyExplain(std::span<const RfGpuPatch::GraphNode> graph, std::span<const uint32_t> structural,
+	                                     std::span<const std::string> root_names, std::span<const uint32_t> flat, uint32_t control_phis);
+	void                      WhyRegister(bool resources);
 
 	ResourcePlan&                                     m_plan;
 	Xbyak::CodeGenerator&                             m_code;
@@ -454,6 +481,10 @@ private:
 	// S570 (KYTY_RF_GPU_PATCH): per node, the flat slots of a load nothing else uses (empty: not patchable); the node being emitted.
 	std::vector<std::vector<uint32_t>> m_patch_slots;
 	uint32_t                           m_emitting = UINT32_MAX;
+	// S573 DIAG: (code offset of the mov, node) of every guest load; per node its explanation; the plan's header.
+	std::vector<std::pair<uint32_t, uint32_t>> m_why_sites;
+	std::vector<std::string>                   m_why_text;
+	std::string                                m_why_header;
 };
 
 void WalkerCompiler::AddOutput(Value value, uint32_t gate) {
@@ -1374,6 +1405,7 @@ void WalkerCompiler::Compile(std::span<const Value> values) {
 	m_plan.srt_user_data = m_user_data;
 	c.readyRE();
 	EXIT_IF(Xbyak::GetError() != 0);
+	if (RfGpuPatch::WhyEnabled()) WhyRegister(resources);
 }
 
 // S570 (KYTY_RF_GPU_PATCH, rfGpuPatch.h): the walker graph as RfGpuPatch::GraphNode, the roots the CPU reads after the walk, and the node
@@ -1384,10 +1416,13 @@ void WalkerCompiler::FindPatchableLoads(std::span<const Operand> conditions, std
 	m_patch_slots.assign(m_nodes.size(), {});
 	// An evaluated control Phi can restart the walk (reset): a load may then run twice, the second time from another address, and the
 	// pending entry of the first run would overwrite the slot with the wrong bytes. Such plans keep the drain.
+	uint32_t control_phis = 0;
 	for (uint32_t index = 0; index < m_nodes.size(); ++index) {
 		const auto& node = m_nodes[index];
-		if (node.inst->GetOpcode() == ValueOpcode::Phi && node.result == Operand {Kind::Node, index}) return;
+		if (node.inst->GetOpcode() == ValueOpcode::Phi && node.result == Operand {Kind::Node, index}) ++control_phis;
 	}
+	const bool why = P::WhyEnabled();
+	if (control_phis != 0 && !why) return;
 	std::vector<P::GraphNode> graph(m_nodes.size());
 	for (uint32_t index = 0; index < m_nodes.size(); ++index) {
 		const auto& node = m_nodes[index];
@@ -1403,19 +1438,24 @@ void WalkerCompiler::FindPatchableLoads(std::span<const Operand> conditions, std
 		g.emits_load = g.read && self && (op == ValueOpcode::LoadBufferU32 ? node.args.size() > 1 : !node.args.empty());
 		g.cyclic     = node.referenced;
 	}
-	std::vector<uint32_t> structural;
-	const auto            root = [&](const Operand& operand) {
-        if (operand.kind == Kind::Node) structural.push_back(static_cast<uint32_t>(operand.value));
+	std::vector<uint32_t>    structural;
+	std::vector<std::string> root_names; // S573 DIAG only
+	const auto               root = [&](const Operand& operand, const char* kind, size_t a, size_t b) {
+        if (operand.kind != Kind::Node) return;
+        structural.push_back(static_cast<uint32_t>(operand.value));
+        if (why) root_names.push_back(b == SIZE_MAX ? fmt::format("{}{}", kind, a) : fmt::format("{}{}.w{}", kind, a, b));
 	};
-	for (const auto& operand: conditions) root(operand);
-	for (const auto& words: descriptors) {
-		for (const auto& operand: words) root(operand);
+	for (size_t b = 0; b < conditions.size(); ++b) root(conditions[b], "cond", b, SIZE_MAX);
+	for (size_t s = 0; s < descriptors.size(); ++s) {
+		for (size_t w = 0; w < descriptors[s].size(); ++w) root(descriptors[s][w], "desc", s, w);
 	}
-	for (const auto& operand: outputs) root(operand);
+	for (size_t k = 0; k < outputs.size(); ++k) root(outputs[k], "out", k, SIZE_MAX);
 	std::vector<uint32_t> flat(reads.size(), UINT32_MAX);
 	for (size_t slot = 0; slot < reads.size(); ++slot) {
 		if (reads[slot].kind == Kind::Node) flat[slot] = static_cast<uint32_t>(reads[slot].value);
 	}
+	if (why) WhyExplain(graph, structural, root_names, flat, control_phis);
+	if (control_phis != 0) return; // DIAG only: the exclusion above, after the explanation
 	const auto patchable = P::PatchableLoads(graph, structural, flat);
 	for (size_t slot = 0; slot < reads.size(); ++slot) {
 		const auto node = flat[slot];
@@ -1427,6 +1467,7 @@ void WalkerCompiler::FindPatchableLoads(std::span<const Operand> conditions, std
 }
 
 void WalkerCompiler::NotePatchSite(size_t code_offset) {
+	if (RfGpuPatch::WhyEnabled() && m_emitting < m_nodes.size()) m_why_sites.emplace_back(static_cast<uint32_t>(code_offset), m_emitting);
 	if (m_emitting >= m_patch_slots.size() || m_patch_slots[m_emitting].empty()) return;
 	const auto& slots = m_patch_slots[m_emitting];
 	m_plan.srt_patch_sites.push_back({.code_offset = static_cast<uint32_t>(code_offset),
@@ -1435,7 +1476,114 @@ void WalkerCompiler::NotePatchSite(size_t code_offset) {
 	m_plan.srt_patch_slots.insert(m_plan.srt_patch_slots.end(), slots.begin(), slots.end());
 }
 
+// S573 DIAG (KYTY_DIAG_RF_WHY=1): U<k> user data dword, C<hex> constant, SB shader base, ? unknown, N<i>:<op>(args) a node, @+<hex> a load's offset.
+std::string WalkerCompiler::WhyOperand(const Operand& operand, int depth) const {
+	switch (operand.kind) {
+		case Kind::Unknown: return "?";
+		case Kind::Constant: return fmt::format("C{:#x}", operand.value);
+		case Kind::UserData: return fmt::format("U{}", operand.value);
+		case Kind::ShaderBase: return "SB";
+		case Kind::Node: return WhyNode(static_cast<uint32_t>(operand.value), depth);
+	}
+	return "?";
+}
+
+std::string WalkerCompiler::WhyNode(uint32_t index, int depth) const {
+	if (index >= m_nodes.size()) return "N?";
+	const auto& node = m_nodes[index];
+	const auto  op   = node.inst->GetOpcode();
+	std::string text = fmt::format("N{}:{}", index, ValueOpcodeName(op));
+	if (op == ValueOpcode::LoadAddressU32 || op == ValueOpcode::ReadConstBuffer || op == ValueOpcode::LoadBufferU32) {
+		const auto mi = node.inst->Flags<MemoryFlags>().index;
+		if (mi < m_plan.memory_info.size()) text += fmt::format("@+{:#x}", m_plan.memory_info[mi].offset);
+	}
+	if (node.result != Operand {Kind::Node, index}) return text + "=>" + (depth > 0 ? WhyOperand(node.result, depth - 1) : "..");
+	if (depth <= 0 || node.args.empty()) return text;
+	text += "(";
+	for (size_t i = 0; i < node.args.size(); ++i) {
+		if (i != 0) text += ",";
+		text += WhyOperand(node.args[i], depth - 1);
+	}
+	return text + ")";
+}
+
+void WalkerCompiler::WhyExplain(std::span<const RfGpuPatch::GraphNode> graph, std::span<const uint32_t> structural,
+                                std::span<const std::string> root_names, std::span<const uint32_t> flat, uint32_t control_phis) {
+	namespace P            = RfGpuPatch;
+	const auto explained   = P::Explain(graph, structural, flat);
+	m_why_header           = fmt::format("cphi={} blocks={} sources={} reads={} outputs={} nodes={}", control_phis, m_plan.control_flow.size(),
+	                                     m_plan.descriptor_sources.size(), flat.size(), m_outputs.size(), m_nodes.size());
+	m_why_text.assign(m_nodes.size(), {});
+	// The first path from a node to a structural root through its users (at most 6 hops).
+	const auto chain = [&](uint32_t from) {
+		std::string text;
+		uint32_t    at = from;
+		for (int hop = 0; hop < 6 && at < explained.size(); ++hop) {
+			const auto& e = explained[at];
+			if (!e.roots.empty()) return text + root_names[e.roots.front()];
+			if (e.users.empty()) return text + (e.flat_slots != 0 ? "flat" : "dead");
+			at = e.users.front();
+			text += fmt::format("N{}:{}>", at, ValueOpcodeName(m_nodes[at].inst->GetOpcode()));
+		}
+		return text + "..";
+	};
+	for (uint32_t i = 0; i < m_nodes.size(); ++i) {
+		const auto& e = explained[i];
+		if (e.why == P::Why::NotLoad) continue;
+		std::string roots, users, slots;
+		for (size_t k = 0; k < e.roots.size() && k < 8; ++k) roots += (k ? "," : "") + root_names[e.roots[k]];
+		for (size_t k = 0; k < e.users.size() && k < 8; ++k) {
+			users += fmt::format("{}N{}:{}>{}", k ? "," : "", e.users[k], ValueOpcodeName(m_nodes[e.users[k]].inst->GetOpcode()),
+			                     chain(e.users[k]));
+		}
+		for (size_t slot = 0, n = 0; slot < flat.size() && n < 8; ++slot) {
+			if (flat[slot] == i) slots += fmt::format("{}{}", n++ ? "," : "", m_plan.srt_reads[slot].flat_offset);
+		}
+		const bool would = e.why == P::Why::Patchable && control_phis == 0;
+		m_why_text[i] = fmt::format("why={}{} patchable={} flat=[{}] roots=[{}] users=[{}]", P::WhyName(e.why),
+		                            e.why == P::Why::Patchable && control_phis != 0 ? "+plan_control_phi" : "", would ? 1 : 0, slots, roots,
+		                            users);
+	}
+}
+
+void WalkerCompiler::WhyRegister(bool resources) {
+	const auto        base   = reinterpret_cast<uint64_t>(m_code.getCode());
+	const std::string header = fmt::format("shader={:016x} stage={} walker={} {}", m_plan.shader_hash, static_cast<uint32_t>(m_plan.stage),
+	                                       resources ? "resources" : "values(call_targets)",
+	                                       resources ? m_why_header : fmt::format("outputs={} nodes={}", m_outputs.size(), m_nodes.size()));
+	std::lock_guard lock(WhyMutex());
+	auto&           sites = WhySites();
+	if (sites.size() > 200000) return; // DIAG: bounded
+	for (const auto& [offset, node]: m_why_sites) {
+		auto& site = sites[base + offset];
+		site.hits  = 0;
+		site.code  = base;
+		site.text  = fmt::format("{} site=+{:#x} load={} {}", header, offset, WhyNode(node, 4),
+		                         node < m_why_text.size() && !m_why_text[node].empty() ? m_why_text[node] : std::string("why=n/a"));
+	}
+}
+
 } // namespace
+
+bool SrtWalkerWhy(uint64_t rip, std::string* text, uint32_t* hits, std::vector<std::string>* plan_sites) {
+	if (!RfGpuPatch::WhyEnabled()) return false;
+	std::lock_guard lock(WhyMutex());
+	auto&           sites = WhySites();
+	const auto      it    = sites.find(rip);
+	if (it == sites.end()) return false;
+	*hits = ++it->second.hits;
+	*text = it->second.text;
+	if (plan_sites != nullptr && *hits == 1) {
+		// The first time: every load of the same walker (the ones that do not fault too), in code order.
+		std::vector<std::pair<uint64_t, const std::string*>> same;
+		for (const auto& [at, site]: sites) {
+			if (site.code == it->second.code && at != rip) same.emplace_back(at, &site.text);
+		}
+		std::ranges::sort(same);
+		for (const auto& [at, site_text]: same) plan_sites->push_back(*site_text);
+	}
+	return true;
+}
 
 void CompileSrtWalker(ResourcePlan& plan, std::span<const Value> values) {
 	plan.srt_patch_sites.clear();

@@ -659,7 +659,10 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	namespace RfPatch      = ShaderRecompiler::IR::RfGpuPatch;
 	const auto rf_patch    = RfPatch::EnvMode();
 	RfPatch::Scope rf_scope(rf_patch != RfPatch::Mode::Off);
-	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) return;
+	RfPatch::DiagDispatchArgs() = args_addr; // S573 DIAG (KYTY_DIAG_RF_WHY): which DISPATCH_INDIRECT the walker faults belong to
+	const bool rf_program = m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info);
+	RfPatch::DiagDispatchArgs() = 0;
+	if (!rf_program) return;
 	rf_scope.Disarm();
 	const auto& rf_pending = RfPatch::ThreadPending();
 	const bool  rf_patched = rf_patch != RfPatch::Mode::Off && rf_pending.count != 0;

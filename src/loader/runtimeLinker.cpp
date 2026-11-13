@@ -965,10 +965,51 @@ static_assert(static_cast<uint32_t>(Libs::Graphics::FrameTiming::Counter::RfPatc
               static_cast<uint32_t>(Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch::Reject::Full) -
                   static_cast<uint32_t>(Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch::Reject::NotPatchable));
 
+// S573 Oracle (KYTY_RF_GPU_PATCH=oracle, DIAG only): per address on the CP thread, the fresh dword of the last drain and how many drains.
+struct RfOracleEntry {
+	uint64_t address = 0;
+	uint32_t fresh   = 0;
+	uint32_t drains  = 0;
+	uint32_t uses    = 0;
+};
+constexpr uint32_t kOracleLearn   = 4;
+constexpr uint32_t kOracleRecheck = 32; // every 32nd fault of an address drains anyway: a changed value is seen (rf_patch_stale_ne_n)
+static thread_local std::array<RfOracleEntry, 16> t_rf_oracle {};
+static thread_local uint32_t                      t_rf_oracle_next  = 0;
+static thread_local uint64_t                      t_rf_oracle_armed = 0;
+
+static RfOracleEntry* RfOracleFind(uint64_t address) {
+	for (auto& e: t_rf_oracle) {
+		if (e.drains != 0 && e.address == address) return &e;
+	}
+	return nullptr;
+}
+static void RfOracleArm(uint64_t address) {
+	t_rf_oracle_armed = address;
+}
+// After the drain of an armed walker fault: remember the fresh dword; a different one than last time counts in rf_patch_stale_ne_n.
+static void RfOracleLearn() {
+	const auto address = t_rf_oracle_armed;
+	t_rf_oracle_armed  = 0;
+	uint32_t fresh     = 0;
+	if (address == 0 || !Libs::LibKernel::Memory::TryReadBacking(address, &fresh, sizeof(fresh))) return;
+	auto* e = RfOracleFind(address);
+	if (e == nullptr) {
+		e  = &t_rf_oracle[t_rf_oracle_next++ % t_rf_oracle.size()];
+		*e = {.address = address, .fresh = fresh, .drains = 0};
+	} else if (e->fresh != fresh) {
+		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::RfPatchStaleNeN);
+		e->drains = 0; // a changed value: learn again
+	}
+	e->fresh = fresh;
+	++e->drains;
+}
+
 bool TryRfGpuPatch(const Common::HostException::ExceptionInfo* info, uint32_t length) {
 	namespace P = Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch;
 	using C     = Libs::Graphics::FrameTiming::Counter;
 	const auto mode = P::EnvMode();
+	t_rf_oracle_armed = 0;
 	if (mode == P::Mode::Off || length == 0) return false;
 	auto& pending = P::ThreadPending();
 	if (!pending.armed) return false;
@@ -997,10 +1038,68 @@ bool TryRfGpuPatch(const Common::HostException::ExceptionInfo* info, uint32_t le
 	}
 	uint32_t stale = 0;
 	if (!Libs::LibKernel::Memory::TryReadBacking(address, &stale, sizeof(stale))) return false;
+	if (mode == P::Mode::Oracle) {
+		// S573 DIAG only: the stale dword without a drain, but only once this address drained kOracleLearn times and the stale dword equals the
+		// fresh one of its last drain (a value the GPU really wrote here before), and not on every kOracleRecheck-th fault; otherwise drain and
+		// learn (RfOracleLearn). A value the GPU changes between two rechecks is drawn wrong: DIAG only.
+		auto* entry = RfOracleFind(address);
+		if (entry == nullptr || entry->drains < kOracleLearn || entry->fresh != stale || ++entry->uses % kOracleRecheck == 0) {
+			RfOracleArm(address);
+			return false;
+		}
+		Loader::X64InstructionEmulator::CompleteLoad(info->native_context, length, stale);
+		Libs::Graphics::FrameTiming::Add(C::RfPatchDeferN);
+		return true;
+	}
 	if (!pending.Add(address, stale, std::span<const uint32_t>(slots.data(), q.slots))) return false;
 	Loader::X64InstructionEmulator::CompleteLoad(info->native_context, length, stale);
 	Libs::Graphics::FrameTiming::Add(C::RfPatchDeferN);
 	return true;
+}
+
+// S573 DIAG (KYTY_DIAG_RF_WHY=1, no change of behaviour): for a CP walker load that takes the drain (or the zero read of an unmapped
+// address), one stdout line with the load's description from the walker compiler (SrtWalkerWhy) and the bytes before / after. First 3 hits
+// per load site, then every 1000th; at most 4000 lines.
+struct RfWhyProbe {
+	bool        on       = false;
+	bool        stale_ok = false;
+	uint32_t    stale    = 0;
+	uint32_t    hits     = 0;
+	uint64_t    addr     = 0;
+	uint64_t    args     = 0;
+	std::string text;
+	std::vector<std::string> plan; // first hit only: the walker's other load sites
+};
+
+static RfWhyProbe RfWhyBegin(const Common::HostException::ExceptionInfo* info, bool read) {
+	namespace P = Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch;
+	RfWhyProbe probe;
+	if (!P::WhyEnabled() || !read || !Libs::Graphics::GuestGpu::IsGpuThread() ||
+	    Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(info->exception_address) == 0 ||
+	    !Libs::Graphics::ShaderRecompiler::IR::SrtWalkerWhy(info->exception_address, &probe.text, &probe.hits, &probe.plan)) {
+		return probe;
+	}
+	probe.on       = true;
+	probe.addr     = info->r10; // LoadGuest: lea r10, [...]; mov eax, [r10]
+	probe.args     = P::DiagDispatchArgs();
+	probe.stale_ok = Libs::LibKernel::Memory::TryReadBacking(probe.addr, &probe.stale, sizeof(probe.stale));
+	return probe;
+}
+
+static void RfWhyEnd(const RfWhyProbe& probe, const char* path) {
+	if (!probe.on || (probe.hits > 3 && probe.hits % 1000 != 0)) return;
+	static std::atomic<uint32_t> lines {0};
+	if (lines.fetch_add(1, std::memory_order_relaxed) >= 4000) return;
+	uint32_t   fresh    = 0;
+	const bool fresh_ok = Libs::LibKernel::Memory::TryReadBacking(probe.addr, &fresh, sizeof(fresh));
+	char       head[320];
+	std::snprintf(head, sizeof(head), "[rf-why] flip=%u hits=%u path=%s addr=0x%016" PRIx64 " stale=%s%08x fresh=%s%08x di_args=0x%" PRIx64 " ",
+	              static_cast<uint32_t>(Libs::Graphics::FrameTiming::GuestFlips()), probe.hits, path, probe.addr, probe.stale_ok ? "" : "!",
+	              probe.stale, fresh_ok ? "" : "!", fresh, probe.args);
+	std::string line = head + probe.text + "\n";
+	for (const auto& site: probe.plan) line += "[rf-why-plan] " + site + "\n";
+	std::fputs(line.c_str(), stdout);
+	std::fflush(stdout);
 }
 
 void FinishCleanWalkShadow(uint64_t addr) {
@@ -1076,9 +1175,12 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		// S570: who reads a GPU-dirty page on the CP thread (rf_gpu_walker_n / rf_gpu_other_n in RenderContext::HandleFault).
 		Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch::FaultFromWalker() =
 		    access == GpuAccess::Read && Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(info->exception_address) != 0;
+		const auto rf_why = RfWhyBegin(info, access == GpuAccess::Read); // S573 DIAG (KYTY_DIAG_RF_WHY)
 		const bool gpu_fault_handled = Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr);
 		Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch::FaultFromWalker() = false;
 		if (gpu_fault_handled) {
+			RfWhyEnd(rf_why, "drain");
+			if (t_rf_oracle_armed != 0) RfOracleLearn(); // S573 DIAG (KYTY_RF_GPU_PATCH=oracle)
 			FinishCleanWalkShadow(info->access_violation_vaddr);
 			GfEmuShadowFinish(gf_shadow);
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
@@ -1089,6 +1191,7 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		CleanWalkPending().armed = false;
 		if (const auto length =
 		        Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(info->exception_address)) {
+			RfWhyEnd(rf_why, "zero");
 			Loader::X64InstructionEmulator::SkipLoad(info->native_context, length);
 			return true;
 		}

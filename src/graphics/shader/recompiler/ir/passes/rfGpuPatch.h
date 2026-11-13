@@ -37,12 +37,17 @@
 
 namespace Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch {
 
-enum class Mode : uint8_t { Off, On, Shadow };
+// S573 Oracle (KYTY_RF_GPU_PATCH=oracle, DIAG ONLY, never install: may draw with a wrong value): every walker fault on GPU-dirty bytes inside
+// DISPATCH_INDIRECT completes with the backing's (stale) dword, patchable or not, with no drain and no GPU copy. It measures the ceiling of any
+// lever on these waits (and where the wait goes next: guest fault lambdas, the next sync), not a fix. rf_patch_defer_n counts the completions,
+// rf_patch_stale_ne_n the ones whose stale dword differs from the previous completion at the same address (the value is not constant).
+enum class Mode : uint8_t { Off, On, Shadow, Oracle };
 
 inline Mode ParseMode(const char* text) {
 	if (text == nullptr) return Mode::Off;
 	if (std::strcmp(text, "1") == 0) return Mode::On;
 	if (std::strcmp(text, "shadow") == 0) return Mode::Shadow;
+	if (std::strcmp(text, "oracle") == 0) return Mode::Oracle;
 	return Mode::Off;
 }
 
@@ -101,6 +106,81 @@ inline std::vector<bool> PatchableLoads(std::span<const GraphNode> nodes, std::s
 	return out;
 }
 
+constexpr uint32_t kMaxEntries = 8;
+constexpr uint32_t kMaxSlots   = 4;
+
+// ---- S573 DIAG (KYTY_DIAG_RF_WHY=1, no change of behaviour): why a walker load is not patchable ------------------------------------------
+// S571: all 4 sync_rf_gpu per garden flip were rejected as not patchable. Explain gives, per load node, the reason PatchableLoads has (the plan's
+// control-Phi exclusion is reported apart, by the caller), the structural roots (indices into `structural`) and the other nodes that use it,
+// and its flat slots. SrtWalker.cpp formats it per load site; the exception handler prints it for the CP's walker faults ([rf-why]).
+
+inline bool WhyEnabled() {
+	static const bool on = [] {
+		const char* v = std::getenv("KYTY_DIAG_RF_WHY");
+		return v != nullptr && v[0] == '1';
+	}();
+	return on;
+}
+
+enum class Why : uint8_t { Patchable, NotLoad, NoLoad, Cyclic, Root, Node, NotStored, TooManySlots };
+
+inline const char* WhyName(Why why) {
+	switch (why) {
+		case Why::Patchable: return "patchable";
+		case Why::NotLoad: return "not_a_load";
+		case Why::NoLoad: return "no_guest_load";
+		case Why::Cyclic: return "cyclic";
+		case Why::Root: return "structural_root";
+		case Why::Node: return "used_by_node";
+		case Why::NotStored: return "not_in_flat";
+		case Why::TooManySlots: return "too_many_slots";
+	}
+	return "?";
+}
+
+struct Explained {
+	Why                   why        = Why::NotLoad;
+	uint32_t              flat_slots = 0;
+	std::vector<uint32_t> roots; // indices into `structural`
+	std::vector<uint32_t> users; // nodes that depend on it
+};
+
+// Same rules and the same order of checks as PatchableLoads (without the plan-level control-Phi exclusion).
+inline std::vector<Explained> Explain(std::span<const GraphNode> nodes, std::span<const uint32_t> structural, std::span<const uint32_t> flat) {
+	const size_t           n = nodes.size();
+	std::vector<Explained> out(n);
+	for (size_t r = 0; r < structural.size(); ++r) {
+		if (structural[r] < n) out[structural[r]].roots.push_back(static_cast<uint32_t>(r));
+	}
+	for (size_t i = 0; i < n; ++i) {
+		for (const auto dep: nodes[i].deps) {
+			if (dep < n && dep != i && (out[dep].users.empty() || out[dep].users.back() != i)) out[dep].users.push_back(static_cast<uint32_t>(i));
+		}
+	}
+	for (const auto node: flat) {
+		if (node < n) ++out[node].flat_slots;
+	}
+	for (size_t i = 0; i < n; ++i) {
+		auto&       e    = out[i];
+		const auto& node = nodes[i];
+		if (!node.read) e.why = Why::NotLoad;
+		else if (!node.emits_load) e.why = Why::NoLoad;
+		else if (node.cyclic) e.why = Why::Cyclic;
+		else if (!e.roots.empty()) e.why = Why::Root;
+		else if (!e.users.empty()) e.why = Why::Node;
+		else if (e.flat_slots == 0) e.why = Why::NotStored;
+		else if (e.flat_slots > kMaxSlots) e.why = Why::TooManySlots;
+		else e.why = Why::Patchable;
+	}
+	return out;
+}
+
+// The DISPATCH_INDIRECT whose walks run on this thread (its argument address; 0 outside one), for the [rf-why] line.
+inline uint64_t& DiagDispatchArgs() {
+	static thread_local uint64_t args = 0;
+	return args;
+}
+
 // ---- fault decision (exception handler, CP thread) ----------------------------------------------------------------------------------------
 
 struct FaultQuery {
@@ -121,16 +201,17 @@ enum class Reject : uint8_t { None, NotArmed, NotPatchable, AddressBase, NotDirt
 
 inline Reject Decide(const FaultQuery& q) {
 	if (q.mode == Mode::Off || !q.armed || !q.gpu_thread) return Reject::NotArmed;
-	if (q.slots == 0) return Reject::NotPatchable;
+	const bool oracle = q.mode == Mode::Oracle; // S573 DIAG: the value's use does not matter, only the bytes' state
+	if (q.slots == 0 && !oracle) return Reject::NotPatchable;
 #if !defined(KYTY_RFPATCH_MUTANT_IGNORE_ADDRESS_BASE)
-	if (q.address_base) return Reject::AddressBase;
+	if (q.address_base && !oracle) return Reject::AddressBase;
 #endif
 #if !defined(KYTY_RFPATCH_MUTANT_IGNORE_DIRTY)
 	// Clean bytes need no wait (the ordinary fault path reads them); bytes in flight are about to change in the backing.
 	if (!q.queried || !q.dirty) return Reject::NotDirty;
 	if (q.inflight) return Reject::Inflight;
 #endif
-	if (!q.room) return Reject::Full;
+	if (!q.room && !oracle) return Reject::Full;
 	return Reject::None;
 }
 
@@ -142,9 +223,6 @@ inline bool& FaultFromWalker() {
 }
 
 // ---- pending list (per thread, per armed scope) -------------------------------------------------------------------------------------------
-
-constexpr uint32_t kMaxEntries = 8;
-constexpr uint32_t kMaxSlots   = 4;
 
 struct Entry {
 	uint64_t                       address = 0; // guest address of the dword

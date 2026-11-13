@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cinttypes>
+#include <cstdio>
 #include <cstdlib>
 #include <mutex>
 #include <unordered_set>
@@ -231,7 +232,24 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		const bool rf_cp_read   = on_gpu_thread && access == PageFaultAccess::Read;
 		const bool rf_walker    = rf_cp_read && ShaderRecompiler::IR::RfGpuPatch::FaultFromWalker();
 		const auto rf_read_begin = rf_cp_read ? FrameTiming::SteadyNowNs() : int64_t {0};
+		// S573 DIAG (KYTY_DIAG_RF_WHY=1): a guest thread's read fault (its download runs on the CP thread): are the bytes GPU-written or only
+		// their page (false sharing)? The guest reads next to the walker's GPU-written dwords in the garden (0x...264 vs 0x...27c, S569).
+		const bool why_guest  = !on_gpu_thread && ShaderRecompiler::IR::RfGpuPatch::WhyEnabled();
+		const bool why_dirty  = why_guest && m_buffer_cache.HasGpuDirtyBytes(fault_vaddr & ~uint64_t {3}, 4);
+		const auto why_begin  = why_guest ? FrameTiming::SteadyNowNs() : int64_t {0};
 		const bool downloaded = m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		if (why_guest) {
+			static std::atomic<uint32_t> why_lines {0};
+			const auto                   n = why_lines.fetch_add(1, std::memory_order_relaxed);
+			if (n < 3000 || n % 1000 == 0) {
+				char line[200];
+				std::snprintf(line, sizeof(line), "[rf-why-guest] flip=%u addr=0x%016" PRIx64 " dirty=%d wait_us=%" PRId64 "\n",
+				              static_cast<uint32_t>(FrameTiming::GuestFlips()), fault_vaddr, why_dirty ? 1 : 0,
+				              FrameTiming::ElapsedNs(why_begin, FrameTiming::SteadyNowNs()) / 1000);
+				std::fputs(line, stdout);
+				std::fflush(stdout);
+			}
+		}
 		if (rf_cp_read) {
 			const auto ns = FrameTiming::ElapsedNs(rf_read_begin, FrameTiming::SteadyNowNs());
 			FrameTiming::Add(rf_walker ? FrameTiming::Counter::RfGpuWalkerN : FrameTiming::Counter::RfGpuOtherN);

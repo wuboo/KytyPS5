@@ -5,6 +5,8 @@
 
 #include <algorithm>
 #include <span>
+#include <string>
+#include <vector>
 
 namespace Libs::Graphics::ShaderRecompiler::IR {
 
@@ -87,6 +89,11 @@ uint32_t SrtWalkerLoadLength(uint64_t rip);
 // S570 (KYTY_RF_GPU_PATCH): when the walker load at rip (running on this thread) only feeds flattened SRT slots, writes them to `slots` and
 // returns their number (0 otherwise); *address_base: one of them is a global address base the CPU reads (BackAddressBases).
 uint32_t SrtWalkerPatchSlots(uint64_t rip, std::span<uint32_t> slots, bool* address_base);
+// S573 DIAG (KYTY_DIAG_RF_WHY=1): the description of the walker load whose mov is at rip (registered when the walker was compiled: plan, load
+// node and its address operands, why it is or is not patchable, its structural roots and users) and how often it was asked for; false when off
+// or unknown.
+// The first time a site is asked for, plan_sites (when non-null) receives the descriptions of the walker's other load sites.
+bool SrtWalkerWhy(uint64_t rip, std::string* text, uint32_t* hits, std::vector<std::string>* plan_sites = nullptr);
 // S490 (KYTY_CP_PIPE): a pipeline worker's walker must not take the fault handler's drain of a GPU-tracked page (that waits for the thread that waits for the
 // worker). On a thread marked here a faulting load of the walker is completed as a zero read at once (length as SrtWalkerLoadLength, 0 when it is not the
 // walker's) and counted; the caller then does not use the walk. SetSrtWalkerWorker resets the count.
