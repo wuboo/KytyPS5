@@ -1076,7 +1076,9 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 		// S570: who reads a GPU-dirty page on the CP thread (rf_gpu_walker_n / rf_gpu_other_n in RenderContext::HandleFault).
 		Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch::FaultFromWalker() =
 		    access == GpuAccess::Read && Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(info->exception_address) != 0;
-		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
+		const bool gpu_fault_handled = Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr);
+		Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch::FaultFromWalker() = false;
+		if (gpu_fault_handled) {
 			FinishCleanWalkShadow(info->access_violation_vaddr);
 			GfEmuShadowFinish(gf_shadow);
 			Common::DebugCounters::Add(Common::DebugCounters::Counter::GpuFaults);
