@@ -261,7 +261,7 @@ void TileManager::Record(vk::Buffer source, uint64_t source_offset, uint64_t sou
 	                     target_capacity % 4 != 0);
 
 	m_scheduler.EndRendering();
-	auto                    command = m_scheduler.Current().Handle();
+	auto                    command = m_scheduler.Current().EmitIfPending(); // S565: follows the KYTY_CP_EMIT IR when it holds commands
 	vk::BufferMemoryBarrier barriers[3] {};
 	barriers[0].srcAccessMask = vk::AccessFlagBits::eMemoryWrite | vk::AccessFlagBits::eHostWrite;
 	barriers[0].dstAccessMask = vk::AccessFlagBits::eShaderRead;
@@ -657,7 +657,7 @@ vk::Buffer TileManager::CheckColorClear(Result metadata, uint64_t stride, uint32
 	    .srcAccessMask = vk::AccessFlagBits::eMemoryWrite,
 	    .dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eShaderWrite};
 	m_scheduler.EndRendering();
-	auto command = m_scheduler.Current().Handle();
+	auto command = m_scheduler.Current().EmitIfPending(); // S565: as Record
 	command.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                        vk::PipelineStageFlagBits::eComputeShader, {}, 1, &barrier, 0, nullptr,
 	                        0, nullptr);

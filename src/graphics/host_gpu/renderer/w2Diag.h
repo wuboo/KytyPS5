@@ -142,6 +142,14 @@ void NoteDestroy(const char* kind) noexcept;
 // The renderer's scheduler (the presenter's has its own and is not watched).
 void SetRendererScheduler(const CommandScheduler* scheduler) noexcept;
 
+// S565 (KYTY_CP_EMIT_SITES=1, default 0; independent of KYTY_W2_DIAG): the CommandBuffer::Handle() sites that drained a non-empty KYTY_CP_EMIT
+// stream (each costs a wait for the emitter in thread mode). Cumulative counts every 100 guest flips on stderr ([emit-drain-site] lines).
+inline bool DrainSitesEnabled() {
+	static const bool on = ParseFlag(std::getenv("KYTY_CP_EMIT_SITES"));
+	return on;
+}
+void NoteDrainSite(const char* file, uint32_t line) noexcept;
+
 } // namespace Libs::Graphics::W2Diag
 
 #endif // EMULATOR_SRC_GRAPHICS_HOST_GPU_RENDERER_W2DIAG_H_

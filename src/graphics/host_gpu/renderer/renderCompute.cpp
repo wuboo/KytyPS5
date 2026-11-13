@@ -300,7 +300,9 @@ static bool HasStorageWrites(const ShaderComputeInputInfo& input_info,
 // address writes only): every stage that can touch a buffer stays in the execution dependency (WAR), the buffer writes
 // stay in the memory dependency (WAW); colour/depth output and their caches cannot hold this memory. The dispatch's own
 // reads of earlier image writes are ordered by Image::Transit, as for a read-only dispatch (which has no barrier here).
-static void DispatchWriteHazard(vk::CommandBuffer vk_buffer, bool image_writes) {
+// S565: Command is vk::CommandBuffer or the KYTY_CP_EMIT IR handle CpEmit::Cmd.
+template <class Command>
+static void DispatchWriteHazard(const Command& vk_buffer, bool image_writes) {
 	FrameTiming::Add(FrameTiming::Counter::DispHazardN);
 	if (image_writes) {
 		FrameTiming::Add(FrameTiming::Counter::DispHazardImgN);
@@ -309,14 +311,15 @@ static void DispatchWriteHazard(vk::CommandBuffer vk_buffer, bool image_writes) 
 		NarrowBarrier::WriteHazard(vk_buffer, vk::PipelineStageFlagBits2::eComputeShader);
 		FrameTiming::Add(FrameTiming::Counter::NarrowBarrierN);
 	} else {
-		ShaderWriteHazardBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+		ShaderWriteHazardBarrierTo(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 	}
 }
 
 // After: a writing dispatch keeps the full barrier (its writes may be read by any later command, an image it wrote may
 // become an attachment). After a read-only dispatch the barrier only orders its reads before later writers (WAR): no
 // write is in its first scope, so level 2 records it without access masks (execution dependency only).
-static void DispatchAfter(vk::CommandBuffer vk_buffer, bool writes) {
+template <class Command>
+static void DispatchAfter(const Command& vk_buffer, bool writes) {
 	if (!writes) {
 		FrameTiming::Add(FrameTiming::Counter::DispAccessRoN);
 		if (NarrowBarrier::ExecOnlyAfterReadOnlyDispatch(NarrowBarrier::Level())) {
@@ -326,7 +329,7 @@ static void DispatchAfter(vk::CommandBuffer vk_buffer, bool writes) {
 			return;
 		}
 	}
-	ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+	ShaderAccessBarrierTo(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 }
 
 void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group_x,
@@ -448,8 +451,9 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 
 	CommitBindings(buffer, vk::PipelineBindPoint::eCompute, pipeline,
 	               std::span {&descriptor_stage, 1u});
-	// S561 (KYTY_CP_EMIT): the raw handle is taken after CommitBindings (an IR site), so it drains what CommitBindings wrote.
-	const auto vk_buffer = buffer.Handle();
+	// S561 (KYTY_CP_EMIT): the handle is taken after CommitBindings (an IR site). S565: it follows the IR when the stream holds commands
+	// (no drain: RESULT-S563 had 221 of the 292 handle drains per flip here), else records straight on.
+	const auto vk_buffer = buffer.EmitIfPending();
 	const bool storage_writes = HasStorageWrites(input_info, bindings);
 	if (storage_writes) {
 		// A host fence used to serialize every dispatch. Preserve its read-before-write ordering
@@ -531,7 +535,7 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 			for (uint32_t y = 0; y < thread_group_y; ++y) {
 				for (uint32_t x = 0; x < thread_group_x; ++x) {
 					if ((x | y | z) != 0u) {
-						ShaderAccessBarrier(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
+						ShaderAccessBarrierTo(vk_buffer, vk::PipelineStageFlagBits::eComputeShader);
 					}
 					vk_buffer.dispatchBase(x, y, z, 1, 1, 1);
 				}
@@ -607,7 +611,7 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		               std::span {&descriptor_stage, 1u});
 	}
 	KYTY_CP_SITE(DispRecord);
-	const auto vk_buffer = buffer.Handle();
+	const auto vk_buffer = buffer.EmitIfPending(); // S565: as DispatchDirect
 	const bool storage_writes = HasStorageWrites(input_info, bindings);
 	if (storage_writes) {
 		DispatchWriteHazard(vk_buffer, HasStorageImageWrites(input_info));

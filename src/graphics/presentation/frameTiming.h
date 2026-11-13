@@ -484,6 +484,13 @@ enum class Counter : uint32_t {
 	// (replay into Vulkan; shadow: into the digest), shadow drains whose digest differs, commands the IR could not hold.
 	EmitOpsN, EmitBytes, EmitDrainN, EmitDrainHandleN, EmitDrainConvN, EmitDrainSubmitN, EmitDrainWaitN, EmitDrainOtherN, EmitRecordNs, EmitReplayNs,
 	EmitNeN, EmitFallbackN,
+	// S565 (KYTY_CP_EMIT=thread): ns the recorder waited for the emitter (all, then by drain reason in Reason order: handle, conv, submit, GPU
+	// wait, other, ring full), ns the emitter replayed, deepest backlog a pass of the emitter found (running max, segments), sum of the
+	// backlogs and passes (mean = sum / passes), segments the emitter replayed, segments pushed, drains where the recorder replayed the rest
+	// itself and those segments, wake-ups of the parked emitter by the recorder, times the emitter parked.
+	EmitThreadWaitNs, EmitThreadWaitHandleNs, EmitThreadWaitConvNs, EmitThreadWaitSubmitNs, EmitThreadWaitWaitNs, EmitThreadWaitOtherNs,
+	EmitThreadWaitFullNs, EmitThreadBusyNs, EmitQueueDepthMax, EmitQueueDepthSum, EmitThreadPassN, EmitThreadSegN, EmitThreadPublishN,
+	EmitThreadStealN, EmitThreadStealSegN, EmitThreadWakeN, EmitThreadParkN,
 	Count,
 };
 

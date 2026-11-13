@@ -54,6 +54,24 @@ void NoteHandle(const char* file, uint32_t line) noexcept {
 	}
 }
 
+void NoteDrainSite(const char* file, uint32_t line) noexcept {
+	static SiteTable<512> table;
+	static uint64_t       last_bucket = 0; // one thread at a time: the drains of the recording thread
+	const bool            cp          = GuestGpu::IsGpuThread();
+	table.Add(file, line, cp);
+	if (!cp) return;
+	const uint64_t bucket = FrameTiming::GuestFlips() / kDumpEvery;
+	if (bucket == last_bucket) return;
+	if (last_bucket == 0) std::fprintf(stderr, "[emit-drain-site] on (KYTY_CP_EMIT_SITES=1): Handle() drains of a non-empty IR, cumulative, every %" PRIu64 " flips\n", kDumpEvery);
+	last_bucket     = bucket;
+	const auto rows = table.Snapshot();
+	for (size_t i = 0; i < rows.size() && i < kDumpRows; i++) {
+		std::fprintf(stderr, "[emit-drain-site] flip=%" PRIu64 " rank=%zu cp=%" PRIu64 " other=%" PRIu64 " site=%s:%u\n", bucket * kDumpEvery, i + 1, rows[i].cp,
+		             rows[i].other, rows[i].file.c_str(), rows[i].line);
+	}
+	std::fflush(stderr);
+}
+
 void NoteWait(bool not_free, bool blocked) noexcept {
 	using C = FrameTiming::Counter;
 	FrameTiming::AddAlways(C::W2WaitCallN);

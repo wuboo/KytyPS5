@@ -559,10 +559,11 @@ ImageId TextureCache::GetForcedImage(uint32_t rgba) {
 	}
 	const vk::ImageSubresourceRange range {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
 	command.EndRendering();
+	// S565: follows the KYTY_CP_EMIT IR when it holds commands.
 	image.Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {},
-	              command.Handle());
-	GpuLabel::With(command.Handle(), GpuLabel::Class::Clear,
-	               [&] { command.Handle().clearColorImage(image.backing.image, vk::ImageLayout::eTransferDstOptimal, &clear, 1, &range); }, "G.clr.forced");
+	              command.EmitIfPending());
+	GpuLabel::With(command.EmitIfPending(), GpuLabel::Class::Clear,
+	               [&] { command.EmitIfPending().clearColorImage(image.backing.image, vk::ImageLayout::eTransferDstOptimal, &clear, 1, &range); }, "G.clr.forced");
 	m_forced_images.emplace(rgba, id);
 	return id;
 }
@@ -1937,18 +1938,19 @@ void TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format for
 		CommitGpuWrite(image);
 		return;
 	}
+	// S565: the transfer clear follows the KYTY_CP_EMIT IR when it holds commands (S560: 13.5 + 10.5 + 3 Handle()/flip here).
 	image.Transit(vk::ImageLayout::eTransferDstOptimal, vk::AccessFlagBits2::eTransferWrite, {},
-	              command.Handle());
+	              command.EmitIfPending());
 	auto native_range = range;
 	if (image.info.IsVolume()) {
 		native_range.baseArrayLayer = 0;
 		native_range.layerCount     = 1;
 	}
 	if (range.aspectMask == vk::ImageAspectFlagBits::eColor) {
-		command.Handle().clearColorImage(image.backing.image, vk::ImageLayout::eTransferDstOptimal,
-		                                 &clear.color, 1, &native_range);
+		command.EmitIfPending().clearColorImage(image.backing.image, vk::ImageLayout::eTransferDstOptimal,
+		                                        &clear.color, 1, &native_range);
 	} else {
-		command.Handle().clearDepthStencilImage(image.backing.image,
+		command.EmitIfPending().clearDepthStencilImage(image.backing.image,
 		                                        vk::ImageLayout::eTransferDstOptimal,
 		                                        &clear.depthStencil, 1, &native_range);
 	}

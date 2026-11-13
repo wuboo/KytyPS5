@@ -60,6 +60,8 @@ public:
 	// binary semaphore drain the thread and are submitted inline. Only for the renderer's
 	// scheduler (the presenter's waits on swapchain binary semaphores).
 	void EnableAsyncSubmit();
+	// S565 (KYTY_CP_EMIT=thread): the renderer's command buffer gets its emitter thread (cpEmit.h); a no-op in the other modes.
+	void EnableEmitThread() { m_command.AttachEmitThread(); }
 	// S410 (KYTY_DIAG_STARVE=1, needs KYTY_DIAG_GPU_DONE=1): the renderer's scheduler counts gpu_starve_* (the presenter's does not).
 	void EnableStarveDiag();
 	// S410: why the next Flush/Submit happens (consumed by it; GpuDone::SubmitReason). Callers outside the scheduler: the flip flushes.

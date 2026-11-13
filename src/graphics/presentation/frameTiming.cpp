@@ -792,6 +792,23 @@ constexpr const char* kCounterNames[] = {
     "emit_replay_ns",
     "emit_ne_n",
     "emit_fallback_n",
+    "emit_thread_wait_ns",
+    "emit_thread_wait_handle_ns",
+    "emit_thread_wait_conv_ns",
+    "emit_thread_wait_submit_ns",
+    "emit_thread_wait_wait_ns",
+    "emit_thread_wait_other_ns",
+    "emit_thread_wait_full_ns",
+    "emit_thread_busy_ns",
+    "emit_queue_depth_max",
+    "emit_queue_depth_sum",
+    "emit_thread_pass_n",
+    "emit_thread_seg_n",
+    "emit_thread_publish_n",
+    "emit_thread_steal_n",
+    "emit_thread_steal_seg_n",
+    "emit_thread_wake_n",
+    "emit_thread_park_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

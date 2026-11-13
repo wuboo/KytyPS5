@@ -75,7 +75,7 @@ void BufferCache::WriteDataBuffer(Buffer& buffer, uint64_t address, const void* 
 		const auto destination_offset = buffer.Offset(address);
 		EXIT_IF(destination_offset > buffer.Size() || chunk > buffer.Size() - destination_offset);
 		m_scheduler.EndRendering();
-		const auto command = m_scheduler.Current().Handle();
+		const auto command = m_scheduler.Current().EmitIfPending(); // S565: follows the KYTY_CP_EMIT IR when it holds commands
 		// S556 (KYTY_NARROW_BARRIER>=1): the range was already the chunk; the masks become the ones a cache buffer can
 		// be used with (narrowBarrierVk.h): WAR on every buffer stage (execution), WAW on buffer writes (memory).
 		const bool narrow = NarrowBarrier::NarrowBufferSync(NarrowBarrier::Level());
@@ -314,7 +314,7 @@ bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t 
 
 	auto& command = m_scheduler.Current();
 	command.EndRendering();
-	const auto              native = command.Handle();
+	const auto              native = command.EmitIfPending(); // S565: follows the KYTY_CP_EMIT IR when it holds commands
 	vk::BufferMemoryBarrier before {};
 	before.srcAccessMask       = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
 	before.dstAccessMask       = vk::AccessFlagBits::eTransferRead;
@@ -1097,7 +1097,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 			FrameTiming::Add(FrameTiming::Counter::UploadPassBreakN);
 		}
 		command.EndRendering();
-		const auto native = command.Handle();
+		const auto native = command.EmitIfPending(); // S565: follows the KYTY_CP_EMIT IR when it holds commands (67 Handle()/flip in S560)
 		FrameTiming::Add(FrameTiming::Counter::UploadSyncN);
 		FrameTiming::Add(FrameTiming::Counter::UploadBufferBytes, buffer.Size());
 		if (NarrowBarrier::NarrowBufferSync(NarrowBarrier::Level())) {

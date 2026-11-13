@@ -4510,11 +4510,35 @@ void ApplyToFrontThread() {
 	ApplyToGuestThread();
 }
 
+// S565: the emitter thread (KYTY_CP_EMIT=thread). KYTY_CP_EMIT_AFFINITY: guest (default; with KYTY_CP_AFFINITY off the CP's core like a guest
+// thread), sibling (the other logical processor of the CP's core), none, or a logical processor number.
+void ApplyToEmitThread() {
+	NameCurrentThreadWin("CpEmit");
+	const char*    text = std::getenv("KYTY_CP_EMIT_AFFINITY");
+	const int      cp   = Affinity();
+	const char*    how  = text != nullptr && text[0] != 0 ? text : "guest";
+	uint64_t       mask = 0;
+	if (std::strcmp(how, "none") == 0) {
+		mask = 0;
+	} else if (std::strcmp(how, "sibling") == 0) {
+		if (cp >= 0) mask = CoreMaskOfLp(cp) & ~(1ull << cp);
+	} else if (std::strcmp(how, "guest") == 0) {
+		if (cp >= 0) mask = GuestMask(ProcessMask(), CoreMaskOfLp(cp));
+	} else {
+		const int lp = std::atoi(how);
+		if (lp >= 0 && lp < 64) mask = 1ull << lp;
+	}
+	const DWORD_PTR prev = mask != 0 ? SetThreadAffinityMask(GetCurrentThread(), static_cast<DWORD_PTR>(mask)) : 0;
+	std::fprintf(stderr, "[cp-emit] emitter thread affinity=%s cp_lp=%d mask=0x%llx ok=%d\n", how, cp, static_cast<unsigned long long>(mask),
+	             mask == 0 || prev != 0 ? 1 : 0);
+}
+
 } // namespace Common::CpTuning
 #else
 namespace Common::CpTuning {
 void ApplyToCpThread() {}
 void ApplyToGuestThread() {}
 void ApplyToFrontThread() {}
+void ApplyToEmitThread() {}
 } // namespace Common::CpTuning
 #endif

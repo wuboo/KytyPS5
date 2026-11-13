@@ -37,6 +37,7 @@ RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::pa
 	LandSync::Announce(); // S495
 	m_command_scheduler.EnableAsyncSubmit();
 	m_command_scheduler.EnableStarveDiag(); // S410
+	m_command_scheduler.EnableEmitThread(); // S565
 }
 
 RenderContext::~RenderContext() {

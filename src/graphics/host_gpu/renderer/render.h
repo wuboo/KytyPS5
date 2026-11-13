@@ -178,12 +178,25 @@ public:
 
 	// S560 (KYTY_W2_DIAG=1): the caller's file and line come in by default arguments; w2Diag.h counts the calls per site.
 	// S561 (KYTY_CP_EMIT, cpEmit.h): a site that records directly; commands the IR sites wrote are replayed into the buffer first.
+	// S565: KYTY_CP_EMIT_SITES=1 counts the sites whose Handle() drained a non-empty stream ([emit-drain-site] lines, w2Diag.cpp).
 	[[nodiscard]] vk::CommandBuffer Handle(const char* site_file = __builtin_FILE(), uint32_t site_line = __builtin_LINE()) const noexcept {
 		m_recorded = true;
 		if (W2Diag::Enabled()) [[unlikely]] {
 			W2Diag::NoteHandle(site_file, site_line);
 		}
+		if (m_emit.Pending() && W2Diag::DrainSitesEnabled()) [[unlikely]] {
+			W2Diag::NoteDrainSite(site_file, site_line);
+		}
 		return CpEmit::TakeRaw(m_emit, m_buffer);
+	}
+	// S565: a site outside the S561 IR sites: its commands follow the IR while the stream holds commands (no drain), else go straight to
+	// the buffer (the stream is empty and, in thread mode, every segment is replayed). It never puts a command into an empty stream.
+	[[nodiscard]] CpEmit::Cmd EmitIfPending(const char* site_file = __builtin_FILE(), uint32_t site_line = __builtin_LINE()) const noexcept {
+		m_recorded = true;
+		if (W2Diag::Enabled()) [[unlikely]] {
+			W2Diag::NoteHandle(site_file, site_line);
+		}
+		return {&m_emit, m_buffer, m_emit.Pending()};
 	}
 	// S561: the IR sites (Transit of the render targets, CommitBindings, the ExecutePreparedDraw seam, Begin/EndRendering) record through
 	// this; with KYTY_CP_EMIT=0 each command still goes straight to the buffer.
@@ -213,6 +226,8 @@ private:
 	void End() const;
 	static void EmitDrainThunk(void* self, CpEmit::Reason why); // S561: the thread's pending slot (MasterSemaphore::Wait)
 	void        FlushEmitStats() const;                         // S561: the stream's counters into FrameTiming
+	// S565 (KYTY_CP_EMIT=thread): starts this buffer's emitter thread (the renderer's scheduler only; the presenter's stays as sync).
+	void AttachEmitThread();
 
 	RenderContext&      m_context;
 	GraphicContext&     m_graphics;
@@ -232,6 +247,9 @@ private:
 	mutable bool        m_recorded    = false;
 	mutable vk::Pipeline m_bound_graphics_pipeline = nullptr; // S546
 	mutable CpEmit::Stream m_emit;                            // S561: IR of the commands not yet in m_buffer (KYTY_CP_EMIT)
+	// S565: declared after m_emit, so it stops (and joins) before the arena it reads goes away.
+	std::unique_ptr<CpEmit::Emitter> m_emitter;
+	mutable CpEmit::EmitterStats     m_emitter_seen; // last ReadStats (FlushEmitStats deltas)
 	HW::Context*        m_registers   = nullptr;
 	HW::UserConfig*     m_user_config = nullptr;
 	HW::Shader*         m_shaders     = nullptr;

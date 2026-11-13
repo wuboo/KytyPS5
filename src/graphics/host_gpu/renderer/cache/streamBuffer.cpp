@@ -168,7 +168,7 @@ void Buffer::CopyFrom(CommandBuffer& command, const Buffer& source, uint64_t sou
 	                   vk::AccessFlagBits::eTransferRead),
 	    Barrier(destination_offset, size, MEMORY_ACCESS, vk::AccessFlagBits::eTransferWrite),
 	};
-	const auto native = command.Handle();
+	const auto native = command.EmitIfPending(); // S565: follows the KYTY_CP_EMIT IR when it holds commands
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                       vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
 	                       0, nullptr, 2, before, 0, nullptr);
@@ -192,7 +192,7 @@ void Buffer::Fill(uint64_t offset, uint64_t size, uint32_t value) {
 	auto& command = Scheduler().Current();
 	command.EndRendering();
 	const auto before = Barrier(offset, size, MEMORY_ACCESS, vk::AccessFlagBits::eTransferWrite);
-	const auto native = command.Handle();
+	const auto native = command.EmitIfPending(); // S565: as CopyFrom
 	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands,
 	                       vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
 	                       0, nullptr, 1, &before, 0, nullptr);

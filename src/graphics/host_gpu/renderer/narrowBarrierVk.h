@@ -77,7 +77,9 @@ inline vk::BufferMemoryBarrier2 BufferBarrier(vk::Buffer buffer, Span span, vk::
 	return barrier;
 }
 
-inline void Record(vk::CommandBuffer command, const vk::BufferMemoryBarrier2& barrier,
+// S565: Command is vk::CommandBuffer or the KYTY_CP_EMIT IR handle CpEmit::Cmd (recorded in the IR, no conversion).
+template <class Command>
+inline void Record(const Command& command, const vk::BufferMemoryBarrier2& barrier,
                    vk::DependencyFlags flags = vk::DependencyFlagBits::eByRegion) {
 	vk::DependencyInfo dependency {};
 	dependency.dependencyFlags          = flags;
@@ -86,7 +88,8 @@ inline void Record(vk::CommandBuffer command, const vk::BufferMemoryBarrier2& ba
 	command.pipelineBarrier2(dependency);
 }
 
-inline void Record(vk::CommandBuffer command, const vk::MemoryBarrier2& barrier) {
+template <class Command>
+inline void Record(const Command& command, const vk::MemoryBarrier2& barrier) {
 	vk::DependencyInfo dependency {};
 	dependency.memoryBarrierCount = 1;
 	dependency.pMemoryBarriers    = &barrier;
@@ -97,7 +100,8 @@ inline void Record(vk::CommandBuffer command, const vk::MemoryBarrier2& barrier)
 // immediate barrier): every earlier access of a buffer (kBufferStages, execution) and every earlier
 // buffer write (kBufferWrites, memory) happen before `dst_stages`' shader reads and writes. Global
 // (VkMemoryBarrier2), because address writes have no range.
-inline void WriteHazard(vk::CommandBuffer command, vk::PipelineStageFlags2 dst_stages) {
+template <class Command>
+inline void WriteHazard(const Command& command, vk::PipelineStageFlags2 dst_stages) {
 	vk::MemoryBarrier2 barrier {};
 	barrier.srcStageMask  = kBufferStages;
 	barrier.srcAccessMask = kBufferWrites;

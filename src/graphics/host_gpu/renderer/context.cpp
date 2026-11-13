@@ -2,6 +2,7 @@
 #include "common/common.h"
 #include "common/profiler.h"
 #include "common/threads.h"
+#include "common/cpTuning.h"
 #include "graphics/host_gpu/gpuLabelsVk.h"
 #include "graphics/host_gpu/graphicContext.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
@@ -40,6 +41,18 @@ void CommandBuffer::EmitDrainThunk(void* self, CpEmit::Reason why) {
 	buffer->m_emit.Drain(buffer->m_buffer, why);
 }
 
+void CommandBuffer::AttachEmitThread() {
+	if (m_emit.Current() != CpEmit::Mode::Thread || m_emitter != nullptr) return;
+	EXIT_IF(m_emit.Pending());
+	const auto config = CpEmit::EnvEmitterConfig();
+	m_emitter         = std::make_unique<CpEmit::Emitter>(&CpEmit::Stream::ReplaySegment<vk::CommandBuffer>, config,
+                                                  [] { Common::CpTuning::ApplyToEmitThread(); });
+	m_emit.AttachEmitter(m_emitter.get());
+	if (!IsInvalid()) m_emit.BindRaw(CpEmit::RawTraits<vk::CommandBuffer>::Bits(m_buffer));
+	std::fprintf(stderr, "[cp-emit] thread: batch=%u spin=%u publish_bytes=%u steal=%d ring=%u\n", config.batch, config.spin, config.publish_bytes,
+	             config.steal ? 1 : 0, config.capacity);
+}
+
 void CommandBuffer::FlushEmitStats() const {
 	if (m_emit.Current() == CpEmit::Mode::Off) return;
 	// The record and replay times are TSC ticks until the clock is calibrated (the first ~20 ms); kept until then.
@@ -58,16 +71,51 @@ void CommandBuffer::FlushEmitStats() const {
 	FrameTiming::Add(Counter::EmitFallbackN, stats.fallback);
 	carry_rec += stats.rec_ticks;
 	carry_replay += stats.replay_ticks;
+	// S565 thread mode: the recorder's waits by reason, the emitter's busy time (both TSC ticks, carried like the above).
+	static thread_local std::array<uint64_t, static_cast<size_t>(CpEmit::Reason::Count)> carry_wait {};
+	static thread_local uint64_t                                                     carry_busy = 0;
+	if (m_emitter != nullptr) {
+		for (size_t i = 0; i < carry_wait.size(); i++) carry_wait[i] += stats.wait_by[i];
+		const auto now = m_emitter->ReadStats();
+		carry_busy += now.busy_ticks - m_emitter_seen.busy_ticks;
+		FrameTiming::Add(Counter::EmitThreadSegN, now.segments - m_emitter_seen.segments);
+		FrameTiming::Add(Counter::EmitThreadPassN, now.passes - m_emitter_seen.passes);
+		FrameTiming::Add(Counter::EmitQueueDepthSum, now.depth_sum - m_emitter_seen.depth_sum);
+		FrameTiming::Add(Counter::EmitThreadParkN, now.parks - m_emitter_seen.parks);
+		FrameTiming::Max(Counter::EmitQueueDepthMax, now.depth_max);
+		m_emitter_seen = now;
+		FrameTiming::Add(Counter::EmitThreadPublishN, stats.publishes);
+		FrameTiming::Add(Counter::EmitThreadStealN, stats.steals);
+		FrameTiming::Add(Counter::EmitThreadStealSegN, stats.steal_segs);
+		FrameTiming::Add(Counter::EmitThreadWakeN, stats.wakes);
+	}
 	if (const double ns_per_tick = CpEmit::NsPerTick(); ns_per_tick != 0.0) {
-		FrameTiming::Add(Counter::EmitRecordNs, static_cast<uint64_t>(static_cast<double>(carry_rec) * ns_per_tick));
-		FrameTiming::Add(Counter::EmitReplayNs, static_cast<uint64_t>(static_cast<double>(carry_replay) * ns_per_tick));
+		const auto ns = [&](uint64_t ticks) { return static_cast<uint64_t>(static_cast<double>(ticks) * ns_per_tick); };
+		FrameTiming::Add(Counter::EmitRecordNs, ns(carry_rec));
+		FrameTiming::Add(Counter::EmitReplayNs, ns(carry_replay));
 		carry_rec    = 0;
 		carry_replay = 0;
+		if (m_emitter != nullptr) {
+			uint64_t total = 0;
+			for (size_t i = 0; i < carry_wait.size(); i++) {
+				const uint64_t v = ns(carry_wait[i]);
+				total += v;
+				FrameTiming::Add(static_cast<Counter>(static_cast<uint32_t>(Counter::EmitThreadWaitHandleNs) + static_cast<uint32_t>(i)), v);
+				carry_wait[i] = 0;
+			}
+			FrameTiming::Add(Counter::EmitThreadWaitNs, total);
+			FrameTiming::Add(Counter::EmitThreadBusyNs, ns(carry_busy));
+			carry_busy = 0;
+		}
 	}
 }
+static_assert(static_cast<uint32_t>(FrameTiming::Counter::EmitThreadWaitFullNs) - static_cast<uint32_t>(FrameTiming::Counter::EmitThreadWaitHandleNs) ==
+              static_cast<uint32_t>(CpEmit::Reason::Full));
+static_assert(static_cast<size_t>(CpEmit::Reason::Count) == static_cast<size_t>(CpEmit::Reason::Full) + 1);
 
 void CommandBuffer::Begin() {
 	EXIT_IF(m_rendering || m_pending_shader_writes || IsInvalid() || m_emit.Pending());
+	m_emit.BindRaw(CpEmit::RawTraits<vk::CommandBuffer>::Bits(m_buffer)); // S565: the emitter's segments go to this buffer from now on
 	auto buffer = Handle();
 
 	vk::CommandBufferBeginInfo begin_info {};
@@ -191,7 +239,8 @@ void CommandBuffer::EndRendering() const {
 	}
 	// S511: a deferred shader-write barrier is recorded here, including when the pass was already closed.
 	if (m_pending_shader_writes) {
-		ShaderWriteBarrier(Handle(), std::exchange(m_pending_shader_writes, {}));
+		// S565: follows the IR when it holds commands (the pass end above is there), so it does not drain.
+		ShaderWriteBarrier(EmitIfPending(), std::exchange(m_pending_shader_writes, {}));
 		FrameTiming::Add(FrameTiming::Counter::DeferWriteFlushN);
 	}
 }

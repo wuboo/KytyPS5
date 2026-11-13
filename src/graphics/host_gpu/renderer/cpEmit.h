@@ -24,19 +24,35 @@
 // The IR is plain values: Vulkan structures are copied (arrays deep, pNext must be null), never a pointer into live state (lesson of S478).
 // Storage is an arena of 64 KB chunks per command buffer, reused after each drain: no allocation in steady state.
 //
+// S565 (KYTY_CP_EMIT=thread, K7 W2 step 2): the stream of the renderer's command buffer is replayed by an emitter thread (Emitter below,
+// pattern of yuzu's Scheduler::Record + worker). The recorder hands contiguous ranges of the arena (segments) over an SPSC ring; the emitter
+// replays them into the VkCommandBuffer. A drain is the same as in sync, except that it publishes what is left and waits until every segment
+// is replayed (the recorder replays the rest itself when the emitter is not working: Emitter::WaitIdle). Ownership of the VkCommandBuffer and
+// of its VkCommandPool: the recorder from a drain (done == last pushed, acquire) until its next push; the holder of Emitter::m_owner while it
+// replays segments otherwise. The arena is rewound only by a drain, so a segment's bytes stay put until the emitter is done with them.
+// A command buffer without an emitter (the presenter's) behaves as in sync.
+// Sites outside the S561 IR sites record through CommandBuffer::EmitIfPending(): to the IR while the stream holds commands, else directly.
+// Like Begin/EndRendering they never drain and never put a command into an empty stream, so a raw handle taken before them stays in order.
+//
 // Header-only (tests/CpEmitTests.cpp). Mutants (must fail the test, WILL_FAIL): NO_DRAIN (TakeRaw does not drain), SHALLOW (push-descriptor
-// infos keep the caller's pointers), UNCOND_PASS (Begin/EndRendering always go to the IR).
+// infos keep the caller's pointers), UNCOND_PASS (Begin/EndRendering always go to the IR), NO_SUBMIT_DRAIN (thread: the drain before the
+// submit does not wait for the emitter), TOUCH_DURING_EMIT (thread: a direct site records while the emitter still replays).
 
 #include "graphics/host_gpu/vulkanCommon.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <functional>
 #include <memory>
+#include <mutex>
+#include <thread>
 #include <type_traits>
 #include <vector>
 
@@ -51,17 +67,18 @@
 
 namespace Libs::Graphics::CpEmit {
 
-enum class Mode : uint8_t { Off = 0, Sync = 1, Shadow = 2 };
+enum class Mode : uint8_t { Off = 0, Sync = 1, Shadow = 2, Thread = 3 };
 
 inline Mode ParseMode(const char* value) {
 	if (value == nullptr) return Mode::Off;
 	if (std::strcmp(value, "sync") == 0) return Mode::Sync;
 	if (std::strcmp(value, "shadow") == 0) return Mode::Shadow;
+	if (std::strcmp(value, "thread") == 0) return Mode::Thread;
 	return Mode::Off;
 }
 
 inline const char* ModeName(Mode mode) {
-	return mode == Mode::Sync ? "sync" : mode == Mode::Shadow ? "shadow" : "0";
+	return mode == Mode::Sync ? "sync" : mode == Mode::Shadow ? "shadow" : mode == Mode::Thread ? "thread" : "0";
 }
 
 inline Mode EnvMode() {
@@ -69,7 +86,8 @@ inline Mode EnvMode() {
 	return mode;
 }
 
-enum class Reason : uint8_t { Handle, Conv, Submit, Wait, Other, Count };
+// Full: not a drain; the thread mode's recorder waited for a slot of the emitter's ring (counted in the wait times only).
+enum class Reason : uint8_t { Handle, Conv, Submit, Wait, Other, Full, Count };
 
 enum class Op : uint16_t {
 	Barrier2,
@@ -107,6 +125,17 @@ enum class Op : uint16_t {
 	DrawMeshTasksIndirect,
 	BeginRendering,
 	EndRendering,
+	// S565: the sites outside the draw seam (EmitIfPending).
+	Dispatch,
+	DispatchBase,
+	DispatchIndirect,
+	CopyBuffer,
+	CopyBufferToImage,
+	CopyImageToBuffer,
+	CopyImage,
+	FillBuffer,
+	ClearColorImage,
+	ClearDepthStencilImage,
 	Count,
 };
 
@@ -119,6 +148,14 @@ struct Stats {
 	uint64_t replay_ticks = 0; // time in the drains (replay into Vulkan, or into the digest in shadow), TSC ticks
 	uint64_t ne        = 0; // shadow: drains whose IR digest differs from the direct one
 	uint64_t fallback  = 0; // commands the IR could not hold (recorded directly after a drain)
+	// S565 thread mode (recorder side): time the recorder waited for the emitter (a drain, by reason; Full: a ring slot), segments pushed,
+	// segments the recorder replayed itself because the emitter was not working at a drain, drains that did so.
+	uint64_t wait_ticks = 0;
+	uint64_t wait_by[static_cast<size_t>(Reason::Count)] {};
+	uint64_t publishes   = 0;
+	uint64_t steal_segs  = 0;
+	uint64_t steals      = 0;
+	uint64_t wakes       = 0; // the recorder woke the parked emitter
 };
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
@@ -314,6 +351,69 @@ public:
 		Array(r.pStencilAttachment, r.pStencilAttachment != nullptr ? 1u : 0u);
 	}
 	void endRendering() { Begin(Op::EndRendering); }
+	// S565
+	void dispatch(uint32_t x, uint32_t y, uint32_t z) { Small(Op::Dispatch, x, y, z); }
+	void dispatchBase(uint32_t bx, uint32_t by, uint32_t bz, uint32_t x, uint32_t y, uint32_t z) {
+		Small(Op::DispatchBase, bx, by, bz, x, y);
+		Mix(z);
+	}
+	void dispatchIndirect(vk::Buffer buffer, vk::DeviceSize offset) {
+		Begin(Op::DispatchIndirect);
+		Handle(buffer);
+		Quad(offset);
+	}
+	void copyBuffer(vk::Buffer src, vk::Buffer dst, uint32_t n, const vk::BufferCopy* regions) {
+		Begin(Op::CopyBuffer);
+		Handle(src);
+		Handle(dst);
+		Array(regions, n);
+	}
+	void copyBufferToImage(vk::Buffer src, vk::Image dst, vk::ImageLayout layout, uint32_t n, const vk::BufferImageCopy* regions) {
+		Begin(Op::CopyBufferToImage);
+		Handle(src);
+		Handle(dst);
+		Word(U(layout));
+		Array(regions, n);
+	}
+	void copyImageToBuffer(vk::Image src, vk::ImageLayout layout, vk::Buffer dst, uint32_t n, const vk::BufferImageCopy* regions) {
+		Begin(Op::CopyImageToBuffer);
+		Handle(src);
+		Word(U(layout));
+		Handle(dst);
+		Array(regions, n);
+	}
+	void copyImage(vk::Image src, vk::ImageLayout src_layout, vk::Image dst, vk::ImageLayout dst_layout, uint32_t n, const vk::ImageCopy* regions) {
+		Begin(Op::CopyImage);
+		Handle(src);
+		Word(U(src_layout));
+		Handle(dst);
+		Word(U(dst_layout));
+		Array(regions, n);
+	}
+	void fillBuffer(vk::Buffer buffer, vk::DeviceSize offset, vk::DeviceSize size, uint32_t data) {
+		Begin(Op::FillBuffer);
+		Handle(buffer);
+		Quad(offset);
+		Quad(size);
+		Word(data);
+	}
+	void clearColorImage(vk::Image image, vk::ImageLayout layout, const vk::ClearColorValue* color, uint32_t n, const vk::ImageSubresourceRange* ranges) {
+		Begin(Op::ClearColorImage);
+		Handle(image);
+		Word(U(layout));
+		Word(color != nullptr ? 1u : 0u);
+		if (color != nullptr) Bytes(color, sizeof(*color)); // a union of 16 bytes, no padding
+		Array(ranges, n);
+	}
+	void clearDepthStencilImage(vk::Image image, vk::ImageLayout layout, const vk::ClearDepthStencilValue* value, uint32_t n,
+	                            const vk::ImageSubresourceRange* ranges) {
+		Begin(Op::ClearDepthStencilImage);
+		Handle(image);
+		Word(U(layout));
+		Word(value != nullptr ? 1u : 0u);
+		if (value != nullptr) Bytes(value, sizeof(*value)); // float + uint32, no padding
+		Array(ranges, n);
+	}
 
 private:
 	static uint32_t Bits(float f) {
@@ -356,7 +456,8 @@ private:
 		if (n == 0 || p == nullptr) return;
 		if constexpr (std::is_same_v<T, vk::Viewport> || std::is_same_v<T, vk::Rect2D> || std::is_same_v<T, vk::Buffer> ||
 		              std::is_same_v<T, vk::DeviceSize> || std::is_same_v<T, vk::DescriptorSet> || std::is_same_v<T, vk::BufferView> ||
-		              std::is_same_v<T, uint32_t>) {
+		              std::is_same_v<T, uint32_t> || std::is_same_v<T, vk::BufferCopy> || std::is_same_v<T, vk::BufferImageCopy> ||
+		              std::is_same_v<T, vk::ImageCopy> || std::is_same_v<T, vk::ImageSubresourceRange>) {
 			Bytes(p, sizeof(T) * n); // no padding
 		} else {
 			for (uint32_t i = 0; i < n; i++) Leaf(p[i]);
@@ -477,6 +578,10 @@ private:
 	uint64_t m_n = 0;
 };
 
+// The region structures hashed by their bytes have no padding (S565).
+static_assert(sizeof(vk::BufferCopy) == 24 && sizeof(vk::BufferImageCopy) == 56 && sizeof(vk::ImageCopy) == 68 &&
+              sizeof(vk::ImageSubresourceRange) == 20 && sizeof(vk::ClearColorValue) == 16 && sizeof(vk::ClearDepthStencilValue) == 8);
+
 // ---------------------------------------------------------------------------------------------------------------------------------------
 // Arena: 64 KB chunks, bump allocation, kept for reuse after Reset.
 
@@ -507,6 +612,10 @@ public:
 		m_ptr = m_chunks[0].data.get();
 		m_end = m_ptr + m_chunks[0].cap;
 	}
+
+	// S565: Alloc(n) stays in the current chunk; the next byte Alloc hands out.
+	[[nodiscard]] bool           Fits(size_t n) const noexcept { return static_cast<size_t>(m_end - m_ptr) >= n && m_ptr != nullptr; }
+	[[nodiscard]] const uint8_t* Cursor() const noexcept { return m_ptr; }
 
 	[[nodiscard]] size_t Used() const noexcept {
 		size_t n = 0;
@@ -550,6 +659,289 @@ private:
 	size_t             m_cur = 0;
 	uint8_t*           m_ptr = nullptr;
 	uint8_t*           m_end = nullptr;
+};
+
+// ---------------------------------------------------------------------------------------------------------------------------------------
+// S565 thread mode: the emitter.
+//
+// Segments s = 1, 2, ... (a range of arena bytes and the command buffer it is replayed into) live in ring slot s % capacity. The recorder
+// (producer) writes slot s once segment s - capacity is replayed (done >= s - capacity), then publishes tail = s. Segments are replayed in
+// order, each exactly once, by the holder of m_owner: the emitter thread (1) or, at a drain while the emitter does not hold it, the recorder
+// itself (2). The holder replays done + 1 .. tail and stores done (release) after each segment, and releases m_owner after its last one, so
+// the next holder (acquire) continues where it stopped. The recorder touches the VkCommandBuffer (and its pool) directly only after it has
+// seen done == the last segment it pushed (acquire) and before it pushes again; in that window there is nothing for the emitter to replay.
+// The emitter parks on tail (atomic wait) with a target `batch` segments ahead; Push wakes it only when it reaches the target, so a busy
+// recorder pays one wake-up per `batch` segments. A drain does not wake it: it takes m_owner and replays the rest itself (no wake-up latency
+// on the recorder's path); with steal off (KYTY_CP_EMIT_STEAL=0) it wakes the emitter and spins until done.
+
+inline void CpuRelax() {
+#if defined(KYTY_CPEMIT_TSC)
+	_mm_pause();
+#else
+	std::this_thread::yield();
+#endif
+}
+
+// vk::CommandBuffer <-> the 64-bit value a segment carries (a test's fake command buffer specialises this).
+template <class Raw>
+struct RawTraits {
+	static uint64_t Bits(const Raw& raw) { return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<typename Raw::CType>(raw))); }
+	static Raw      From(uint64_t bits) { return Raw(reinterpret_cast<typename Raw::CType>(static_cast<uintptr_t>(bits))); }
+};
+
+struct EmitterConfig {
+	uint32_t capacity      = 1024; // ring slots (segments)
+	uint32_t batch         = 4;    // a parked emitter is woken when this many segments wait
+	uint32_t spin          = 0;    // pause loops the emitter polls for work before it parks
+	uint32_t publish_bytes = 2048; // the recorder publishes at the end of a draw / dispatch once this many bytes wait (16x that anywhere)
+	bool     steal         = true; // a drain replays the rest itself when the emitter does not hold m_owner
+};
+
+inline uint32_t EnvU32(const char* name, uint32_t fallback) {
+	const char* v = std::getenv(name);
+	if (v == nullptr || v[0] == '\0') return fallback;
+	return static_cast<uint32_t>(std::strtoul(v, nullptr, 10));
+}
+
+// KYTY_CP_EMIT_BATCH, KYTY_CP_EMIT_SPIN, KYTY_CP_EMIT_PUBLISH_BYTES, KYTY_CP_EMIT_STEAL (0|1).
+inline EmitterConfig EnvEmitterConfig() {
+	EmitterConfig c;
+	c.batch         = std::max(1u, EnvU32("KYTY_CP_EMIT_BATCH", c.batch));
+	c.spin          = EnvU32("KYTY_CP_EMIT_SPIN", c.spin);
+	c.publish_bytes = std::max(64u, EnvU32("KYTY_CP_EMIT_PUBLISH_BYTES", c.publish_bytes));
+	c.steal         = EnvU32("KYTY_CP_EMIT_STEAL", 1) != 0;
+	return c;
+}
+
+// Counters the emitter thread writes (read by the recorder with ReadStats: one line, written by the emitter only).
+struct EmitterStats {
+	uint64_t busy_ticks = 0; // replaying (TSC ticks)
+	uint64_t segments   = 0; // segments it replayed
+	uint64_t passes     = 0; // times it took m_owner and found work
+	uint64_t depth_sum  = 0; // segments waiting when a pass started (sum over passes)
+	uint64_t depth_max  = 0;
+	uint64_t parks      = 0; // times it blocked in the atomic wait
+};
+
+class Emitter {
+public:
+	using ReplayFn = void (*)(uint64_t raw, const uint8_t* p, size_t n);
+
+	// `on_start` runs first on the emitter thread (name, affinity).
+	Emitter(ReplayFn replay, EmitterConfig config, std::function<void()> on_start = {})
+	    : m_replay(replay), m_cfg(config), m_ring(std::max<uint32_t>(config.capacity, 2u)) {
+		m_thread = std::thread([this, start = std::move(on_start)] {
+			if (start) start();
+			Run();
+		});
+	}
+	~Emitter() { Stop(); }
+	Emitter(const Emitter&)            = delete;
+	Emitter& operator=(const Emitter&) = delete;
+
+	[[nodiscard]] const EmitterConfig& Config() const noexcept { return m_cfg; }
+
+	// ---- recorder ----
+	struct Waited {
+		uint64_t ticks      = 0;
+		uint64_t steal_segs = 0; // segments the recorder replayed itself
+		bool     stole      = false;
+		bool     woke       = false;
+	};
+
+	// Publishes [p, p + n) to be replayed into `raw`. Blocks (or replays) while the ring is full.
+	Waited Push(uint64_t raw, const uint8_t* p, size_t n) {
+		Waited         w;
+		const uint64_t seq = m_next;
+		const uint64_t cap = m_ring.size();
+		if (seq > cap) {
+			const uint64_t need = seq - cap;
+			if (m_done_seen < need && (m_done_seen = m_done.load(std::memory_order_acquire)) < need) w = WaitDone(need);
+		}
+		m_ring[seq % cap] = {raw, p, n};
+		m_next            = seq + 1;
+		m_tail.store(seq, std::memory_order_seq_cst);
+		uint64_t target = m_target.load(std::memory_order_seq_cst);
+		if (target != 0 && seq >= target && m_target.compare_exchange_strong(target, 0, std::memory_order_seq_cst)) {
+			Wake();
+			w.woke = true;
+		}
+		return w;
+	}
+
+	// Returns once every pushed segment is replayed (acquire: the recorder may then touch the command buffer).
+	Waited WaitIdle() {
+		const uint64_t want = m_next - 1;
+		if (m_done_seen >= want || (m_done_seen = m_done.load(std::memory_order_acquire)) >= want) return {};
+		return WaitDone(want);
+	}
+
+	// Test / diag: every pushed segment is replayed (recorder thread).
+	[[nodiscard]] bool IdleNow() const { return m_done.load(std::memory_order_acquire) >= m_next - 1; }
+	[[nodiscard]] uint64_t Pushed() const noexcept { return m_next - 1; }
+	// Test: the recorder holds m_owner (it replays the rest itself at a drain).
+	[[nodiscard]] bool HeldByRecorder() const { return m_owner.load(std::memory_order_acquire) == 2; }
+
+	[[nodiscard]] EmitterStats ReadStats() const {
+		EmitterStats s;
+		s.busy_ticks = m_busy.load(std::memory_order_relaxed);
+		s.segments   = m_segments.load(std::memory_order_relaxed);
+		s.passes     = m_passes.load(std::memory_order_relaxed);
+		s.depth_sum  = m_depth_sum.load(std::memory_order_relaxed);
+		s.depth_max  = m_depth_max.load(std::memory_order_relaxed);
+		s.parks      = m_parks.load(std::memory_order_relaxed);
+		return s;
+	}
+
+	// Recorder thread, with nothing left to record: replays the rest, stops and joins the emitter.
+	void Stop() {
+		if (!m_thread.joinable()) return;
+		(void)WaitIdle();
+		m_stop.store(true, std::memory_order_seq_cst);
+		(void)Push(0, nullptr, 0); // a stop marker
+		m_target.store(0, std::memory_order_seq_cst);
+		Wake();
+		m_thread.join();
+	}
+
+private:
+	struct Segment {
+		uint64_t       raw = 0;
+		const uint8_t* p   = nullptr; // nullptr: the stop marker
+		size_t         n   = 0;
+	};
+
+	// The caller holds m_owner: replays done + 1 .. upto in order.
+	uint64_t ReplayOwned(uint64_t upto) {
+		uint64_t done = m_done.load(std::memory_order_relaxed);
+		uint64_t n    = 0;
+		while (done < upto) {
+			const Segment& s = m_ring[(done + 1) % m_ring.size()];
+			if (s.p != nullptr) m_replay(s.raw, s.p, s.n);
+			done++;
+			n++;
+			m_done.store(done, std::memory_order_release);
+		}
+		return n;
+	}
+
+	// Recorder: waits for done >= want; replays the rest itself whenever m_owner is free (steal on).
+	Waited WaitDone(uint64_t want) {
+		Waited         w;
+		const uint64_t t0    = Ticks();
+		uint64_t       spins = 0;
+		for (;;) {
+			uint32_t free_owner = 0;
+			if (m_cfg.steal && m_owner.load(std::memory_order_relaxed) == 0 &&
+			    m_owner.compare_exchange_strong(free_owner, 2, std::memory_order_acq_rel)) {
+				const uint64_t done_before = m_done.load(std::memory_order_relaxed);
+				const uint64_t tail        = m_next - 1;
+				const uint64_t n           = ReplayOwned(tail);
+				m_owner.store(0, std::memory_order_release);
+				w.steal_segs += n;
+				w.stole = w.stole || n != 0;
+				(void)done_before;
+				m_done_seen = tail;
+				break;
+			}
+			if (!m_cfg.steal && !w.woke) {
+				uint64_t target = m_target.load(std::memory_order_seq_cst);
+				if (target != 0 && m_target.compare_exchange_strong(target, 0, std::memory_order_seq_cst)) {
+					Wake();
+					w.woke = true;
+				}
+			}
+			if ((m_done_seen = m_done.load(std::memory_order_acquire)) >= want) break;
+			CpuRelax();
+			if ((++spins & 0xFFFFu) == 0) std::this_thread::yield(); // the emitter holds m_owner but is descheduled
+		}
+		w.ticks = Ticks() - t0;
+		return w;
+	}
+
+	void Run() {
+		for (;;) {
+			uint32_t free_owner = 0;
+			if (m_owner.load(std::memory_order_relaxed) == 0 && m_owner.compare_exchange_strong(free_owner, 1, std::memory_order_acq_rel)) {
+				uint64_t       tail  = m_tail.load(std::memory_order_acquire);
+				uint64_t       done  = m_done.load(std::memory_order_relaxed);
+				const uint64_t t0    = done < tail ? Ticks() : 0;
+				uint64_t       total = 0;
+				if (done < tail) {
+					const uint64_t depth = tail - done;
+					m_passes.store(m_passes.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+					m_depth_sum.store(m_depth_sum.load(std::memory_order_relaxed) + depth, std::memory_order_relaxed);
+					if (depth > m_depth_max.load(std::memory_order_relaxed)) m_depth_max.store(depth, std::memory_order_relaxed);
+				}
+				while (done < tail) {
+					total += ReplayOwned(tail);
+					done = tail;
+					tail = m_tail.load(std::memory_order_acquire);
+				}
+				m_owner.store(0, std::memory_order_release);
+				if (total != 0) {
+					m_busy.store(m_busy.load(std::memory_order_relaxed) + (Ticks() - t0), std::memory_order_relaxed);
+					m_segments.store(m_segments.load(std::memory_order_relaxed) + total, std::memory_order_relaxed);
+				}
+			}
+			const uint64_t done = m_done.load(std::memory_order_acquire);
+			if (m_tail.load(std::memory_order_acquire) > done) {
+				CpuRelax(); // more work, or the recorder holds m_owner for a moment
+				continue;
+			}
+			if (m_stop.load(std::memory_order_acquire)) return;
+			bool more = false;
+			for (uint32_t i = 0; i < m_cfg.spin && !more; i++) {
+				CpuRelax();
+				more = m_tail.load(std::memory_order_acquire) > done;
+			}
+			if (!more) Park(done);
+		}
+	}
+
+	// Blocks until the recorder pushed `batch` segments past `done` (it then clears the target and wakes it) or a stop. The target is set
+	// and tail checked under the mutex the waker takes before notifying, so a wake-up between the check and the block is not lost (the
+	// recorder: store tail, load target; the emitter: store target, load tail, both seq_cst: one of them sees the other).
+	// A mutex + condition variable, not std::atomic::wait: with atomic wait/notify the macOS (libc++) test run hung on a lost wake-up.
+	void Park(uint64_t done) {
+		const uint64_t   want = done + m_cfg.batch;
+		std::unique_lock lock(m_park_mutex);
+		m_target.store(want, std::memory_order_seq_cst);
+		if (m_tail.load(std::memory_order_seq_cst) == done && !m_stop.load(std::memory_order_seq_cst)) {
+			m_parks.store(m_parks.load(std::memory_order_relaxed) + 1, std::memory_order_relaxed);
+			m_park_cv.wait(lock, [&] { return m_target.load(std::memory_order_seq_cst) != want || m_stop.load(std::memory_order_seq_cst); });
+		}
+		uint64_t mine = want;
+		m_target.compare_exchange_strong(mine, 0, std::memory_order_seq_cst);
+	}
+	// Recorder, after it cleared the target.
+	void Wake() {
+		{ std::lock_guard lock(m_park_mutex); }
+		m_park_cv.notify_one();
+	}
+
+	ReplayFn             m_replay;
+	EmitterConfig        m_cfg;
+	std::vector<Segment> m_ring;
+	// Recorder-private.
+	uint64_t m_next      = 1;
+	uint64_t m_done_seen = 0;
+	// One line each: the recorder writes tail, the replaying holder done, the emitter target (and the recorder clears it), owner both.
+	alignas(64) std::atomic<uint64_t> m_tail {0};
+	alignas(64) std::atomic<uint64_t> m_done {0};
+	alignas(64) std::atomic<uint64_t> m_target {0};
+	alignas(64) std::atomic<uint32_t> m_owner {0}; // 0 free, 1 emitter, 2 recorder
+	std::atomic<bool>                 m_stop {false};
+	// Emitter-written counters.
+	alignas(64) std::atomic<uint64_t> m_busy {0};
+	std::atomic<uint64_t>             m_segments {0};
+	std::atomic<uint64_t>             m_passes {0};
+	std::atomic<uint64_t>             m_depth_sum {0};
+	std::atomic<uint64_t>             m_depth_max {0};
+	std::atomic<uint64_t>             m_parks {0};
+	std::mutex                        m_park_mutex;
+	std::condition_variable           m_park_cv;
+	std::thread                       m_thread;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
@@ -604,6 +996,43 @@ public:
 		m_drain = drain;
 	}
 
+	// S565: thread mode. The stream's segments are replayed by `emitter` (nullptr: as sync). Only with an empty stream.
+	void AttachEmitter(Emitter* emitter) noexcept {
+		m_emitter       = m_mode == Mode::Thread ? emitter : nullptr;
+		m_publish_bytes = emitter != nullptr ? emitter->Config().publish_bytes : 2048u;
+		m_pub           = nullptr;
+	}
+	[[nodiscard]] Emitter* GetEmitter() const noexcept { return m_emitter; }
+	// The command buffer the next segments are replayed into (RawTraits bits); set by Begin, the stream is empty then.
+	void BindRaw(uint64_t bits) noexcept { m_raw_bits = bits; }
+
+	// Thread mode: hands the bytes written since the last publish to the emitter.
+	void Publish() {
+		if (m_pub == nullptr) return;
+		const uint8_t* end = m_arena.Cursor();
+		if (end <= m_pub) return;
+		const auto w = m_emitter->Push(m_raw_bits, m_pub, static_cast<size_t>(end - m_pub));
+		m_pub        = end;
+		m_stats.publishes++;
+		NoteWaited(w, Reason::Full);
+	}
+
+	// Emitter::ReplayFn of a vk::CommandBuffer-like Raw: decodes the records of one segment.
+	template <class Raw>
+	static void ReplaySegment(uint64_t raw_bits, const uint8_t* p, size_t n) {
+		Raw raw = RawTraits<Raw>::From(raw_bits);
+		ReplayRange(raw, p, n);
+	}
+	template <class Sink>
+	static void ReplayRange(Sink& sink, const uint8_t* base, size_t used) {
+		size_t at = 0;
+		while (at < used) {
+			const auto* h = reinterpret_cast<const Hdr*>(base + at);
+			Decode(sink, h->op, base + at + sizeof(Hdr));
+			at += h->size;
+		}
+	}
+
 	[[nodiscard]] Stats TakeStats() noexcept {
 		Stats s = m_stats;
 		m_stats = {};
@@ -622,10 +1051,23 @@ public:
 			Replay(replayed);
 			if (replayed.Value() != m_direct.Value() || replayed.Count() != m_direct.Count()) m_stats.ne++;
 			m_direct.Reset();
+		} else if (m_emitter != nullptr) {
+			// S565: what is left goes to the emitter; then wait until it (or this thread, when it does not hold the command buffer) replayed all.
+			Publish();
+#if defined(KYTY_EMIT_MUTANT_TOUCH_DURING_EMIT)
+			if (why == Reason::Handle) return; // the direct site records while the emitter may still replay
+#endif
+#if defined(KYTY_EMIT_MUTANT_NO_SUBMIT_DRAIN)
+			if (why != Reason::Submit) NoteWaited(m_emitter->WaitIdle(), why);
+#else
+			NoteWaited(m_emitter->WaitIdle(), why);
+#endif
+			m_pub = nullptr;
+			(void)raw;
 		} else {
 			Replay(raw);
 		}
-		m_stats.replay_ticks += Ticks() - t0;
+		if (m_emitter == nullptr) m_stats.replay_ticks += Ticks() - t0;
 		m_stats.drains++;
 		m_stats.by[static_cast<size_t>(why)]++;
 		m_stats.ops += m_ops;
@@ -856,6 +1298,102 @@ public:
 		if (m_mode == Mode::Shadow) m_direct.endRendering();
 	}
 
+	// S565: the commands of the sites outside the draw seam.
+	void DispatchIndirect(vk::Buffer buffer, vk::DeviceSize offset) {
+		Rec    r(*this);
+		Writer w(*this, Op::DispatchIndirect, sizeof(DI));
+		auto*  p  = w.Put<DI>();
+		p->buffer = static_cast<VkBuffer>(buffer);
+		p->offset = offset;
+		if (m_mode == Mode::Shadow) m_direct.dispatchIndirect(buffer, offset);
+	}
+	void CopyBuffer(vk::Buffer src, vk::Buffer dst, uint32_t n, const vk::BufferCopy* regions) {
+		Rec    r(*this);
+		Writer w(*this, Op::CopyBuffer, sizeof(CB) + sizeof(vk::BufferCopy) * n);
+		auto*  p = w.Put<CB>();
+		p->src   = static_cast<VkBuffer>(src);
+		p->dst   = static_cast<VkBuffer>(dst);
+		p->n     = n;
+		p->pad   = 0;
+		w.Copy(regions, n);
+		if (m_mode == Mode::Shadow) m_direct.copyBuffer(src, dst, n, regions);
+	}
+	void CopyBufferToImage(vk::Buffer src, vk::Image dst, vk::ImageLayout layout, uint32_t n, const vk::BufferImageCopy* regions) {
+		Rec    r(*this);
+		Writer w(*this, Op::CopyBufferToImage, sizeof(BI) + sizeof(vk::BufferImageCopy) * n);
+		auto*  p  = w.Put<BI>();
+		p->buffer = static_cast<VkBuffer>(src);
+		p->image  = static_cast<VkImage>(dst);
+		p->layout = static_cast<uint32_t>(layout);
+		p->n      = n;
+		w.Copy(regions, n);
+		if (m_mode == Mode::Shadow) m_direct.copyBufferToImage(src, dst, layout, n, regions);
+	}
+	void CopyImageToBuffer(vk::Image src, vk::ImageLayout layout, vk::Buffer dst, uint32_t n, const vk::BufferImageCopy* regions) {
+		Rec    r(*this);
+		Writer w(*this, Op::CopyImageToBuffer, sizeof(BI) + sizeof(vk::BufferImageCopy) * n);
+		auto*  p  = w.Put<BI>();
+		p->buffer = static_cast<VkBuffer>(dst);
+		p->image  = static_cast<VkImage>(src);
+		p->layout = static_cast<uint32_t>(layout);
+		p->n      = n;
+		w.Copy(regions, n);
+		if (m_mode == Mode::Shadow) m_direct.copyImageToBuffer(src, layout, dst, n, regions);
+	}
+	void CopyImage(vk::Image src, vk::ImageLayout src_layout, vk::Image dst, vk::ImageLayout dst_layout, uint32_t n, const vk::ImageCopy* regions) {
+		Rec    r(*this);
+		Writer w(*this, Op::CopyImage, sizeof(CI) + Align8(sizeof(vk::ImageCopy) * n));
+		auto*  p      = w.Put<CI>();
+		p->src        = static_cast<VkImage>(src);
+		p->dst        = static_cast<VkImage>(dst);
+		p->src_layout = static_cast<uint32_t>(src_layout);
+		p->dst_layout = static_cast<uint32_t>(dst_layout);
+		p->n          = n;
+		p->pad        = 0;
+		w.Copy(regions, n);
+		if (m_mode == Mode::Shadow) m_direct.copyImage(src, src_layout, dst, dst_layout, n, regions);
+	}
+	void FillBuffer(vk::Buffer buffer, vk::DeviceSize offset, vk::DeviceSize size, uint32_t data) {
+		Rec    r(*this);
+		Writer w(*this, Op::FillBuffer, sizeof(FB));
+		auto*  p  = w.Put<FB>();
+		p->buffer = static_cast<VkBuffer>(buffer);
+		p->offset = offset;
+		p->size   = size;
+		p->data   = data;
+		p->pad    = 0;
+		if (m_mode == Mode::Shadow) m_direct.fillBuffer(buffer, offset, size, data);
+	}
+	void ClearColorImage(vk::Image image, vk::ImageLayout layout, const vk::ClearColorValue* color, uint32_t n, const vk::ImageSubresourceRange* ranges) {
+		Rec    r(*this);
+		Writer w(*this, Op::ClearColorImage, sizeof(CL) + Align8(sizeof(vk::ImageSubresourceRange) * n));
+		auto*  p   = w.Put<CL>();
+		p->image   = static_cast<VkImage>(image);
+		p->layout  = static_cast<uint32_t>(layout);
+		p->n       = n;
+		p->has     = color != nullptr ? 1u : 0u;
+		p->pad     = 0;
+		std::memset(p->value, 0, sizeof(p->value));
+		if (color != nullptr) std::memcpy(p->value, color, sizeof(*color));
+		w.Copy(ranges, n);
+		if (m_mode == Mode::Shadow) m_direct.clearColorImage(image, layout, color, n, ranges);
+	}
+	void ClearDepthStencilImage(vk::Image image, vk::ImageLayout layout, const vk::ClearDepthStencilValue* value, uint32_t n,
+	                            const vk::ImageSubresourceRange* ranges) {
+		Rec    r(*this);
+		Writer w(*this, Op::ClearDepthStencilImage, sizeof(CL) + Align8(sizeof(vk::ImageSubresourceRange) * n));
+		auto*  p   = w.Put<CL>();
+		p->image   = static_cast<VkImage>(image);
+		p->layout  = static_cast<uint32_t>(layout);
+		p->n       = n;
+		p->has     = value != nullptr ? 1u : 0u;
+		p->pad     = 0;
+		std::memset(p->value, 0, sizeof(p->value));
+		if (value != nullptr) std::memcpy(p->value, value, sizeof(*value));
+		w.Copy(ranges, n);
+		if (m_mode == Mode::Shadow) m_direct.clearDepthStencilImage(image, layout, value, n, ranges);
+	}
+
 	// The shadow digest of the direct calls (Words / Indirect commands are folded in by the caller, CmdT).
 	HashSink& Direct() noexcept { return m_direct; }
 
@@ -905,6 +1443,35 @@ private:
 		uint32_t   flags, layers, view_mask, colors, has_depth, has_stencil;
 		vk::Rect2D area;
 	};
+	struct DI {
+		VkBuffer     buffer;
+		VkDeviceSize offset;
+	};
+	struct CB {
+		VkBuffer src, dst;
+		uint32_t n, pad;
+	};
+	struct BI {
+		VkBuffer buffer;
+		VkImage  image;
+		uint32_t layout, n;
+	};
+	struct CI {
+		VkImage  src, dst;
+		uint32_t src_layout, dst_layout, n, pad;
+	};
+	struct FB {
+		VkBuffer     buffer;
+		VkDeviceSize offset, size;
+		uint32_t     data, pad;
+	};
+	struct CL {
+		VkImage  image;
+		uint32_t layout, n, has, pad;
+		uint8_t  value[16]; // ClearColorValue or ClearDepthStencilValue
+	};
+	static_assert(sizeof(DI) % 8 == 0 && sizeof(CB) % 8 == 0 && sizeof(BI) % 8 == 0 && sizeof(CI) % 8 == 0 && sizeof(FB) % 8 == 0 &&
+	              sizeof(CL) % 8 == 0 && sizeof(vk::BufferCopy) % 8 == 0 && sizeof(vk::BufferImageCopy) % 8 == 0);
 	// Arrays of these follow one another in a record: each must keep the next one 8-aligned.
 	static_assert(sizeof(vk::MemoryBarrier2) % 8 == 0 && sizeof(vk::BufferMemoryBarrier2) % 8 == 0 && sizeof(vk::ImageMemoryBarrier2) % 8 == 0 &&
 	              sizeof(vk::MemoryBarrier) % 8 == 0 && sizeof(vk::BufferMemoryBarrier) % 8 == 0 && sizeof(vk::ImageMemoryBarrier) % 8 == 0 &&
@@ -943,16 +1510,27 @@ private:
 
 	// One record: header + payload; the payload size is known up front and rounded to 8.
 	struct Writer {
-		Writer(Stream& s, Op op, size_t payload) {
+		Writer(Stream& s, Op op, size_t payload): s(s), op(op) {
 			const size_t size = sizeof(Hdr) + Align8(payload);
-			p                 = s.m_arena.Alloc(size);
-			auto* h           = reinterpret_cast<Hdr*>(p);
-			h->op             = op;
-			h->pad            = 0;
-			h->size           = static_cast<uint32_t>(size);
+			if (s.m_emitter != nullptr && !s.m_arena.Fits(size)) {
+				s.Publish(); // S565: the record opens a new chunk; the tail of this one goes first (a segment never spans chunks)
+				s.m_pub = nullptr;
+			}
+			p       = s.m_arena.Alloc(size);
+			if (s.m_pub == nullptr) s.m_pub = p;
+			auto* h = reinterpret_cast<Hdr*>(p);
+			h->op   = op;
+			h->pad  = 0;
+			h->size = static_cast<uint32_t>(size);
 			p += sizeof(Hdr);
 			if (s.m_ops++ == 0) s.NotePending();
 		}
+		// The record is complete here (the payload is written in the body of the recording method).
+		~Writer() {
+			if (s.m_emitter != nullptr) s.AfterRecord(op);
+		}
+		Writer(const Writer&)            = delete;
+		Writer& operator=(const Writer&) = delete;
 		template <class T>
 		T* Put() {
 			auto* t = reinterpret_cast<T*>(p);
@@ -975,8 +1553,28 @@ private:
 			std::memcpy(p, src, sizeof(uint32_t) * n);
 			p += Align8(sizeof(uint32_t) * n);
 		}
+		Stream&  s;
+		Op       op;
 		uint8_t* p;
 	};
+
+	// S565: publish at the end of a draw / dispatch once publish_bytes wait, anywhere once 16x that wait.
+	static bool EndsWork(Op op) {
+		return (op >= Op::Draw && op <= Op::DrawMeshTasksIndirect) || op == Op::Dispatch || op == Op::DispatchBase || op == Op::DispatchIndirect;
+	}
+	void AfterRecord(Op op) {
+		const size_t waiting = static_cast<size_t>(m_arena.Cursor() - m_pub);
+		if (waiting >= m_publish_bytes * 16u || (waiting >= m_publish_bytes && EndsWork(op))) Publish();
+	}
+	void NoteWaited(const Emitter::Waited& w, Reason why) {
+		if (w.ticks != 0) {
+			m_stats.wait_ticks += w.ticks;
+			m_stats.wait_by[static_cast<size_t>(why)] += w.ticks;
+		}
+		m_stats.steal_segs += w.steal_segs;
+		if (w.stole) m_stats.steals++;
+		if (w.woke) m_stats.wakes++;
+	}
 
 	void NotePending() {
 		if (m_owner == nullptr) return;
@@ -1130,6 +1728,55 @@ private:
 				break;
 			}
 			case Op::EndRendering: sink.endRendering(); break;
+			case Op::Dispatch: sink.dispatch(w[0], w[1], w[2]); break;
+			case Op::DispatchBase: sink.dispatchBase(w[0], w[1], w[2], w[3], w[4], w[5]); break;
+			case Op::DispatchIndirect: {
+				const auto* d = Take<DI>(p, 1);
+				sink.dispatchIndirect(vk::Buffer(d->buffer), d->offset);
+				break;
+			}
+			case Op::CopyBuffer: {
+				const auto* c = Take<CB>(p, 1);
+				sink.copyBuffer(vk::Buffer(c->src), vk::Buffer(c->dst), c->n, Take<vk::BufferCopy>(p, c->n));
+				break;
+			}
+			case Op::CopyBufferToImage: {
+				const auto* c = Take<BI>(p, 1);
+				sink.copyBufferToImage(vk::Buffer(c->buffer), vk::Image(c->image), vk::ImageLayout(c->layout), c->n, Take<vk::BufferImageCopy>(p, c->n));
+				break;
+			}
+			case Op::CopyImageToBuffer: {
+				const auto* c = Take<BI>(p, 1);
+				sink.copyImageToBuffer(vk::Image(c->image), vk::ImageLayout(c->layout), vk::Buffer(c->buffer), c->n, Take<vk::BufferImageCopy>(p, c->n));
+				break;
+			}
+			case Op::CopyImage: {
+				const auto* c = Take<CI>(p, 1);
+				sink.copyImage(vk::Image(c->src), vk::ImageLayout(c->src_layout), vk::Image(c->dst), vk::ImageLayout(c->dst_layout), c->n,
+				               Take<vk::ImageCopy>(p, c->n));
+				break;
+			}
+			case Op::FillBuffer: {
+				const auto* f = Take<FB>(p, 1);
+				sink.fillBuffer(vk::Buffer(f->buffer), f->offset, f->size, f->data);
+				break;
+			}
+			case Op::ClearColorImage: {
+				const auto* c = Take<CL>(p, 1);
+				vk::ClearColorValue value {};
+				std::memcpy(&value, c->value, sizeof(value));
+				sink.clearColorImage(vk::Image(c->image), vk::ImageLayout(c->layout), c->has != 0 ? &value : nullptr, c->n,
+				                     Take<vk::ImageSubresourceRange>(p, c->n));
+				break;
+			}
+			case Op::ClearDepthStencilImage: {
+				const auto* c = Take<CL>(p, 1);
+				vk::ClearDepthStencilValue value {};
+				std::memcpy(&value, c->value, sizeof(value));
+				sink.clearDepthStencilImage(vk::Image(c->image), vk::ImageLayout(c->layout), c->has != 0 ? &value : nullptr, c->n,
+				                            Take<vk::ImageSubresourceRange>(p, c->n));
+				break;
+			}
 			case Op::Count: break;
 		}
 	}
@@ -1142,16 +1789,23 @@ private:
 	Stats    m_stats;
 	void*    m_owner = nullptr;
 	void (*m_drain)(void*, Reason) = nullptr;
+	// S565 thread mode
+	Emitter*       m_emitter       = nullptr;
+	uint64_t       m_raw_bits      = 0;
+	const uint8_t* m_pub           = nullptr; // first byte not yet published (current chunk)
+	uint32_t       m_publish_bytes = 2048;
 };
 
 // ---------------------------------------------------------------------------------------------------------------------------------------
 // The handle the IR sites record through: the vk::CommandBuffer method names, routed by the stream's mode. Converting it to the raw handle
 // drains the stream first (Reason::Conv), so a helper that still takes vk::CommandBuffer records in order.
 
+// S565: `ir` = false routes every command straight to `raw` whatever the mode (EmitIfPending with an empty stream): the handle is then a raw handle.
 template <class Raw>
 class CmdT {
 public:
-	CmdT(Stream* stream, Raw raw) noexcept: m_s(stream), m_raw(raw) {}
+	CmdT(Stream* stream, Raw raw, bool ir = true) noexcept: m_s(stream), m_raw(raw), m_ir(ir && stream->Current() != Mode::Off) {}
+	[[nodiscard]] bool ToIr() const noexcept { return m_ir; }
 
 	// NOLINTNEXTLINE(google-explicit-constructor)
 	operator Raw() const {
@@ -1335,10 +1989,62 @@ public:
 		m_s->EndRendering();
 		if (Shadow()) m_raw.endRendering();
 	}
+	// S565
+	void dispatch(uint32_t x, uint32_t y, uint32_t z) const {
+		if (Off()) return m_raw.dispatch(x, y, z);
+		W(Op::Dispatch, std::array<uint32_t, 3> {x, y, z});
+		if (Shadow()) Both([&](auto& s) { s.dispatch(x, y, z); });
+	}
+	void dispatchBase(uint32_t bx, uint32_t by, uint32_t bz, uint32_t x, uint32_t y, uint32_t z) const {
+		if (Off()) return m_raw.dispatchBase(bx, by, bz, x, y, z);
+		W(Op::DispatchBase, std::array<uint32_t, 6> {bx, by, bz, x, y, z});
+		if (Shadow()) Both([&](auto& s) { s.dispatchBase(bx, by, bz, x, y, z); });
+	}
+	void dispatchIndirect(vk::Buffer buffer, vk::DeviceSize offset) const {
+		if (Off()) return m_raw.dispatchIndirect(buffer, offset);
+		m_s->DispatchIndirect(buffer, offset);
+		if (Shadow()) m_raw.dispatchIndirect(buffer, offset);
+	}
+	void copyBuffer(vk::Buffer src, vk::Buffer dst, uint32_t n, const vk::BufferCopy* regions) const {
+		if (Off()) return m_raw.copyBuffer(src, dst, n, regions);
+		m_s->CopyBuffer(src, dst, n, regions);
+		if (Shadow()) m_raw.copyBuffer(src, dst, n, regions);
+	}
+	void copyBufferToImage(vk::Buffer src, vk::Image dst, vk::ImageLayout layout, uint32_t n, const vk::BufferImageCopy* regions) const {
+		if (Off()) return m_raw.copyBufferToImage(src, dst, layout, n, regions);
+		m_s->CopyBufferToImage(src, dst, layout, n, regions);
+		if (Shadow()) m_raw.copyBufferToImage(src, dst, layout, n, regions);
+	}
+	void copyImageToBuffer(vk::Image src, vk::ImageLayout layout, vk::Buffer dst, uint32_t n, const vk::BufferImageCopy* regions) const {
+		if (Off()) return m_raw.copyImageToBuffer(src, layout, dst, n, regions);
+		m_s->CopyImageToBuffer(src, layout, dst, n, regions);
+		if (Shadow()) m_raw.copyImageToBuffer(src, layout, dst, n, regions);
+	}
+	void copyImage(vk::Image src, vk::ImageLayout src_layout, vk::Image dst, vk::ImageLayout dst_layout, uint32_t n, const vk::ImageCopy* regions) const {
+		if (Off()) return m_raw.copyImage(src, src_layout, dst, dst_layout, n, regions);
+		m_s->CopyImage(src, src_layout, dst, dst_layout, n, regions);
+		if (Shadow()) m_raw.copyImage(src, src_layout, dst, dst_layout, n, regions);
+	}
+	void fillBuffer(vk::Buffer buffer, vk::DeviceSize offset, vk::DeviceSize size, uint32_t data) const {
+		if (Off()) return m_raw.fillBuffer(buffer, offset, size, data);
+		m_s->FillBuffer(buffer, offset, size, data);
+		if (Shadow()) m_raw.fillBuffer(buffer, offset, size, data);
+	}
+	void clearColorImage(vk::Image image, vk::ImageLayout layout, const vk::ClearColorValue* color, uint32_t n, const vk::ImageSubresourceRange* ranges) const {
+		if (Off()) return m_raw.clearColorImage(image, layout, color, n, ranges);
+		m_s->ClearColorImage(image, layout, color, n, ranges);
+		if (Shadow()) m_raw.clearColorImage(image, layout, color, n, ranges);
+	}
+	void clearDepthStencilImage(vk::Image image, vk::ImageLayout layout, const vk::ClearDepthStencilValue* value, uint32_t n,
+	                            const vk::ImageSubresourceRange* ranges) const {
+		if (Off()) return m_raw.clearDepthStencilImage(image, layout, value, n, ranges);
+		m_s->ClearDepthStencilImage(image, layout, value, n, ranges);
+		if (Shadow()) m_raw.clearDepthStencilImage(image, layout, value, n, ranges);
+	}
 
 private:
-	[[nodiscard]] bool Off() const noexcept { return m_s->Current() == Mode::Off; }
-	[[nodiscard]] bool Shadow() const noexcept { return m_s->Current() == Mode::Shadow; }
+	[[nodiscard]] bool Off() const noexcept { return !m_ir; }
+	[[nodiscard]] bool Shadow() const noexcept { return m_ir && m_s->Current() == Mode::Shadow; }
 	static uint32_t    Bits(float f) {
         uint32_t u = 0;
         std::memcpy(&u, &f, 4);
@@ -1363,6 +2069,7 @@ private:
 
 	Stream* m_s;
 	Raw     m_raw;
+	bool    m_ir;
 };
 
 using Cmd = CmdT<vk::CommandBuffer>;

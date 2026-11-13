@@ -355,7 +355,8 @@ void Image::Upload(std::span<const vk::BufferImageCopy> copies, vk::Buffer buffe
 	dependency.pBufferMemoryBarriers    = &buffer_barrier;
 	dependency.imageMemoryBarrierCount  = static_cast<uint32_t>(image_barriers.size());
 	dependency.pImageMemoryBarriers     = image_barriers.data();
-	auto command                        = m_scheduler.Current().Handle();
+	// S565: follows the KYTY_CP_EMIT IR when it holds commands.
+	auto command                        = m_scheduler.Current().EmitIfPending();
 	command.pipelineBarrier2(dependency);
 	GpuLabel::With(
 	    command, GpuLabel::Class::Tex,
@@ -400,7 +401,7 @@ void Image::Download(std::span<const vk::BufferImageCopy> copies, vk::Buffer buf
 	dependency.pBufferMemoryBarriers    = &buffer_barrier;
 	dependency.imageMemoryBarrierCount  = static_cast<uint32_t>(image_barriers.size());
 	dependency.pImageMemoryBarriers     = image_barriers.data();
-	auto command                        = m_scheduler.Current().Handle();
+	auto command                        = m_scheduler.Current().EmitIfPending(); // S565: as Upload
 	command.pipelineBarrier2(dependency);
 	command.copyImageToBuffer(backing.image, vk::ImageLayout::eTransferSrcOptimal, buffer,
 	                          static_cast<uint32_t>(copies.size()), copies.data());

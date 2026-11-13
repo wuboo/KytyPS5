@@ -6,11 +6,22 @@
 // constants, attachments) is overwritten after each IR command and before its drain: the IR must hold values.
 // Mutants (must fail, WILL_FAIL): NO_DRAIN (a direct site does not drain first), SHALLOW (push-descriptor infos keep the caller's pointers),
 // UNCOND_PASS (Begin/EndRendering go to the IR even when it is empty, so a raw handle taken before them records out of order).
+//
+// S565 (thread mode): the same script with an emitter thread replaying the segments (several configurations: tiny segments, batch 1 and 8,
+// steal on/off, a slow command buffer). The log must be the reference again, which checks the order across the two threads; the fake
+// command buffer also checks the ownership rule: a call on the recording thread while the emitter has a segment left (the recorder touches
+// the command buffer during the emission) or two calls at once fail the test. At each End the emitter must have replayed everything.
+// Mutants (WILL_FAIL): NO_SUBMIT_DRAIN (the drain before the submit does not wait for the emitter), TOUCH_DURING_EMIT (a direct site
+// records while the emitter still replays). Built with -fsanitize=thread the thread runs are also a data-race check of the hand-over.
 
 #include "graphics/host_gpu/renderer/cpEmit.h"
 
+#include <atomic>
 #include <cstdio>
 #include <cstdlib>
+#include <memory>
+#include <mutex>
+#include <thread>
 #include <vector>
 
 namespace {
@@ -24,15 +35,38 @@ void Check(bool ok, const char* what) {
 	}
 }
 
+// What a fake command buffer logs into, and the thread-mode ownership probe.
+struct Ctx {
+	std::vector<uint64_t>* log = nullptr;
+	std::mutex             mutex; // the log of a mutant may be written by two threads at once: no crash, the probe reports it
+	std::atomic<int>       inside {0};
+	const Emitter*         emitter = nullptr; // thread mode
+	std::thread::id        recorder;
+	uint32_t               slow_spins = 0; // per command, to widen the emitter's window
+
+	void Note(uint64_t value) {
+		if (inside.fetch_add(1, std::memory_order_acq_rel) != 0) Check(false, "two threads record into the command buffer at once");
+		if (emitter != nullptr && std::this_thread::get_id() == recorder && !emitter->IdleNow() && !emitter->HeldByRecorder()) {
+			Check(false, "the recorder touches the command buffer while the emitter has segments left");
+		}
+		for (uint32_t i = 0; i < slow_spins; i++) CpuRelax();
+		{
+			std::lock_guard lock(mutex);
+			log->push_back(value);
+		}
+		inside.fetch_sub(1, std::memory_order_acq_rel);
+	}
+};
+
 // Logs one digest per command (the same HashSink the shadow uses, one fresh per command).
 struct FakeRaw {
-	std::vector<uint64_t>* log = nullptr;
+	Ctx* ctx = nullptr;
 
 #define KYTY_FAKE(name, params, args)                                                                                                            \
 	void name params const {                                                                                                                       \
 		HashSink h;                                                                                                                                \
 		h.name args;                                                                                                                               \
-		log->push_back(h.Value());                                                                                                                 \
+		ctx->Note(h.Value());                                                                                                                      \
 	}
 	KYTY_FAKE(pipelineBarrier2, (const vk::DependencyInfo& d), (d))
 	KYTY_FAKE(pipelineBarrier,
@@ -77,21 +111,66 @@ struct FakeRaw {
 	KYTY_FAKE(drawMeshTasksIndirectEXT, (vk::Buffer b, vk::DeviceSize o, uint32_t n, uint32_t s), (b, o, n, s))
 	KYTY_FAKE(beginRendering, (const vk::RenderingInfo& r), (r))
 	KYTY_FAKE(endRendering, (), ())
+	KYTY_FAKE(dispatch, (uint32_t x, uint32_t y, uint32_t z), (x, y, z))
+	KYTY_FAKE(dispatchBase, (uint32_t a, uint32_t b, uint32_t c, uint32_t x, uint32_t y, uint32_t z), (a, b, c, x, y, z))
+	KYTY_FAKE(dispatchIndirect, (vk::Buffer b, vk::DeviceSize o), (b, o))
+	KYTY_FAKE(copyBuffer, (vk::Buffer s, vk::Buffer d, uint32_t n, const vk::BufferCopy* r), (s, d, n, r))
+	KYTY_FAKE(copyBufferToImage, (vk::Buffer s, vk::Image d, vk::ImageLayout l, uint32_t n, const vk::BufferImageCopy* r), (s, d, l, n, r))
+	KYTY_FAKE(copyImageToBuffer, (vk::Image s, vk::ImageLayout l, vk::Buffer d, uint32_t n, const vk::BufferImageCopy* r), (s, l, d, n, r))
+	KYTY_FAKE(copyImage, (vk::Image s, vk::ImageLayout sl, vk::Image d, vk::ImageLayout dl, uint32_t n, const vk::ImageCopy* r), (s, sl, d, dl, n, r))
+	KYTY_FAKE(fillBuffer, (vk::Buffer b, vk::DeviceSize o, vk::DeviceSize n, uint32_t v), (b, o, n, v))
+	KYTY_FAKE(clearColorImage, (vk::Image i, vk::ImageLayout l, const vk::ClearColorValue* c, uint32_t n, const vk::ImageSubresourceRange* r),
+	          (i, l, c, n, r))
+	KYTY_FAKE(clearDepthStencilImage,
+	          (vk::Image i, vk::ImageLayout l, const vk::ClearDepthStencilValue* c, uint32_t n, const vk::ImageSubresourceRange* r), (i, l, c, n, r))
 #undef KYTY_FAKE
 	// A command no IR site records (an upload copy, a dispatch ...).
-	void foreign(uint32_t id) const { log->push_back(0xF0F0F0F000000000ull | id); }
+	void foreign(uint32_t id) const { ctx->Note(0xF0F0F0F000000000ull | id); }
 };
 
-// The command buffer: its stream, its raw handle, the pending-slot thunk (as CommandBuffer in render.h).
+} // namespace
+
+// The segment carries the context pointer.
+template <>
+struct Libs::Graphics::CpEmit::RawTraits<FakeRaw> {
+	static uint64_t Bits(const FakeRaw& raw) { return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(raw.ctx)); }
+	static FakeRaw  From(uint64_t bits) { return FakeRaw {reinterpret_cast<Ctx*>(static_cast<uintptr_t>(bits))}; }
+};
+
+namespace {
+
+// The command buffer: its stream, its raw handle, the pending-slot thunk (as CommandBuffer in render.h); in thread mode its emitter.
 struct FakeBuffer {
-	explicit FakeBuffer(Mode mode): stream(mode) { stream.SetOwner(this, &Thunk); }
+	explicit FakeBuffer(Mode mode, const EmitterConfig* config = nullptr, uint32_t slow_spins = 0): stream(mode) {
+		stream.SetOwner(this, &Thunk);
+		ctx.recorder   = std::this_thread::get_id();
+		ctx.slow_spins = slow_spins;
+		if (mode == Mode::Thread && config != nullptr) {
+			emitter = std::make_unique<Emitter>(&Stream::ReplaySegment<FakeRaw>, *config);
+			stream.AttachEmitter(emitter.get());
+			ctx.emitter = emitter.get();
+		}
+		stream.BindRaw(RawTraits<FakeRaw>::Bits(raw));
+	}
+	~FakeBuffer() {
+		if (emitter) emitter->Stop();
+	}
 	static void Thunk(void* self, Reason why) {
 		auto* b = static_cast<FakeBuffer*>(self);
 		b->stream.Drain(b->raw, why);
 	}
 	[[nodiscard]] FakeRaw          Handle() { return TakeRaw(stream, raw); }
 	[[nodiscard]] CmdT<FakeRaw>    Emit() { return {&stream, raw}; }
-	void                           End() { stream.Drain(raw, Reason::Submit); }
+	[[nodiscard]] CmdT<FakeRaw>    EmitIfPending() { return {&stream, raw, stream.Pending()}; } // as CommandBuffer::EmitIfPending
+	void                           End() {
+        stream.Drain(raw, Reason::Submit);
+        if (emitter) {
+            Check(emitter->IdleNow(), "the submit drain left segments to the emitter");
+            std::lock_guard lock(ctx.mutex);
+            Check(ctx.log->size() == expected_at_end, "the command buffer holds every command at the submit");
+        }
+	}
+	size_t expected_at_end = 0; // thread mode: log size the submit must see (set by the runner from the reference)
 	void                           EndRenderingOp() {
         if (PassToIr(stream)) Emit().endRendering();
         else Handle().endRendering();
@@ -101,8 +180,10 @@ struct FakeBuffer {
 		else Handle().beginRendering(info);
 	}
 
-	Stream  stream;
-	FakeRaw raw;
+	Ctx                      ctx;
+	Stream                   stream;
+	FakeRaw                  raw {&ctx};
+	std::unique_ptr<Emitter> emitter; // declared last: stops before the stream's arena goes away
 };
 
 template <class H>
@@ -254,6 +335,53 @@ void Script(FakeBuffer& b) {
 		b.Emit().pipelineBarrier2(dep);
 		b.Emit().draw(2, 1, 0, 0);
 	}
+	// 9. S565: sites outside the seam through EmitIfPending. With commands in the stream they follow the IR, with an empty one they go
+	//    straight on (and the stream stays empty).
+	{
+		b.Emit().draw(7, 1, 0, 0); // the stream holds commands
+		std::array<vk::BufferCopy, 2> regions {vk::BufferCopy {0, 64, 128}, vk::BufferCopy {256, 512, 64}};
+		b.EmitIfPending().copyBuffer(buffer, Fake<vk::Buffer>(0x4200), 2, regions.data());
+		regions[0].size = 1; // the caller's memory changes before the drain
+		b.EmitIfPending().fillBuffer(buffer, 0, 256, 0xABCDu);
+		vk::BufferImageCopy bic {};
+		bic.bufferOffset                = 32;
+		bic.imageSubresource.aspectMask = vk::ImageAspectFlagBits::eColor;
+		bic.imageSubresource.layerCount = 1;
+		bic.imageExtent                 = vk::Extent3D {16, 16, 1};
+		b.EmitIfPending().copyBufferToImage(buffer, image, vk::ImageLayout::eTransferDstOptimal, 1, &bic);
+		bic.bufferOffset = 4096;
+		b.EmitIfPending().copyImageToBuffer(image, vk::ImageLayout::eTransferSrcOptimal, buffer, 1, &bic);
+		bic.bufferOffset = 7;
+		std::array<vk::ImageCopy, 2> copies {};
+		copies[0].srcSubresource = {vk::ImageAspectFlagBits::eColor, 0, 0, 1};
+		copies[0].dstSubresource = {vk::ImageAspectFlagBits::eColor, 1, 0, 1};
+		copies[0].extent         = vk::Extent3D {8, 8, 1};
+		copies[1]                = copies[0];
+		copies[1].dstOffset      = vk::Offset3D {8, 0, 0};
+		b.EmitIfPending().copyImage(image, vk::ImageLayout::eTransferSrcOptimal, Fake<vk::Image>(0x3300), vk::ImageLayout::eTransferDstOptimal, 2,
+		                            copies.data());
+		copies[1].extent.width = 1;
+		vk::ClearColorValue color {};
+		color.uint32[0] = 5;
+		vk::ImageSubresourceRange range {vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1};
+		b.EmitIfPending().clearColorImage(image, vk::ImageLayout::eTransferDstOptimal, &color, 1, &range);
+		color.uint32[0] = 9;
+		range.levelCount = 2;
+		const vk::ClearDepthStencilValue depth_stencil {0.5f, 3};
+		vk::ImageSubresourceRange depth_range {vk::ImageAspectFlagBits::eDepth | vk::ImageAspectFlagBits::eStencil, 0, 1, 0, 1};
+		b.EmitIfPending().clearDepthStencilImage(Fake<vk::Image>(0x3400), vk::ImageLayout::eTransferDstOptimal, &depth_stencil, 1, &depth_range);
+		const auto cmd = b.EmitIfPending();
+		cmd.bindPipeline(vk::PipelineBindPoint::eCompute, Fake<vk::Pipeline>(0x2100));
+		cmd.dispatch(4, 2, 1);
+		cmd.dispatchBase(1, 0, 0, 2, 1, 1);
+		cmd.dispatchIndirect(buffer, 64);
+		Check(b.stream.Current() == Mode::Off || cmd.ToIr(), "with commands in the stream EmitIfPending follows the IR");
+		b.Handle().foreign(6); // a direct site: drains
+		Check(!b.EmitIfPending().ToIr(), "with an empty stream EmitIfPending records directly");
+		b.EmitIfPending().fillBuffer(buffer, 64, 64, 1);
+		b.EmitIfPending().dispatch(1, 1, 1);
+		Check(!b.stream.Pending(), "EmitIfPending leaves an empty stream empty");
+	}
 	// 8. Many draws: the IR crosses several chunks, then the submit drains it.
 	{
 		const auto cmd = b.Emit();
@@ -267,14 +395,20 @@ void Script(FakeBuffer& b) {
 	b.End();
 }
 
-std::vector<uint64_t> Run(Mode mode, Stats* stats) {
+std::vector<uint64_t> Run(Mode mode, Stats* stats, const EmitterConfig* config = nullptr, uint32_t slow_spins = 0, size_t expected = 0,
+                          EmitterStats* emitter_stats = nullptr) {
 	std::vector<uint64_t> log;
-	FakeBuffer            b(mode);
-	b.raw.log = &log;
+	FakeBuffer            b(mode, config, slow_spins);
+	b.ctx.log         = &log;
+	b.expected_at_end = expected;
 	Script(b);
 	if (stats != nullptr) *stats = b.stream.TakeStats();
 	Check(!b.stream.Pending(), "the stream is empty after End");
 	Check(ThreadPending().owner == nullptr, "the thread's pending slot is clear after End");
+	if (b.emitter) {
+		b.emitter->Stop();
+		if (emitter_stats != nullptr) *emitter_stats = b.emitter->ReadStats();
+	}
 	return log;
 }
 
@@ -282,7 +416,7 @@ std::vector<uint64_t> Run(Mode mode, Stats* stats) {
 
 int main() {
 	Check(ParseMode(nullptr) == Mode::Off && ParseMode("0") == Mode::Off && ParseMode("sync") == Mode::Sync && ParseMode("shadow") == Mode::Shadow &&
-	          ParseMode("1") == Mode::Off && ParseMode("SYNC") == Mode::Off,
+	          ParseMode("thread") == Mode::Thread && ParseMode("1") == Mode::Off && ParseMode("SYNC") == Mode::Off,
 	      "ParseMode");
 
 	Stats off_stats {};
@@ -313,7 +447,7 @@ int main() {
 	{
 		std::vector<uint64_t> log;
 		FakeBuffer            b(Mode::Sync);
-		b.raw.log = &log;
+		b.ctx.log = &log;
 		Script(b);
 		const size_t chunks = b.stream.ArenaChunks();
 		Check(chunks >= 3, "the script's IR needs several chunks");
@@ -338,7 +472,7 @@ int main() {
 	{
 		std::vector<uint64_t> log;
 		FakeBuffer            b(Mode::Shadow);
-		b.raw.log = &log;
+		b.ctx.log = &log;
 		b.Emit().draw(1, 2, 3, 4);
 		b.stream.Direct().draw(5, 6, 7, 8);
 		b.End();
@@ -349,8 +483,8 @@ int main() {
 	{
 		std::vector<uint64_t> log;
 		FakeBuffer            a(Mode::Sync), c(Mode::Sync);
-		a.raw.log = &log;
-		c.raw.log = &log;
+		a.ctx.log = &log;
+		c.ctx.log = &log;
 		a.Emit().draw(1, 0, 0, 0);
 		c.Emit().draw(2, 0, 0, 0);
 		Check(!a.stream.Pending() && c.stream.Pending(), "the first stream drained when the second became pending");
@@ -358,6 +492,53 @@ int main() {
 		Check(!c.stream.Pending() && log.size() == 2, "the wait drained the second");
 		a.End();
 		c.End();
+	}
+
+	// S565 thread mode: the emitter replays the segments; the log is the reference (order across the threads), the ownership probe in
+	// Ctx::Note holds, every End finds the emitter done, and the drains are those of sync. The slow command buffer runs first (the mutants
+	// fail there for sure).
+	{
+		struct Case {
+			uint32_t publish, batch, spin, slow, repeat;
+			bool     steal;
+		};
+		const Case cases[] = {
+		    {256, 2, 0, 400, 2, true},   // slow command buffer: the emitter lags, drains wait or replay the rest
+		    {64, 1, 0, 0, 20, true},     // a segment per draw, the emitter woken for each
+		    {2048, 4, 0, 0, 20, true},   // the production defaults
+		    {64, 8, 0, 0, 10, false},    // no stealing: every segment by the emitter, the drain wakes it
+		    {512, 4, 2000, 0, 10, true}, // the emitter spins before it parks
+		};
+		uint64_t by_emitter = 0, stolen = 0;
+		for (const auto& c: cases) {
+			EmitterConfig config;
+			config.publish_bytes = c.publish;
+			config.batch         = c.batch;
+			config.spin          = c.spin;
+			config.steal         = c.steal;
+			for (uint32_t r = 0; r < c.repeat; r++) {
+				Stats        st {};
+				EmitterStats es {};
+				const auto   log = Run(Mode::Thread, &st, &config, c.slow, reference.size(), &es);
+				Check(log.size() == reference.size(), "thread: as many commands as the direct path");
+				for (size_t i = 0; i < reference.size(); i++) {
+					if (log[i] != reference[i]) {
+						std::fprintf(stderr, "CpEmitTests: thread (publish %u batch %u steal %d) differs at command %zu of %zu\n", c.publish, c.batch,
+						             c.steal ? 1 : 0, i, reference.size());
+						Check(false, "thread replays the direct sequence");
+					}
+				}
+				for (size_t k = 0; k < static_cast<size_t>(Reason::Full); k++) Check(st.by[k] == sync_stats.by[k], "thread drains where sync does");
+				Check(st.drains == sync_stats.drains && st.ops == sync_stats.ops, "thread: the same IR as sync");
+				Check(st.publishes >= 1 && es.segments + st.steal_segs == st.publishes + 1, "every segment (and the stop marker) replayed once");
+				if (!c.steal) Check(st.steal_segs == 0 && es.segments >= st.publishes, "no stealing: the emitter replayed every segment");
+				by_emitter += es.segments;
+				stolen += st.steal_segs;
+			}
+		}
+		Check(by_emitter > 0, "the emitter thread replayed segments");
+		std::printf("CpEmitTests: thread OK (segments by the emitter %llu, replayed by the recorder at drains %llu)\n",
+		            static_cast<unsigned long long>(by_emitter), static_cast<unsigned long long>(stolen));
 	}
 
 	std::printf("CpEmitTests: OK (%zu commands, %llu IR ops, %llu bytes, %llu drains)\n", reference.size(),
