@@ -84,6 +84,80 @@ inline std::vector<CpFrameStats::ThreadSample> SnapshotThreads() {
 	return out;
 }
 
+// S570 (KYTY_THREAD_CPU=lite): the threads of this process with open handles, rescanned rarely; a sample is one QueryThreadCycleTime per
+// handle (no Toolhelp snapshot of every thread of the system, no OpenThread / GetThreadDescription).
+class ThreadList {
+public:
+	ThreadList() = default;
+	~ThreadList() { Close(); }
+	ThreadList(const ThreadList&)            = delete;
+	ThreadList& operator=(const ThreadList&) = delete;
+
+	[[nodiscard]] bool Empty() const { return m_threads.empty(); }
+
+	void Rescan() {
+		using GetDesc = HRESULT(WINAPI*)(HANDLE, PWSTR*);
+		static const GetDesc get_desc =
+		    reinterpret_cast<GetDesc>(reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetThreadDescription")));
+		Close();
+		const HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+		if (snap == INVALID_HANDLE_VALUE) return;
+		const DWORD   pid = GetCurrentProcessId();
+		THREADENTRY32 te {};
+		te.dwSize = sizeof(te);
+		for (BOOL ok = Thread32First(snap, &te); ok; ok = Thread32Next(snap, &te)) {
+			if (te.th32OwnerProcessID != pid) continue;
+			const HANDLE h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, te.th32ThreadID);
+			if (h == nullptr) continue;
+			Entry e {te.th32ThreadID, h, {}};
+			if (get_desc != nullptr) {
+				PWSTR d = nullptr;
+				if (SUCCEEDED(get_desc(h, &d)) && d != nullptr) {
+					e.name = Utf8(d);
+					LocalFree(d);
+				}
+			}
+			if (e.name.empty()) e.name = "unnamed";
+			m_threads.push_back(std::move(e));
+		}
+		CloseHandle(snap);
+	}
+
+	[[nodiscard]] std::vector<CpFrameStats::ThreadSample> Sample() const {
+		std::vector<CpFrameStats::ThreadSample> out;
+		out.reserve(m_threads.size());
+		const double ns_per_cycle = NsPerCycle();
+		for (const auto& t: m_threads) {
+			ULONG64 cycles = 0;
+			if (!QueryThreadCycleTime(t.handle, &cycles)) continue;
+			out.push_back({t.id, t.name, static_cast<uint64_t>(static_cast<double>(cycles) * ns_per_cycle)});
+		}
+		return out;
+	}
+
+private:
+	struct Entry {
+		uint64_t    id     = 0;
+		HANDLE      handle = nullptr;
+		std::string name;
+	};
+	void Close() {
+		for (auto& t: m_threads) CloseHandle(t.handle);
+		m_threads.clear();
+	}
+	std::vector<Entry> m_threads;
+};
+
+// S570: an own handle of the calling thread (for queries from other threads too) and its CPU ns.
+inline void* OpenCurrentThread() {
+	return OpenThread(THREAD_QUERY_LIMITED_INFORMATION, FALSE, GetCurrentThreadId());
+}
+inline uint64_t ThreadCpuNs(void* handle) {
+	ULONG64 cycles = 0;
+	if (handle == nullptr || !QueryThreadCycleTime(static_cast<HANDLE>(handle), &cycles)) return 0;
+	return static_cast<uint64_t>(static_cast<double>(cycles) * NsPerCycle());
+}
+
 } // namespace Libs::Graphics::ThreadCpuWin
 
 #endif

@@ -1239,7 +1239,8 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 			m_sync_seq.Note(vaddr, size, ++m_sync_seq_next);
 			m_sync_cmds.Note(vaddr, size, FrameTiming::Get(FrameTiming::Counter::Draws) + FrameTiming::Get(FrameTiming::Counter::Dispatches));
 		}
-		ForgetColorMetadataChecks(vaddr, size);
+		// S570 (KYTY_DIRTY_ADD_MEMO=1): the same subtraction already ran above, nothing in between adds to the checked sets.
+		if (m_gpu_modified_ranges.AddMode() != DirtyMemo::Mode::On) ForgetColorMetadataChecks(vaddr, size);
 	}
 	return {&buffer, buffer.Offset(vaddr)};
 }
@@ -1433,6 +1434,15 @@ bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {
 }
 
 void BufferCache::RunGarbageCollector() {
+	// S570: the dirty-range memo counts (gpuDirtyRanges.h), kept in plain fields on the CP and published here.
+	if (const auto memo = m_gpu_modified_ranges.TakeMemoStats(); memo.add_hit + memo.add_miss + memo.query_hit + memo.query_miss != 0) {
+		FrameTiming::Add(FrameTiming::Counter::DirtyAddMemoHitN, memo.add_hit);
+		FrameTiming::Add(FrameTiming::Counter::DirtyAddMemoMissN, memo.add_miss);
+		FrameTiming::Add(FrameTiming::Counter::DirtyAddMemoNeN, memo.add_ne);
+		FrameTiming::Add(FrameTiming::Counter::DirtyQueryMemoHitN, memo.query_hit);
+		FrameTiming::Add(FrameTiming::Counter::DirtyQueryMemoMissN, memo.query_miss);
+		FrameTiming::Add(FrameTiming::Counter::DirtyQueryMemoNeN, memo.query_ne);
+	}
 	const auto tick = m_gc_tick++;
 	if (m_graphics.CanReportMemoryUsage()) {
 		m_total_used_memory = m_graphics.GetDeviceMemoryUsage();

@@ -7,21 +7,83 @@
 // BeginDownloadCopy fixes the order of the hand-over of a range to a GPU->host copy: first it becomes "in flight", then it stops being "dirty", so
 // a reader that looks at dirty first and at in-flight second never sees a range that is neither (S418/S419: the backing is stale in between).
 // Pure part; tests/GuestFaultSyncTests.cpp pins it.
+//
+// S570 micro (CP-only memos, the set is the CP's): KYTY_DIRTY_ADD_MEMO=0|1|shadow: ObtainBuffer adds the range of every written binding
+// (~per draw), almost always one already in the set. A range added since the last removal of anything (Subtract / BeginDownloadCopy bump
+// m_sub_gen) is still contained, so the Add (mutex, map walk, SpecPageCache invalidation of pages that cannot be quiet: they are dirty) is
+// skipped. KYTY_DIRTY_QUERY_MEMO=0|1|shadow: Intersects (HasGpuDirtyBytes, ~10 k/flip) answers from a memo of the same range while the set
+// has not changed (m_change_gen: every Add that ran, every removal). shadow: compute as before, count disagreements (*_ne_n must be 0).
+// Direct-mapped, 1024 slots each. Mutants (tests/DirtyMemoTests.cpp, WILL_FAIL): KYTY_DIRTYMEMO_MUTANT_NO_SUB_GEN (a removal does not
+// invalidate the add memo), _QUERY_IGNORES_ADD (an Add does not invalidate the query memo).
 
 #include "graphics/host_gpu/rangeSet.h"
 #include "kernel/specPageCache.h"
 #include "graphics/host_gpu/renderer/cache/inflightRanges.h"
 
+#include <array>
 #include <cstdint>
+#include <cstdlib>
+#include <cstring>
 #include <mutex>
 
 namespace Libs::Graphics {
 
+namespace DirtyMemo {
+enum class Mode : uint8_t { Off, On, Shadow };
+inline Mode Parse(const char* text) {
+	if (text == nullptr) return Mode::Off;
+	if (std::strcmp(text, "1") == 0) return Mode::On;
+	if (std::strcmp(text, "shadow") == 0) return Mode::Shadow;
+	return Mode::Off;
+}
+inline Mode AddEnv() {
+	static const Mode mode = Parse(std::getenv("KYTY_DIRTY_ADD_MEMO"));
+	return mode;
+}
+inline Mode QueryEnv() {
+	static const Mode mode = Parse(std::getenv("KYTY_DIRTY_QUERY_MEMO"));
+	return mode;
+}
+struct Stats {
+	uint64_t add_hit = 0, add_miss = 0, add_ne = 0, query_hit = 0, query_miss = 0, query_ne = 0;
+};
+} // namespace DirtyMemo
+
 class GpuDirtyRanges final {
 public:
+	GpuDirtyRanges(): m_add_mode(DirtyMemo::AddEnv()), m_query_mode(DirtyMemo::QueryEnv()) {}
+	// Tests.
+	void SetMemoModes(DirtyMemo::Mode add, DirtyMemo::Mode query) {
+		m_add_mode   = add;
+		m_query_mode = query;
+		m_add_memo   = {};
+		m_query_memo = {};
+	}
+	[[nodiscard]] DirtyMemo::Mode AddMode() const { return m_add_mode; }
+	// The counts since the last call (CP thread).
+	DirtyMemo::Stats TakeMemoStats() {
+		const auto out = m_stats;
+		m_stats        = {};
+		return out;
+	}
+
 	void Add(uint64_t address, uint64_t size) {
+		if (m_add_mode != DirtyMemo::Mode::Off) {
+			auto& slot = m_add_memo[Slot(address, size)];
+			if (slot.size == size && slot.address == address && slot.gen == m_sub_gen) {
+				m_stats.add_hit++;
+				if (m_add_mode == DirtyMemo::Mode::On) return;
+				if (!m_set.Contains(address, size)) m_stats.add_ne++;
+			} else {
+				m_stats.add_miss++;
+			}
+			slot = {address, size, m_sub_gen};
+		}
 		std::lock_guard lock(m_mutex);
 		m_set.Add(address, size);
+#ifndef KYTY_DIRTYMEMO_MUTANT_QUERY_IGNORES_ADD
+		m_change_gen++;
+#endif
 		// S430 (KYTY_SPEC_READ_FAST): pages of this range are no longer quiet.
 #ifndef KYTY_SPECFAST_MUTANT_FAST_NO_INVALIDATE_ON_WRITE
 		Libs::LibKernel::Memory::SpecPageCache::OnRangeBecameBusy(address, size);
@@ -31,10 +93,26 @@ public:
 	void Subtract(uint64_t address, uint64_t size) {
 		std::lock_guard lock(m_mutex);
 		m_set.Subtract(address, size);
+		Removed();
 	}
 
 	// Command processor thread only (the thread that changes the set).
-	[[nodiscard]] bool Intersects(uint64_t address, uint64_t size) const { return m_set.Intersects(address, size); }
+	[[nodiscard]] bool Intersects(uint64_t address, uint64_t size) const {
+		if (m_query_mode == DirtyMemo::Mode::Off) return m_set.Intersects(address, size);
+		auto& slot = m_query_memo[Slot(address, size)];
+		if (slot.size == size && slot.address == address && slot.gen == m_change_gen) {
+			m_stats.query_hit++;
+			if (m_query_mode == DirtyMemo::Mode::On) return slot.result;
+			const bool real = m_set.Intersects(address, size);
+			if (real != slot.result) m_stats.query_ne++;
+			slot.result = real;
+			return real;
+		}
+		m_stats.query_miss++;
+		const bool result = m_set.Intersects(address, size);
+		slot              = {address, size, m_change_gen, result};
+		return result;
+	}
 	[[nodiscard]] bool Empty() const { return m_set.Empty(); }
 	template <typename Func>
 	void ForEachInRange(uint64_t address, uint64_t size, Func&& func) const {
@@ -79,6 +157,7 @@ public:
 		between();
 		m_set.Subtract(address, size);
 #endif
+		Removed();
 	}
 	template <typename Piece>
 	void BeginDownloadCopy(InflightRanges& inflight, uint64_t address, uint64_t size, Piece&& piece) {
@@ -89,8 +168,40 @@ public:
 	[[nodiscard]] std::mutex& MutexForTest() const { return m_mutex; }
 
 private:
+	struct AddSlot {
+		uint64_t address = 0;
+		uint64_t size    = 0; // 0 = empty (the set never holds an empty range)
+		uint64_t gen     = 0;
+	};
+	struct QuerySlot {
+		uint64_t address = 0;
+		uint64_t size    = 0;
+		uint64_t gen     = 0;
+		bool     result  = false;
+	};
+	static constexpr size_t kSlots = 1024;
+	static size_t Slot(uint64_t address, uint64_t size) {
+		uint64_t h = (address >> 4u) ^ (size * 0x9e3779b97f4a7c15ull);
+		h ^= h >> 29u;
+		return static_cast<size_t>(h % kSlots);
+	}
+	// Under m_mutex, after any removal from the set.
+	void Removed() {
+#ifndef KYTY_DIRTYMEMO_MUTANT_NO_SUB_GEN
+		m_sub_gen++;
+#endif
+		m_change_gen++;
+	}
+
 	mutable std::mutex m_mutex;
 	RangeSet           m_set;
+	DirtyMemo::Mode    m_add_mode   = DirtyMemo::Mode::Off;
+	DirtyMemo::Mode    m_query_mode = DirtyMemo::Mode::Off;
+	uint64_t           m_sub_gen    = 1; // slots start at gen 0: never a hit before the first store
+	uint64_t           m_change_gen = 1;
+	std::array<AddSlot, kSlots>           m_add_memo {};
+	mutable std::array<QuerySlot, kSlots> m_query_memo {};
+	mutable DirtyMemo::Stats              m_stats;
 };
 
 } // namespace Libs::Graphics

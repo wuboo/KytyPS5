@@ -1175,6 +1175,7 @@ bool FlipQueue::Flip() {
 	for (size_t i = count; i != 0; i--) {
 		requests[i - 1].cfg->mutex.Unlock();
 	}
+	Graphics::FrameTiming::AfterGuestFlipUnlocked(); // S570 T1b: KYTY_THREAD_CPU=lite samples here, outside the flip locks
 	if (due) {
 		Graphics::RenderDocOnGuestFlip(m_presenter.Renderer());
 		if (Config::GraphicsDebugDumpEnabled() &&

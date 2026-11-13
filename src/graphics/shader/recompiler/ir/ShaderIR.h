@@ -717,6 +717,15 @@ struct ResourcePlan {
 	std::unique_ptr<Xbyak::CodeGenerator> srt_code;
 	uint32_t                              srt_user_data = 0; // User-data DWORDs the walker reads.
 	uint32_t                              srt_captures  = 0; // Scratch offset of loaded addresses.
+	// S570 (KYTY_RF_GPU_PATCH, rfGpuPatch.h): the walker loads whose value only reaches flattened SRT slots, by the code offset of their
+	// guest load (ascending), with those slots (dword indices of flattened_srt) in srt_patch_slots.
+	struct SrtPatchSite {
+		uint32_t code_offset = 0;
+		uint32_t slot_begin  = 0;
+		uint32_t slot_count  = 0;
+	};
+	std::vector<SrtPatchSite>             srt_patch_sites;
+	std::vector<uint32_t>                 srt_patch_slots;
 	// GPU-thread scratch for walker results and material keys.
 	mutable std::vector<uint64_t>           srt_scratch;
 	mutable std::vector<uint32_t>           material_keys;

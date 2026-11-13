@@ -40,6 +40,16 @@ namespace Libs::Graphics {
 
 namespace {
 
+// S570 micro: KYTY_CP_TIMERS_LITE=1 drops the two clock reads per FIFO item (pipe_exec_ns) and the one per pipeline job (submit time for
+// pipe_queue_ns) on the CP; those two columns stay 0. Nothing else changes (pure bookkeeping).
+bool CpTimersLite() {
+	static const bool lite = [] {
+		const char* v = std::getenv("KYTY_CP_TIMERS_LITE");
+		return v != nullptr && v[0] == '1' && v[1] == '\0';
+	}();
+	return lite;
+}
+
 using CpPipe::EnvMode;
 
 size_t EnvWorkers() {
@@ -176,7 +186,7 @@ private:
 				queue.jobs.pop_front();
 				queue.size.fetch_sub(1, std::memory_order_release);
 			}
-			FrameTiming::AddAlways(FrameTiming::Counter::PipeQueueNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - job->submit_ns));
+			if (job->submit_ns != 0) FrameTiming::AddAlways(FrameTiming::Counter::PipeQueueNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - job->submit_ns));
 			RunGfpJob(*job);
 			FrameTiming::AddAlways(FrameTiming::Counter::PipeWorkerNs, static_cast<uint64_t>(job->worker_ns));
 			job->state.store(GfpJob::Done, std::memory_order_release);
@@ -282,7 +292,7 @@ struct CommandProcessor::PipeState {
 
 namespace {
 void SubmitJob(CpPipe::GfpJob* job) {
-	job->submit_ns = FrameTiming::SteadyNowNs();
+	job->submit_ns = CpTimersLite() ? 0 : FrameTiming::SteadyNowNs(); // S570: 0 = not timed
 	job->state.store(CpPipe::GfpJob::Queued, std::memory_order_relaxed);
 	CpPipe::Workers::Instance().Submit(job, job->shard_key);
 }
@@ -407,7 +417,8 @@ void CommandProcessor::PipeExecuteFront() {
 	auto&          p   = *m_pipe;
 	auto&          it  = p.items[p.ring.Front()];
 	const uint64_t seq = p.ring.FrontSeq();
-	const auto     t0  = FrameTiming::SteadyNowNs();
+	const bool     timed = !CpTimersLite();
+	const auto     t0  = timed ? FrameTiming::SteadyNowNs() : int64_t {0};
 	p.executing        = true;
 
 	const auto handler = g_cp_op_func[it.opcode];
@@ -476,7 +487,7 @@ void CommandProcessor::PipeExecuteFront() {
 		SubmitJob(p.held.front().job);
 		p.held.pop_front();
 	}
-	FrameTiming::Add(C::PipeExecNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
+	if (timed) FrameTiming::Add(C::PipeExecNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
 }
 
 namespace {
@@ -816,7 +827,8 @@ void CommandProcessor::PipeFrontExecute(uint64_t seq) {
 	using C        = FrameTiming::Counter;
 	auto&      p   = *m_pipe;
 	auto&      it  = p.items[p.front->Slot(seq)];
-	const auto t0  = FrameTiming::SteadyNowNs();
+	const bool timed = !CpTimersLite();
+	const auto t0  = timed ? FrameTiming::SteadyNowNs() : int64_t {0};
 	FrameTiming::Add(C::FrontItemsN);
 	if (it.sync_kind != kSyncNone) { // a hand-over: the front waits, the live state is ours
 		const CpPipe::HandoffScope handoff;
@@ -889,7 +901,7 @@ void CommandProcessor::PipeFrontExecute(uint64_t seq) {
 		GetScheduler().Rebind(m_ctx, m_ucfg, m_sh_ctx); // pointers only: nothing outside a draw or dispatch reads the bound registers
 	}
 	p.executing = false;
-	FrameTiming::Add(C::PipeExecNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
+	if (timed) FrameTiming::Add(C::PipeExecNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
 }
 
 } // namespace Libs::Graphics

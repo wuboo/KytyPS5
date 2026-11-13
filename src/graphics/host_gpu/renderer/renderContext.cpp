@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/syncCensus.h"
 #include "kernel/memory.h"
 #include "graphics/shader/recompiler/ir/passes/srtProtAvoid.h"
+#include "graphics/shader/recompiler/ir/passes/rfGpuPatch.h"
 #include "graphics/presentation/cpPhaseScope.h"
 
 #include "common/assert.h"
@@ -226,7 +227,16 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 		}
 		const bool wf_threads = !on_gpu_thread && access == PageFaultAccess::Read && WriteFault::Enabled();
 		const auto wf_read_begin = wf_threads ? FrameTiming::SteadyNowNs() : int64_t {0};
+		// S570: the CP's read faults split by reader (the SRT walker's loads, which KYTY_RF_GPU_PATCH can defer, and the rest) with their wait.
+		const bool rf_cp_read   = on_gpu_thread && access == PageFaultAccess::Read;
+		const bool rf_walker    = rf_cp_read && ShaderRecompiler::IR::RfGpuPatch::FaultFromWalker();
+		const auto rf_read_begin = rf_cp_read ? FrameTiming::SteadyNowNs() : int64_t {0};
 		const bool downloaded = m_buffer_cache.ReadMemory(fault_vaddr, fault_size);
+		if (rf_cp_read) {
+			const auto ns = FrameTiming::ElapsedNs(rf_read_begin, FrameTiming::SteadyNowNs());
+			FrameTiming::Add(rf_walker ? FrameTiming::Counter::RfGpuWalkerN : FrameTiming::Counter::RfGpuOtherN);
+			FrameTiming::Add(rf_walker ? FrameTiming::Counter::RfGpuWalkerNs : FrameTiming::Counter::RfGpuOtherNs, ns);
+		}
 		if (wf_threads) {
 			WriteFault::Threads().NoteRead(WfThreadId(), WfThreadName(), FrameTiming::ElapsedNs(wf_read_begin, FrameTiming::SteadyNowNs()));
 		}
@@ -269,7 +279,7 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 			static std::atomic<uint64_t> logged {0};
 			if (RfOp::ShouldLog(logged.fetch_add(1, std::memory_order_relaxed), rf_event.flip)) {
 				const auto& ctx = RfOp::FaultCtxRef();
-				rf_event.pc_text = RfOp::ResolvePc(ctx.pc);
+				rf_event.pc_text = rf_walker ? std::string("srt_walker") : RfOp::ResolvePc(ctx.pc); // S570: the walker's code has no symbol
 				uint64_t stack_lo = 0, stack_hi = 0, frames[RfOp::kMaxFrames];
 				if (RfOp::CurrentStackBounds(&stack_lo, &stack_hi)) {
 					rf_event.bt_text = RfOp::FormatBacktrace(frames, RfOp::WalkFrames(ctx, stack_lo, stack_hi, frames));

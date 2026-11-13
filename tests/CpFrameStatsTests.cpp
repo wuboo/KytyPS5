@@ -1,5 +1,5 @@
 // S441: bookkeeping of cp_frame_ns / guest_lead_ns / thread CPU (cpFrameStats.h). Mutants: KYTY_CPFRAME_MUTANT_{PERCENTILE_LOW,MIN_IS_MAX,
-// FIRST_MARK_COUNTS,THREAD_ABSOLUTE}.
+// FIRST_MARK_COUNTS,THREAD_ABSOLUTE,LITE_ABSOLUTE,LITE_NO_RESCAN}. S570: the KYTY_THREAD_CPU=lite pieces (LiteCpu, LitePlan, DeferredFlip).
 
 #include "graphics/presentation/cpFrameStats.h"
 
@@ -64,6 +64,49 @@ int main() {
 		const std::vector<ThreadSample> c {{1, "Thread_Gpu", 2000}, {2, "guest", 5400}};
 		const auto e = cpu.Update(c, "Thread_Gpu");
 		Check(e.cp == 200 && e.other == 0, "a thread that left does not break the deltas");
+	}
+	{
+		// S570: per-flip CP time = differences of the cumulative counter; their sum over a window equals the counter's growth.
+		LiteCpu lite;
+		Check(!lite.Note(5'000'000).has_value(), "lite: the first query is the baseline");
+		uint64_t sum = 0, cumulative = 5'000'000;
+		for (uint64_t flip = 1; flip <= 50; flip++) {
+			cumulative += 40'000'000 + flip * 1000;
+			const auto d = lite.Note(cumulative);
+			Check(d && *d == 40'000'000 + flip * 1000, "lite: the delta of one flip");
+			sum += d ? *d : 0;
+		}
+		Check(sum == cumulative - 5'000'000, "lite: the deltas add up to the counter's growth");
+		const auto back = lite.Note(1000);
+		Check(back && *back == 0, "lite: a counter that went back gives 0, not a wrap");
+	}
+	{
+		LitePlan plan;
+		uint64_t samples = 0, scans = 0;
+		bool     have    = false;
+		for (uint64_t flip = 1; flip <= 1800; flip++) {
+			if (!plan.Sample(flip)) continue;
+			samples++;
+			if (plan.FullScan(flip, have)) {
+				scans++;
+				have = true;
+			}
+		}
+		Check(samples == 180, "lite plan: every 10th flip samples");
+		Check(scans == 4, "lite plan: the list is scanned at the first sample (flip 10), then at flips 600, 1200 and 1800");
+		Check(plan.FullScan(1800, true), "lite plan: flip 1800 rescans");
+		Check(!plan.FullScan(610, true) && plan.FullScan(610, false), "lite plan: no rescan between, except without a list");
+	}
+	{
+		DeferredFlip deferred;
+		Check(!deferred.Take().has_value(), "deferred: nothing marked");
+		deferred.Mark(9, false);
+		Check(!deferred.Take().has_value(), "deferred: a flip that is not due is not taken");
+		deferred.Mark(10, true);
+		deferred.Mark(11, false);
+		const auto t = deferred.Take();
+		Check(t && *t == 10, "deferred: the due flip survives a later flip in the same locked section");
+		Check(!deferred.Take().has_value(), "deferred: taken once");
 	}
 	if (g_failures != 0) {
 		std::fprintf(stderr, "%d failure(s)\n", g_failures);

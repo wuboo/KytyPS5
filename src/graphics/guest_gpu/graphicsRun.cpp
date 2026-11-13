@@ -438,6 +438,7 @@ void GuestGpu::ThreadRun(void* data) {
 	g_gpu_state = gpu;
 	CpPhases::BindCpThread();
 	CpPhases::NameCurrentThread("Thread_Gpu");
+	FrameTiming::RegisterCpThread(); // S570 T1b (KYTY_THREAD_CPU=lite)
 	Common::CpTuning::ApplyToCpThread();
 
 	for (;;) {

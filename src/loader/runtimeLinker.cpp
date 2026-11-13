@@ -23,6 +23,7 @@
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/cleanWalk.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
+#include "graphics/shader/recompiler/ir/passes/rfGpuPatch.h"
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
@@ -956,6 +957,52 @@ bool TryServeCleanWalk(const Common::HostException::ExceptionInfo* info, uint32_
 	return false;
 }
 
+// S570 (KYTY_RF_GPU_PATCH, rfGpuPatch.h): a fault of a walker load whose value only reaches flattened SRT slots, on GPU-dirty bytes, inside
+// RenderExecutor::DispatchIndirect: the load completes with the backing's (stale) dword and the dispatch copies the GPU's bytes into the
+// uploaded slots. Every other case takes the drain as before.
+static_assert(static_cast<uint32_t>(Libs::Graphics::FrameTiming::Counter::RfPatchRejectFullN) -
+                  static_cast<uint32_t>(Libs::Graphics::FrameTiming::Counter::RfPatchRejectNotPatchableN) ==
+              static_cast<uint32_t>(Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch::Reject::Full) -
+                  static_cast<uint32_t>(Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch::Reject::NotPatchable));
+
+bool TryRfGpuPatch(const Common::HostException::ExceptionInfo* info, uint32_t length) {
+	namespace P = Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch;
+	using C     = Libs::Graphics::FrameTiming::Counter;
+	const auto mode = P::EnvMode();
+	if (mode == P::Mode::Off || length == 0) return false;
+	auto& pending = P::ThreadPending();
+	if (!pending.armed) return false;
+	std::array<uint32_t, P::kMaxSlots> slots {};
+	P::FaultQuery                      q;
+	q.mode       = mode;
+	q.armed      = true;
+	q.gpu_thread = Libs::Graphics::GuestGpu::IsGpuThread();
+	q.slots      = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerPatchSlots(info->exception_address, slots, &q.address_base);
+	// The walker's address is r10 (LoadGuest: lea r10, [...]; mov eax, [r10]), dword aligned, so the fault is at r10.
+	const uint64_t address = info->r10;
+	bool           dirty = true, inflight = true, busy = true;
+	if ((address & 3u) == 0 && (info->access_violation_vaddr & ~uint64_t {3}) == address) {
+		q.queried = Libs::LibKernel::Memory::QueryGuestFaultBytes(address, 4, &dirty, &inflight, &busy) && !busy;
+	}
+	q.dirty    = dirty;
+	q.inflight = inflight;
+	q.room     = pending.Room();
+	const auto why = P::Decide(q);
+	if (why != P::Reject::None) {
+		if (why != P::Reject::NotArmed) {
+			Libs::Graphics::FrameTiming::Add(static_cast<C>(static_cast<uint32_t>(C::RfPatchRejectNotPatchableN) + static_cast<uint32_t>(why) -
+			                                               static_cast<uint32_t>(P::Reject::NotPatchable)));
+		}
+		return false;
+	}
+	uint32_t stale = 0;
+	if (!Libs::LibKernel::Memory::TryReadBacking(address, &stale, sizeof(stale))) return false;
+	if (!pending.Add(address, stale, std::span<const uint32_t>(slots.data(), q.slots))) return false;
+	Loader::X64InstructionEmulator::CompleteLoad(info->native_context, length, stale);
+	Libs::Graphics::FrameTiming::Add(C::RfPatchDeferN);
+	return true;
+}
+
 void FinishCleanWalkShadow(uint64_t addr) {
 	auto& pending = CleanWalkPending();
 	if (!pending.armed || pending.addr != addr) {
@@ -1011,6 +1058,11 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 					Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultHandled);
 					return true;
 				}
+				if (TryRfGpuPatch(info, length)) {
+					CleanWalkPending().armed = false;
+					Common::SignalCensus::OnPath(Common::SignalCensus::Path::GpuFaultHandled);
+					return true;
+				}
 			}
 			if (Libs::Graphics::GuestFault::Enabled() && !Libs::Graphics::GuestGpu::IsGpuThread()) {
 				GfEmuLogInstruction(info->native_context, info->access_violation_vaddr, info->exception_address);
@@ -1021,6 +1073,9 @@ static bool KytyExceptionHandler(const Common::HostException::ExceptionInfo& exc
 				return true;
 			}
 		}
+		// S570: who reads a GPU-dirty page on the CP thread (rf_gpu_walker_n / rf_gpu_other_n in RenderContext::HandleFault).
+		Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch::FaultFromWalker() =
+		    access == GpuAccess::Read && Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(info->exception_address) != 0;
 		if (Libs::LibKernel::Memory::HandleGpuFault(access, info->access_violation_vaddr)) {
 			FinishCleanWalkShadow(info->access_violation_vaddr);
 			GfEmuShadowFinish(gf_shadow);

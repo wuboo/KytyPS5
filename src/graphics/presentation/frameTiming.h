@@ -22,6 +22,10 @@ void OnGuestFlip();
 // `[cp-frame] ... p50 p90 p99 max`. NoteGuestLead: the CP picked up a submission that the guest enqueued `ns` earlier (CP thread).
 void NoteCpFlipPrepared();
 void NoteGuestLead(uint64_t ns);
+// S570 T1b (KYTY_THREAD_CPU=lite): RegisterCpThread once on Thread_Gpu (its own handle for the per-flip CPU query); AfterGuestFlipUnlocked
+// right after VideoOut released FlipQueue::m_mutex and the cfg mutexes (the other threads' sample of a due flip runs there, not under them).
+void RegisterCpThread();
+void AfterGuestFlipUnlocked();
 
 // Adds time the GPU command thread spent processing a submission or command.
 void AddGpuBusy(uint64_t ns);
@@ -491,6 +495,18 @@ enum class Counter : uint32_t {
 	EmitThreadWaitNs, EmitThreadWaitHandleNs, EmitThreadWaitConvNs, EmitThreadWaitSubmitNs, EmitThreadWaitWaitNs, EmitThreadWaitOtherNs,
 	EmitThreadWaitFullNs, EmitThreadBusyNs, EmitQueueDepthMax, EmitQueueDepthSum, EmitThreadPassN, EmitThreadSegN, EmitThreadPublishN,
 	EmitThreadStealN, EmitThreadStealSegN, EmitThreadWakeN, EmitThreadParkN,
+	// S570 T1b (KYTY_THREAD_CPU=lite): per-flip CP CPU samples, full thread scans (Toolhelp / task_threads), ns the present thread spent sampling
+	// outside the flip locks.
+	ThreadCpuLiteCpN, ThreadCpuFullScanN, ThreadCpuSampleNs,
+	// S570 K-rf: the CP's read faults by reader (SRT walker loads / the rest) with the ns they waited; KYTY_RF_GPU_PATCH (rfGpuPatch.h): walker
+	// loads deferred, faults not deferred by reason (in RfGpuPatch::Reject order from NotPatchable), slot copies recorded, dispatches patched,
+	// shadow dispatches, shadow mismatches (must stay 0), deferred dwords whose fresh value differed from the stale one.
+	RfGpuWalkerN, RfGpuWalkerNs, RfGpuOtherN, RfGpuOtherNs, RfPatchDeferN, RfPatchRejectNotPatchableN, RfPatchRejectAddressBaseN,
+	RfPatchRejectNotDirtyN, RfPatchRejectInflightN, RfPatchRejectFullN, RfPatchCopyN, RfPatchDispatchN, RfPatchShadowN, RfPatchNeN,
+	RfPatchStaleNeN,
+	// S570 micro (gpuDirtyRanges.h): KYTY_DIRTY_ADD_MEMO adds skipped / done / shadow mismatches; KYTY_DIRTY_QUERY_MEMO answers from the
+	// memo / computed / shadow mismatches. Hits are added in batches (flushed by BufferCache::RunGarbageCollector).
+	DirtyAddMemoHitN, DirtyAddMemoMissN, DirtyAddMemoNeN, DirtyQueryMemoHitN, DirtyQueryMemoMissN, DirtyQueryMemoNeN,
 	Count,
 };
 

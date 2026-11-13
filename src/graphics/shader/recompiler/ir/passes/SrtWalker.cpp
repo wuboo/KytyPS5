@@ -1,4 +1,5 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
+#include "graphics/shader/recompiler/ir/passes/rfGpuPatch.h"
 
 #include "common/abi.h"
 #include "common/assert.h"
@@ -167,11 +168,14 @@ const uint8_t* Scratch(const ResourcePlan& plan) {
 }
 
 thread_local const Xbyak::CodeGenerator* t_running_walker = nullptr;
+thread_local const ResourcePlan*         t_running_plan   = nullptr; // S570 (KYTY_RF_GPU_PATCH): the plan of t_running_walker
 
-// Every guest load is mov eax, [r10] (41 8b 02), so a fault completes it as a zero read.
-void LoadGuest(Xbyak::CodeGenerator& code, const Xbyak::RegExp& address) {
+// Every guest load is mov eax, [r10] (41 8b 02), so a fault completes it as a zero read. Returns the code offset of the mov.
+size_t LoadGuest(Xbyak::CodeGenerator& code, const Xbyak::RegExp& address) {
 	code.lea(code.r10, code.ptr[address]);
+	const size_t at = code.getSize();
 	code.mov(code.eax, code.dword[code.r10]);
+	return at;
 }
 
 class RuntimeValidator {
@@ -433,6 +437,9 @@ private:
 	void EmitNode(uint32_t index);
 	void EmitRead(const Node& node);
 	void EmitStrict(const Node& node);
+	void FindPatchableLoads(std::span<const Operand> conditions, std::span<const std::vector<Operand>> descriptors,
+	                        std::span<const Operand> outputs, std::span<const Operand> reads);
+	void NotePatchSite(size_t code_offset);
 
 	ResourcePlan&                                     m_plan;
 	Xbyak::CodeGenerator&                             m_code;
@@ -444,6 +451,9 @@ private:
 	Xbyak::Label                                      m_ret;
 	uint32_t m_shader_base = 0, m_reach = 0, m_states = 0, m_states_end = 0;
 	uint32_t m_user_data = 0, m_captures = 0;
+	// S570 (KYTY_RF_GPU_PATCH): per node, the flat slots of a load nothing else uses (empty: not patchable); the node being emitted.
+	std::vector<std::vector<uint32_t>> m_patch_slots;
+	uint32_t                           m_emitting = UINT32_MAX;
 };
 
 void WalkerCompiler::AddOutput(Value value, uint32_t gate) {
@@ -782,6 +792,7 @@ void WalkerCompiler::EmitNode(uint32_t index) {
 	auto&       c    = m_code;
 	auto&       node = m_nodes[index];
 	const auto& args = node.args;
+	m_emitting       = index;
 	c.L(node.label);
 	c.cmp(c.byte[c.rdx + node.state], 0);
 	c.jne(m_ret, Near);
@@ -933,7 +944,7 @@ void WalkerCompiler::EmitRead(const Node& node) {
 			c.mov(c.rcx, c.rax);
 			c.shr(c.rcx, 48);
 			c.jnz(m_ret, Near);
-			LoadGuest(c, c.rax);
+			NotePatchSite(LoadGuest(c, c.rax));
 		} else {
 			Load(c.r11, args[1]);
 			c.shr(c.r11d, 16);
@@ -963,7 +974,7 @@ void WalkerCompiler::EmitRead(const Node& node) {
 			c.lea(c.r11, c.ptr[c.r9 + static_cast<size_t>(immediate) + 4u]);
 			c.cmp(c.r11, c.rcx);
 			c.ja(zero, Near);
-			LoadGuest(c, c.rax + c.r9 + static_cast<size_t>(immediate));
+			NotePatchSite(LoadGuest(c, c.rax + c.r9 + static_cast<size_t>(immediate)));
 		}
 		++m_captures;
 		c.mov(c.qword[c.r8], c.r10);
@@ -1217,6 +1228,7 @@ void WalkerCompiler::Compile(std::span<const Value> values) {
 	}
 	for (const auto value: m_outputs) outputs.push_back(Evaluate(value, 0).operand);
 	Layout();
+	if (resources) FindPatchableLoads(conditions, descriptors, outputs, reads);
 
 	Xbyak::Label pass, fail, reset;
 	c.mov(c.qword[c.rdx + m_shader_base], c.rcx);
@@ -1364,9 +1376,70 @@ void WalkerCompiler::Compile(std::span<const Value> values) {
 	EXIT_IF(Xbyak::GetError() != 0);
 }
 
+// S570 (KYTY_RF_GPU_PATCH, rfGpuPatch.h): the walker graph as RfGpuPatch::GraphNode, the roots the CPU reads after the walk, and the node
+// each flat slot stores. A load that only reaches flat slots gets them in m_patch_slots (as flattened SRT dword indices).
+void WalkerCompiler::FindPatchableLoads(std::span<const Operand> conditions, std::span<const std::vector<Operand>> descriptors,
+                                        std::span<const Operand> outputs, std::span<const Operand> reads) {
+	namespace P = RfGpuPatch;
+	m_patch_slots.assign(m_nodes.size(), {});
+	// An evaluated control Phi can restart the walk (reset): a load may then run twice, the second time from another address, and the
+	// pending entry of the first run would overwrite the slot with the wrong bytes. Such plans keep the drain.
+	for (uint32_t index = 0; index < m_nodes.size(); ++index) {
+		const auto& node = m_nodes[index];
+		if (node.inst->GetOpcode() == ValueOpcode::Phi && node.result == Operand {Kind::Node, index}) return;
+	}
+	std::vector<P::GraphNode> graph(m_nodes.size());
+	for (uint32_t index = 0; index < m_nodes.size(); ++index) {
+		const auto& node = m_nodes[index];
+		auto&       g    = graph[index];
+		for (const auto& arg: node.args) {
+			if (arg.kind == Kind::Node) g.deps.push_back(static_cast<uint32_t>(arg.value));
+		}
+		const bool self = node.result == Operand {Kind::Node, index};
+		if (!self && node.result.kind == Kind::Node) g.deps.push_back(static_cast<uint32_t>(node.result.value));
+		const auto op = node.inst->GetOpcode();
+		g.read        = op == ValueOpcode::LoadAddressU32 || op == ValueOpcode::ReadConstBuffer || op == ValueOpcode::LoadBufferU32;
+		// EmitRead loads guest memory only when it has address operands (a vector load whose only operand is its guard does not).
+		g.emits_load = g.read && self && (op == ValueOpcode::LoadBufferU32 ? node.args.size() > 1 : !node.args.empty());
+		g.cyclic     = node.referenced;
+	}
+	std::vector<uint32_t> structural;
+	const auto            root = [&](const Operand& operand) {
+        if (operand.kind == Kind::Node) structural.push_back(static_cast<uint32_t>(operand.value));
+	};
+	for (const auto& operand: conditions) root(operand);
+	for (const auto& words: descriptors) {
+		for (const auto& operand: words) root(operand);
+	}
+	for (const auto& operand: outputs) root(operand);
+	std::vector<uint32_t> flat(reads.size(), UINT32_MAX);
+	for (size_t slot = 0; slot < reads.size(); ++slot) {
+		if (reads[slot].kind == Kind::Node) flat[slot] = static_cast<uint32_t>(reads[slot].value);
+	}
+	const auto patchable = P::PatchableLoads(graph, structural, flat);
+	for (size_t slot = 0; slot < reads.size(); ++slot) {
+		const auto node = flat[slot];
+		if (node < patchable.size() && patchable[node]) m_patch_slots[node].push_back(m_plan.srt_reads[slot].flat_offset);
+	}
+	for (auto& slots: m_patch_slots) {
+		if (slots.size() > P::kMaxSlots) slots.clear(); // too many slots for one pending entry: drain as before
+	}
+}
+
+void WalkerCompiler::NotePatchSite(size_t code_offset) {
+	if (m_emitting >= m_patch_slots.size() || m_patch_slots[m_emitting].empty()) return;
+	const auto& slots = m_patch_slots[m_emitting];
+	m_plan.srt_patch_sites.push_back({.code_offset = static_cast<uint32_t>(code_offset),
+	                                  .slot_begin  = static_cast<uint32_t>(m_plan.srt_patch_slots.size()),
+	                                  .slot_count  = static_cast<uint32_t>(slots.size())});
+	m_plan.srt_patch_slots.insert(m_plan.srt_patch_slots.end(), slots.begin(), slots.end());
+}
+
 } // namespace
 
 void CompileSrtWalker(ResourcePlan& plan, std::span<const Value> values) {
+	plan.srt_patch_sites.clear();
+	plan.srt_patch_slots.clear();
 	plan.srt_code = std::make_unique<Xbyak::CodeGenerator>(4096, Xbyak::AutoGrow);
 	WalkerCompiler(plan, *plan.srt_code).Compile(values);
 }
@@ -1378,9 +1451,11 @@ bool WalkSrt(const ResourcePlan& plan, const SrtRuntime& runtime, std::vector<ui
 	using Walker = const uint64_t* KYTY_SYSV_ABI (*)(const uint32_t*, uint32_t*, uint64_t*, uint64_t);
 	auto& srt = plan.scratch().srt;
 	t_running_walker = plan.srt_code.get();
+	t_running_plan   = &plan;
 	const auto* end = plan.srt_code->getCode<Walker>()(runtime.user_data.data(), flat.data(),
 	                                                     srt.data(), runtime.shader_base);
 	t_running_walker = nullptr;
+	t_running_plan   = nullptr;
 	if (end == nullptr) return false;
 	if (reads != nullptr) {
 		for (auto* read = srt.data() + plan.srt_captures / 8u; read != end; ++read)
@@ -1454,6 +1529,24 @@ uint32_t SrtWalkerWorkerFaultLength(uint64_t rip) {
 	const auto length = SrtWalkerLoadLength(rip);
 	if (length != 0) ++t_worker_faults;
 	return length;
+}
+
+uint32_t SrtWalkerPatchSlots(uint64_t rip, std::span<uint32_t> slots, bool* address_base) {
+	*address_base = false;
+	if (t_running_walker == nullptr || t_running_plan == nullptr || SrtWalkerLoadLength(rip) == 0) return 0;
+	const auto  offset = rip - reinterpret_cast<uint64_t>(t_running_walker->getCode());
+	const auto& sites  = t_running_plan->srt_patch_sites;
+	const auto  it     = std::lower_bound(sites.begin(), sites.end(), offset,
+	                                      [](const ResourcePlan::SrtPatchSite& site, uint64_t at) { return site.code_offset < at; });
+	if (it == sites.end() || it->code_offset != offset || it->slot_count > slots.size()) return 0;
+	for (uint32_t i = 0; i < it->slot_count; ++i) {
+		const auto slot = t_running_plan->srt_patch_slots[it->slot_begin + i];
+		slots[i]        = slot;
+		for (const auto& base: t_running_plan->info.address_bases) {
+			if (base[0] == slot || base[1] == slot) *address_base = true;
+		}
+	}
+	return it->slot_count;
 }
 
 uint32_t SrtWalkerLoadLength(uint64_t rip) {

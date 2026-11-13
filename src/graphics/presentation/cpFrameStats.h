@@ -8,10 +8,15 @@
 //   PerFlipMin   the smallest value noted since the last flip: guest lead = (CP picks up a submission) - (the guest enqueued it); its minimum per
 //                flip is the slack of the guest, the time it could have been late without the CP idling.
 //   ThreadCpu    per-thread CPU time deltas between two snapshots of the process threads, split into the CP thread and the others by name.
+//   LiteCpu      S570 (KYTY_THREAD_CPU=lite): the CP thread's CPU time per flip from one cheap query of its own counter (delta between flips).
+//   LitePlan     S570: which flips sample the other threads (every 10th) and which also rescan the thread list (every 600th, or no list yet).
+//   DeferredFlip S570: the flip that is due a sample, noted under the flip locks and taken after they are released (no syscall under a lock).
 // Mutants (KYTY_CPFRAME_MUTANT_*): PERCENTILE_LOW (p99 reads one rank too low), MIN_IS_MAX (PerFlipMin keeps the largest), FIRST_MARK_COUNTS (the first mark
-// gives an interval from time 0), THREAD_ABSOLUTE (ThreadCpu reports the cumulative time, not the delta).
+// gives an interval from time 0), THREAD_ABSOLUTE (ThreadCpu reports the cumulative time, not the delta), LITE_ABSOLUTE (LiteCpu reports the cumulative
+// time), LITE_NO_RESCAN (the thread list is scanned once and never again).
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -133,6 +138,55 @@ public:
 
 private:
 	std::unordered_map<uint64_t, uint64_t> m_last;
+};
+
+class LiteCpu {
+public:
+	// The CPU time of the thread since the previous call; nothing on the first call; 0 when the counter went back (a new handle).
+	std::optional<uint64_t> Note(uint64_t cpu_ns) {
+		std::optional<uint64_t> delta;
+#ifdef KYTY_CPFRAME_MUTANT_LITE_ABSOLUTE
+		delta = cpu_ns;
+#else
+		if (m_have) delta = cpu_ns >= m_last ? cpu_ns - m_last : 0;
+#endif
+		m_last = cpu_ns;
+		m_have = true;
+		return delta;
+	}
+
+private:
+	uint64_t m_last = 0;
+	bool     m_have = false;
+};
+
+struct LitePlan {
+	uint64_t every      = 10;
+	uint64_t full_every = 600;
+	[[nodiscard]] bool Sample(uint64_t flip) const { return every != 0 && flip % every == 0; }
+	[[nodiscard]] bool FullScan(uint64_t flip, bool have_list) const {
+#ifdef KYTY_CPFRAME_MUTANT_LITE_NO_RESCAN
+		return !have_list;
+#else
+		return !have_list || (full_every != 0 && flip % full_every == 0);
+#endif
+	}
+};
+
+class DeferredFlip {
+public:
+	// Under the flip locks: remember the flip when it is due a sample (several flips in one locked section keep the latest due one).
+	void Mark(uint64_t flip, bool due) {
+		if (due) m_flip.store(flip, std::memory_order_release);
+	}
+	// After the locks: the due flip, once.
+	std::optional<uint64_t> Take() {
+		const auto flip = m_flip.exchange(0, std::memory_order_acq_rel);
+		return flip != 0 ? std::optional<uint64_t>(flip) : std::nullopt;
+	}
+
+private:
+	std::atomic<uint64_t> m_flip {0};
 };
 
 } // namespace Libs::Graphics::CpFrameStats

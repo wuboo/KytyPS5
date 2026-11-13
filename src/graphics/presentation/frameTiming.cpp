@@ -809,6 +809,30 @@ constexpr const char* kCounterNames[] = {
     "emit_thread_steal_seg_n",
     "emit_thread_wake_n",
     "emit_thread_park_n",
+    "thread_cpu_lite_cp_n",
+    "thread_cpu_full_scan_n",
+    "thread_cpu_sample_ns",
+    "rf_gpu_walker_n",
+    "rf_gpu_walker_ns",
+    "rf_gpu_other_n",
+    "rf_gpu_other_ns",
+    "rf_patch_defer_n",
+    "rf_patch_reject_not_patchable_n",
+    "rf_patch_reject_address_base_n",
+    "rf_patch_reject_not_dirty_n",
+    "rf_patch_reject_inflight_n",
+    "rf_patch_reject_full_n",
+    "rf_patch_copy_n",
+    "rf_patch_dispatch_n",
+    "rf_patch_shadow_n",
+    "rf_patch_ne_n",
+    "rf_patch_stale_ne_n",
+    "dirty_add_memo_hit_n",
+    "dirty_add_memo_miss_n",
+    "dirty_add_memo_ne_n",
+    "dirty_query_memo_hit_n",
+    "dirty_query_memo_miss_n",
+    "dirty_query_memo_ne_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
@@ -984,7 +1008,58 @@ void ReportCpFrame(uint64_t from, uint64_t to) {
 	     static_cast<unsigned long long>(st.leads.Percentile(1) / 1000));
 }
 
+// S570 T1b: KYTY_THREAD_CPU unset / anything but 0 and lite = Full (the S467 snapshot every 10th flip, inside the flip locks);
+// 0 = Off; lite = the CP's own counter once per flip (NoteCpFlipPrepared) plus the other threads every 10th flip through cached handles,
+// after the flip locks are released (AfterGuestFlipUnlocked), the thread list rescanned every 600th flip.
+enum class ThreadCpuMode : uint8_t { Off, Full, Lite };
+
+ThreadCpuMode ThreadCpuEnvMode() {
+	static const ThreadCpuMode mode = [] {
+		const char* v = std::getenv("KYTY_THREAD_CPU");
+		if (v == nullptr) return ThreadCpuMode::Full;
+		if (std::string_view(v) == "lite") return ThreadCpuMode::Lite;
+		return v[0] != '0' ? ThreadCpuMode::Full : ThreadCpuMode::Off;
+	}();
+	return mode;
+}
+
+struct ThreadCpuLiteState {
+	CpFrameStats::LiteCpu      cp;       // CP thread only (NoteCpFlipPrepared)
+	CpFrameStats::LitePlan     plan;
+	CpFrameStats::DeferredFlip deferred; // marked under the flip locks, taken after them
+	std::atomic<uint64_t>      cp_handle {0};
+#if defined(__APPLE__)
+	std::atomic<uint32_t>      cp_port {0};
+#endif
+} g_thread_lite;
+
+uint64_t LiteCpNs() {
+#if defined(_WIN32)
+	return ThreadCpuWin::ThreadCpuNs(reinterpret_cast<void*>(g_thread_lite.cp_handle.load(std::memory_order_acquire)));
+#elif defined(__APPLE__)
+	const auto port = static_cast<mach_port_t>(g_thread_lite.cp_port.load(std::memory_order_acquire));
+	if (port == 0) return 0;
+	thread_basic_info_data_t basic {};
+	mach_msg_type_number_t   count = THREAD_BASIC_INFO_COUNT;
+	if (thread_info(port, THREAD_BASIC_INFO, reinterpret_cast<thread_info_t>(&basic), &count) != KERN_SUCCESS) return 0;
+	const auto us = [](const time_value_t& t) { return static_cast<uint64_t>(t.seconds) * 1000000ull + static_cast<uint64_t>(t.microseconds); };
+	return (us(basic.user_time) + us(basic.system_time)) * 1000ull;
+#else
+	return 0;
+#endif
+}
+
 } // namespace
+
+void RegisterCpThread() {
+	if (ThreadCpuEnvMode() != ThreadCpuMode::Lite) return;
+#if defined(_WIN32)
+	(void)ThreadCpuWin::NsPerCycle(); // the 50 ms calibration here, at the CP's start, not later under a flip lock
+	g_thread_lite.cp_handle.store(reinterpret_cast<uint64_t>(ThreadCpuWin::OpenCurrentThread()), std::memory_order_release);
+#elif defined(__APPLE__)
+	g_thread_lite.cp_port.store(static_cast<uint32_t>(pthread_mach_thread_np(pthread_self())), std::memory_order_release);
+#endif
+}
 
 void NoteGuestLead(uint64_t ns) {
 	g_cp_frame.lead_min.Note(ns);
@@ -992,6 +1067,13 @@ void NoteGuestLead(uint64_t ns) {
 
 void NoteCpFlipPrepared() {
 	auto& st = g_cp_frame;
+	if (ThreadCpuEnvMode() == ThreadCpuMode::Lite) {
+		// S570 T1b: one query of the CP thread's own counter per flip (thread_cpu_cp_ns per flip, no snapshot).
+		if (const auto delta = g_thread_lite.cp.Note(LiteCpNs())) {
+			Add(Counter::ThreadCpuCpNs, *delta);
+			Add(Counter::ThreadCpuLiteCpN);
+		}
+	}
 	if (const auto lead = st.lead_min.TakeFlip()) {
 		Add(Counter::GuestLeadN);
 		Add(Counter::GuestLeadMinNs, *lead);
@@ -1044,44 +1126,17 @@ std::vector<CpFrameStats::ThreadSample> SnapshotThreads() {
 }
 #endif
 
-// KYTY_THREAD_CPU=0 switches the snapshots off (default on: one task_threads + 2 thread_info per thread per guest flip; on Windows one
-// Toolhelp snapshot + OpenThread/QueryThreadCycleTime per thread every kThreadCpuEvery-th flip, the deltas are between snapshots so the sums stay exact).
-void SampleThreadCpu(uint64_t flip) {
-#if defined(__APPLE__) || defined(_WIN32)
-	static const bool on = [] {
-		const char* v = std::getenv("KYTY_THREAD_CPU");
-		return v == nullptr || v[0] != '0';
-	}();
-	if (!on) return;
-#if defined(_WIN32)
-	constexpr uint64_t kThreadCpuEvery = 10;
-	if (flip % kThreadCpuEvery != 0) return;
-	constexpr uint64_t kWindowSamples = 10;
-#else
-	constexpr uint64_t kWindowSamples = 100;
-#endif
-	static std::mutex                                           mutex;
-	static CpFrameStats::ThreadCpu                              tracker;
-	static std::unordered_map<std::string, uint64_t>            window;
-	static uint64_t                                             window_from = 0, window_n = 0;
-	std::unique_lock                                            lock(mutex, std::try_to_lock);
-	if (!lock.owns_lock()) return;
-#if defined(_WIN32)
-	const auto snapshot = ThreadCpuWin::SnapshotThreads();
-#else
-	const auto snapshot = SnapshotThreads();
-#endif
-	if (snapshot.empty()) return;
-	const auto delta = tracker.Update(snapshot, "Thread_Gpu");
-	Add(Counter::ThreadCpuCpNs, delta.cp);
-	Add(Counter::ThreadCpuOtherNs, delta.other);
-	Add(Counter::ThreadCpuN);
-	for (const auto& [name, ns]: delta.by_name) window[name] += ns;
-	window_n++;
-	if (window_n >= kWindowSamples) {
-		// ms per flip: every sample spans (flip - window_from) / window_n flips
-		const double flips = static_cast<double>(std::max<uint64_t>(1, flip - window_from));
-		std::vector<std::pair<std::string, uint64_t>> top(window.begin(), window.end());
+// The [thread-cpu] line: ms per flip of the largest threads over `samples` samples.
+struct ThreadWindow {
+	std::unordered_map<std::string, uint64_t> by_name;
+	uint64_t                                  from = 0, n = 0;
+
+	void Note(const std::vector<std::pair<std::string, uint64_t>>& delta, uint64_t flip, uint64_t samples) {
+		for (const auto& [name, ns]: delta) by_name[name] += ns;
+		if (++n < samples) return;
+		// ms per flip: every sample spans (flip - from) / n flips
+		const double flips = static_cast<double>(std::max<uint64_t>(1, flip - from));
+		std::vector<std::pair<std::string, uint64_t>> top(by_name.begin(), by_name.end());
 		std::sort(top.begin(), top.end(), [](const auto& a, const auto& b) { return a.second != b.second ? a.second > b.second : a.first < b.first; });
 		std::string line;
 		for (size_t i = 0; i < top.size() && i < 8; i++) {
@@ -1094,22 +1149,92 @@ void SampleThreadCpu(uint64_t flip) {
 		if (const char* fl = std::getenv("KYTY_FRAME_LOG"); fl != nullptr && fl[0] != 0) {
 			const std::string path = std::string(fl) + ".thread-cpu.txt";
 			if (FILE* f = std::fopen(path.c_str(), "ab")) {
-				std::fprintf(f, "[thread-cpu] flips=%llu-%llu ms_per_flip:%s\n", static_cast<unsigned long long>(window_from), static_cast<unsigned long long>(flip), line.c_str());
+				std::fprintf(f, "[thread-cpu] flips=%llu-%llu ms_per_flip:%s\n", static_cast<unsigned long long>(from), static_cast<unsigned long long>(flip), line.c_str());
 				std::fclose(f);
 			}
 		}
 #endif
-		LOGF("[thread-cpu] flips=%llu-%llu ms_per_flip:%s\n", static_cast<unsigned long long>(window_from), static_cast<unsigned long long>(flip), line.c_str());
-		window.clear();
-		window_n    = 0;
-		window_from = flip;
+		LOGF("[thread-cpu] flips=%llu-%llu ms_per_flip:%s\n", static_cast<unsigned long long>(from), static_cast<unsigned long long>(flip), line.c_str());
+		by_name.clear();
+		n    = 0;
+		from = flip;
 	}
+};
+
+// KYTY_THREAD_CPU=0 switches the snapshots off (default on: one task_threads + 2 thread_info per thread per guest flip; on Windows one
+// Toolhelp snapshot + OpenThread/QueryThreadCycleTime per thread every kThreadCpuEvery-th flip, the deltas are between snapshots so the sums stay exact).
+void SampleThreadCpu(uint64_t flip) {
+#if defined(__APPLE__) || defined(_WIN32)
+	if (ThreadCpuEnvMode() != ThreadCpuMode::Full) return; // S570: lite samples in NoteCpFlipPrepared / AfterGuestFlipUnlocked
+#if defined(_WIN32)
+	constexpr uint64_t kThreadCpuEvery = 10;
+	if (flip % kThreadCpuEvery != 0) return;
+	constexpr uint64_t kWindowSamples = 10;
+#else
+	constexpr uint64_t kWindowSamples = 100;
+#endif
+	static std::mutex                                           mutex;
+	static CpFrameStats::ThreadCpu                              tracker;
+	static ThreadWindow                                         window;
+	std::unique_lock                                            lock(mutex, std::try_to_lock);
+	if (!lock.owns_lock()) return;
+#if defined(_WIN32)
+	const auto snapshot = ThreadCpuWin::SnapshotThreads();
+#else
+	const auto snapshot = SnapshotThreads();
+#endif
+	if (snapshot.empty()) return;
+	const auto delta = tracker.Update(snapshot, "Thread_Gpu");
+	Add(Counter::ThreadCpuCpNs, delta.cp);
+	Add(Counter::ThreadCpuOtherNs, delta.other);
+	Add(Counter::ThreadCpuN);
+	window.Note(delta.by_name, flip, kWindowSamples);
+#else
+	(void)flip;
+#endif
+}
+
+// S570 T1b (KYTY_THREAD_CPU=lite): the other threads, outside the flip locks (present thread). The CP's own time comes from
+// NoteCpFlipPrepared, so delta.cp is dropped here (it would count the CP twice).
+void SampleThreadCpuLite(uint64_t flip) {
+#if defined(__APPLE__) || defined(_WIN32)
+	static std::mutex              mutex;
+	static CpFrameStats::ThreadCpu tracker;
+	static ThreadWindow            window;
+#if defined(_WIN32)
+	static ThreadCpuWin::ThreadList list;
+#endif
+	std::unique_lock lock(mutex, std::try_to_lock);
+	if (!lock.owns_lock()) return;
+	const auto begin = SteadyNowNs();
+#if defined(_WIN32)
+	if (g_thread_lite.plan.FullScan(flip, !list.Empty())) {
+		list.Rescan();
+		Add(Counter::ThreadCpuFullScanN);
+	}
+	const auto snapshot = list.Sample();
+#else
+	const auto snapshot = SnapshotThreads();
+#endif
+	if (!snapshot.empty()) {
+		const auto delta = tracker.Update(snapshot, "Thread_Gpu");
+		Add(Counter::ThreadCpuOtherNs, delta.other);
+		Add(Counter::ThreadCpuN);
+		window.Note(delta.by_name, flip, 10);
+	}
+	Add(Counter::ThreadCpuSampleNs, ElapsedNs(begin, SteadyNowNs()));
 #else
 	(void)flip;
 #endif
 }
 
 } // namespace
+
+void AfterGuestFlipUnlocked() {
+	if (ThreadCpuEnvMode() != ThreadCpuMode::Lite) return;
+	if (const auto flip = g_thread_lite.deferred.Take()) SampleThreadCpuLite(*flip);
+}
+
 
 namespace {
 
@@ -1135,6 +1260,7 @@ void DumpTreeReject(uint64_t from, uint64_t to) {
 void OnGuestFlip() {
 	const auto flip = g_guest_flips.fetch_add(1, std::memory_order_relaxed) + 1;
 	SampleThreadCpu(flip);
+	if (ThreadCpuEnvMode() == ThreadCpuMode::Lite) g_thread_lite.deferred.Mark(flip, g_thread_lite.plan.Sample(flip)); // S570: sampled after the locks
 	if (flip % 100 == 0) DumpTreeReject(flip - 100, flip);
 	Common::MemEvents::SetCompletedFlips(flip);
 	// S276: KYTY_DIAG_SIGCENSUS=1 dumps the RIP histogram every 600 guest flips (and at exit, see ProgramExitHandler).

@@ -27,6 +27,7 @@
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+#include "graphics/shader/recompiler/ir/passes/rfGpuPatch.h"
 #include "graphics/shader/shader.h"
 #include "kernel/eventQueue.h"
 #include "kernel/memory.h"
@@ -553,6 +554,78 @@ void RenderExecutor::DispatchDirect(CommandBuffer& buffer, uint32_t thread_group
 	ResetBindings();
 }
 
+// S570 (KYTY_RF_GPU_PATCH, rfGpuPatch.h) shadow: drain each deferred dword, walk the program again with the fresh bytes and compare the
+// snapshots: equal except the patched slots, which must now hold the fresh dwords (rf_patch_ne_n otherwise). The second walk's snapshot is
+// the one the dispatch uses, so shadow never draws with a stale value.
+static bool RfPatchShadow(RenderContext& context, ShaderComputeInputInfo& input_info, const HW::ComputeShaderInfo& cs_regs) {
+	namespace P = ShaderRecompiler::IR::RfGpuPatch;
+	auto&       pending = P::ThreadPending();
+	const auto* module  = input_info.stage.module;
+	const auto  first   = *input_info.stage.resources; // copy: the second walk rewrites the program's snapshot
+	std::array<uint32_t, P::kMaxEntries> fresh {};
+	for (uint32_t i = 0; i < pending.count; ++i) {
+		const auto& e = pending.entries[i];
+		(void)context.GetBufferCache().ReadMemory(e.address, sizeof(uint32_t));
+		if (!LibKernel::Memory::TryReadBacking(e.address, &fresh[i], sizeof(uint32_t))) fresh[i] = e.stale;
+		if (fresh[i] != e.stale) FrameTiming::Add(FrameTiming::Counter::RfPatchStaleNeN);
+	}
+	FrameTiming::Add(FrameTiming::Counter::RfPatchShadowN);
+	if (!context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) {
+		FrameTiming::Add(FrameTiming::Counter::RfPatchNeN);
+		return false;
+	}
+	const auto& second = *input_info.stage.resources;
+	bool        agree  = input_info.stage.module == module && first.buffers == second.buffers && first.images == second.images &&
+	             first.samplers == second.samplers && first.uniform_fill == second.uniform_fill &&
+	             first.specialization_reads == second.specialization_reads &&
+	             P::SnapshotsAgree(first.flattened_srt, second.flattened_srt, pending);
+	for (uint32_t i = 0; agree && i < pending.count; ++i) {
+		const auto& e = pending.entries[i];
+		for (uint32_t k = 0; k < e.slot_count; ++k) {
+			agree &= e.slots[k] < second.flattened_srt.size() && second.flattened_srt[e.slots[k]] == fresh[i];
+		}
+	}
+	if (!agree) {
+		FrameTiming::Add(FrameTiming::Counter::RfPatchNeN);
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 16) {
+			LOGF("[rf-patch] shadow: the walk with the fresh bytes differs beyond the patched slots (shader=0x%016" PRIx64 " entries=%u)\n",
+			     module != nullptr ? static_cast<uint64_t>(module->info.shader_hash) : 0ull, pending.count);
+		}
+	}
+	return true;
+}
+
+// S570: the GPU bytes of each deferred dword into its slots of the uploaded flattened SRT, before the dispatch reads them.
+template <class Command>
+static void RfPatchRecord(const Command& vk_buffer, std::span<const std::pair<vk::Buffer, uint64_t>> sources,
+                          const vk::DescriptorBufferInfo& flat) {
+	namespace P = ShaderRecompiler::IR::RfGpuPatch;
+	const auto& pending = P::ThreadPending();
+	vk::MemoryBarrier before {};
+	before.srcAccessMask = vk::AccessFlagBits::eShaderWrite | vk::AccessFlagBits::eTransferWrite;
+	before.dstAccessMask = vk::AccessFlagBits::eTransferRead;
+	vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer, {}, 1, &before, 0, nullptr, 0,
+	                          nullptr);
+	uint32_t copies = 0;
+	for (uint32_t i = 0; i < pending.count && i < sources.size(); ++i) {
+		const auto& e = pending.entries[i];
+		std::array<vk::BufferCopy, P::kMaxSlots> regions {};
+		for (uint32_t k = 0; k < e.slot_count; ++k) {
+			regions[k] = vk::BufferCopy(sources[i].second, flat.offset + uint64_t {e.slots[k]} * sizeof(uint32_t), sizeof(uint32_t));
+		}
+		vk_buffer.copyBuffer(sources[i].first, flat.buffer, e.slot_count, regions.data());
+		copies += e.slot_count;
+	}
+	vk::MemoryBarrier after {};
+	after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+	after.dstAccessMask = vk::AccessFlagBits::eShaderRead | vk::AccessFlagBits::eUniformRead;
+	vk_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eComputeShader, {}, 1, &after, 0, nullptr, 0,
+	                          nullptr);
+	FrameTiming::Add(FrameTiming::Counter::RfPatchCopyN, copies);
+	FrameTiming::Add(FrameTiming::Counter::RfPatchDispatchN);
+}
+
 void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr, uint32_t mode,
                                       bool async_compute) {
 	CpPhases::Scope dispatch_phase(CpPhases::Phase::Dispatch);
@@ -582,7 +655,15 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	input_info.async_compute = async_compute;
 	input_info.indirect_args_address = args_addr;
 	m_context.GetImageHeap().BeginDraw();
+	// S570 (KYTY_RF_GPU_PATCH): the walks of this program may defer GPU-dirty dwords that only reach flattened SRT slots (rfGpuPatch.h).
+	namespace RfPatch      = ShaderRecompiler::IR::RfGpuPatch;
+	const auto rf_patch    = RfPatch::EnvMode();
+	RfPatch::Scope rf_scope(rf_patch != RfPatch::Mode::Off);
 	if (!m_context.GetPipelineCache().GetComputeProgram(cs_regs, input_info)) return;
+	rf_scope.Disarm();
+	const auto& rf_pending = RfPatch::ThreadPending();
+	const bool  rf_patched = rf_patch != RfPatch::Mode::Off && rf_pending.count != 0;
+	if (rf_patched && rf_patch == RfPatch::Mode::Shadow && !RfPatchShadow(m_context, input_info, cs_regs)) return;
 	buffer.EndRendering();
 	auto& pipeline = m_context.GetPipelineCache().GetComputePipeline(input_info);
 	auto& bindings = m_compute_bindings;
@@ -600,10 +681,24 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 		m_context.GetImageHeap().Rebind(*this);
 	}
 	RebindImages(bindings);
+	// S570: the patch sources first (a buffer they create or merge cannot replace the arguments' buffer afterwards), then again after the
+	// arguments (they exist now: no merge).
+	std::array<std::pair<vk::Buffer, uint64_t>, RfPatch::kMaxEntries> rf_sources {};
+	if (rf_patched) {
+		for (uint32_t i = 0; i < rf_pending.count; ++i) {
+			(void)m_context.GetBufferCache().ObtainBuffer(rf_pending.entries[i].address, sizeof(uint32_t), false);
+		}
+	}
 	// Acquiring arguments can merge cache buffers; finalize shader bindings afterward.
 	const auto [args_buffer, args_offset] = m_context.GetBufferCache().ObtainBuffer(
 	    args_addr, sizeof(vk::DispatchIndirectCommand), false);
 	EXIT_IF((args_offset & 3u) != 0);
+	if (rf_patched) {
+		for (uint32_t i = 0; i < rf_pending.count; ++i) {
+			const auto [source, offset] = m_context.GetBufferCache().ObtainBuffer(rf_pending.entries[i].address, sizeof(uint32_t), false);
+			rf_sources[i]               = {source->Handle(), offset};
+		}
+	}
 	RebindBuffers(bindings);
 	{
 		KYTY_CP_SITE(DispDesc);
@@ -612,6 +707,10 @@ void RenderExecutor::DispatchIndirect(CommandBuffer& buffer, uint64_t args_addr,
 	}
 	KYTY_CP_SITE(DispRecord);
 	const auto vk_buffer = buffer.EmitIfPending(); // S565: as DispatchDirect
+	if (rf_patched) {
+		EXIT_IF(!bindings.flattened_srt.buffer);
+		RfPatchRecord(vk_buffer, std::span(rf_sources.data(), rf_pending.count), bindings.flattened_srt);
+	}
 	const bool storage_writes = HasStorageWrites(input_info, bindings);
 	if (storage_writes) {
 		DispatchWriteHazard(vk_buffer, HasStorageImageWrites(input_info));
