@@ -788,10 +788,14 @@ static void GfEmuLogInstruction(void* native_context, uint64_t fault_vaddr, uint
 		return;
 	}
 	seen[index % 64].store(pc, std::memory_order_relaxed);
-	const auto plan = Loader::GuestReadEmulator::Decode(native_context, fault_vaddr);
-	LOGF("[gf-insn] pc=0x%016" PRIx64 " addr=0x%016" PRIx64 " mnemonic=%s operands=%s size=%u supported=%d why=%u\n", pc, fault_vaddr,
-	     plan.mnemonic[0] != 0 ? plan.mnemonic : "?", plan.operands[0] != 0 ? plan.operands : "-", static_cast<unsigned>(plan.size),
-	     plan.ok ? 1 : 0, static_cast<unsigned>(plan.why));
+	const auto plan = Loader::GuestReadEmulator::Decode(native_context, fault_vaddr, GfEmuOptions()); // S585: as the emulator would decode it
+	// S585: also to stdout (bench runs --printf-direction Silent, which drops LOGF).
+	char line[256];
+	std::snprintf(line, sizeof(line), "[gf-insn] pc=0x%016" PRIx64 " addr=0x%016" PRIx64 " mnemonic=%s operands=%s size=%u supported=%d why=%u\n", pc,
+	              fault_vaddr, plan.mnemonic[0] != 0 ? plan.mnemonic : "?", plan.operands[0] != 0 ? plan.operands : "-",
+	              static_cast<unsigned>(plan.size), plan.ok ? 1 : 0, static_cast<unsigned>(plan.why));
+	LOGF("%s", line);
+	Libs::Graphics::RfOp::WriteStdout(line);
 }
 
 struct GfEmuShadow {
@@ -849,20 +853,34 @@ static bool TryGuestReadEmulation(const Common::HostException::ExceptionInfo* in
 			    vex_logged.fetch_add(1, std::memory_order_relaxed) < 8) {
 				char text[200] = {};
 				(void)DescribeContext(info->native_context, text, sizeof(text));
-				LOGF("[gf-vex-ctx] pc=0x%016" PRIx64 " addr=0x%016" PRIx64 " %s\n", info->exception_address, info->access_violation_vaddr, text);
+				char line[320];
+				std::snprintf(line, sizeof(line), "[gf-vex-ctx] pc=0x%016" PRIx64 " addr=0x%016" PRIx64 " %s\n", info->exception_address,
+				              info->access_violation_vaddr, text);
+				LOGF("%s", line);
+				Libs::Graphics::RfOp::WriteStdout(line);
 			}
 		}
+		// The first 50 of the process, and (S585) every one inside KYTY_DIAG_GF_WINDOW up to 4000, with the flip; also to stdout.
 		static std::atomic<uint32_t> logged {0};
-		if (logged.fetch_add(1, std::memory_order_relaxed) < 50) {
-			LOGF("[gf-emu-fallback] pc=0x%016" PRIx64 " addr=0x%016" PRIx64 " mnemonic=%s operands=%s why=%u\n", info->exception_address,
-			     info->access_violation_vaddr, attempt.plan.mnemonic[0] != 0 ? attempt.plan.mnemonic : "?",
-			     attempt.plan.operands[0] != 0 ? attempt.plan.operands : "-", static_cast<unsigned>(attempt.plan.why));
+		static std::atomic<uint32_t> logged_window {0};
+		const auto flip      = Libs::Graphics::FrameTiming::GuestFlips();
+		const bool in_window = Libs::Graphics::GuestFault::InWindow(flip);
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 50 || (in_window && logged_window.fetch_add(1, std::memory_order_relaxed) < 4000)) {
+			char line[320];
+			std::snprintf(line, sizeof(line), "[gf-emu-fallback] flip=%u pc=0x%016" PRIx64 " addr=0x%016" PRIx64 " size=%u mnemonic=%s operands=%s why=%u bytes_wait=%d\n",
+			              static_cast<uint32_t>(flip), info->exception_address, info->access_violation_vaddr,
+			              static_cast<unsigned>(attempt.plan.size), attempt.plan.mnemonic[0] != 0 ? attempt.plan.mnemonic : "?",
+			              attempt.plan.operands[0] != 0 ? attempt.plan.operands : "-", static_cast<unsigned>(attempt.plan.why),
+			              Libs::Graphics::GuestWait::BytesOn(Libs::Graphics::GuestWait::EnvMode()) ? 1 : 0);
+			LOGF("%s", line);
+			Libs::Graphics::RfOp::WriteStdout(line);
 		}
 		return false;
 	}
 	GwTakeSpinStats();
-	if (attempt.plan.vex_init) {
-		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuVexInitN); // S585
+	if (attempt.plan.vex_init || attempt.plan.vex_hw) {
+		Libs::Graphics::FrameTiming::Add(attempt.plan.vex_init ? Libs::Graphics::FrameTiming::Counter::GfEmuVexInitN
+		                                                       : Libs::Graphics::FrameTiming::Counter::GfEmuVexHwN); // S585
 	}
 	if (mode == Mode::Shadow) {
 		shadow->attempt    = attempt;

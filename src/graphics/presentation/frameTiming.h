@@ -524,11 +524,12 @@ enum class Counter : uint32_t {
 	// banned by the guest page guard, bans it would make with banning off (KYTY_KRF3=inflight), walker faults drained on a banned page, trials
 	// after a ban; guest read faults on a page of a deferred dword and their wait (the guest's side of what the drain used to clean).
 	Krf3InflightDeferN, Krf3PageBanN, Krf3PageWouldBanN, Krf3PageDrainN, Krf3PageTrialN, Krf3GuestPageN, Krf3GuestPageWaitNs,
-	// S585 (KYTY_GUEST_WAIT, guestWait.h): VEX.128 loads served with the AVX component in its init state (Windows); spin queries of the buffer
+	// S585 (KYTY_GUEST_WAIT, guestWait.h): VEX.128 loads served with the AVX component in its init state / with the upper half zeroed in the
+	// hardware register (a CONTEXT without CONTEXT_XSTATE, Windows); spin queries of the buffer
 	// cache state that did not get the lock at once / gave up; byte waits (for the copy of the bytes) and their time, of them with the GPU done,
 	// with a newer page tick (today's wait would have been longer), loads served after one, refused after one (bytes dirty again / still in
 	// flight), in-flight bytes whose copy was not submitted (today's path), shadow mismatches of byte-wait loads.
-	GfEmuVexInitN, GwSpinN, GwSpinBusyN, GwByteWaitN, GwByteWaitNs, GwByteDoneN, GwByteOlderN, GwByteServedN, GwByteRefusedN,
+	GfEmuVexInitN, GfEmuVexHwN, GwSpinN, GwSpinBusyN, GwByteWaitN, GwByteWaitNs, GwByteDoneN, GwByteOlderN, GwByteServedN, GwByteRefusedN,
 	GwByteUnsubmittedN, GwByteShadowNeN,
 	// S585 DIAG U5 (KYTY_DIAG_GUEST_STALE): guest read faults on GPU-dirty / in-flight bytes sampled, backing before != after the drain, of them
 	// in flight (not dirty), the drain left the bytes dirty / in flight (fresh not comparable), the state query gave up.

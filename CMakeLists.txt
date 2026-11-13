@@ -1027,12 +1027,12 @@ foreach(mutant IN ITEMS SUBTRACT_FIRST BLOCKING_QUERY)
 endforeach()
 # S585 KYTY_GUEST_WAIT (guestWait.h): the byte-wait decision, a model of a guest float next to a GPU-written neighbour, guest threads against the
 # CP (the bounded spin loses no write), copy ticks, env parsers, the YMM init-state rule. Mutants (WILL_FAIL): the five KYTY_GUESTWAIT_MUTANT_*
-# and KYTY_GUESTREAD_MUTANT_VEX_INIT_NO_XSTATE.
+# and KYTY_GUESTREAD_MUTANT_VEX_MASK_GUESS.
 add_executable(guest_wait_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GuestWaitTests.cpp")
 target_link_libraries(guest_wait_tests common fmt::fmt)
 target_include_directories(guest_wait_tests PRIVATE ${inc_headers})
 foreach(mutant IN ITEMS GUESTWAIT_MUTANT_INFLIGHT_SERVES GUESTWAIT_MUTANT_CLEAN_WAITS_PAGE GUESTWAIT_MUTANT_UNDONE_SERVES GUESTWAIT_MUTANT_WAITS_NEWEST
-                        GUESTWAIT_MUTANT_BUSY_AS_CLEAN GUESTREAD_MUTANT_VEX_INIT_NO_XSTATE)
+                        GUESTWAIT_MUTANT_BUSY_AS_CLEAN GUESTREAD_MUTANT_VEX_MASK_GUESS)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(guest_wait_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GuestWaitTests.cpp")
 	target_link_libraries(guest_wait_${mutant_lower}_tests common fmt::fmt)
@@ -2218,7 +2218,7 @@ if(BUILD_TESTING)
 	add_test(NAME guest_wait COMMAND $<TARGET_FILE:guest_wait_tests>)
 	set_tests_properties(guest_wait PROPERTIES TIMEOUT 60)
 	foreach(mutant IN ITEMS guestwait_mutant_inflight_serves guestwait_mutant_clean_waits_page guestwait_mutant_undone_serves guestwait_mutant_waits_newest
-	                        guestwait_mutant_busy_as_clean guestread_mutant_vex_init_no_xstate)
+	                        guestwait_mutant_busy_as_clean guestread_mutant_vex_mask_guess)
 		add_test(NAME guest_wait_${mutant} COMMAND $<TARGET_FILE:guest_wait_${mutant}_tests>)
 		set_tests_properties(guest_wait_${mutant} PROPERTIES TIMEOUT 60 WILL_FAIL TRUE)
 	endforeach()

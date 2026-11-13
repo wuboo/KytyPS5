@@ -9,7 +9,7 @@
 //    or before their publish (no write is lost), and a lock held for a short while is waited out;
 //  - the copy ticks of InflightRanges, the env parsers (KYTY_GUEST_WAIT, KYTY_DIAG_GUEST_STALE, KYTY_PRESENT_MODE), the YMM init-state rule.
 // Mutants (WILL_FAIL): KYTY_GUESTWAIT_MUTANT_{INFLIGHT_SERVES, CLEAN_WAITS_PAGE, UNDONE_SERVES, WAITS_NEWEST, BUSY_AS_CLEAN},
-// KYTY_GUESTREAD_MUTANT_VEX_INIT_NO_XSTATE.
+// KYTY_GUESTREAD_MUTANT_VEX_MASK_GUESS.
 
 #include "graphics/host_gpu/renderer/cache/gpuDirtyRanges.h"
 #include "graphics/host_gpu/renderer/cache/guestWait.h"
@@ -391,12 +391,15 @@ static void TestParsers() {
 static void TestYmmh() {
 	using Loader::GuestReadEmulator::ClassifyYmmh;
 	using Loader::GuestReadEmulator::YmmhState;
-	Check(ClassifyYmmh(true, true, true, true, false) == YmmhState::Present, "ymm: AVX bit set, area present");
-	Check(ClassifyYmmh(true, true, false, true, true) == YmmhState::InitZero, "ymm: AVX bit clear in a context with the area: init state");
-	Check(ClassifyYmmh(true, true, false, true, false) == YmmhState::Unknown, "ymm: init state not allowed (KYTY_GUEST_WAIT off)");
-	Check(ClassifyYmmh(true, true, false, false, true) == YmmhState::Unknown, "ymm: no AVX area in the context: unknown");
-	Check(ClassifyYmmh(false, false, false, false, true) == YmmhState::Unknown, "ymm: no extended area at all: unknown (a guess)");
-	Check(ClassifyYmmh(true, false, false, true, true) == YmmhState::Unknown, "ymm: the mask cannot be read: unknown");
+	// (xstate, mask_ok, avx_bit, located, allow, hw_ok)
+	Check(ClassifyYmmh(true, true, true, true, false, false) == YmmhState::Present, "ymm: AVX bit set, area present");
+	Check(ClassifyYmmh(true, true, false, true, true, false) == YmmhState::InitZero, "ymm: AVX bit clear in a context with the area: init state");
+	Check(ClassifyYmmh(true, true, false, true, false, false) == YmmhState::Unknown, "ymm: init state not allowed (KYTY_GUEST_WAIT off)");
+	Check(ClassifyYmmh(true, true, false, false, true, true) == YmmhState::Unknown, "ymm: no AVX area in an extended context: unknown");
+	Check(ClassifyYmmh(true, false, false, true, true, true) == YmmhState::Unknown, "ymm: the mask cannot be read: unknown (a guess)");
+	Check(ClassifyYmmh(false, false, false, false, true, true) == YmmhState::Hardware, "ymm: no extended area: the hardware register");
+	Check(ClassifyYmmh(false, false, false, false, true, false) == YmmhState::Unknown, "ymm: no extended area, no hardware stub: unknown");
+	Check(ClassifyYmmh(false, false, false, false, false, true) == YmmhState::Unknown, "ymm: no extended area, not allowed: unknown");
 }
 
 int main() {

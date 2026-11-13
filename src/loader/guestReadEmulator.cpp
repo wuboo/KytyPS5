@@ -124,6 +124,7 @@ struct Regs {
 	// Upper YMM halves exist only in the AVX layout of the saved context; the size of the saved context says which one the kernel (Rosetta) wrote.
 	[[nodiscard]] bool HasYmmh() const { return Valid() && native->uc_mcsize >= sizeof(_STRUCT_MCONTEXT_AVX64); }
 	[[nodiscard]] YmmhState State(bool) const { return HasYmmh() ? YmmhState::Present : YmmhState::Unknown; }
+	void                    ZeroUpperInHardware(uint8_t) const {}
 	[[nodiscard]] int       Describe(char* text, size_t size) const {
 		return std::snprintf(text, size, "mcsize=%u", Valid() ? static_cast<unsigned>(native->uc_mcsize) : 0u);
 	}
@@ -166,6 +167,7 @@ struct Regs {
 	[[nodiscard]] bool  HasYmmh() const { return false; }
 	[[nodiscard]] void* Ymmh(uint8_t) const { return nullptr; }
 	[[nodiscard]] YmmhState State(bool) const { return YmmhState::Unknown; }
+	void                    ZeroUpperInHardware(uint8_t) const {}
 	[[nodiscard]] int       Describe(char* text, size_t size) const { return std::snprintf(text, size, "linux"); }
 #endif
 };
@@ -223,7 +225,39 @@ struct Regs {
 		const bool mask_ok  = xstate && GetXStateFeaturesMask(native, &features) != FALSE;
 		DWORD      size     = 0;
 		const bool located  = mask_ok && LocateXStateFeature(native, XSTATE_AVX, &size) != nullptr && size >= 16 * sizeof(M128A);
-		return ClassifyYmmh(xstate, mask_ok, (features & XSTATE_MASK_AVX) != 0, located, init_ok);
+		const bool hw_ok    = !xstate && init_ok && (GetEnabledXStateFeatures() & XSTATE_MASK_AVX) != 0 && HwZeroUpperStub(0) != nullptr;
+		return ClassifyYmmh(xstate, mask_ok, (features & XSTATE_MASK_AVX) != 0, located, init_ok, hw_ok);
+	}
+	// S585 (YmmhState::Hardware): 16 stubs `vmovaps xmmD, xmmD; ret` (VEX.128: bits 128..255 of ymmD become zero, bits 0..127 stay).
+	using HwStub = void (*)();
+	static HwStub HwZeroUpperStub(uint8_t index) {
+		static uint8_t* const page = [] {
+			auto* code = static_cast<uint8_t*>(VirtualAlloc(nullptr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE));
+			if (code == nullptr) {
+				return static_cast<uint8_t*>(nullptr);
+			}
+			for (uint8_t i = 0; i < 16; ++i) {
+				uint8_t* stub = code + i * 16u;
+				stub[0]       = 0xc4;                                           // 3-byte VEX
+				stub[1]       = i < 8 ? 0xe1 : 0x41;                            // ~R ~X ~B, map 0F (R = B = 1 for xmm8..15)
+				stub[2]       = 0x78;                                           // W0, vvvv = 1111b, L = 0 (128), pp = none
+				stub[3]       = 0x28;                                           // vmovaps xmm, xmm/m128
+				stub[4]       = static_cast<uint8_t>(0xc0 | ((i & 7u) << 3u) | (i & 7u)); // xmmD, xmmD
+				stub[5]       = 0xc3;                                           // ret
+			}
+			DWORD old = 0;
+			if (VirtualProtect(code, 4096, PAGE_EXECUTE_READ, &old) == FALSE) {
+				return static_cast<uint8_t*>(nullptr);
+			}
+			FlushInstructionCache(GetCurrentProcess(), code, 4096);
+			return code;
+		}();
+		return page == nullptr || index > 15 ? nullptr : reinterpret_cast<HwStub>(page + index * 16u);
+	}
+	void ZeroUpperInHardware(uint8_t index) const {
+		if (const auto stub = HwZeroUpperStub(index); stub != nullptr) {
+			stub();
+		}
 	}
 	[[nodiscard]] int Describe(char* text, size_t size) const {
 		if (!Valid()) {
@@ -234,10 +268,10 @@ struct Regs {
 		const bool mask_ok  = xstate && GetXStateFeaturesMask(native, &features) != FALSE;
 		DWORD      length   = 0;
 		const bool located  = mask_ok && LocateXStateFeature(native, XSTATE_AVX, &length) != nullptr;
-		return std::snprintf(text, size, "flags=0x%08lx xstate=%d mask_ok=%d features=0x%llx enabled=0x%llx avx_located=%d avx_len=%lu",
+		return std::snprintf(text, size, "flags=0x%08lx xstate=%d mask_ok=%d features=0x%llx enabled=0x%llx avx_located=%d avx_len=%lu hw_stub=%d",
 		                     static_cast<unsigned long>(native->ContextFlags), xstate ? 1 : 0, mask_ok ? 1 : 0,
 		                     static_cast<unsigned long long>(features), static_cast<unsigned long long>(GetEnabledXStateFeatures()),
-		                     located ? 1 : 0, static_cast<unsigned long>(length));
+		                     located ? 1 : 0, static_cast<unsigned long>(length), HwZeroUpperStub(0) != nullptr ? 1 : 0);
 	}
 };
 constexpr bool kHaveRegs = true;
@@ -252,6 +286,7 @@ struct Regs {
 	[[nodiscard]] bool      HasYmmh() const { return false; }
 	[[nodiscard]] void*     Ymmh(uint8_t) const { return nullptr; }
 	[[nodiscard]] YmmhState State(bool) const { return YmmhState::Unknown; }
+	void                    ZeroUpperInHardware(uint8_t) const {}
 	[[nodiscard]] int       Describe(char* text, size_t size) const { return std::snprintf(text, size, "none"); }
 };
 constexpr bool kHaveRegs = false;
@@ -441,8 +476,11 @@ Plan Decode(void* native_context, uint64_t fault_address, const Options& options
 			return Refuse(plan, Why::NotALoad);
 		}
 		// S585: the upper halves are all zero already (init state): nothing to write there.
-		if (options.vex_init_zero && regs.State(true) == YmmhState::InitZero) {
+		const auto state = options.vex_init_zero ? regs.State(true) : YmmhState::Unknown;
+		if (state == YmmhState::InitZero) {
 			plan.vex_init = true;
+		} else if (state == YmmhState::Hardware) {
+			plan.vex_hw = true;
 		} else {
 			vex_no_avx = true; // refused below, after the address (same Why as before; the address is for the DIAG)
 		}
@@ -509,10 +547,13 @@ void Commit(void* native_context, const Plan& plan, const uint8_t* bytes) {
 				std::memcpy(value, bytes, plan.size);
 				std::memcpy(xmm, value, sizeof(value));
 			}
-			if (plan.vex && !plan.vex_init && kZeroUpper) {
+			if (plan.vex && !plan.vex_init && !plan.vex_hw && kZeroUpper) {
 				if (void* ymmh = regs.Ymmh(plan.dst); ymmh != nullptr) {
 					std::memset(ymmh, 0, 16); // VEX.128 zeroes bits 128..255; legacy SSE leaves them
 				}
+			}
+			if (plan.vex && plan.vex_hw && kZeroUpper) {
+				regs.ZeroUpperInHardware(plan.dst); // S585: the restore keeps the hardware upper halves (no extended area in the context)
 			}
 			break;
 		case Kind::None: return;

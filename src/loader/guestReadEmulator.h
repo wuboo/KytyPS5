@@ -57,28 +57,39 @@ enum class Fallback : uint8_t { Dirty, Inflight, Vex, Form, LockBusy };
 // Pure: Vex = VEX.L = 1 / EVEX / vvvv != 1111b (Why::Vex), VexNoAvx stays Form (it has its own column); everything the decoder refuses is Form.
 [[nodiscard]] Fallback ClassifyFallback(Why why);
 
-// S585 (KYTY_GUEST_WAIT=clean|1): the upper YMM halves of a saved context. Present = writable in the context; InitZero = the context carries
-// the AVX component (Windows: CONTEXT_XSTATE, LocateXStateFeature(XSTATE_AVX) != null) but its XSTATE_BV bit is clear: the component is in its
-// init state, every upper half is zero, and the restore re-initialises it, so a VEX.128 load needs no write there; Unknown = no such state
-// (Why::VexNoAvx). Pure: `xstate` = the context has an extended area, `mask_ok` = its feature mask could be read, `avx_bit` = the AVX bit of
-// that mask, `located` = the AVX area exists in the context, `init_ok` = the caller allows InitZero.
-enum class YmmhState : uint8_t { Present, InitZero, Unknown };
-// Mutant (tests/GuestWaitTests.cpp, WILL_FAIL): KYTY_GUESTREAD_MUTANT_VEX_INIT_NO_XSTATE (a context without an extended area counts as init state).
-[[nodiscard]] constexpr YmmhState ClassifyYmmh(bool xstate, bool mask_ok, bool avx_bit, bool located, bool init_ok) {
-#if defined(KYTY_GUESTREAD_MUTANT_VEX_INIT_NO_XSTATE)
-	if (!xstate || !mask_ok) return init_ok ? YmmhState::InitZero : YmmhState::Unknown;
+// S585 (KYTY_GUEST_WAIT=clean|1): the upper YMM halves of a saved context.
+//  - Present: writable in the context (the restore loads them);
+//  - InitZero: the context carries the AVX area (Windows: CONTEXT_XSTATE, LocateXStateFeature(XSTATE_AVX) != null) but its XSTATE_BV bit is
+//    clear: the component is in its init state, every upper half is zero, the restore re-initialises it; a VEX.128 load writes nothing there;
+//  - Hardware: the context has no extended area at all (Windows CONTEXT without CONTEXT_XSTATE): the restore (NtContinue) does not load the
+//    AVX state from the context, the thread keeps its current upper halves, so the load zeroes the destination's upper half in the hardware
+//    register right before the handler returns (a VEX.128 vmovaps xmmD, xmmD: the low 128 bits, the only part the Win64 ABI preserves, are
+//    unchanged). Legacy SSE code never writes upper halves, VEX.128 code zeroes them, 256-bit code ends with vzeroupper: nothing between the
+//    handler and NtContinue makes it non-zero again. tests/GuestWaitWinTests.cpp checks it on a real fault with a stripped CONTEXT_XSTATE;
+//  - Unknown: Why::VexNoAvx (extended area present but its mask unreadable or without the AVX area: a guess).
+// Pure: `xstate` = the context has an extended area, `mask_ok` = its feature mask could be read, `avx_bit` = the AVX bit of that mask,
+// `located` = the AVX area exists in the context, `allow` = the caller allows InitZero / Hardware (KYTY_GUEST_WAIT), `hw_ok` = the hardware
+// zeroing is available (Windows, the stub page exists).
+enum class YmmhState : uint8_t { Present, InitZero, Hardware, Unknown };
+// Mutant (tests/GuestWaitTests.cpp, WILL_FAIL): KYTY_GUESTREAD_MUTANT_VEX_MASK_GUESS (an unreadable XSTATE mask counts as init state).
+[[nodiscard]] constexpr YmmhState ClassifyYmmh(bool xstate, bool mask_ok, bool avx_bit, bool located, bool allow, bool hw_ok) {
+	if (!xstate) {
+		return allow && hw_ok ? YmmhState::Hardware : YmmhState::Unknown;
+	}
+#if defined(KYTY_GUESTREAD_MUTANT_VEX_MASK_GUESS)
+	if (!mask_ok) return allow ? YmmhState::InitZero : YmmhState::Unknown;
 #endif
-	if (!xstate || !mask_ok || !located) {
+	if (!mask_ok || !located) {
 		return YmmhState::Unknown;
 	}
 	if (avx_bit) {
 		return YmmhState::Present;
 	}
-	return init_ok ? YmmhState::InitZero : YmmhState::Unknown;
+	return allow ? YmmhState::InitZero : YmmhState::Unknown;
 }
 
 struct Options {
-	bool vex_init_zero = false; // S585: serve VEX.128 loads in YmmhState::InitZero
+	bool vex_init_zero = false; // S585: serve VEX.128 loads in YmmhState::InitZero / Hardware
 };
 
 struct Plan {
@@ -91,6 +102,7 @@ struct Plan {
 	uint8_t  dst_bytes = 0; // GPR kinds: width of the destination register
 	bool     vex       = false; // VEX.128 form: bits 128..255 of the YMM register are zeroed (S427)
 	bool     vex_init  = false; // S585: ... and they are already zero (YmmhState::InitZero), Commit leaves them
+	bool     vex_hw    = false; // S585: ... the context has no extended area (YmmhState::Hardware): Commit zeroes the hardware register's upper half
 	uint64_t address   = 0; // effective address of the memory operand
 	char     mnemonic[16] = {};
 	char     operands[48] = {}; // "r32, m32" style shape for the DIAG line (no code bytes)

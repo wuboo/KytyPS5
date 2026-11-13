@@ -866,6 +866,7 @@ constexpr const char* kCounterNames[] = {
     "krf3_guest_page_n",
     "krf3_guest_page_wait_ns",
     "gf_emu_vex_init_n",
+    "gf_emu_vex_hw_n",
     "gw_spin_n",
     "gw_spin_busy_n",
     "gw_byte_wait_n",

@@ -146,10 +146,13 @@ void GuestStaleLine(const GuestStale& g, const uint8_t* fresh, bool settled, int
 		std::snprintf(values, sizeof(values), " stale_f=%g fresh_f=%g rel=%g", static_cast<double>(a), static_cast<double>(b),
 		              static_cast<double>((diff < 0 ? -diff : diff) / denom));
 	}
-	LOGF("[gs-stale] flip=%u tid=%u addr=0x%016" PRIx64 " size=%u cls=%s stale=%s fresh=%s eq=%d settled=%d eager=%d wait_us=%" PRId64 "%s\n",
+	char line[512];
+	std::snprintf(line, sizeof(line), "[gs-stale] flip=%u tid=%u addr=0x%016" PRIx64 " size=%u cls=%s stale=%s fresh=%s eq=%d settled=%d eager=%d wait_us=%" PRId64 "%s\n",
 	     static_cast<uint32_t>(flip), static_cast<uint32_t>(SyncCensus::ThreadId()), g.address, static_cast<unsigned>(g.size),
 	     g.inflight ? "inflight" : "dirty", g.stale_ok ? stale_hex : "-", fresh_hex, std::memcmp(g.stale, fresh, g.size) == 0 ? 1 : 0,
 	     settled ? 1 : 0, eager ? 1 : 0, wait_ns / 1000, values);
+	LOGF("%s", line);
+	RfOp::WriteStdout(line);
 }
 
 void StickyRefaultLine(uint64_t page, uint32_t flip, uint32_t sticky_flip) {
@@ -371,7 +374,9 @@ bool RenderContext::HandleFault(PageFaultAccess access, uint64_t fault_vaddr) no
 				if (RfOp::CurrentStackBounds(&stack_lo, &stack_hi)) {
 					gf_event.bt_text = RfOp::FormatBacktrace(frames, RfOp::WalkFrames(ctx, stack_lo, stack_hi, frames));
 				}
-				LOGF("%s\n", GuestFault::FormatLine(gf_event).c_str());
+				const auto line = GuestFault::FormatLine(gf_event);
+				LOGF("%s\n", line.c_str());
+				RfOp::WriteStdout(line.c_str()); // S585: bench runs --printf-direction Silent
 			}
 		}
 		if (rf_op) {
