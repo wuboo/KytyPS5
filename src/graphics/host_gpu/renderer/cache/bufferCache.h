@@ -175,6 +175,8 @@ private:
 	void NoteReadbackFault(uint64_t vaddr, uint64_t size, bool dcc);
 	void NoteGpuWrite(uint64_t vaddr, uint64_t size);
 	void FlushEagerReadbacks();
+	// S587 (KYTY_GW_PAGE, guestWait.h): pages whose loads the guest read emulator served, posted by guest threads; GPU thread (pre-submit hook).
+	void DrainGuestEmuPages();
 	[[nodiscard]] bool WaitEagerReadback(uint64_t vaddr, uint64_t size, bool dcc = false, SyncCensus::Probe* probe = nullptr);
 	[[nodiscard]] bool WaitEagerReadbackPages(uint64_t vaddr, uint64_t size, SyncCensus::Probe* probe = nullptr);
 	void               NoteEagerWait(SyncCensus::Probe& probe, uint64_t tick);

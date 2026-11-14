@@ -200,6 +200,158 @@ constexpr bool StaleShouldLog(uint64_t outside, uint64_t inside, bool in_window)
 	return in_window ? inside < 3000 : outside < 300;
 }
 
+// ==== S587 KYTY_GW_PAGE=0|1|<limit> (only with the guest read emulator on, e.g. KYTY_GUEST_WAIT=clean|1) ======================================
+// S586 (KRF3 + KYTY_GUEST_WAIT=1): garden +13.2 / +11.4 ms cp_frame, desert hitches > 33 ms 3 -> 163. An emulated load is served in the
+// exception handler and returns (runtimeLinker.cpp TryGuestReadEmulation): it never reaches BufferCache::ReadMemory, so
+//  (1) the page is never downloaded and never released: it stays protected while K-rf v3 defers the walker's GPU-written dword on it, and
+//      every later read faults again (garden: 375 emulated loads/flip, the CP's clean walks 1015 -> 8030/flip, pipe worker bails 238 -> 1426);
+//  (2) NoteReadbackFault is never called, so the page never becomes an eager ("hot") page whose GPU writes are downloaded at the next
+//      submit (rb_eager_downloads 24 -> 15/flip);
+//  (3) RenderContext::HandleFault is never reached, so the K-rf v3 guest page guard sees no guest read (krf3_guest_page_n 0 for the whole
+//      desert run d1k vs 0.1-0.4/flip in d1x) and never bans the desert page: 3 defers/flip, gpu_ts_busy 20 ms instead of 11.
+// KYTY_GW_PAGE gives the emulator the three side effects of the ordinary path, per guest page and guest flip (PageFlipCounts):
+//  - the first emulated load of a page in a flip (EmulateFirst) posts the page to the CP (EmuPages mailbox; BufferCache::DrainGuestEmuPages
+//    in the pre-submit hook calls NoteReadbackFault, and a hot page with GPU-dirty bytes and no download in flight is queued for the eager
+//    download at once), and counts one guard hit (GuestPageGuard::NoteGuestRead) - once per flip, what the ordinary path counts: its first
+//    fault drains the page, so later reads of that flip do not fault;
+//  - a load beyond `limit` faults on one page in one flip takes the ordinary path (drain + release of the page).
+// Unset / 0 = bdae37c9 bit for bit. 1 = limit 32; <n> (2..65535) = limit n.
+// Mutants (WILL_FAIL, tests/GuestWaitPageTests.cpp): KYTY_GWPAGE_MUTANT_NO_LIMIT (never the ordinary path), _NO_FEED (no post to the CP),
+// _NO_GUARD_HIT (the guard is not told), _HIT_EVERY (every emulated load is a guard hit).
+struct PageEnv {
+	bool     on    = false;
+	uint32_t limit = 32;
+};
+inline PageEnv ParsePage(const char* text) {
+	PageEnv env;
+	if (text == nullptr || text[0] == '\0' || std::strcmp(text, "0") == 0) return env;
+	if (std::strcmp(text, "1") == 0) {
+		env.on = true;
+		return env;
+	}
+	char*      end   = nullptr;
+	const auto value = std::strtoul(text, &end, 10);
+	if (end == text || *end != '\0' || value < 2 || value > 65535) return env;
+	env.on    = true;
+	env.limit = static_cast<uint32_t>(value);
+	return env;
+}
+inline const PageEnv& PageCare() {
+	static const PageEnv env = ParsePage(std::getenv("KYTY_GW_PAGE"));
+	return env;
+}
+
+enum class PageAction : uint8_t {
+	Emulate,      // emulate as S585
+	EmulateFirst, // emulate; the first load of the page in this flip: post the page to the CP and count a guard hit
+	Ordinary,     // over the limit: the ordinary path (it downloads the page and releases it)
+};
+// count = loads of the page in this flip including this one (1-based); 0 = not tracked (the table is full): as S585.
+constexpr PageAction DecidePage(uint32_t count, uint32_t limit) {
+	if (count == 0) return PageAction::Emulate;
+#if !defined(KYTY_GWPAGE_MUTANT_NO_LIMIT)
+	if (count > limit) return PageAction::Ordinary;
+#endif
+	return count == 1 ? PageAction::EmulateFirst : PageAction::Emulate;
+}
+struct PageEffects {
+	bool feed      = false; // post the page to the CP (hot page / eager download)
+	bool guard_hit = false; // GuestPageGuard::NoteGuestRead
+};
+constexpr PageEffects EffectsOf(PageAction action) {
+	PageEffects e;
+	const bool  first = action == PageAction::EmulateFirst;
+#if !defined(KYTY_GWPAGE_MUTANT_NO_FEED)
+	e.feed = first;
+#endif
+#if defined(KYTY_GWPAGE_MUTANT_HIT_EVERY)
+	e.guard_hit = action != PageAction::Ordinary;
+#elif !defined(KYTY_GWPAGE_MUTANT_NO_GUARD_HIT)
+	e.guard_hit = first;
+#endif
+	return e;
+}
+
+// Loads per 4 KiB guest page within one guest flip: open addressing over atomics, cleared when the flip number changes (as gf_emu_page_max).
+// Any thread. Note() returns the count including this load, 0 when the table is full. A clear racing with a note can lose a few counts
+// at the flip boundary: the decision then errs on the S585 side (emulate).
+template <size_t N = 256>
+class PageFlipCounts {
+	static_assert((N & (N - 1)) == 0, "power of two");
+
+public:
+	uint32_t Note(uint64_t address, uint64_t flip) {
+		const uint64_t key = (address >> 12) + 1; // 0 = free
+		uint64_t       seen = m_flip.load(std::memory_order_acquire);
+		if (seen != flip + 1) {
+			if (m_flip.compare_exchange_strong(seen, flip + 1, std::memory_order_acq_rel)) {
+				for (size_t i = 0; i < N; ++i) {
+					m_counts[i].store(0, std::memory_order_relaxed);
+					m_pages[i].store(0, std::memory_order_relaxed);
+				}
+			}
+		}
+		size_t slot = static_cast<size_t>((key * 0x9e3779b97f4a7c15ull) >> 56) & (N - 1);
+		for (size_t probe = 0; probe < N; ++probe, slot = (slot + 1) & (N - 1)) {
+			uint64_t known = m_pages[slot].load(std::memory_order_acquire);
+			if (known == 0 && m_pages[slot].compare_exchange_strong(known, key, std::memory_order_acq_rel)) {
+				known = key;
+			}
+			if (known == key) {
+				return m_counts[slot].fetch_add(1, std::memory_order_relaxed) + 1u;
+			}
+		}
+		return 0;
+	}
+
+private:
+	std::atomic<uint64_t> m_flip {0}; // flip + 1 (0 = never)
+	std::atomic<uint64_t> m_pages[N] {};
+	std::atomic<uint32_t> m_counts[N] {};
+};
+inline PageFlipCounts<>& EmuPageCounts() {
+	static PageFlipCounts<> counts;
+	return counts;
+}
+
+// Guest threads post pages (lock-free, bounded), the CP thread drains them. Push returns false when every slot is taken (the post is
+// dropped: gw_page_feed_drop_n; the page still gets the limit's ordinary path).
+template <size_t N = 64>
+class PageMailbox {
+public:
+	bool Push(uint64_t page) {
+		if (page == 0) return false;
+		size_t start = static_cast<size_t>((page >> 12) * 0x9e3779b97f4a7c15ull >> 58) % N;
+		for (size_t i = 0; i < N; ++i) {
+			auto&    slot  = m_slots[(start + i) % N];
+			uint64_t empty = 0;
+			if (slot.load(std::memory_order_relaxed) == page) return true; // already posted
+			if (slot.compare_exchange_strong(empty, page, std::memory_order_acq_rel)) return true;
+		}
+		return false;
+	}
+	template <typename F>
+	size_t Drain(F&& f) {
+		size_t n = 0;
+		for (auto& slot: m_slots) {
+			if (slot.load(std::memory_order_relaxed) == 0) continue;
+			const uint64_t page = slot.exchange(0, std::memory_order_acq_rel);
+			if (page != 0) {
+				f(page);
+				++n;
+			}
+		}
+		return n;
+	}
+
+private:
+	std::atomic<uint64_t> m_slots[N] {};
+};
+inline PageMailbox<>& EmuPages() {
+	static PageMailbox<> mailbox;
+	return mailbox;
+}
+
 } // namespace Libs::Graphics::GuestWait
 
 #endif

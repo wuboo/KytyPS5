@@ -1039,6 +1039,18 @@ foreach(mutant IN ITEMS GUESTWAIT_MUTANT_INFLIGHT_SERVES GUESTWAIT_MUTANT_CLEAN_
 	target_include_directories(guest_wait_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(guest_wait_${mutant_lower}_tests PRIVATE KYTY_${mutant}=1)
 endforeach()
+# S587 KYTY_GW_PAGE (guestWait.h): the per-page per-flip side effects of the guest read emulator (post to the CP, guard hit, limit), the
+# page/flip table and the mailbox (threads), a model of a K-rf v3 page in the garden / desert. Mutants (WILL_FAIL): KYTY_GWPAGE_MUTANT_*.
+add_executable(guest_wait_page_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GuestWaitPageTests.cpp")
+target_link_libraries(guest_wait_page_tests common fmt::fmt)
+target_include_directories(guest_wait_page_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS NO_LIMIT NO_FEED NO_GUARD_HIT HIT_EVERY)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(guest_wait_page_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/GuestWaitPageTests.cpp")
+	target_link_libraries(guest_wait_page_mutant_${mutant_lower}_tests common fmt::fmt)
+	target_include_directories(guest_wait_page_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(guest_wait_page_mutant_${mutant_lower}_tests PRIVATE KYTY_GWPAGE_MUTANT_${mutant}=1)
+endforeach()
 
 add_executable(shader_vertex_metadata_tests EXCLUDE_FROM_ALL
 	"${KYTY_TESTS_DIR}/ShaderVertexMetadataTests.cpp"
@@ -2221,6 +2233,12 @@ if(BUILD_TESTING)
 	                        guestwait_mutant_busy_as_clean guestread_mutant_vex_mask_guess)
 		add_test(NAME guest_wait_${mutant} COMMAND $<TARGET_FILE:guest_wait_${mutant}_tests>)
 		set_tests_properties(guest_wait_${mutant} PROPERTIES TIMEOUT 60 WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME guest_wait_page COMMAND $<TARGET_FILE:guest_wait_page_tests>)
+	set_tests_properties(guest_wait_page PROPERTIES TIMEOUT 60)
+	foreach(mutant IN ITEMS no_limit no_feed no_guard_hit hit_every)
+		add_test(NAME guest_wait_page_mutant_${mutant} COMMAND $<TARGET_FILE:guest_wait_page_mutant_${mutant}_tests>)
+		set_tests_properties(guest_wait_page_mutant_${mutant} PROPERTIES TIMEOUT 60 WILL_FAIL TRUE)
 	endforeach()
 	add_test(NAME page_manager COMMAND $<TARGET_FILE:page_manager_tests>)
 	add_test(NAME build_flags COMMAND $<TARGET_FILE:build_flags_tests>)

@@ -40,9 +40,9 @@ RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::pa
 	EXIT_NOT_IMPLEMENTED(!Common::Thread::IsMainThread());
 	LandSync::Announce(); // S495
 	// S585: read KYTY_GUEST_WAIT / KYTY_DIAG_GUEST_STALE here, not first inside a fault handler; one line when either is set.
-	if (GuestWait::EnvMode() != GuestWait::Mode::Off || GuestWait::Stale().on) {
-		std::printf("Environment: KYTY_GUEST_WAIT=%s guest_stale=%d filter=0x%016" PRIx64 "\n", GuestWait::ModeName(GuestWait::EnvMode()),
-		            GuestWait::Stale().on ? 1 : 0, GuestWait::Stale().filter);
+	if (GuestWait::EnvMode() != GuestWait::Mode::Off || GuestWait::Stale().on || GuestWait::PageCare().on) {
+		std::printf("Environment: KYTY_GUEST_WAIT=%s guest_stale=%d filter=0x%016" PRIx64 " gw_page=%d limit=%u\n", GuestWait::ModeName(GuestWait::EnvMode()),
+		            GuestWait::Stale().on ? 1 : 0, GuestWait::Stale().filter, GuestWait::PageCare().on ? 1 : 0, GuestWait::PageCare().limit);
 		std::fflush(stdout);
 	}
 	m_command_scheduler.EnableAsyncSubmit();

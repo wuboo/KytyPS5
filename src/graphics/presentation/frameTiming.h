@@ -538,6 +538,10 @@ enum class Counter : uint32_t {
 	// (the previous present submit of the semaphore slot still in the queue) and how often it blocked, vkQueuePresentKHR with the queue lock,
 	// present submits not done when the next one is submitted (sum; / present_n = average).
 	PresentN, PresentNs, PresentAcquireNs, PresentSlotWaitNs, PresentSlotWaitN, PresentQueueNs, PresentInflightSum,
+	// S587 (KYTY_GW_PAGE, guestWait.h): guest loads over the per-page per-flip limit (ordinary path), pages posted to the CP by the first served
+	// load of a flip / posts dropped (mailbox full), posted pages the CP drained (one read fault each for the hot-page count) / queued for an
+	// eager download at once, guard hits of served loads (K-rf v3 GuestPageGuard::NoteGuestRead on a page of a deferred dword).
+	GwPageLimitN, GwPageFeedN, GwPageFeedDropN, GwPageHotN, GwPageEagerN, GwGuardHitN,
 	Count,
 };
 

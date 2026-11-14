@@ -802,7 +802,42 @@ void BufferCache::NoteGpuWrite(uint64_t vaddr, uint64_t size) {
 	}
 }
 
+// S587 (KYTY_GW_PAGE): an emulated guest load never reaches ReadMemory, so the page it read would never count as a read fault (hot / eager)
+// and, never downloaded, stays protected. Each posted page (the first emulated load of the page in a guest flip) counts one read fault, as the
+// ordinary path's first fault of that flip would; a hot page with GPU-dirty bytes and no eager download in flight is queued now, so this
+// submit's flush downloads it and the publish releases it (the same path a GPU write to a hot page takes in NoteGpuWrite).
+void BufferCache::DrainGuestEmuPages() {
+	static std::atomic<uint32_t> logged {0};
+	GuestWait::EmuPages().Drain([this](uint64_t posted) {
+		const auto page = Common::AlignDown(posted, TRACKER_PAGE_SIZE);
+		FrameTiming::Add(FrameTiming::Counter::GwPageHotN);
+		NoteReadbackFault(page, 1, false);
+		if (!EagerReadbackEnabled() || !m_gpu_modified_ranges.Intersects(page, TRACKER_PAGE_SIZE)) {
+			return;
+		}
+		std::lock_guard lock(m_eager_mutex);
+		const auto      found = m_eager_pages.find(page);
+		if (found == m_eager_pages.end() || found->second.tick != 0) {
+			return; // not hot yet, or a download of the page is in flight (its publish releases the page)
+		}
+		if (std::find(m_eager_pending.begin(), m_eager_pending.end(), page) != m_eager_pending.end()) {
+			return;
+		}
+		m_eager_pending.push_back(page);
+		FrameTiming::Add(FrameTiming::Counter::GwPageEagerN);
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 64) {
+			char line[160];
+			std::snprintf(line, sizeof(line), "[gw-page-eager] flip=%u page=0x%016" PRIx64 "\n", static_cast<uint32_t>(FrameTiming::GuestFlips()), page);
+			LOGF("%s", line);
+			RfOp::WriteStdout(line);
+		}
+	});
+}
+
 void BufferCache::FlushEagerReadbacks() {
+	if (GuestWait::PageCare().on && GuestGpu::IsGpuThread()) {
+		DrainGuestEmuPages(); // S587
+	}
 	if (m_eager_pending.empty() || !GuestGpu::IsGpuThread()) {
 		return;
 	}

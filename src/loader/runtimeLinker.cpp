@@ -802,6 +802,11 @@ struct GfEmuShadow {
 	Loader::GuestReadEmulator::Attempt attempt;
 	bool                               pending    = false;
 	bool                               from_bytes = false; // S585: served after a byte wait (KYTY_GUEST_WAIT=1)
+	// S587: for the [gf-emu-ne] line: when the bytes were read from the backing, and the CPU write fault counters then.
+	int64_t  begin_ns     = 0;
+	uint64_t wf_before    = 0; // FrameTiming WriteFaults (guest write faults on tracked pages)
+	uint64_t rb_wf_before = 0; // FrameTiming ReadbackWriteFault (CPU writes to GPU-modified pages)
+	uint32_t flip         = 0;
 };
 
 // S585 (KYTY_GUEST_WAIT=1): bytes in flight wait for their own copy, then the load is prepared again; true when it can be served now.
@@ -833,6 +838,27 @@ static bool TryGuestReadEmulation(const Common::HostException::ExceptionInfo* in
 	auto       mode      = GuestFaultMode();
 	if (mode == Mode::Off || Libs::Graphics::GuestGpu::IsGpuThread()) {
 		return false;
+	}
+	// S587 (KYTY_GW_PAGE, guestWait.h): loads of this page in this guest flip; over the limit the ordinary path downloads and releases it.
+	const auto& page_care   = Libs::Graphics::GuestWait::PageCare();
+	auto        page_action = Libs::Graphics::GuestWait::PageAction::Emulate;
+	if (page_care.on) {
+		const auto flip  = Libs::Graphics::FrameTiming::GuestFlips();
+		const auto count = Libs::Graphics::GuestWait::EmuPageCounts().Note(info->access_violation_vaddr, flip);
+		page_action      = Libs::Graphics::GuestWait::DecidePage(count, page_care.limit);
+		if (page_action == Libs::Graphics::GuestWait::PageAction::Ordinary) {
+			Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GwPageLimitN);
+			static std::atomic<uint32_t> limit_logged {0};
+			if (count == page_care.limit + 1 && limit_logged.fetch_add(1, std::memory_order_relaxed) < 200) {
+				char line[200];
+				std::snprintf(line, sizeof(line), "[gw-page-limit] flip=%u page=0x%016" PRIx64 " addr=0x%016" PRIx64 " limit=%u\n",
+				              static_cast<uint32_t>(flip), info->access_violation_vaddr & ~uint64_t {4095}, info->access_violation_vaddr,
+				              page_care.limit);
+				LOGF("%s", line);
+				Libs::Graphics::RfOp::WriteStdout(line);
+			}
+			return false;
+		}
 	}
 	Attempt    attempt;
 	bool       from_bytes = false;
@@ -883,14 +909,32 @@ static bool TryGuestReadEmulation(const Common::HostException::ExceptionInfo* in
 		                                                       : Libs::Graphics::FrameTiming::Counter::GfEmuVexHwN); // S585
 	}
 	if (mode == Mode::Shadow) {
-		shadow->attempt    = attempt;
-		shadow->pending    = true;
-		shadow->from_bytes = from_bytes;
+		shadow->attempt      = attempt;
+		shadow->pending      = true;
+		shadow->from_bytes   = from_bytes;
+		shadow->begin_ns     = Libs::Graphics::FrameTiming::SteadyNowNs();
+		shadow->wf_before    = Libs::Graphics::FrameTiming::Get(Libs::Graphics::FrameTiming::Counter::WriteFaults);
+		shadow->rb_wf_before = Libs::Graphics::FrameTiming::Get(Libs::Graphics::FrameTiming::Counter::ReadbackWriteFault);
+		shadow->flip         = static_cast<uint32_t>(Libs::Graphics::FrameTiming::GuestFlips());
 		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuN);
-		return false;
+		return false; // the ordinary path follows: it counts the read fault, the guard hit and releases the page itself
 	}
 	Commit(info->native_context, attempt.plan, attempt.bytes);
 	Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GfEmuN);
+	if (page_care.on) {
+		// S587: the first served load of the page in this flip does what the ordinary path's first fault would have done besides the wait.
+		const auto effects = Libs::Graphics::GuestWait::EffectsOf(page_action);
+		if (effects.feed) {
+			Libs::Graphics::FrameTiming::Add(Libs::Graphics::GuestWait::EmuPages().Push(info->access_violation_vaddr & ~uint64_t {4095})
+			                                     ? Libs::Graphics::FrameTiming::Counter::GwPageFeedN
+			                                     : Libs::Graphics::FrameTiming::Counter::GwPageFeedDropN);
+		}
+		namespace RfP = Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch;
+		if (effects.guard_hit && RfP::Krf3EnvMode().Any() && RfP::IsSuperset(RfP::EnvMode()) &&
+		    RfP::GuestGuard().NoteGuestRead(info->access_violation_vaddr)) {
+			Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::GwGuardHitN);
+		}
+	}
 	if (from_land) {
 		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::LandGuestEmuN);
 	}
@@ -918,6 +962,43 @@ static void GfEmuShadowFinish(const GfEmuShadow& shadow) {
 	if (logged.fetch_add(1, std::memory_order_relaxed) < 20) {
 		LOGF("[gf-emu-ne] addr=0x%016" PRIx64 " size=%u mnemonic=%s\n", shadow.attempt.plan.address,
 		     static_cast<unsigned>(shadow.attempt.plan.size), shadow.attempt.plan.mnemonic);
+	}
+	// S587: also on stdout (bench runs --printf-direction Silent): the address, both values, the time between the emulated read and the
+	// compare, whether a CPU write fault happened meanwhile (wf = guest write faults on tracked pages, rbwf = CPU writes to GPU-modified
+	// pages; both process-wide), the bytes' state after the ordinary path, and how often this address mismatched so far (n).
+	static std::atomic<uint32_t> line_count {0};
+	static std::atomic<uint64_t> ne_addr[32] {};
+	static std::atomic<uint32_t> ne_count[32] {};
+	uint32_t                     n = 0;
+	for (size_t i = 0; i < 32; ++i) {
+		uint64_t known = ne_addr[i].load(std::memory_order_relaxed);
+		if (known == 0 && ne_addr[i].compare_exchange_strong(known, shadow.attempt.plan.address, std::memory_order_relaxed)) {
+			known = shadow.attempt.plan.address;
+		}
+		if (known == shadow.attempt.plan.address) {
+			n = ne_count[i].fetch_add(1, std::memory_order_relaxed) + 1;
+			break;
+		}
+	}
+	if (line_count.fetch_add(1, std::memory_order_relaxed) < 400) {
+		char emu_hex[40] = {}, raw_hex[40] = {};
+		for (uint32_t i = 0; i < shadow.attempt.plan.size && i < 16; i++) {
+			std::snprintf(emu_hex + 2 * i, 3, "%02x", shadow.attempt.bytes[i]);
+			std::snprintf(raw_hex + 2 * i, 3, "%02x", raw[i]);
+		}
+		bool       dirty = false, inflight = false, busy = false;
+		const bool queried = Libs::LibKernel::Memory::QueryGuestFaultBytes(shadow.attempt.plan.address, shadow.attempt.plan.size, &dirty, &inflight, &busy);
+		char       line[400];
+		std::snprintf(line, sizeof(line),
+		              "[gf-emu-ne] flip=%u now=%u addr=0x%016" PRIx64 " size=%u mnemonic=%s emu=%s raw=%s bytes_wait=%d dt_us=%" PRId64
+		              " wf=%" PRIu64 " rbwf=%" PRIu64 " after=%s n=%u\n",
+		              shadow.flip, static_cast<uint32_t>(Libs::Graphics::FrameTiming::GuestFlips()), shadow.attempt.plan.address,
+		              static_cast<unsigned>(shadow.attempt.plan.size), shadow.attempt.plan.mnemonic, emu_hex, raw_hex, shadow.from_bytes ? 1 : 0,
+		              (Libs::Graphics::FrameTiming::SteadyNowNs() - shadow.begin_ns) / 1000,
+		              Libs::Graphics::FrameTiming::Get(C::WriteFaults) - shadow.wf_before,
+		              Libs::Graphics::FrameTiming::Get(C::ReadbackWriteFault) - shadow.rb_wf_before,
+		              !queried ? "busy" : (dirty ? "dirty" : (inflight ? "inflight" : "clean")), n);
+		Libs::Graphics::RfOp::WriteStdout(line);
 	}
 }
 

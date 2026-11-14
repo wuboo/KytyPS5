@@ -889,6 +889,12 @@ constexpr const char* kCounterNames[] = {
     "present_slot_wait_n",
     "present_queue_ns",
     "present_inflight_sum",
+    "gw_page_limit_n",
+    "gw_page_feed_n",
+    "gw_page_feed_drop_n",
+    "gw_page_hot_n",
+    "gw_page_eager_n",
+    "gw_guard_hit_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
