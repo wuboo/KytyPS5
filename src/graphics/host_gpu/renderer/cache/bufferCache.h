@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/renderer/syncCensus.h"
 
 #include <array>
+#include <atomic>
 #include <map>
 #include <mutex>
 #include <span>
@@ -122,9 +123,12 @@ public:
 	[[nodiscard]] MemoryTracker::PageGeneration QueryPageGeneration(uint64_t vaddr, uint64_t size);
 	void               ProcessFaultBuffer();
 	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
-	// Queue after the range's state change becomes visible, or a drain could consume it first.
-	void                   QueueBdaSync(uint64_t vaddr, uint64_t size);
+	// Queue after the range's state change becomes visible, or a drain could consume it first. S601 (KYTY_BDA_DEFER, bdaDefer.h): a
+	// deferred event (a write fault off the GPU thread) is held back until PromoteBdaSync().
+	void                   QueueBdaSync(uint64_t vaddr, uint64_t size, bool deferred = false);
 	[[nodiscard]] RangeSet TakeBdaSync();
+	// S601 (KYTY_BDA_DEFER): makes the held-back game-thread writes visible to the next BDA synchronization.
+	void               PromoteBdaSync();
 	void               RunGarbageCollector();
 	// S412 (KYTY_DIAG_RFOP)
 	[[nodiscard]] uint32_t RfOpWriter(uint64_t vaddr, uint64_t size) const { return m_rfop_writers.Find(vaddr, size); }
@@ -215,6 +219,9 @@ private:
 	MemoryTracker                                     m_memory_tracker;
 	std::mutex                                        m_bda_sync_mutex;
 	RangeSet                                          m_bda_sync;
+	// S601 (KYTY_BDA_DEFER): held-back events, and a flag set while that set may be non-empty (PromoteBdaSync skips the lock without it).
+	RangeSet                                          m_bda_sync_deferred;
+	std::atomic<bool>                                 m_has_deferred_bda_sync {false};
 	StreamBuffer                                      m_staging_buffer;
 	StreamBuffer                                      m_stream_buffer;
 	StreamBuffer                                      m_download_buffer;

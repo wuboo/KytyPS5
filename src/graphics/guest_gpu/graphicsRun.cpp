@@ -16,6 +16,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/guest_gpu/pm4Hist.h"
+#include "graphics/host_gpu/renderer/cache/bdaDefer.h"
 #include "graphics/host_gpu/renderer/pipeline/rdHazard.h"
 #include "graphics/host_gpu/renderer/gpuKeepWarm.h"
 #include "graphics/host_gpu/renderer/indirectGpu.h"
@@ -252,7 +253,20 @@ void CommandProcessor::BufferWait() {
 void CommandProcessor::WaitForRewind(bool valid) {
 	if (!valid) {
 		SuspendPm4();
+		return;
 	}
+	PromoteGuestWrites(); // S601: the game thread may have set the valid bit after writing the commands' data
+}
+
+// S601 (KYTY_BDA_DEFER, port of KytyPS5#1933, bdaDefer.h).
+void CommandProcessor::PromoteGuestWrites() {
+	if (!BdaDefer::EnvOn()) {
+		return;
+	}
+	// Keeps the caller's read of the guest value ahead of the check for held-back events, or the check could miss an event
+	// queued before the value was written.
+	std::atomic_thread_fence(std::memory_order_acquire);
+	m_renderer.GetBufferCache().PromoteBdaSync();
 }
 
 bool TestWaitRegMemValue(uint64_t value, uint64_t ref, uint64_t mask, uint32_t func) {
@@ -279,13 +293,20 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 
 	if (m_pipe != nullptr) { // S479: the writes still in the FIFO are what the memory will hold when the wait is reached
 		bool virtual_satisfied = false;
-		if (PipeWaitVirtual(reinterpret_cast<uint64_t>(addr), sizeof(T), func, ref, mask, &virtual_satisfied) && virtual_satisfied) return;
+		if (PipeWaitVirtual(reinterpret_cast<uint64_t>(addr), sizeof(T), func, ref, mask, &virtual_satisfied) && virtual_satisfied) {
+			PromoteGuestWrites(); // S601: satisfied by a CP write still in the FIFO; promoting is only conservative here
+			return;
+		}
 	}
 	const bool wait_satisfied = TestWaitRegMemValue(*addr, ref, mask, func);
 	if (Pm4Hist::Enabled()) Pm4Hist::Wait(reinterpret_cast<uintptr_t>(addr), wait_satisfied); // S477 D1 DIAG
 	if (!wait_satisfied) {
 		SuspendPm4();
+		return;
 	}
+	// S601: the value may come from a game thread that wrote the data it guards first; those writes must reach the BDA draws that
+	// follow, even though the submission never suspended.
+	PromoteGuestWrites();
 }
 
 template void CommandProcessor::WaitRegMem<uint32_t>(uint32_t, const uint32_t*, uint32_t, uint32_t,
@@ -300,6 +321,7 @@ void CommandProcessor::MemSemaphore(uint64_t* counter, bool signal, bool write) 
 		SuspendPm4();
 	} else {
 		(*counter)--;
+		PromoteGuestWrites(); // S601: a game thread may have signalled the count after writing the data it guards
 	}
 }
 
@@ -576,6 +598,11 @@ void GuestGpu::ThreadRun(void* data) {
 }
 
 bool GuestGpu::Process(Submission& submission) {
+	// S601 (KYTY_BDA_DEFER): game-thread writes made before this submission, or before the wait it resumes from, must reach the BDA
+	// draws it records.
+	if (BdaDefer::EnvOn()) {
+		m_renderer.GetBufferCache().PromoteBdaSync();
+	}
 	auto& cp = GetProcessor(submission.queue_id);
 
 	cp.BufferInit();
@@ -939,6 +966,7 @@ void CommandProcessor::SetPredication(uint32_t condition, uint32_t op, uint32_t 
 			// The wait selector applies only to Z-pass query readiness.
 			EXIT_NOT_IMPLEMENTED(address == nullptr);
 			value = *reinterpret_cast<const volatile uint64_t*>(address);
+			PromoteGuestWrites(); // S601
 			break;
 		default: EXIT("unknown predication op: 0x%08" PRIx32 "\n", op);
 	}

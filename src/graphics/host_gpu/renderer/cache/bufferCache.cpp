@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/host_gpu/renderer/cache/bdaDefer.h"
 #include "graphics/host_gpu/renderer/cache/bufTouchSkip.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
 #include "kernel/memory.h"
@@ -476,7 +477,9 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	if (known) {
 		m_write_ledger.Forget(vaddr, size); // a CPU write: remembered fills of the range are stale
 	}
-	QueueBdaSync(vaddr, size);
+	// S601 (KYTY_BDA_DEFER, port of KytyPS5#1933): a write from a game thread (or file I/O) lands before the work that reads it is
+	// submitted, or before a wait the CP is blocked on is released; its BDA event waits for the CP's next promotion (bdaDefer.h).
+	QueueBdaSync(vaddr, size, BdaDefer::Defer(BdaDefer::EnvOn(), GuestGpu::IsGpuThread()));
 }
 
 namespace {
@@ -1589,11 +1592,31 @@ void BufferCache::ProcessFaultBuffer() {
 	m_fault_manager.ProcessFaultBuffer();
 }
 
-void BufferCache::QueueBdaSync(uint64_t vaddr, uint64_t size) {
+void BufferCache::QueueBdaSync(uint64_t vaddr, uint64_t size, bool deferred) {
 	const auto begin = Common::AlignDown(vaddr, TRACKER_PAGE_SIZE);
 	const auto end   = Common::AlignUp(vaddr + size, TRACKER_PAGE_SIZE);
-	std::lock_guard lock(m_bda_sync_mutex);
-	m_bda_sync.Add(begin, end - begin);
+	{
+		std::lock_guard lock(m_bda_sync_mutex);
+		BdaDefer::Queue(m_bda_sync, m_bda_sync_deferred, m_has_deferred_bda_sync, begin, end - begin, deferred);
+	}
+	if (deferred) {
+		FrameTiming::Add(FrameTiming::Counter::BdaDeferN);
+	}
+}
+
+// S601 (KYTY_BDA_DEFER, port of KytyPS5#1933): moves the held-back events into the set TakeBdaSync returns.
+void BufferCache::PromoteBdaSync() {
+	if (!BdaDefer::MayHaveHeld(m_has_deferred_bda_sync)) {
+		return;
+	}
+	bool moved = false;
+	{
+		std::lock_guard lock(m_bda_sync_mutex);
+		moved = BdaDefer::Promote(m_bda_sync, m_bda_sync_deferred, m_has_deferred_bda_sync);
+	}
+	if (moved) {
+		FrameTiming::Add(FrameTiming::Counter::BdaPromoteN);
+	}
 }
 
 RangeSet BufferCache::TakeBdaSync() {
@@ -1601,6 +1624,10 @@ RangeSet BufferCache::TakeBdaSync() {
 	{
 		std::lock_guard lock(m_bda_sync_mutex);
 		taken = std::exchange(m_bda_sync, {});
+		// S601: a BDA synchronization that leaves held-back events behind (without the switch it would have uploaded them now).
+		if (BdaDefer::EnvOn() && !m_bda_sync_deferred.Empty()) {
+			FrameTiming::Add(FrameTiming::Counter::BdaTakeHeldN);
+		}
 	}
 	if (HotPages::CurrentMode() == HotPages::Mode::On || FlipUnprotect::CurrentMode() == HotPages::Mode::On) {
 		m_memory_tracker.AddHotPages(taken);

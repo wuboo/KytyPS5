@@ -544,6 +544,9 @@ enum class Counter : uint32_t {
 	GwPageLimitN, GwPageFeedN, GwPageFeedDropN, GwPageHotN, GwPageEagerN, GwGuardHitN,
 	// S594 (KYTY_WALK_NOFAULT): walker loads served from the backing without a fault, hot-page loads that took the ordinary load, pages noted hot.
 	WalkNfServeN, WalkNfOrdinaryN, WalkNfHotN,
+	// S601 (KYTY_BDA_DEFER, bdaDefer.h): write-fault BDA events held back, promotions that moved held-back events, BDA synchronizations
+	// (PrepareBda) that left held-back events behind.
+	BdaDeferN, BdaPromoteN, BdaTakeHeldN,
 	Count,
 };
 

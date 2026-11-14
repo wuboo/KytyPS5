@@ -898,6 +898,9 @@ constexpr const char* kCounterNames[] = {
     "walk_nf_serve_n",
     "walk_nf_ordinary_n",
     "walk_nf_hot_n",
+    "bda_defer_n",
+    "bda_promote_n",
+    "bda_take_held_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
