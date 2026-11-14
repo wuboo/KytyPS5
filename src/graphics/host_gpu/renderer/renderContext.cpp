@@ -46,7 +46,16 @@ RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::pa
 		std::fflush(stdout);
 	}
 	// S589: KYTY_KRF3 and the guest page guard's config read here (main thread), not first inside a fault handler; one line when set.
-	if (const auto krf3 = ShaderRecompiler::IR::RfGpuPatch::Krf3EnvMode(); krf3.Any()) {
+	if (const auto krf3 = ShaderRecompiler::IR::RfGpuPatch::Krf3EnvMode(); krf3.v4) {
+		// S599 v4: the burst rule (A), the starvation rule (B) and the ban lengths; the flip log is created here too.
+		const auto& c = ShaderRecompiler::IR::RfGpuPatch::GuestGuard().GetConfig();
+		(void)ShaderRecompiler::IR::RfGpuPatch::Krf4Flips();
+		std::printf("Environment: KYTY_KRF3=v4 burst_hits=%u burst_window=%" PRIu64 " grace=%" PRIu64 " starve_window=%u starve_pct=%u starve_mean_ms=%.1f"
+		            " ban_min=%" PRIu64 " ban_max=%" PRIu64 " halve=%d\n",
+		            c.burst_hits, c.burst_window, c.grace, ShaderRecompiler::IR::RfGpuPatch::GuestPageGuard::kStarveWindow, c.starve_pct,
+		            static_cast<double>(c.starve_mean_ns) / 1e6, c.ban_min, c.ban_max, c.halve ? 1 : 0);
+		std::fflush(stdout);
+	} else if (krf3.Any()) {
 		const auto& c = ShaderRecompiler::IR::RfGpuPatch::GuestGuard().GetConfig();
 		std::printf("Environment: KYTY_KRF3=%s window=%u trial_window=%u hit_div=%u ban_min=%" PRIu64 " ban_max=%" PRIu64 " early=%d halve=%d\n",
 		            ShaderRecompiler::IR::RfGpuPatch::Krf3ModeName(krf3), c.window, c.trial_window, c.hit_div, c.ban_min, c.ban_max, c.early ? 1 : 0,

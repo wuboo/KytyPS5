@@ -544,6 +544,10 @@ enum class Counter : uint32_t {
 	GwPageLimitN, GwPageFeedN, GwPageFeedDropN, GwPageHotN, GwPageEagerN, GwGuardHitN,
 	// S594 (KYTY_WALK_NOFAULT): walker loads served from the backing without a fault, hot-page loads that took the ordinary load, pages noted hot.
 	WalkNfServeN, WalkNfOrdinaryN, WalkNfHotN,
+	// S599 (KYTY_KRF3=v4, rfGpuPatch.h GuestPageGuard): pages banned by the burst rule (A) / the starvation rule (B), closed guest flips whose
+	// 16-flip window was starved (CP wait on the guest >= 20 %, flips >= 25 ms on average), and per closed flip the pages not banned that the
+	// guest faulted on >= 2 times (a storm; the guard's own flip log, so a flip the CP drains late may hold several).
+	Krf4BurstBanN, Krf4StarveBanN, Krf4StarveFlipN, Krf4StormN,
 	Count,
 };
 

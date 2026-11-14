@@ -28,6 +28,7 @@
 #include "graphics/presentation/videoOut.h"
 #include "graphics/presentation/window.h"
 #include "graphics/shader/shader.h"
+#include "graphics/shader/recompiler/ir/passes/rfGpuPatch.h"
 #include "kernel/memory.h"
 #include "libs/errno.h"
 
@@ -445,6 +446,7 @@ void GuestGpu::ThreadRun(void* data) {
 	Common::CpTuning::ApplyToCpThread();
 
 	for (;;) {
+		Krf4PollFlips(); // S599 KYTY_KRF3=v4: the closed guest flips into the guest page guard (a relaxed load when nothing closed)
 		// Lazy flush: before the thread waits (no command, no runnable submission), submit what
 		// the batched flushes held back, so nothing the guest waits for stays unsubmitted.
 		if (gpu->m_gfx_cp->FlushRequested()) {
@@ -469,6 +471,7 @@ void GuestGpu::ThreadRun(void* data) {
 				gpu->m_processing = false;
 				gpu->m_idle.Signal();
 				FrameTiming::ScopedCounterNs wait(FrameTiming::Counter::CpWaitGuestNs);
+				ShaderRecompiler::IR::RfGpuPatch::Krf4WaitScope krf4_wait; // S599 KYTY_KRF3=v4: the same wait for the guest page guard
 				gpu->m_work_available.Wait(&gpu->m_queue_mutex);
 			}
 			if (gpu->m_stopping && gpu->m_commands.empty() && gpu->m_submission_count == 0) {
@@ -493,6 +496,7 @@ void GuestGpu::ThreadRun(void* data) {
 					gpu->m_processing = false;
 					{
 						FrameTiming::ScopedCounterNs wait(FrameTiming::Counter::CpWaitGuestNs);
+						ShaderRecompiler::IR::RfGpuPatch::Krf4WaitScope krf4_wait; // S599
 						gpu->m_work_available.WaitFor(&gpu->m_queue_mutex, 100);
 					}
 					for (auto& queue: gpu->m_queues) {
@@ -1345,6 +1349,15 @@ void CommandProcessor::PrepareCpuFlip(uint64_t request_id) {
 
 bool GuestGpu::IsGpuThread() noexcept {
 	return g_gpu_state != nullptr;
+}
+
+void GuestGpu::Krf4PollFlips() {
+	namespace RfP = ShaderRecompiler::IR::RfGpuPatch;
+	if (!RfP::Krf3EnvMode().v4 || !IsGpuThread()) return; // one reader: the CP thread
+	RfP::Krf4DrainFlips(RfP::GuestGuard(), RfP::Krf4Flips(), [](const RfP::GuestPageGuard::FlipResult& fr) {
+		if (fr.starved) FrameTiming::Add(FrameTiming::Counter::Krf4StarveFlipN);
+		if (fr.storms != 0) FrameTiming::Add(FrameTiming::Counter::Krf4StormN, fr.storms);
+	});
 }
 
 } // namespace Libs::Graphics

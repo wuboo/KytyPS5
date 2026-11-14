@@ -27,11 +27,23 @@
 // Garden: two pages, 3 defers per flip each, an entry burst of 8 (and 12, margin) guest faults in the first 64 flips, then 2 % / 0.5 % of
 // flips: never banned over 6000 flips, 20 seeds. A scene change gets the page back after one ban; reading again bans again within a window.
 // Mutants (WILL_FAIL): _KRF3_STICKY_OLD_RATIO, _KRF3_STICKY_LOW_RATIO, _KRF3_STICKY_SHORT_BAN, _KRF3_STICKY_NO_EARLY.
+// S599 K-rf v4 (KYTY_KRF3=v4, GuestPageGuard::V4Config, Krf4FlipLog): per-flip traces cut from the S592/S595 CSVs (RfGpuPatchKrf4Traces.h,
+// artifacts/S599/mktraces.py) replayed in the production order (flip log closed by the presenter, drained by the CP before its defers): the
+// garden's entry (g6), storms of guest reads (sv1 9817-9831, the post-trial storm 18424-18444 with its 50.8/29.7 ms flip, gn3's storm in the defer
+// gap) and its light part (gt1, CP waits without defers) never ban; the desert bans at the simulator's flip (+-2): d14 by the burst rule,
+// d2 / dn2 by starvation <= +120 (sticky +218 / +1634). sticky and v3 decide the same with flip closes; a loading entry (synthetic, F3) does
+// not ban; trials, ban lengths, a stale starvation mark, the flip log (first close, lapping, the wait scope) and threads.
+// Mutants (WILL_FAIL, _Exit(1)): _KRF4_BURST_ANYTIME, _KRF4_NO_GRACE, _KRF4_STARVE_IGNORED, _KRF4_STARVE_ANY_FLIP.
 
 #include "graphics/shader/recompiler/ir/passes/rfGpuPatch.h"
+#include "RfGpuPatchKrf4Traces.h"
+#if defined(KYTY_GRAPHICS_PRESENTATION_FRAMETIMING_H_)
+#error "S599: the guest page guard and its flip log must not depend on FrameTiming (frames.csv off, muted threads)"
+#endif
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -50,6 +62,10 @@ void Check(bool ok, const char* what) {
 	if (!ok) {
 		std::fprintf(stderr, "RfGpuPatchTests: failed: %s\n", what);
 		++g_failures;
+#if defined(KYTY_RFPATCH_MUTANT_KRF4_BURST_ANYTIME) || defined(KYTY_RFPATCH_MUTANT_KRF4_NO_GRACE) || \
+    defined(KYTY_RFPATCH_MUTANT_KRF4_STARVE_IGNORED) || defined(KYTY_RFPATCH_MUTANT_KRF4_STARVE_ANY_FLIP)
+		std::_Exit(1); // S599: a mutant fails with an exit code on its first failed check (as S594)
+#endif
 	}
 }
 
@@ -1365,6 +1381,306 @@ void TestThreads() {
 
 } // namespace krf3s
 
+namespace krf4 {
+
+using krf4traces::Row;
+using krf4traces::Trace;
+
+constexpr uint64_t kDword     = 0x5794bf27cull; // the garden's page 0x5794bf000 (the desert's differs, one page per trace is what matters)
+constexpr uint64_t kGuestByte = 0x5794bf264ull;
+constexpr uint64_t kMs        = 1000000;
+
+struct ReplayOut {
+	uint32_t           ban_row       = 0; // row flip of the first ban (0 = none)
+	GuestPageGuard::Why why          = GuestPageGuard::Why::None;
+	uint32_t           bans          = 0;
+	uint32_t           storms        = 0; // krf4_storm_n
+	uint32_t           starved_flips = 0; // krf4_starve_flip_n
+	uint32_t           drained       = 0; // flips the guard saw
+	uint64_t           age           = 0;
+};
+
+// The production order per flip M (row flip): the CP drains the closed flips (Krf4PollFlips at the loop and before a defer), the walker defers
+// at GuestFlips() = M - 1 (the first defer of a row, then the guest's faults, then the other defers: the slot exists before the row's hits are
+// counted, as in the simulator), the CP's wait on the guest goes into the log, the presenter closes flip M after host_us.
+struct Replayer {
+	GuestPageGuard& g;
+	Krf4FlipLog&    log;
+	int64_t         now = 1000000000;
+	ReplayOut       out {};
+
+	Replayer(GuestPageGuard& guard, Krf4FlipLog& flip_log): g(guard), log(flip_log) {}
+
+	void Drain() {
+		out.drained += Krf4DrainFlips(g, log, [&](const GuestPageGuard::FlipResult& fr) {
+			out.storms += fr.storms;
+			out.starved_flips += fr.starved ? 1u : 0u;
+		});
+	}
+	void Defer(uint32_t row_flip) {
+		Drain();
+		const auto r = g.OnDefer(kDword, row_flip - 1, true);
+		if (r.banned_now) {
+			++out.bans;
+			if (out.ban_row == 0) {
+				out.ban_row = row_flip;
+				out.why     = r.why;
+				out.age     = r.age;
+			}
+		}
+	}
+	void Flip(uint32_t m, uint32_t hits, uint32_t defers, uint64_t cw_ns, uint64_t host_ns) {
+		Drain();
+		if (defers > 0) Defer(m);
+		for (uint32_t k = 0; k < hits; ++k) (void)g.NoteGuestRead(kGuestByte + 0x40u * (k % 8));
+		for (uint32_t k = 1; k < defers; ++k) Defer(m);
+		log.AddCpWait(cw_ns);
+		now += static_cast<int64_t>(host_ns);
+		log.Close(m, now);
+	}
+	void Start(uint32_t first_flip) { log.Close(first_flip - 1, now); } // the presenter's clock starts one flip before
+};
+
+// The prelude (a page older than the cut): quiet garden flips from first_defer.
+ReplayOut Replay(GuestPageGuard& g, Krf4FlipLog& log, const Trace& t) {
+	Replayer rp(g, log);
+	const uint32_t first = std::min(t.first_defer, t.rows[0].flip);
+	rp.Start(first);
+	for (uint32_t m = t.first_defer; m < t.rows[0].flip; ++m) rp.Flip(m, 0, 6, 0, 44 * kMs);
+	for (uint32_t i = 0; i < t.n; ++i) {
+		const Row& r = t.rows[i];
+		rp.Flip(r.flip, r.hits, r.defers, uint64_t {r.cw_us} * 1000, uint64_t {r.host_us} * 1000);
+	}
+	rp.Drain();
+	return rp.out;
+}
+
+void TestParse() {
+	const auto m = ParseKrf3("v4");
+	Check(m.inflight && m.page && m.v4 && !m.sticky, "krf4 parse: v4 = inflight + page + the v4 config");
+	Check(!ParseKrf3("sticky").v4 && !ParseKrf3("1").v4 && !ParseKrf3(nullptr).v4 && !ParseKrf3("V4").v4, "krf4 parse: only v4");
+	Check(std::strcmp(Krf3ModeName(m), "v4") == 0 && std::strcmp(Krf3ModeName(ParseKrf3("sticky")), "sticky") == 0, "krf4 parse: names");
+	const auto c = GuestPageGuard::V4Config();
+	Check(c.v4 && c.ban_min == 4096 && c.ban_max == 65536 && c.halve && c.burst_hits == 16 && c.starve_pct == 20 &&
+	          c.starve_mean_ns == 25 * kMs && GuestPageGuard::kStarveWindow == 16,
+	      "krf4 parse: the v4 config (sticky's ban lengths, A 16 hits, B 20 % of 16 flips of >= 25 ms)");
+	const auto s = GuestPageGuard::StickyConfig();
+	const GuestPageGuard::Config v3;
+	Check(!s.v4 && !v3.v4 && s.window == 256 && s.hit_div == 16 && s.ban_min == 4096 && v3.window == 32 && v3.hit_div == 4,
+	      "krf4 parse: sticky and v3 configs unchanged, v4 off in both");
+}
+
+// KYTY_KRF3=sticky (and v3) bit for bit: OnFlipClosed changes nothing and the decisions are those of a guard that never sees a flip close.
+void TestStickyUnchanged() {
+	for (const bool sticky: {true, false}) {
+		const auto     cfg = sticky ? GuestPageGuard::StickyConfig() : GuestPageGuard::Config {};
+		GuestPageGuard a(cfg), b(cfg);
+		krf3s::Rng     rng(7);
+		bool           same = true;
+		uint32_t       bans = 0;
+		for (uint32_t f = 0; f < 9000; ++f) {
+			const auto fr = b.OnFlipClosed(f, 66 * kMs, 60 * kMs); // a starved flip: v4 would act, sticky must not
+			same          = same && !fr.starved && fr.storms == 0 && fr.pending == 0;
+			for (int k = 0; k < 3; ++k) {
+				const uint64_t addr = k == 2 ? krf3s::kUnreadDword : krf3s::kReadDword;
+				const auto     ra   = a.OnDefer(addr, f, true);
+				const auto     rb   = b.OnDefer(addr, f, true);
+				same = same && ra.drain == rb.drain && ra.banned_now == rb.banned_now && ra.would_ban == rb.would_ban && ra.trial == rb.trial &&
+				       ra.hits == rb.hits && ra.defers == rb.defers && ra.ban_len == rb.ban_len && ra.why == GuestPageGuard::Why::None &&
+				       rb.why == GuestPageGuard::Why::None;
+				bans += ra.banned_now ? 1u : 0u;
+			}
+			const double   lambda = f < 3000 ? 0.4 : (f < 6000 ? 0.0 : 1.1);
+			const uint32_t n      = rng.Poisson(lambda);
+			for (uint32_t k = 0; k < n; ++k) same = same && a.NoteGuestRead(krf3s::kReadByte) == b.NoteGuestRead(krf3s::kReadByte);
+		}
+		Check(same && bans > 0, sticky ? "krf4: sticky decides the same with flip closes (bans happen)" : "krf4: v3 decides the same with flip closes");
+	}
+}
+
+void TestTraces() {
+	for (const auto& t: krf4traces::kTraces) {
+		GuestPageGuard g(GuestPageGuard::V4Config());
+		Krf4FlipLog    log;
+		const auto     r = Replay(g, log, t);
+		std::printf("krf4 trace %-24s %-9s first_defer %u: v4 ban %s at row %u (age %llu), sim %u; storms %u, starved flips %u, flips %u\n", t.name, t.run,
+		            t.first_defer, Krf4WhyName(r.why), r.ban_row, static_cast<unsigned long long>(r.age), t.sim_ban, r.storms, r.starved_flips, r.drained);
+		char what[160];
+		if (t.garden) {
+			std::snprintf(what, sizeof(what), "krf4 %s (%s): the garden never bans", t.name, t.run);
+			Check(r.bans == 0, what);
+		} else {
+			std::snprintf(what, sizeof(what), "krf4 %s (%s): the desert bans at the simulator's flip (+-2)", t.name, t.run);
+			Check(r.ban_row != 0 && r.ban_row + 2 >= t.sim_ban && r.ban_row <= t.sim_ban + 2, what);
+		}
+		if (std::strcmp(t.name, "garden_storm_sv1") == 0 || std::strcmp(t.name, "garden_storm_sv1_trial") == 0) {
+			std::snprintf(what, sizeof(what), "krf4 %s: the storm is seen (krf4_storm_n > 0) and does not starve the window", t.name);
+			Check(r.storms > 0 && r.starved_flips == 0, what);
+		}
+		if (std::strcmp(t.name, "garden_light_gt1") == 0) {
+			// the light part's starved windows come with no defers of the page (the defer gap): no ban
+			std::snprintf(what, sizeof(what), "krf4 %s: starved windows (%u) without defers do not ban", t.name, r.starved_flips);
+			Check(r.starved_flips > 0, what);
+		}
+		if (std::strcmp(t.name, "desert_burst_d14") == 0) Check(r.why == GuestPageGuard::Why::Burst, "krf4 d14: a burst ban (A)");
+		if (std::strcmp(t.name, "desert_starve_d2") == 0 || std::strcmp(t.name, "desert_starve_dn2") == 0) {
+			std::snprintf(what, sizeof(what), "krf4 %s: a starvation ban (B) <= +120 (sticky: +218 / +1634)", t.name);
+			Check(r.why == GuestPageGuard::Why::Starve && r.ban_row <= t.first_defer + 120, what);
+		}
+	}
+}
+
+// F3 (S597): a level entry that loads (600 ms flips, the CP waiting on the guest) right when the page starts deferring, with the entry's guest
+// faults (8). Synthetic: the S590-S596 CSVs have no CP wait in the garden's entry (max window share 0.049), the grace is the margin.
+void TestLoadingEntry() {
+	GuestPageGuard g(GuestPageGuard::V4Config());
+	Krf4FlipLog    log;
+	Replayer       rp(g, log);
+	rp.Start(4570);
+	for (uint32_t m = 4570; m < 4593; ++m) rp.Flip(m, 0, 0, 0, 16700000);
+	for (uint32_t m = 4593; m < 4604; ++m) rp.Flip(m, m < 4596 ? 3u - (m == 4595 ? 1u : 0u) : 0u, 6, 120 * kMs, 150 * kMs);
+	for (uint32_t m = 4604; m < 4800; ++m) rp.Flip(m, 0, 6, 0, 50 * kMs);
+	std::printf("krf4 loading entry: bans %u (why %s at %u), starved flips %u\n", rp.out.bans, Krf4WhyName(rp.out.why), rp.out.ban_row, rp.out.starved_flips);
+	Check(rp.out.starved_flips > 0 && rp.out.bans == 0, "krf4: a loading level entry (CP starved in the first flips) does not ban (grace)");
+}
+
+// A ban runs out: the trial restarts the page's age (A's window, B's grace); a burst in the trial bans for twice as long; a clean trial halves.
+void TestTrialAndLength() {
+	GuestPageGuard g(GuestPageGuard::V4Config());
+	Krf4FlipLog    log;
+	Replayer       rp(g, log);
+	rp.Start(1);
+	for (uint32_t m = 1; m < 10; ++m) rp.Flip(m, m < 9 ? 2u : 0u, 3, 0, 16700000); // 16 hits in 8 flips: A
+	const uint32_t ban1 = rp.out.ban_row;
+	Check(ban1 != 0 && rp.out.why == GuestPageGuard::Why::Burst, "krf4 trial: the first burst bans");
+	uint32_t trials = 0, drains = 0;
+	uint64_t len2 = 0, len3 = 0;
+	for (uint32_t m = 10; m < ban1 + 4096 + 20; ++m) {
+		rp.Drain();
+		const auto r = g.OnDefer(kDword, m - 1, true);
+		trials += r.trial ? 1u : 0u;
+		drains += r.drain ? 1u : 0u;
+		if (m >= ban1 + 4096 && m < ban1 + 4096 + 10) (void)g.NoteGuestRead(kGuestByte), (void)g.NoteGuestRead(kGuestByte);
+		if (r.banned_now && len2 == 0) len2 = r.ban_len;
+		rp.log.AddCpWait(0);
+		rp.now += static_cast<int64_t>(16700000);
+		rp.log.Close(m, rp.now);
+	}
+	Check(trials == 1 && len2 == 8192, "krf4 trial: a burst in the trial bans again, for 8192 flips");
+	// the second ban runs out, a clean trial (no hits, no starvation for > burst_window flips), then a starved window bans for 4096 again
+	const uint32_t ban2_end = ban1 + 4096 + 10 + 8192 + 5;
+	for (uint32_t m = ban1 + 4096 + 20; m < ban2_end + 400; ++m) {
+		rp.Drain();
+		const bool starve = m > ban2_end + 300 && m < ban2_end + 330;
+		const auto r      = g.OnDefer(kDword, m - 1, true);
+		if (r.banned_now && len3 == 0) len3 = r.ban_len, rp.out.why = r.why;
+		rp.log.AddCpWait(starve ? 40 * kMs : 0);
+		rp.now += static_cast<int64_t>(starve ? 50 * kMs : 16700000);
+		rp.log.Close(m, rp.now);
+	}
+	std::printf("krf4 trial: ban %u, lengths 4096 / %llu / %llu (%s), drains %u\n", ban1, static_cast<unsigned long long>(len2),
+	            static_cast<unsigned long long>(len3), Krf4WhyName(rp.out.why), drains);
+	Check(len3 == 8192 && rp.out.why == GuestPageGuard::Why::Starve, "krf4 trial: a clean trial halves the next ban (16384 -> 8192, here by B)");
+}
+
+// A starved window marks the page; the mark is dropped when the page stops deferring for longer than the window.
+void TestPendingExpires() {
+	// the page defers until row 104, the CP starves from row 105 (the window is starved from ~108 while the page's last defer is in it, the
+	// mark is renewed until row 120), then the page defers again at row 160 (dropped) / 125 (applied)
+	for (const uint32_t again: {160u, 125u}) {
+		GuestPageGuard g(GuestPageGuard::V4Config());
+		Krf4FlipLog    log;
+		Replayer       rp(g, log);
+		rp.Start(1);
+		for (uint32_t m = 1; m < 200; ++m) {
+			const bool starve = m >= 105 && m < 121;
+			rp.Flip(m, 0, m <= 104 || m >= again ? 3u : 0u, starve ? 40 * kMs : 0, starve ? 50 * kMs : 16700000);
+		}
+		if (again == 160) {
+			Check(rp.out.bans == 0 && rp.out.starved_flips > 0, "krf4: a starvation mark older than the window is dropped when the page defers again");
+		} else {
+			Check(rp.out.bans == 1 && rp.out.why == GuestPageGuard::Why::Starve && rp.out.ban_row == 125,
+			      "krf4: ... and applied at the next defer while fresh");
+		}
+	}
+}
+
+// The flip log: the first close only starts the clock, durations and waits per flip, a reader behind by more than the ring gets the last kRing.
+void TestFlipLog() {
+	Krf4FlipLog log;
+	log.AddCpWait(5);
+	log.Close(1, 1100);
+	uint32_t n = log.Drain([](uint64_t, uint64_t, uint64_t) {});
+	Check(n == 0, "krf4 flip log: the first close has no duration");
+	for (uint64_t f = 2; f <= 11; ++f) {
+		log.AddCpWait(f * 10);
+		log.Close(f, static_cast<int64_t>(1000 + f * 100));
+	}
+	bool     ok   = true;
+	uint64_t next = 2;
+	n             = log.Drain([&](uint64_t flip, uint64_t host, uint64_t cw) {
+        ok = ok && flip == next && host == 100 && cw == flip * 10;
+        ++next;
+    });
+	Check(ok && n == 10, "krf4 flip log: one entry per closed flip, its duration and its CP wait");
+	for (uint64_t f = 12; f <= 211; ++f) log.Close(f, static_cast<int64_t>(1000 + f * 100));
+	uint64_t first = 0;
+	n              = log.Drain([&](uint64_t flip, uint64_t, uint64_t) {
+        if (first == 0) first = flip;
+    });
+	Check(n == Krf4FlipLog::kRing && first == 211 - Krf4FlipLog::kRing + 1, "krf4 flip log: a lapped reader gets the last kRing flips");
+	// Krf4WaitScope: off adds nothing; on adds the wait into the given log (no FrameTiming: no KYTY_FRAME_LOG, no muted-thread rule here)
+	Krf4FlipLog l2;
+	l2.Close(1, 1);
+	{ Krf4WaitScope off(l2, false); }
+	{
+		Krf4WaitScope on(l2, true);
+		std::this_thread::sleep_for(std::chrono::milliseconds(2));
+	}
+	l2.Close(2, 2);
+	uint64_t cw = 0;
+	(void)l2.Drain([&](uint64_t, uint64_t, uint64_t c) { cw = c; });
+	Check(cw >= 1000000, "krf4 flip log: the wait scope (on) adds its wait, the one off nothing");
+}
+
+// Threads: guest threads fault, a presenter closes flips while the CP adds waits, drains and defers (TSan: no race on the guard or the log).
+void TestThreads() {
+	GuestPageGuard        g(GuestPageGuard::V4Config());
+	Krf4FlipLog           log;
+	std::atomic<bool>     stop {false};
+	std::atomic<uint64_t> flips {0};
+	std::vector<std::thread> threads;
+	for (int t = 0; t < 3; ++t) {
+		threads.emplace_back([&, t] {
+			uint64_t i = 0;
+			while (!stop.load(std::memory_order_relaxed)) (void)g.NoteGuestRead(0x400000ull + ((i++ + static_cast<uint64_t>(t)) % 20) * 0x1000ull + 0x80);
+		});
+	}
+	threads.emplace_back([&] {
+		int64_t now = 1;
+		for (uint64_t f = 1; !stop.load(std::memory_order_relaxed); ++f) {
+			now += 1000;
+			log.Close(f, now);
+			flips.store(f, std::memory_order_relaxed);
+			if (f % 64 == 0) std::this_thread::yield();
+		}
+	});
+	uint64_t seen = 0, drained = 0, bans = 0;
+	for (uint32_t i = 0; i < 40000 || flips.load(std::memory_order_relaxed) < 3000; ++i) {
+		log.AddCpWait(700); // the CP waits on the guest for 70 % of each 1 us flip: starved by the ratio, not by the 25 ms mean
+		drained += Krf4DrainFlips(g, log, [&](const GuestPageGuard::FlipResult& fr) { seen += fr.storms; });
+		// the CP's own flip clock for the defers (i / 20): the pages stay young enough for A whatever the presenter's pace (sanitizers)
+		bans += g.OnDefer(0x400000ull + static_cast<uint64_t>(i % 18) * 0x1000ull, i / 20, true).banned_now ? 1u : 0u;
+	}
+	stop.store(true);
+	for (auto& t: threads) t.join();
+	std::printf("krf4 threads: %llu flips drained, storms %llu, bans %llu\n", static_cast<unsigned long long>(drained), static_cast<unsigned long long>(seen),
+	            static_cast<unsigned long long>(bans));
+	Check(drained > 0 && bans > 0, "krf4 threads: flips drained and pages hammered by guest threads banned (A on a concurrent counter)");
+}
+
+} // namespace krf4
+
 } // namespace
 
 int main() {
@@ -1399,6 +1715,14 @@ int main() {
 	krf3s::TestSceneChange();
 	krf3s::TestBanLength();
 	krf3s::TestThreads();
+	krf4::TestParse();
+	krf4::TestStickyUnchanged();
+	krf4::TestTraces();
+	krf4::TestLoadingEntry();
+	krf4::TestTrialAndLength();
+	krf4::TestPendingExpires();
+	krf4::TestFlipLog();
+	krf4::TestThreads();
 	if (g_failures != 0) {
 		std::fprintf(stderr, "RfGpuPatchTests: %d failure(s)\n", g_failures);
 		return 1;

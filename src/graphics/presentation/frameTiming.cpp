@@ -16,6 +16,7 @@
 #include "common/signalCensus.h"
 #include "graphics/presentation/cpFrameStats.h"
 #include "graphics/shader/recompiler/ir/passes/srtTreeReject.h"
+#include "graphics/shader/recompiler/ir/passes/rfGpuPatch.h"
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
@@ -898,6 +899,10 @@ constexpr const char* kCounterNames[] = {
     "walk_nf_serve_n",
     "walk_nf_ordinary_n",
     "walk_nf_hot_n",
+    "krf4_burst_ban_n",
+    "krf4_starve_ban_n",
+    "krf4_starve_flip_n",
+    "krf4_storm_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
@@ -1324,6 +1329,9 @@ void DumpTreeReject(uint64_t from, uint64_t to) {
 
 void OnGuestFlip() {
 	const auto flip = g_guest_flips.fetch_add(1, std::memory_order_relaxed) + 1;
+	// S599 KYTY_KRF3=v4: the guest page guard's own flip clock and CP wait on the guest (independent of KYTY_FRAME_LOG and of muted threads).
+	namespace RfP = ShaderRecompiler::IR::RfGpuPatch;
+	if (RfP::Krf3EnvMode().v4) RfP::Krf4Flips().Close(flip, RfP::Krf4FlipLog::NowNs());
 	SampleThreadCpu(flip);
 	if (ThreadCpuEnvMode() == ThreadCpuMode::Lite) g_thread_lite.deferred.Mark(flip, g_thread_lite.plan.Sample(flip)); // S570: sampled after the locks
 	if (flip % 100 == 0) DumpTreeReject(flip - 100, flip);

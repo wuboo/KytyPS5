@@ -1798,9 +1798,10 @@ endforeach()
 # S570 K-rf KYTY_RF_GPU_PATCH (rfGpuPatch.h): patchable walker loads, the fault decision, the pending list, the two paths on a model.
 # S579 K-rf v2 (superset): the superset classification, decision and shadow cover, a walker model on synthetic and random plans (+7 mutants).
 # S581 K-rf v3 (KYTY_KRF3): the in-flight decision and the guest page guard on models of the S580 desert and garden (+4 mutants).
+# S599 K-rf v4 (KYTY_KRF3=v4): the guard on per-flip traces of the S592/S595 CSVs (tests/RfGpuPatchKrf4Traces.h) and its flip log (+4 mutants).
 add_executable(rf_gpu_patch_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RfGpuPatchTests.cpp")
 target_include_directories(rf_gpu_patch_tests PRIVATE ${inc_headers})
-foreach(mutant IN ITEMS DIRECT_USES_ONLY IGNORE_DIRTY IGNORE_ADDRESS_BASE NO_DEDUPE SKIP_SUCCESSOR COND_AS_TAKEN NO_FLAT_COPY DEFER_ADDRESS DEFER_LOOP COVER_MISSES_ONE CPHI_ADDRESS KRF3_INFLIGHT_DRAINS KRF3_NO_GUEST_HITS KRF3_NO_EXPIRY KRF3_ADDRESS_KEY KRF3_STICKY_OLD_RATIO KRF3_STICKY_LOW_RATIO KRF3_STICKY_SHORT_BAN KRF3_STICKY_NO_EARLY)
+foreach(mutant IN ITEMS DIRECT_USES_ONLY IGNORE_DIRTY IGNORE_ADDRESS_BASE NO_DEDUPE SKIP_SUCCESSOR COND_AS_TAKEN NO_FLAT_COPY DEFER_ADDRESS DEFER_LOOP COVER_MISSES_ONE CPHI_ADDRESS KRF3_INFLIGHT_DRAINS KRF3_NO_GUEST_HITS KRF3_NO_EXPIRY KRF3_ADDRESS_KEY KRF3_STICKY_OLD_RATIO KRF3_STICKY_LOW_RATIO KRF3_STICKY_SHORT_BAN KRF3_STICKY_NO_EARLY KRF4_BURST_ANYTIME KRF4_NO_GRACE KRF4_STARVE_IGNORED KRF4_STARVE_ANY_FLIP)
 	add_executable(rf_gpu_patch_mutant_${mutant}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RfGpuPatchTests.cpp")
 	target_include_directories(rf_gpu_patch_mutant_${mutant}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(rf_gpu_patch_mutant_${mutant}_tests PRIVATE KYTY_RFPATCH_MUTANT_${mutant}=1)
@@ -2174,7 +2175,7 @@ if(BUILD_TESTING)
 		set_tests_properties(numinst_lazy_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
 	add_test(NAME rf_gpu_patch COMMAND $<TARGET_FILE:rf_gpu_patch_tests>)
-	foreach(mutant IN ITEMS DIRECT_USES_ONLY IGNORE_DIRTY IGNORE_ADDRESS_BASE NO_DEDUPE SKIP_SUCCESSOR COND_AS_TAKEN NO_FLAT_COPY DEFER_ADDRESS DEFER_LOOP COVER_MISSES_ONE CPHI_ADDRESS KRF3_INFLIGHT_DRAINS KRF3_NO_GUEST_HITS KRF3_NO_EXPIRY KRF3_ADDRESS_KEY KRF3_STICKY_OLD_RATIO KRF3_STICKY_LOW_RATIO KRF3_STICKY_SHORT_BAN KRF3_STICKY_NO_EARLY)
+	foreach(mutant IN ITEMS DIRECT_USES_ONLY IGNORE_DIRTY IGNORE_ADDRESS_BASE NO_DEDUPE SKIP_SUCCESSOR COND_AS_TAKEN NO_FLAT_COPY DEFER_ADDRESS DEFER_LOOP COVER_MISSES_ONE CPHI_ADDRESS KRF3_INFLIGHT_DRAINS KRF3_NO_GUEST_HITS KRF3_NO_EXPIRY KRF3_ADDRESS_KEY KRF3_STICKY_OLD_RATIO KRF3_STICKY_LOW_RATIO KRF3_STICKY_SHORT_BAN KRF3_STICKY_NO_EARLY KRF4_BURST_ANYTIME KRF4_NO_GRACE KRF4_STARVE_IGNORED KRF4_STARVE_ANY_FLIP)
 		add_test(NAME rf_gpu_patch_mutant_${mutant} COMMAND $<TARGET_FILE:rf_gpu_patch_mutant_${mutant}_tests>)
 		set_tests_properties(rf_gpu_patch_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()

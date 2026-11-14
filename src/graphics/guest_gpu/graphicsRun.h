@@ -43,6 +43,8 @@ public:
 	[[nodiscard]] int GetFrameNum() const;
 
 	[[nodiscard]] static bool IsGpuThread() noexcept;
+	// S599 KYTY_KRF3=v4: on the GPU (CP) thread, the guest flips closed since the last call into the guest page guard (no-op otherwise).
+	static void Krf4PollFlips();
 
 private:
 	static constexpr uint32_t ComputePipeCount     = 7;

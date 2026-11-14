@@ -1270,18 +1270,26 @@ static bool TrySupersetDefer(const Common::HostException::ExceptionInfo* info, u
 	}
 	// S581 K-rf v3 (KYTY_KRF3=page|1): a page the guest reads is drained as in the base (the drain also cleans it for the guest's reads).
 	if (krf3.Any()) {
+		if (krf3.v4) Libs::Graphics::GuestGpu::Krf4PollFlips(); // S599: the starvation window is current before the decision
 		const auto flip = Libs::Graphics::FrameTiming::GuestFlips();
 		const auto g    = P::GuestGuard().OnDefer(address, flip, krf3.page);
 		if (g.trial) Libs::Graphics::FrameTiming::Add(C::Krf3PageTrialN);
 		if (g.banned_now) Libs::Graphics::FrameTiming::Add(C::Krf3PageBanN);
+		if (g.banned_now && g.why == P::GuestPageGuard::Why::Burst) Libs::Graphics::FrameTiming::Add(C::Krf4BurstBanN);
+		if (g.banned_now && g.why == P::GuestPageGuard::Why::Starve) Libs::Graphics::FrameTiming::Add(C::Krf4StarveBanN);
 		// S589: which page, when, on how many guest faults (stdout, also with Silent; <= 200 lines).
 		if (g.banned_now || g.trial) {
 			static std::atomic<uint32_t> krf3_logged {0};
 			if (krf3_logged.fetch_add(1, std::memory_order_relaxed) < 200) {
-				char line[200];
-				std::snprintf(line, sizeof(line), "[krf3-ban] flip=%u page=0x%016" PRIx64 " what=%s hits=%u defers=%u ban=%" PRIu64 " mode=%s\n",
-				              static_cast<uint32_t>(flip), P::GuestPageGuard::PageOf(address), g.banned_now ? "ban" : "trial", g.hits, g.defers,
-				              g.ban_len, P::Krf3ModeName(krf3));
+				char line[320];
+				const int n = std::snprintf(line, sizeof(line), "[krf3-ban] flip=%u page=0x%016" PRIx64 " what=%s hits=%u defers=%u ban=%" PRIu64 " mode=%s\n",
+				                            static_cast<uint32_t>(flip), P::GuestPageGuard::PageOf(address), g.banned_now ? "ban" : "trial", g.hits,
+				                            g.defers, g.ban_len, P::Krf3ModeName(krf3));
+				// S599 v4: the rule, the page's age and the starvation window (CP wait on the guest / time of the last 16 flips); sticky: as before.
+				if (krf3.v4 && g.banned_now && n > 0 && static_cast<size_t>(n) < sizeof(line)) {
+					std::snprintf(line + n - 1, sizeof(line) - static_cast<size_t>(n) + 1, " why=%s age=%" PRIu64 " starve_cw_ms=%.1f starve_host_ms=%.1f\n",
+					              P::Krf4WhyName(g.why), g.age, static_cast<double>(g.window_cw_ns) / 1e6, static_cast<double>(g.window_host_ns) / 1e6);
+				}
 				LOGF("%s", line);
 				Libs::Graphics::RfOp::WriteStdout(line);
 			}
