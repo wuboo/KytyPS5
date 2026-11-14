@@ -1586,8 +1586,9 @@ void TestTrialAndLength() {
 // A starved window marks the page; the mark is dropped when the page stops deferring for longer than the window.
 void TestPendingExpires() {
 	// the page defers until row 104, the CP starves from row 105 (the window is starved from ~108 while the page's last defer is in it, the
-	// mark is renewed until row 120), then the page defers again at row 160 (dropped) / 125 (applied)
-	for (const uint32_t again: {160u, 125u}) {
+	// mark is renewed until row 119), then the page defers again at row 160 (dropped) / 130 (applied: 11 flips after the last renewal, 22 after
+	// the first mark; without the renewal the mark would be dropped and the ban come one flip later)
+	for (const uint32_t again: {160u, 130u}) {
 		GuestPageGuard g(GuestPageGuard::V4Config());
 		Krf4FlipLog    log;
 		Replayer       rp(g, log);
@@ -1599,8 +1600,8 @@ void TestPendingExpires() {
 		if (again == 160) {
 			Check(rp.out.bans == 0 && rp.out.starved_flips > 0, "krf4: a starvation mark older than the window is dropped when the page defers again");
 		} else {
-			Check(rp.out.bans == 1 && rp.out.why == GuestPageGuard::Why::Starve && rp.out.ban_row == 125,
-			      "krf4: ... and applied at the next defer while fresh");
+			Check(rp.out.bans == 1 && rp.out.why == GuestPageGuard::Why::Starve && rp.out.ban_row == 130,
+			      "krf4: ... and applied at the next defer while fresh (renewed while the window stays starved)");
 		}
 	}
 }

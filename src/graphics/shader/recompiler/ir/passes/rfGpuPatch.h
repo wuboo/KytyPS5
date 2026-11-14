@@ -969,10 +969,6 @@ public:
 				s.trial   = false;
 				s.ban_len = std::max(s.ban_len / 2, m_config.ban_min);
 			}
-			if (s.pending != Why::None) {
-				++fr.pending;
-				continue;
-			}
 			Why why = Why::None;
 			if (BurstAge(age) && hits >= m_config.burst_hits) {
 				why = Why::Burst;
@@ -981,13 +977,16 @@ public:
 				why = Why::Starve; // (mutant: B never bans, the desert waits for its burst)
 #endif
 			}
+			// The mark keeps its first rule and is renewed while the condition holds (it expires kStarveWindow flips after the last renewal).
 			if (why != Why::None) {
-				s.pending          = why;
-				s.pending_flip     = flip;
-				s.pending_cw_ns    = m_window_cw;
-				s.pending_host_ns  = m_window_host;
-				++fr.pending;
+				if (s.pending == Why::None) s.pending = why;
+				s.pending_flip = flip;
+				if (why == Why::Starve) {
+					s.pending_cw_ns   = m_window_cw;
+					s.pending_host_ns = m_window_host;
+				}
 			}
+			if (s.pending != Why::None) ++fr.pending;
 		}
 		m_busy.clear(std::memory_order_release);
 		return fr;
