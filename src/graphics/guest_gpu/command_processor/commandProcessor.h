@@ -113,6 +113,9 @@ public:
 	void TriggerEvent(uint32_t event_type, uint32_t event_index, uint64_t event_address = 0);
 
 	void WaitForRewind(bool valid);
+	// S601 (KYTY_BDA_DEFER, port of KytyPS5#1933): call after reading a guest value that a game thread may have written after the
+	// data it guards (COND_EXEC, BRANCH, ...): its held-back BDA events are promoted for the draws that follow. No-op without the switch.
+	void PromoteGuestWrites();
 
 	template <typename T>
 	void WaitRegMem(uint32_t func, const T* addr, T ref, T mask, uint32_t wait_op);

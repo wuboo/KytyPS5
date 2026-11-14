@@ -576,7 +576,9 @@ KYTY_CP_OP_PARSER(CpOpCondExec) {
 	EXIT_NOT_IMPLEMENTED(addr == 0);
 	EXIT_NOT_IMPLEMENTED(payload_dw + exec_count >= dw);
 
-	if (*reinterpret_cast<const volatile uint32_t*>(addr) == 0) {
+	const auto condition = *reinterpret_cast<const volatile uint32_t*>(addr);
+	cp.PromoteGuestWrites(); // S601 (KYTY_BDA_DEFER)
+	if (condition == 0) {
 		return payload_dw + exec_count;
 	}
 
@@ -606,7 +608,9 @@ KYTY_CP_OP_PARSER(CpOpBranch) {
 	EXIT_NOT_IMPLEMENTED(function > 6);
 	EXIT_NOT_IMPLEMENTED(then_buffer == nullptr || then_num_dw == 0);
 
-	if (TestWaitRegMemValue(*compare_addr, reference, mask, function)) {
+	const bool take_then = TestWaitRegMemValue(*compare_addr, reference, mask, function);
+	cp.PromoteGuestWrites(); // S601 (KYTY_BDA_DEFER)
+	if (take_then) {
 		cp.ProcessIndirectBuffer({then_buffer, then_num_dw}, true);
 	} else if (mode == 2 && else_num_dw != 0) {
 		EXIT_NOT_IMPLEMENTED(else_buffer == nullptr);

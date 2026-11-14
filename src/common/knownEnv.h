@@ -34,7 +34,8 @@ inline constexpr std::string_view kKnownKytyEnv[] = {
     "KYTY_RT_SKIP", "KYTY_SHADER_LOOP_LIMIT",
     "KYTY_SPEC_COND", "KYTY_SPEC_READ_FAST", "KYTY_SPLIT_WIDE_STORES", "KYTY_SPV_NOCONTRACT", "KYTY_SRT_FAST", "KYTY_SRT_JIT_COVER", "KYTY_SRT_READER", "KYTY_PROGS_MEMO", "KYTY_SRT_SLOT_BATCH", "KYTY_SRT_PROT_AVOID", "KYTY_TEX_RESOLVE_MEMO", "KYTY_TEX_SAMPLED_NOTE", "KYTY_TSHARP_MINLOD_APPLE", "KYTY_VS_LANE_FROM_INDEX", "KYTY_WF_FAST_HANDLER", "KYTY_WF_FLIP_UNPROTECT", "KYTY_WF_HOT_UNPROTECT",
     "KYTY_WIDE_STORE_HOT", "KYTY_WIDE_STORE_MOVE", "KYTY_OPENXR", "KYTY_WALK_NOFAULT", "KYTY_PAGE_STAMP_OFF",
-    "KYTY_HAVOK_PRIO" // S601: port of KytyPS5#2022
+    "KYTY_HAVOK_PRIO", // S601: port of KytyPS5#2022
+    "KYTY_BDA_DEFER"   // S601: port of KytyPS5#1933
 #ifdef KYTY_KNOWNENV_MUTANT_UNCLASSIFIED
     , "KYTY_ZZ_UNCLASSIFIED" // a new switch added to the known list and to neither classification (tests/EnvClassificationTests.cpp must fail)
 #endif
@@ -58,6 +59,8 @@ inline constexpr std::string_view kNonCodegenKytyEnv[] = {
     , "KYTY_WALK_NOFAULT", "KYTY_PAGE_STAMP_OFF"
     // S601: host thread priority of the guest's Havok band (port of KytyPS5#2022): scheduling only, not codegen.
     , "KYTY_HAVOK_PRIO"
+    // S601: when game-thread BDA events reach PrepareBda (port of KytyPS5#1933): CP scheduling only, not codegen.
+    , "KYTY_BDA_DEFER"
     // S585: KYTY_GF_EMULATE moved here from kCodegenKytyEnv: it only decides how a guest read fault is served (loader/guestReadEmulator.cpp,
     // runtimeLinker.cpp), never what the recompiler emits; in the key it only cost a cold program cache for every emulation run.
 };

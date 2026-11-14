@@ -548,6 +548,9 @@ enum class Counter : uint32_t {
 	// 16-flip window was starved (CP wait on the guest >= 20 %, flips >= 25 ms on average), and per closed flip the pages not banned that the
 	// guest faulted on >= 2 times (a storm; the guard's own flip log, so a flip the CP drains late may hold several).
 	Krf4BurstBanN, Krf4StarveBanN, Krf4StarveFlipN, Krf4StormN,
+	// S601 (KYTY_BDA_DEFER, bdaDefer.h): write-fault BDA events held back, promotions that moved held-back events, BDA synchronizations
+	// (PrepareBda) that left held-back events behind.
+	BdaDeferN, BdaPromoteN, BdaTakeHeldN,
 	Count,
 };
 

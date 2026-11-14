@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/gfDiag.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
+#include "graphics/host_gpu/renderer/cache/bdaDefer.h"
 #include "graphics/host_gpu/renderer/cache/guestWait.h"
 #include "kernel/memory.h"
 #include "graphics/shader/recompiler/ir/passes/srtProtAvoid.h"
@@ -60,6 +61,11 @@ RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::pa
 		std::printf("Environment: KYTY_KRF3=%s window=%u trial_window=%u hit_div=%u ban_min=%" PRIu64 " ban_max=%" PRIu64 " early=%d halve=%d\n",
 		            ShaderRecompiler::IR::RfGpuPatch::Krf3ModeName(krf3), c.window, c.trial_window, c.hit_div, c.ban_min, c.ban_max, c.early ? 1 : 0,
 		            c.halve ? 1 : 0);
+		std::fflush(stdout);
+	}
+	// S601: KYTY_BDA_DEFER read here (main thread), not first inside the write-fault handler (BufferCache::InvalidateMemory); one line when set.
+	if (BdaDefer::EnvOn()) {
+		std::printf("Environment: KYTY_BDA_DEFER=1 (game-thread BDA events held until the CP promotes them, port of KytyPS5#1933)\n");
 		std::fflush(stdout);
 	}
 	m_command_scheduler.EnableAsyncSubmit();
