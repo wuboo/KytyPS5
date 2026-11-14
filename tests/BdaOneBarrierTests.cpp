@@ -76,6 +76,12 @@ std::vector<size_t> Run(World& world, const std::vector<Piece>& pieces, uint64_t
 	std::vector<uint8_t> staging(base_offset + total, 0);
 	BdaOneBarrier::Fill<FakeBuffer, Copy>(uploads, copies, staging.data() + base_offset, base_offset,
 	                                      [&](uint64_t address, uint8_t* destination, uint64_t bytes) {
+		                                      // Checked before the write: a mutant that replays copies must fail with an exit code, not corrupt the heap.
+		                                      Check(destination >= staging.data() + base_offset &&
+		                                                destination + bytes <= staging.data() + staging.size(),
+		                                            "the staging fill writes outside its reservation");
+		                                      Check(address >= kGuestBase && address + bytes <= kGuestBase + world.guest.size(),
+		                                            "the staging fill reads outside guest memory");
 		                                      std::memcpy(destination, world.Guest(address), bytes);
 	                                      });
 	std::vector<size_t> parts;
