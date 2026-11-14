@@ -45,6 +45,14 @@ RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::pa
 		            GuestWait::Stale().on ? 1 : 0, GuestWait::Stale().filter, GuestWait::PageCare().on ? 1 : 0, GuestWait::PageCare().limit);
 		std::fflush(stdout);
 	}
+	// S589: KYTY_KRF3 and the guest page guard's config read here (main thread), not first inside a fault handler; one line when set.
+	if (const auto krf3 = ShaderRecompiler::IR::RfGpuPatch::Krf3EnvMode(); krf3.Any()) {
+		const auto& c = ShaderRecompiler::IR::RfGpuPatch::GuestGuard().GetConfig();
+		std::printf("Environment: KYTY_KRF3=%s window=%u trial_window=%u hit_div=%u ban_min=%" PRIu64 " ban_max=%" PRIu64 " early=%d halve=%d\n",
+		            ShaderRecompiler::IR::RfGpuPatch::Krf3ModeName(krf3), c.window, c.trial_window, c.hit_div, c.ban_min, c.ban_max, c.early ? 1 : 0,
+		            c.halve ? 1 : 0);
+		std::fflush(stdout);
+	}
 	m_command_scheduler.EnableAsyncSubmit();
 	m_command_scheduler.EnableStarveDiag(); // S410
 	m_command_scheduler.EnableEmitThread(); // S565

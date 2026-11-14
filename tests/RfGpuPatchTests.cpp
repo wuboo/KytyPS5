@@ -20,11 +20,22 @@
 // ~2 % of flips) defers again long before F10+330; a scene change (the guest stops reading) gets the page back; inflight only counts would-bans;
 // eviction keeps banned pages; guest threads hammering NoteGuestRead while the CP defers.
 // Mutants (WILL_FAIL): _KRF3_INFLIGHT_DRAINS, _KRF3_NO_GUEST_HITS, _KRF3_NO_EXPIRY, _KRF3_ADDRESS_KEY.
+// S589 K-rf v3 sticky (KYTY_KRF3=sticky, GuestPageGuard::StickyConfig): models fitted to the S588 CSVs. Desert: the read page defers 3 times per
+// flip and the guest faults on it Poisson(lambda) times in a flip it was left dirty (lambda 0.3-0.5 steady, 1.1 in the landing burst), 0 when
+// drained; a second page defers 2 times per flip, never read. v3 (Config{}) is bistable there (the read page keeps deferring in most flips at
+// lambda 0.35: S588 dk2 / da1); sticky bans it in ~50 flips (median), then never defers it again before flip 2600 and keeps the other page.
+// Garden: two pages, 3 defers per flip each, an entry burst of 8 (and 12, margin) guest faults in the first 64 flips, then 2 % / 0.5 % of
+// flips: never banned over 6000 flips, 20 seeds. A scene change gets the page back after one ban; reading again bans again within a window.
+// Mutants (WILL_FAIL): _KRF3_STICKY_OLD_RATIO, _KRF3_STICKY_LOW_RATIO, _KRF3_STICKY_SHORT_BAN, _KRF3_STICKY_NO_EARLY.
 
 #include "graphics/shader/recompiler/ir/passes/rfGpuPatch.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <random>
 #include <thread>
@@ -1125,6 +1136,235 @@ void TestThreads() {
 
 } // namespace krf3
 
+namespace krf3s {
+
+// Deterministic on every standard library: mt19937 is specified, the distributions are not.
+struct Rng {
+	std::mt19937 g;
+	explicit Rng(uint32_t seed): g(seed) {}
+	double   Uniform() { return static_cast<double>(g() >> 8) * (1.0 / 16777216.0); }
+	uint32_t Poisson(double lambda) {
+		const double limit = std::exp(-lambda);
+		double       p     = Uniform();
+		uint32_t     k     = 0;
+		while (p > limit) {
+			++k;
+			p *= Uniform();
+		}
+		return k;
+	}
+};
+
+constexpr uint64_t kReadDword   = 0x571b2effcull; // the page the guest reads (0x571b2e000)
+constexpr uint64_t kReadByte    = 0x571b2e080ull;
+constexpr uint64_t kUnreadDword = 0x571b2f03cull;
+
+struct DesertRun {
+	uint32_t first_ban       = UINT32_MAX; // flip of the first ban of the read page
+	uint32_t defer_flips     = 0;          // flips in which the read page deferred (at least once)
+	uint32_t defer_after_ban = 0;          // ... after its first ban
+	uint32_t unread_drains   = 0;
+	uint32_t faults          = 0;
+};
+
+// stop_at: the guest stops reading from that flip; resume_at: and reads again from that flip.
+DesertRun RunDesert(GuestPageGuard& g, uint32_t seed, double lambda, uint32_t flips, uint32_t read_defers = 3, uint32_t stop_at = UINT32_MAX,
+                    uint32_t resume_at = UINT32_MAX) {
+	Rng       rng(seed);
+	DesertRun r;
+	for (uint32_t f = 0; f < flips; ++f) {
+		bool deferred = false;
+		for (uint32_t k = 0; k < read_defers; ++k) {
+			const auto a = g.OnDefer(kReadDword, f, true);
+			if (a.banned_now && r.first_ban == UINT32_MAX) r.first_ban = f;
+			deferred = deferred || !a.drain;
+		}
+		for (int k = 0; k < 2; ++k) r.unread_drains += g.OnDefer(kUnreadDword, f, true).drain ? 1u : 0u;
+		if (deferred) {
+			++r.defer_flips;
+			if (r.first_ban != UINT32_MAX && f > r.first_ban) ++r.defer_after_ban;
+		}
+		const bool reading = f < stop_at || f >= resume_at;
+		if (deferred && reading) {
+			const uint32_t n = rng.Poisson(lambda);
+			for (uint32_t k = 0; k < n; ++k) (void)g.NoteGuestRead(kReadByte + 0x40u * k);
+			r.faults += n;
+		}
+	}
+	return r;
+}
+
+void TestParse() {
+	const auto m = ParseKrf3("sticky");
+	Check(m.inflight && m.page && m.sticky, "krf3 sticky parse: sticky = inflight + page + sticky config");
+	Check(!ParseKrf3("1").sticky && !ParseKrf3("page").sticky && !ParseKrf3(nullptr).sticky, "krf3 sticky parse: only sticky");
+	Check(std::strcmp(Krf3ModeName(m), "sticky") == 0 && std::strcmp(Krf3ModeName(ParseKrf3("1")), "1") == 0, "krf3 sticky parse: names");
+	const auto c = GuestPageGuard::StickyConfig();
+	const GuestPageGuard::Config v3;
+	Check(!v3.early && !v3.halve && v3.window == 32 && v3.hit_div == 4 && v3.ban_min == 128, "krf3 sticky parse: the v3 config is unchanged");
+	Check(c.window == c.trial_window, "krf3 sticky parse: a trial is a full window");
+}
+
+// S588 dk2 / da1: v3 lets the read page defer in most flips at the desert's steady rate.
+void TestV3Bistable() {
+	uint32_t open_seeds = 0;
+	for (uint32_t seed = 1; seed <= 20; ++seed) {
+		GuestPageGuard g;
+		const auto     r = RunDesert(g, seed, 0.35, 2600);
+		if (r.defer_flips * 5 > 2600) ++open_seeds; // > 20 % of the flips
+	}
+	std::printf("krf3 sticky: v3 at lambda 0.35: the read page defers in > 20 %% of 2600 flips in %u of 20 seeds\n", open_seeds);
+	Check(open_seeds >= 10, "krf3 sticky: the model reproduces S588 (v3 leaves the desert page deferring)");
+}
+
+void TestDesert() {
+	const double lambdas[] = {0.3, 0.35, 0.5, 1.1};
+	for (const double lambda: lambdas) {
+		std::vector<uint32_t> bans;
+		uint32_t              worst_ban = 0, after = 0, unread = 0, faults = 0;
+		for (uint32_t seed = 1; seed <= 20; ++seed) {
+			GuestPageGuard g(GuestPageGuard::StickyConfig());
+			const auto     r = RunDesert(g, seed, lambda, 2600);
+			bans.push_back(r.first_ban);
+			worst_ban = std::max(worst_ban, r.first_ban);
+			after += r.defer_after_ban;
+			unread += r.unread_drains;
+			faults += r.faults;
+		}
+		std::sort(bans.begin(), bans.end());
+		const uint32_t median = bans[bans.size() / 2];
+		std::printf("krf3 sticky desert lambda %.2f: first ban median %u worst %u flips, read page deferred after the ban in %u flips (20 seeds), "
+		            "%u guest faults\n",
+		            lambda, median, worst_ban, after, faults);
+		Check(worst_ban <= 256, "krf3 sticky desert: the read page is banned within 3 windows in every seed");
+		Check(median <= 70, "krf3 sticky desert: ... in ~50 flips (early decision), not at the end of an 85-flip window");
+		Check(after == 0, "krf3 sticky desert: once banned, the read page does not defer again before flip 2600 (no trials in the window)");
+		Check(unread == 0, "krf3 sticky desert: the page the guest does not read keeps deferring");
+	}
+	// One defer of the read page per flip: the window is 256 flips, the early decision still bans within ~50.
+	std::vector<uint32_t> bans;
+	for (uint32_t seed = 1; seed <= 20; ++seed) {
+		GuestPageGuard g(GuestPageGuard::StickyConfig());
+		bans.push_back(RunDesert(g, seed, 0.35, 2600, 1).first_ban);
+	}
+	std::sort(bans.begin(), bans.end());
+	std::printf("krf3 sticky desert 1 defer/flip: first ban median %u worst %u\n", bans[10], bans.back());
+	Check(bans.back() <= 256 && bans[10] <= 70, "krf3 sticky desert: one defer per flip bans as fast");
+}
+
+// Garden: pages A and B, 3 defers per flip each; an entry burst of `burst` faults on A in flips [0, 64), then 2 % of flips on A, 0.5 % on B.
+uint32_t RunGarden(uint32_t seed, uint32_t burst, uint32_t flips, uint32_t* window_drains) {
+	GuestPageGuard g(GuestPageGuard::StickyConfig());
+	Rng            rng(seed);
+	std::vector<uint32_t> burst_at;
+	for (uint32_t k = 0; k < burst; ++k) burst_at.push_back(static_cast<uint32_t>(rng.Uniform() * 64.0));
+	uint32_t bans = 0;
+	for (uint32_t f = 0; f < flips; ++f) {
+		bool drained = false;
+		for (int k = 0; k < 3; ++k) {
+			const auto a = g.OnDefer(0x57954027cull, f, true);
+			const auto b = g.OnDefer(0x5794bf8fcull, f, true);
+			bans += (a.banned_now ? 1u : 0u) + (b.banned_now ? 1u : 0u);
+			drained = drained || a.drain || b.drain;
+		}
+		for (const auto at: burst_at) {
+			if (at == f) (void)g.NoteGuestRead(0x579540264ull);
+		}
+		if (f >= 64 && rng.Uniform() < 0.02) (void)g.NoteGuestRead(0x579540264ull);
+		if (rng.Uniform() < 0.005) (void)g.NoteGuestRead(0x5794bf900ull);
+		if (drained && f >= 330) ++*window_drains;
+	}
+	return bans;
+}
+
+void TestGarden() {
+	uint32_t bans8 = 0, bans12 = 0, drains = 0;
+	for (uint32_t seed = 1; seed <= 20; ++seed) {
+		bans8 += RunGarden(seed, 8, 6000, &drains);
+		bans12 += RunGarden(seed + 100, 12, 6000, &drains);
+	}
+	std::printf("krf3 sticky garden: %u ban(s) with an entry burst of 8, %u with 12, %u drained window flips (20 + 20 seeds x 6000 flips)\n",
+	            bans8, bans12, drains);
+	Check(bans8 == 0 && bans12 == 0 && drains == 0, "krf3 sticky garden: never banned (the gain stays)");
+}
+
+// The guest stops reading (flip 600): after the ban the page defers again for good; reading again (flip 7000) bans again within ~a window.
+void TestSceneChange() {
+	GuestPageGuard g(GuestPageGuard::StickyConfig());
+	Rng            rng(589);
+	uint32_t       resumed = UINT32_MAX, rebanned = UINT32_MAX, late_drains = 0;
+	for (uint32_t f = 0; f < 9000; ++f) {
+		bool deferred = false, banned_now = false;
+		for (int k = 0; k < 3; ++k) {
+			const auto a = g.OnDefer(kReadDword, f, true);
+			deferred     = deferred || !a.drain;
+			banned_now   = banned_now || a.banned_now;
+		}
+		if (deferred && f > 600 && resumed == UINT32_MAX) resumed = f;
+		if (f >= 5000 && f < 7000 && !deferred) ++late_drains;
+		if (banned_now && f >= 7000 && rebanned == UINT32_MAX) rebanned = f;
+		const bool reading = f < 600 || f >= 7000;
+		if (deferred && reading) {
+			const uint32_t n = rng.Poisson(0.35);
+			for (uint32_t k = 0; k < n; ++k) (void)g.NoteGuestRead(kReadByte);
+		}
+	}
+	std::printf("krf3 sticky scene change: deferring again at flip %u, banned again at %u\n", resumed, rebanned);
+	Check(resumed != UINT32_MAX && resumed <= 600 + 4096 + 300, "krf3 sticky scene change: the page defers again after its ban");
+	Check(late_drains == 0, "krf3 sticky scene change: ... and keeps deferring while the guest does not read it");
+	Check(rebanned != UINT32_MAX && rebanned <= 7000 + 256, "krf3 sticky scene change: reading again bans again");
+}
+
+// Ban lengths: 4096, then a failed trial doubles (8192); a clean trial halves (not below 4096).
+void TestBanLength() {
+	GuestPageGuard g(GuestPageGuard::StickyConfig());
+	uint64_t       flip = 0;
+	auto           ban  = [&] {
+		(void)g.OnDefer(kReadDword, flip, true); // tracks the page (or starts the trial, which clears the hits)
+		for (int k = 0; k < 16; ++k) (void)g.NoteGuestRead(kReadByte);
+		for (int k = 0; k < 300; ++k) {
+			const auto r = g.OnDefer(kReadDword, flip, true);
+			if (r.banned_now) return r.ban_len;
+		}
+		return uint64_t {0};
+	};
+	const auto first = ban();
+	Check(first == 4096 && g.Banned(kReadDword, flip + 4095) && !g.Banned(kReadDword, flip + 4096), "krf3 sticky ban: the first ban is 4096 flips");
+	flip += 4096;
+	const auto second = ban(); // the trial fails at once
+	Check(second == 8192, "krf3 sticky ban: a failed trial doubles it");
+	flip += 8192;
+	for (int k = 0; k < 256; ++k) (void)g.OnDefer(kReadDword, flip, true); // clean trial: 16384 -> 8192
+	const auto third = ban();
+	Check(third == 8192, "krf3 sticky ban: a clean trial halves the next ban");
+}
+
+void TestThreads() {
+	GuestPageGuard        g(GuestPageGuard::StickyConfig());
+	std::atomic<bool>     stop {false};
+	std::atomic<uint64_t> calls {0};
+	for (uint64_t p = 0; p < 16; ++p) (void)g.OnDefer(0x300000ull + p * 0x1000ull, 0, true);
+	std::vector<std::thread> threads;
+	for (int t = 0; t < 4; ++t) {
+		threads.emplace_back([&, t] {
+			uint64_t i = 0;
+			while (!stop.load(std::memory_order_relaxed)) {
+				(void)g.NoteGuestRead(0x300000ull + static_cast<uint64_t>((i++ + t) % 24) * 0x1000ull + 0x80);
+				calls.fetch_add(1, std::memory_order_relaxed);
+			}
+		});
+	}
+	uint32_t bans = 0;
+	for (uint32_t f = 0; f < 20000 || calls.load(std::memory_order_relaxed) < 40000; ++f) {
+		bans += g.OnDefer(0x300000ull + static_cast<uint64_t>(f % 20) * 0x1000ull, f / 20, true).banned_now ? 1u : 0u;
+	}
+	stop.store(true);
+	for (auto& t: threads) t.join();
+	Check(bans > 0, "krf3 sticky threads: pages hammered by guest threads get banned (early decision on a concurrent counter)");
+}
+
+} // namespace krf3s
+
 } // namespace
 
 int main() {
@@ -1152,6 +1392,13 @@ int main() {
 	krf3::TestWouldBan();
 	krf3::TestEviction();
 	krf3::TestThreads();
+	krf3s::TestParse();
+	krf3s::TestV3Bistable();
+	krf3s::TestDesert();
+	krf3s::TestGarden();
+	krf3s::TestSceneChange();
+	krf3s::TestBanLength();
+	krf3s::TestThreads();
 	if (g_failures != 0) {
 		std::fprintf(stderr, "RfGpuPatchTests: %d failure(s)\n", g_failures);
 		return 1;

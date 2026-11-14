@@ -650,9 +650,17 @@ inline bool SupersetCoverRanges(std::span<const P> truth, std::span<const P> sup
 //             drains there as in the base, which also cleans the page for the guest), doubling up to `ban_max` while trials (`trial_window`
 //             defers) keep failing and back to `ban_min` after a clean trial window. The garden's pages see ~0.1 guest faults per 6 defers per flip; the desert's ~3 per 2.6.
 //   1 = inflight + page. inflight alone still tracks the pages and counts what page would do (krf3_page_would_ban_n) without banning.
+// S589 sticky (KYTY_KRF3=sticky = inflight + page with GuestPageGuard::StickyConfig()): S588 found the v3 guard bistable on the desert (a ban in
+// 4 of 5 runs, 163 hitches without it; kr3 alone 21 vs 111). Per S588 CSV: the desert page sees 0.3-0.5 guest faults per flip at ~3 defers
+// per flip (0.11-0.16 per defer; 1.1 in the landing burst), the garden 0.002-0.005 per defer (an entry burst of at most 8 faults in 64 flips,
+// then ~0.01 per flip). v3 asks for 1 fault per 4 defers in a window of 32 (8 faults in ~11 flips): above the desert's steady rate, so a ban
+// came only from bursts, lasted 128 flips, and a trial of 8 defers (~3 flips, before the guest faults again) usually passed. sticky: 1 fault
+// per 16 defers in a window of 256 (16 faults), decided as soon as the hits reach it (~50 flips on the desert, the garden stays at <= 8);
+// a ban lasts 4096 flips and doubles up to 65536, a trial is a full window, and a clean trial halves the next ban (min 4096).
 struct Krf3Mode {
 	bool inflight = false;
 	bool page     = false;
+	bool sticky   = false; // S589: the page guard uses GuestPageGuard::StickyConfig()
 	[[nodiscard]] bool Any() const { return inflight || page; }
 };
 
@@ -666,6 +674,10 @@ inline Krf3Mode ParseKrf3(const char* text) {
 		m.inflight = true;
 	} else if (std::strcmp(text, "page") == 0) {
 		m.page = true;
+	} else if (std::strcmp(text, "sticky") == 0) {
+		m.inflight = true;
+		m.page     = true;
+		m.sticky   = true;
 	}
 	return m;
 }
@@ -689,17 +701,50 @@ public:
 		uint32_t hit_div = 4;    // ban when hits * hit_div >= defers of the window
 		uint64_t ban_min = 128;  // flips
 		uint64_t ban_max = 4096; // flips
+		bool     early   = false; // S589: ban as soon as hits * hit_div reach the window (not only when the window closes)
+		bool     halve   = false; // S589: a clean trial halves the ban length (not below ban_min) instead of resetting it to ban_min
 	};
 
+	// S589 KYTY_KRF3=sticky (see Krf3Mode).
+	static Config StickyConfig() {
+		Config c;
+		c.window       = 256;
+		c.trial_window = 256;
+#if defined(KYTY_RFPATCH_MUTANT_KRF3_STICKY_OLD_RATIO)
+		c.hit_div = 4; // mutant: the v3 ratio, above the desert's steady 0.11-0.16 faults per defer
+#elif defined(KYTY_RFPATCH_MUTANT_KRF3_STICKY_LOW_RATIO)
+		c.hit_div = 64; // mutant: 4 faults per window, the garden's entry burst bans
+#else
+		c.hit_div = 16;
+#endif
+#if defined(KYTY_RFPATCH_MUTANT_KRF3_STICKY_SHORT_BAN)
+		c.ban_min = 128; // mutant: the v3 ban length, trials inside the desert window
+#else
+		c.ban_min = 4096;
+#endif
+		c.ban_max = 65536;
+#if defined(KYTY_RFPATCH_MUTANT_KRF3_STICKY_NO_EARLY)
+		c.early = false; // mutant: a ban only when the window closes (~85 flips at 3 defers per flip)
+#else
+		c.early = true;
+#endif
+		c.halve = true;
+		return c;
+	}
+
 	struct Result {
-		bool drain        = false; // the walker drains this fault (the page is banned, or was banned just now)
-		bool banned_now   = false; // this defer closed a window that bans the page
-		bool would_ban    = false; // the same, with banning off (inflight only): counted, the defer goes on
-		bool trial        = false; // a ban ran out: deferring on the page is tried again
+		bool     drain      = false; // the walker drains this fault (the page is banned, or was banned just now)
+		bool     banned_now = false; // this defer closed a window that bans the page
+		bool     would_ban  = false; // the same, with banning off (inflight only): counted, the defer goes on
+		bool     trial      = false; // a ban ran out: deferring on the page is tried again
+		uint32_t hits       = 0;     // banned_now / would_ban: the guest faults and defers of the deciding window, the ban length (S589 log)
+		uint32_t defers     = 0;
+		uint64_t ban_len    = 0;
 	};
 
 	GuestPageGuard() = default;
 	explicit GuestPageGuard(Config c): m_config(c) {}
+	[[nodiscard]] const Config& GetConfig() const { return m_config; }
 
 	static uint64_t PageOf(uint64_t address) {
 #if defined(KYTY_RFPATCH_MUTANT_KRF3_ADDRESS_KEY)
@@ -734,14 +779,21 @@ public:
 			s->hits.store(0, std::memory_order_relaxed);
 			r.trial = true;
 		}
-		if (++s->defers >= (s->trial ? m_config.trial_window : m_config.window)) {
+		const uint32_t window = s->trial ? m_config.trial_window : m_config.window;
+		++s->defers;
+		// S589 (early): the window's hits so far already reach the ratio of a whole window.
+		const bool early = m_config.early && uint64_t {s->hits.load(std::memory_order_relaxed)} * m_config.hit_div >= window;
+		if (early || s->defers >= window) {
 			const uint32_t hits   = s->hits.exchange(0, std::memory_order_relaxed);
 			const uint32_t defers = s->defers;
 			s->defers             = 0;
-			if (uint64_t {hits} * m_config.hit_div >= defers) {
+			r.hits                = hits;
+			r.defers              = defers;
+			if (early || uint64_t {hits} * m_config.hit_div >= defers) {
 				if (may_ban) {
 					s->banned    = true;
 					s->ban_until = flip + s->ban_len;
+					r.ban_len    = s->ban_len;
 					s->ban_len   = std::min(s->ban_len * 2, m_config.ban_max);
 					s->trial     = false;
 					r.drain      = true;
@@ -751,7 +803,7 @@ public:
 				}
 			} else if (s->trial) {
 				s->trial   = false;
-				s->ban_len = m_config.ban_min;
+				s->ban_len = m_config.halve ? std::max(s->ban_len / 2, m_config.ban_min) : m_config.ban_min;
 			}
 		}
 		m_busy.clear(std::memory_order_release);
@@ -821,8 +873,16 @@ private:
 };
 
 inline GuestPageGuard& GuestGuard() {
-	static GuestPageGuard guard;
+	static GuestPageGuard guard(Krf3EnvMode().sticky ? GuestPageGuard::StickyConfig() : GuestPageGuard::Config {}); // S589
 	return guard;
+}
+
+inline const char* Krf3ModeName(Krf3Mode m) {
+	if (m.sticky) return "sticky";
+	if (m.inflight && m.page) return "1";
+	if (m.inflight) return "inflight";
+	if (m.page) return "page";
+	return "0";
 }
 
 } // namespace Libs::Graphics::ShaderRecompiler::IR::RfGpuPatch

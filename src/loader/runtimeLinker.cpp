@@ -1236,9 +1236,22 @@ static bool TrySupersetDefer(const Common::HostException::ExceptionInfo* info, u
 	}
 	// S581 K-rf v3 (KYTY_KRF3=page|1): a page the guest reads is drained as in the base (the drain also cleans it for the guest's reads).
 	if (krf3.Any()) {
-		const auto g = P::GuestGuard().OnDefer(address, Libs::Graphics::FrameTiming::GuestFlips(), krf3.page);
+		const auto flip = Libs::Graphics::FrameTiming::GuestFlips();
+		const auto g    = P::GuestGuard().OnDefer(address, flip, krf3.page);
 		if (g.trial) Libs::Graphics::FrameTiming::Add(C::Krf3PageTrialN);
 		if (g.banned_now) Libs::Graphics::FrameTiming::Add(C::Krf3PageBanN);
+		// S589: which page, when, on how many guest faults (stdout, also with Silent; <= 200 lines).
+		if (g.banned_now || g.trial) {
+			static std::atomic<uint32_t> krf3_logged {0};
+			if (krf3_logged.fetch_add(1, std::memory_order_relaxed) < 200) {
+				char line[200];
+				std::snprintf(line, sizeof(line), "[krf3-ban] flip=%u page=0x%016" PRIx64 " what=%s hits=%u defers=%u ban=%" PRIu64 " mode=%s\n",
+				              static_cast<uint32_t>(flip), P::GuestPageGuard::PageOf(address), g.banned_now ? "ban" : "trial", g.hits, g.defers,
+				              g.ban_len, P::Krf3ModeName(krf3));
+				LOGF("%s", line);
+				Libs::Graphics::RfOp::WriteStdout(line);
+			}
+		}
 		if (g.would_ban) Libs::Graphics::FrameTiming::Add(C::Krf3PageWouldBanN);
 		if (g.drain) {
 			Libs::Graphics::FrameTiming::Add(C::Krf3PageDrainN);
