@@ -14,6 +14,7 @@
 #include <mutex>
 #include <semaphore>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -418,7 +419,13 @@ void TestCpuDirtyUpload() {
 // S406 (KYTY_PV_RANGE_GEN): page stamps. A stamp is taken when a page BECOMES CPU- or GPU-modified (never when it is cleaned), so the
 // maximum over a range moves whenever any page of it was written, and a range that is clean again after a write still shows it.
 // Mutants NO_BUMP_CPU / NO_BUMP_GPU (compile definitions of this target) must fail here.
+void TestPageStampOff();
+
 void TestPageGeneration() {
+  if (Libs::Graphics::PageStampOff()) {
+    TestPageStampOff();
+    return;
+  }
   TrackerHarness harness;
   auto &tracker = harness.tracker;
   auto &page_manager = harness.page_manager;
@@ -472,6 +479,45 @@ void TestPageGeneration() {
   tracker.UntrackMemory(address, whole);
   Release(memory);
 }
+// S594 (KYTY_PAGE_STAMP_OFF=1, ctest memory_tracker_page_stamp_off): the same writes as TestPageGeneration take no stamp, and the state
+// the tracker reports (registered / clean, dirty bits) is the one with stamps. Mutant KYTY_PAGESTAMP_MUTANT_ALWAYS_OFF: the default run
+// takes this branch and TestPageGeneration's stamp checks are skipped, so memory_tracker_mutant_pagestamp_always_off must fail on the
+// marker below.
+void TestPageStampOff() {
+  const char *env = std::getenv("KYTY_PAGE_STAMP_OFF");
+  Check(env != nullptr && std::string_view(env) == "1", "stamps are off only with KYTY_PAGE_STAMP_OFF=1");
+  TrackerHarness harness;
+  auto &tracker = harness.tracker;
+  const auto page_size = Libs::Graphics::TRACKER_PAGE_SIZE;
+  auto *memory = Allocate(4);
+  const auto address = reinterpret_cast<uint64_t>(memory);
+  const auto whole = page_size * 4;
+  auto q = tracker.QueryPageGeneration(address, whole);
+  Check(!q.registered && !q.clean && q.max_stamp == 0, "off: an unseen range is not registered");
+  Check(tracker.IsRegionCpuModified(address, whole), "off: new region is CPU dirty");
+  const auto make_clean = [&] {
+    tracker.ForEachUploadRange(
+        address, whole, false, [&](uint64_t, uint64_t) noexcept {}, [&]() noexcept {});
+  };
+  make_clean();
+  q = tracker.QueryPageGeneration(address, whole);
+  Check(q.registered && q.clean && q.max_stamp == 0, "off: an uploaded range is clean, no stamp");
+  tracker.MarkRegionAsCpuModified(address + page_size + 16, 32);
+  q = tracker.QueryPageGeneration(address, whole);
+  Check(!q.clean && q.max_stamp == 0 && tracker.IsRegionCpuModified(address + page_size, page_size),
+        "off: a CPU write dirties the page and takes no stamp");
+  make_clean();
+  tracker.MarkRegionAsGpuModified(address, page_size);
+  q = tracker.QueryPageGeneration(address, whole);
+  Check(!q.clean && q.max_stamp == 0 && tracker.IsRegionGpuModified(address, page_size),
+        "off: a GPU write marks the page and takes no stamp");
+  tracker.UnmarkRegionAsGpuModified(address, page_size);
+  q = tracker.QueryPageGeneration(address, whole);
+  Check(q.clean && q.max_stamp == 0, "off: unmarking leaves the range clean");
+  tracker.UntrackMemory(address, whole);
+  Release(memory);
+}
+
 // A repeated ForEachUploadRange is skipped only while its regions are
 // unchanged: a CPU write, a GPU unmark or a download in between makes the next
 // identical call run again, and a new tracker does not take an old one's skip.

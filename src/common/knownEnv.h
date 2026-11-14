@@ -33,7 +33,7 @@ inline constexpr std::string_view kKnownKytyEnv[] = {
 #endif
     "KYTY_RT_SKIP", "KYTY_SHADER_LOOP_LIMIT",
     "KYTY_SPEC_COND", "KYTY_SPEC_READ_FAST", "KYTY_SPLIT_WIDE_STORES", "KYTY_SPV_NOCONTRACT", "KYTY_SRT_FAST", "KYTY_SRT_JIT_COVER", "KYTY_SRT_READER", "KYTY_PROGS_MEMO", "KYTY_SRT_SLOT_BATCH", "KYTY_SRT_PROT_AVOID", "KYTY_TEX_RESOLVE_MEMO", "KYTY_TEX_SAMPLED_NOTE", "KYTY_TSHARP_MINLOD_APPLE", "KYTY_VS_LANE_FROM_INDEX", "KYTY_WF_FAST_HANDLER", "KYTY_WF_FLIP_UNPROTECT", "KYTY_WF_HOT_UNPROTECT",
-    "KYTY_WIDE_STORE_HOT", "KYTY_WIDE_STORE_MOVE", "KYTY_OPENXR"
+    "KYTY_WIDE_STORE_HOT", "KYTY_WIDE_STORE_MOVE", "KYTY_OPENXR", "KYTY_WALK_NOFAULT", "KYTY_PAGE_STAMP_OFF"
 #ifdef KYTY_KNOWNENV_MUTANT_UNCLASSIFIED
     , "KYTY_ZZ_UNCLASSIFIED" // a new switch added to the known list and to neither classification (tests/EnvClassificationTests.cpp must fail)
 #endif
@@ -52,6 +52,9 @@ inline constexpr std::string_view kNonCodegenKytyEnv[] = {
     "KYTY_PAD_FRAME_HOLD", "KYTY_PAD_HOLD", "KYTY_PAD_RECORD", "KYTY_PAD_REPLAY", "KYTY_PAD_SCRIPT", "KYTY_PAD_SCRIPT_LOG", "KYTY_PATCH_CACHE", "KYTY_PIPELINE_SAVE_ASYNC",
     "KYTY_PROGRAM_DISK_CACHE", "KYTY_PROGRAM_DISK_PREFETCH", "KYTY_ROSETTA_RELEASE_AHEAD_MB", "KYTY_SHADER_PREWARM", "KYTY_SHADER_PREWARM_MAX_MB", "KYTY_THREAD_CPU", "KYTY_SRT_JIT_COVER", "KYTY_PROGS_MEMO", "KYTY_SRT_SLOT_BATCH", "KYTY_RB_CLEAN_WALK", "KYTY_SRT_PROT_AVOID", "KYTY_SPLIT_WIDE_STORES", "KYTY_TEX_RESOLVE_MEMO", "KYTY_TEX_SAMPLED_NOTE", "KYTY_WF_FAST_HANDLER", "KYTY_WF_FLIP_UNPROTECT", "KYTY_WF_HOT_UNPROTECT", "KYTY_WIDE_STORE_HOT", "KYTY_WIDE_STORE_MOVE"
     , "KYTY_OPENXR" // S487: upstream VR switch (headset on/off), not codegen
+    // S594: how a clean walker load is completed (KYTY_WALK_NOFAULT) and whether the tracker stamps page generations nobody reads
+    // (KYTY_PAGE_STAMP_OFF): neither changes what the recompiler emits.
+    , "KYTY_WALK_NOFAULT", "KYTY_PAGE_STAMP_OFF"
     // S585: KYTY_GF_EMULATE moved here from kCodegenKytyEnv: it only decides how a guest read fault is served (loader/guestReadEmulator.cpp,
     // runtimeLinker.cpp), never what the recompiler emits; in the key it only cost a cold program cache for every emulation run.
 };

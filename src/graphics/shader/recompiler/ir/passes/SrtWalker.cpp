@@ -1,5 +1,6 @@
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "graphics/shader/recompiler/ir/passes/rfGpuPatch.h"
+#include "graphics/shader/recompiler/ir/passes/walkNoFault.h"
 
 #include "common/abi.h"
 #include "common/assert.h"
@@ -9,6 +10,7 @@
 #include <xbyak/xbyak.h>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstring>
 #include <deque>
@@ -38,6 +40,9 @@ bool SrtReadCapture::Read(void* userdata, uint64_t address, std::span<uint32_t> 
 	capture.m_ranges.emplace_back(address, values.size_bytes());
 	return true;
 }
+
+// S594 (KYTY_WALK_NOFAULT): the dword at `address` through WalkNoFault::ReaderHook (WalkNoFault::Served(dword)), or 0: take the ordinary load.
+uint64_t KYTY_SYSV_ABI WalkNoFaultLoad(uint64_t address);
 
 namespace {
 
@@ -192,11 +197,65 @@ thread_local const Xbyak::CodeGenerator* t_running_walker = nullptr;
 thread_local const ResourcePlan*         t_running_plan   = nullptr; // S570 (KYTY_RF_GPU_PATCH): the plan of t_running_walker
 thread_local uint8_t*                    t_running_scratch = nullptr; // S579: its scratch (rdx), where a deferred load's state byte lives
 
+// S594 (KYTY_WALK_NOFAULT=1): before the ordinary load, a load whose page is in WalkNoFault::Hot() asks WalkNoFaultLoad. Only rax and the
+// flags change on the way (the load overwrites rax anyway; no flag is live across a load); every register the call may clobber is saved.
+static void EmitNoFaultCheck(Xbyak::CodeGenerator& code, const Xbyak::Label& ordinary, const Xbyak::Label& done) {
+	using Xbyak::CodeGenerator;
+	auto& c = code;
+#if !defined(KYTY_WALKNF_EVERY_LOAD)
+	c.push(c.r11);
+	c.mov(c.r11, c.r10);
+	c.shr(c.r11, WalkNoFault::kPageShift);
+	c.and_(c.r11d, static_cast<uint32_t>(WalkNoFault::kSlots - 1));
+	c.mov(c.rax, reinterpret_cast<uint64_t>(WalkNoFault::Hot().pages.data()));
+	c.mov(c.rax, c.qword[c.rax + c.r11 * 8]);
+	c.mov(c.r11, c.r10);
+	c.shr(c.r11, WalkNoFault::kPageShift);
+	c.cmp(c.rax, c.r11);
+	c.pop(c.r11);
+	c.jne(ordinary, CodeGenerator::T_NEAR);
+#endif
+	const std::array saved {c.rcx, c.rdx, c.rsi, c.rdi, c.r8, c.r9, c.r10, c.r11};
+	for (const auto& reg: saved) c.push(reg);
+	c.sub(c.rsp, 32);
+	c.movdqu(c.ptr[c.rsp], c.xmm0);
+	c.movdqu(c.ptr[c.rsp + 16], c.xmm1);
+	// SysV call: rsp 16-aligned at the call, whatever the walker's depth.
+	c.mov(c.rax, c.rsp);
+	c.and_(c.rsp, -16);
+	c.push(c.rax);
+	c.sub(c.rsp, 8);
+	c.mov(c.rdi, c.r10);
+	c.mov(c.rax, reinterpret_cast<uint64_t>(&WalkNoFaultLoad));
+	c.call(c.rax);
+	c.add(c.rsp, 8);
+	c.pop(c.rsp);
+	c.movdqu(c.xmm0, c.ptr[c.rsp]);
+	c.movdqu(c.xmm1, c.ptr[c.rsp + 16]);
+	c.add(c.rsp, 32);
+	for (auto it = saved.rbegin(); it != saved.rend(); ++it) c.pop(*it);
+#if !defined(KYTY_WALKNF_MUTANT_IGNORE_REFUSAL)
+	c.bt(c.rax, 32);
+	c.jnc(ordinary, CodeGenerator::T_NEAR);
+#endif
+	c.mov(c.eax, c.eax);
+	c.jmp(done, CodeGenerator::T_NEAR);
+}
+
 // Every guest load is mov eax, [r10] (41 8b 02), so a fault completes it as a zero read. Returns the code offset of the mov.
 size_t LoadGuest(Xbyak::CodeGenerator& code, const Xbyak::RegExp& address) {
 	code.lea(code.r10, code.ptr[address]);
+	if (WalkNoFault::Current() != WalkNoFault::Mode::On) {
+		const size_t at = code.getSize();
+		code.mov(code.eax, code.dword[code.r10]);
+		return at;
+	}
+	Xbyak::Label ordinary, done;
+	EmitNoFaultCheck(code, ordinary, done);
+	code.L(ordinary);
 	const size_t at = code.getSize();
 	code.mov(code.eax, code.dword[code.r10]);
+	code.L(done);
 	return at;
 }
 
@@ -1766,6 +1825,15 @@ namespace {
 thread_local bool     t_walker_worker = false;
 thread_local uint32_t t_worker_faults = 0;
 } // namespace
+
+uint64_t KYTY_SYSV_ABI WalkNoFaultLoad(uint64_t address) {
+#if !defined(KYTY_WALKNF_MUTANT_WORKER_SERVED)
+	// A pipeline worker keeps its zero read and bail (S490): its walk runs ahead of the command processor.
+	if (t_walker_worker) return 0;
+#endif
+	const auto reader = WalkNoFault::ReaderHook().load(std::memory_order_acquire);
+	return reader != nullptr ? reader(address) : 0;
+}
 
 void SetSrtWalkerWorker(bool on) {
 	t_walker_worker = on;

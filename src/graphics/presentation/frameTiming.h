@@ -542,6 +542,8 @@ enum class Counter : uint32_t {
 	// load of a flip / posts dropped (mailbox full), posted pages the CP drained (one read fault each for the hot-page count) / queued for an
 	// eager download at once, guard hits of served loads (K-rf v3 GuestPageGuard::NoteGuestRead on a page of a deferred dword).
 	GwPageLimitN, GwPageFeedN, GwPageFeedDropN, GwPageHotN, GwPageEagerN, GwGuardHitN,
+	// S594 (KYTY_WALK_NOFAULT): walker loads served from the backing without a fault, hot-page loads that took the ordinary load, pages noted hot.
+	WalkNfServeN, WalkNfOrdinaryN, WalkNfHotN,
 	Count,
 };
 

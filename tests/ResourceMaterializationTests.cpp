@@ -1,6 +1,7 @@
 #include "graphics/shader/recompiler/ir/Serialize.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+#include "graphics/shader/recompiler/ir/passes/walkNoFault.h"
 #include "SrtWalkerTestMemory.h"
 
 #include <atomic>
@@ -10,6 +11,17 @@
 #include <limits>
 #include <memory>
 #include <thread>
+
+#if defined(_WIN32)
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <sys/mman.h>
+#else
+#include <sys/mman.h>
+#include <sys/uio.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -212,11 +224,11 @@ void TestWorkerScratchIsPrivate() {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   uint32_t cell = 0x11111111u;
   auto plan = Extract(SrtProgram(reinterpret_cast<uint64_t>(&cell)));
+  CompileSrtWalker(plan);
   std::vector<uint32_t> flat;
-  DescriptorValue value;
   const SrtRuntime runtime{};
-  Check(WalkSrt(plan, runtime, flat, nullptr) && WalkedDescriptor(plan, 0, value) &&
-            value.dwords[0] == 0x11111111u,
+  // The plan has no descriptor gate, so the walk's result is its flat SRT read.
+  Check(WalkSrt(plan, runtime, flat, nullptr) && flat.size() == 1u && flat[0] == 0x11111111u,
         "CP walk did not read its DWORD");
   const auto cp_scratch = plan.srt_scratch;
   bool worker_ok = false;
@@ -224,15 +236,12 @@ void TestWorkerScratchIsPrivate() {
     SetScratchPerThread(true);
     cell = 0x22222222u;
     std::vector<uint32_t> worker_flat;
-    DescriptorValue worker_value;
-    worker_ok = WalkSrt(plan, runtime, worker_flat, nullptr) &&
-                WalkedDescriptor(plan, 0, worker_value) && worker_value.dwords[0] == 0x22222222u;
+    worker_ok = WalkSrt(plan, runtime, worker_flat, nullptr) && worker_flat.size() == 1u &&
+                worker_flat[0] == 0x22222222u;
     SetScratchPerThread(false);
   }).join();
   Check(worker_ok, "the worker's walk did not see its own result");
   Check(plan.srt_scratch == cp_scratch, "a worker walk changed the CP's scratch");
-  Check(WalkedDescriptor(plan, 0, value) && value.dwords[0] == 0x11111111u,
-        "the CP's walk result changed after a worker walked the plan");
 }
 
 // A faulting load of a worker's walker is completed as zero and counted (the emulator's handler does not drain a tracked page for it); the CP's walk still reads the
@@ -241,6 +250,7 @@ void TestWorkerWalkerFaultIsZeroAndCounted() {
   using namespace Libs::Graphics::ShaderRecompiler::IR;
   const uint32_t dword = 0x5a5a5a5au;
   auto           plan  = Extract(SrtProgram(reinterpret_cast<uint64_t>(&dword)));
+  CompileSrtWalker(plan);
   std::vector<uint32_t> flat;
   FakeGuestMemory guest; // the handler as the emulator's: worker first
   const SrtRuntime runtime{};
@@ -249,10 +259,173 @@ void TestWorkerWalkerFaultIsZeroAndCounted() {
   Check(SrtWalkerWorkerFaults() == 0, "count starts at zero");
   // A walk of a worker over unmapped memory (the page a tracker protects): zero, one fault.
   auto unmapped_plan = Extract(SrtProgram(0x1000u));
+  CompileSrtWalker(unmapped_plan);
   Check(WalkSrt(unmapped_plan, runtime, flat, nullptr) && flat.size() == 1u && flat[0] == 0u, "the worker's faulting load completes as zero");
   Check(SrtWalkerWorkerFaults() == 1u, "the worker's faulting load is counted");
   SetSrtWalkerWorker(false);
   Check(SrtWalkerWorkerFaultLength(0) == 0, "a thread that is not a worker is not asked");
+}
+
+// S594 (KYTY_WALK_NOFAULT): a page the test can make unreadable (the protection a tracker puts on a GPU-written page).
+struct GuardPage {
+  uint32_t *words = nullptr;
+  GuardPage() {
+#if defined(_WIN32)
+    words = static_cast<uint32_t *>(VirtualAlloc(nullptr, 4096, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE));
+#else
+    void *page = mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    words = page == MAP_FAILED ? nullptr : static_cast<uint32_t *>(page);
+#endif
+    Check(words != nullptr, "guard page");
+  }
+  void Protect(bool on) {
+#if defined(_WIN32)
+    DWORD old = 0;
+    Check(VirtualProtect(words, 4096, on ? PAGE_NOACCESS : PAGE_READWRITE, &old) != 0, "guard page protect");
+#else
+    Check(mprotect(words, 4096, on ? PROT_NONE : (PROT_READ | PROT_WRITE)) == 0, "guard page protect");
+#endif
+  }
+  ~GuardPage() {
+#if defined(_WIN32)
+    VirtualFree(words, 0, MEM_RELEASE);
+#else
+    munmap(words, 4096);
+#endif
+  }
+};
+
+// Reads 4 bytes of this process without faulting (false: not readable).
+bool SafeRead(uint64_t address, uint32_t &value) {
+#if defined(_WIN32)
+  SIZE_T done = 0;
+  return ReadProcessMemory(GetCurrentProcess(), reinterpret_cast<const void *>(address), &value, 4, &done) != 0 && done == 4;
+#elif defined(__APPLE__)
+  vm_size_t done = 0;
+  return vm_read_overwrite(mach_task_self(), static_cast<vm_address_t>(address), 4, reinterpret_cast<vm_address_t>(&value), &done) ==
+             KERN_SUCCESS && done == 4;
+#else
+  iovec local{&value, 4}, remote{reinterpret_cast<void *>(address), 4};
+  return process_vm_readv(getpid(), &local, 1, &remote, 1, 0) == 4;
+#endif
+}
+
+struct NoFaultProbe {
+  std::atomic<uint32_t> calls{0};
+  std::atomic<uint64_t> last{0};
+  uint32_t value = 0;
+  bool refuse = false;
+};
+NoFaultProbe &Probe() {
+  static NoFaultProbe probe;
+  return probe;
+}
+uint64_t ProbeReader(uint64_t address) {
+  auto &probe = Probe();
+  probe.calls.fetch_add(1);
+  probe.last.store(address);
+  return probe.refuse ? 0 : Libs::Graphics::ShaderRecompiler::IR::WalkNoFault::Served(probe.value);
+}
+// KYTY_WALKNF_EVERY_LOAD: every walker load asks this reader, which answers every readable address with its bytes.
+uint64_t SafeReader(uint64_t address) {
+  Probe().calls.fetch_add(1);
+  uint32_t value = 0;
+  return SafeRead(address, value) ? Libs::Graphics::ShaderRecompiler::IR::WalkNoFault::Served(value) : 0;
+}
+
+std::atomic<uint32_t> g_fault_reads{0};
+bool FaultReader(void *, uint64_t, std::span<uint32_t> values) {
+  g_fault_reads.fetch_add(1);
+  for (auto &value : values) value = 0xfa017000u;
+  return true;
+}
+
+std::vector<uint8_t> CodeBytes(const Libs::Graphics::ShaderRecompiler::IR::ResourcePlan &plan) {
+  const auto *code = plan.srt_code->getCode();
+  return {code, code + plan.srt_code->getSize()};
+}
+
+// S594 (KYTY_WALK_NOFAULT=1): a walker load on a hot page is served by the reader hook without a fault; a cold page, a refused read
+// and a pipeline worker keep the ordinary load (and its fault). Off (unset or 0): the walker code is byte for byte the old one.
+// Mutants: KYTY_WALKNF_MUTANT_WORKER_SERVED (the worker's load is served), KYTY_WALKNF_MUTANT_IGNORE_REFUSAL (a refused read skips the
+// ordinary load and reads zero).
+void TestWalkNoFault() {
+  using namespace Libs::Graphics::ShaderRecompiler::IR;
+  namespace NF = WalkNoFault;
+  GuardPage guard;
+  guard.words[5] = 0x0a0b0c0du;
+  const auto address = reinterpret_cast<uint64_t>(&guard.words[5]);
+
+  // Off: the code is the same with the switch unset and set to 0, and the walk reads memory.
+  NF::Override().store(-1);
+  auto plan_unset = Extract(SrtProgram(address));
+  CompileSrtWalker(plan_unset);
+  const auto unset_bytes = CodeBytes(plan_unset);
+  NF::Override().store(0);
+  auto plan = Extract(SrtProgram(address));
+  CompileSrtWalker(plan);
+  Check(CodeBytes(plan) == unset_bytes, "off: KYTY_WALK_NOFAULT=0 changes the walker code");
+  NF::Override().store(1);
+  auto plan_nf = Extract(SrtProgram(address));
+  CompileSrtWalker(plan_nf);
+  Check(CodeBytes(plan_nf).size() > unset_bytes.size(), "on: no check emitted");
+  NF::Override().store(-1);
+
+  NF::ClearHot();
+  NF::ReaderHook().store(&ProbeReader);
+  auto &probe = Probe();
+  probe.value = 0x5e7e0001u;
+  probe.refuse = false;
+  probe.calls = 0;
+  FakeGuestMemory fake(FaultReader);
+  std::vector<uint32_t> flat;
+  const SrtRuntime runtime{};
+
+  // Readable, cold page: no question, ordinary load.
+  Check(WalkSrt(plan_nf, runtime, flat, nullptr) && flat.size() == 1u && flat[0] == 0x0a0b0c0du && probe.calls == 0,
+        "on, cold page: ordinary load");
+  // Protected, cold page: the fault path as before.
+  guard.Protect(true);
+  g_fault_reads = 0;
+  Check(WalkSrt(plan_nf, runtime, flat, nullptr) && flat[0] == 0xfa017000u && g_fault_reads == 1 && probe.calls == 0,
+        "on, cold protected page: the load faults as before");
+  // Hot page: served by the reader, no fault, the address is the load's.
+  Check(NF::NoteHot(address) && !NF::NoteHot(address + 64) && NF::IsHot(address + 4000 - 20), "hot page noted once per page");
+  g_fault_reads = 0;
+  Check(WalkSrt(plan_nf, runtime, flat, nullptr) && flat[0] == 0x5e7e0001u && g_fault_reads == 0 && probe.calls == 1 &&
+            probe.last == address,
+        "on, hot page: served without a fault");
+  // The captured read range is the load's, served or not.
+  std::vector<std::pair<uint64_t, uint64_t>> reads;
+  Check(WalkSrt(plan_nf, runtime, flat, &reads) && reads.size() == 1u && reads[0].first == address, "served load is captured");
+  // Refused: the ordinary load runs and faults.
+  probe.refuse = true;
+  probe.calls = 0;
+  g_fault_reads = 0;
+  Check(WalkSrt(plan_nf, runtime, flat, nullptr) && flat[0] == 0xfa017000u && g_fault_reads == 1 && probe.calls == 1,
+        "on, hot page, refused: the ordinary load faults");
+  probe.refuse = false;
+  // A pipeline worker: never asks, its fault completes as zero and is counted (S490).
+  probe.calls = 0;
+  bool worker_ok = false;
+  std::thread([&] {
+    SetScratchPerThread(true);
+    SetSrtWalkerWorker(true);
+    std::vector<uint32_t> worker_flat;
+    worker_ok = WalkSrt(plan_nf, runtime, worker_flat, nullptr) && worker_flat.size() == 1u && worker_flat[0] == 0u &&
+                SrtWalkerWorkerFaults() == 1u;
+    SetSrtWalkerWorker(false);
+    SetScratchPerThread(false);
+  }).join();
+  Check(worker_ok && probe.calls == 0, "on, worker: the load is not served, the fault is the worker's");
+  // The walker of an off compile never asks, hot or not.
+  probe.calls = 0;
+  g_fault_reads = 0;
+  Check(WalkSrt(plan, runtime, flat, nullptr) && flat[0] == 0xfa017000u && g_fault_reads == 1 && probe.calls == 0,
+        "off walker: hot page faults as before");
+  guard.Protect(false);
+  NF::ReaderHook().store(nullptr);
+  NF::ClearHot();
 }
 
 void TestNativeNestedSrtRefresh() {
@@ -1531,6 +1704,13 @@ void DbgExitIfHandler(const char *, const char *, int) { std::abort(); }
 } // namespace Common
 
 int main() {
+#if defined(KYTY_WALKNF_EVERY_LOAD)
+  // S594: the whole suite with every walker load asking the reader hook first (saved registers, served values, capture).
+  Libs::Graphics::ShaderRecompiler::IR::WalkNoFault::Override().store(1);
+  Libs::Graphics::ShaderRecompiler::IR::WalkNoFault::ReaderHook().store(&SafeReader);
+#else
+  TestWalkNoFault();
+#endif
   TestWalkerLoadsBypassSpecializationReader();
   TestNativeNestedSrtRefresh();
   TestIntegerRuntimeValueFollowsSrtReads();
@@ -1557,6 +1737,10 @@ int main() {
   TestShaderCacheRecords();
   TestWorkerScratchIsPrivate();
   TestWorkerWalkerFaultIsZeroAndCounted();
+#if defined(KYTY_WALKNF_EVERY_LOAD)
+  Check(Probe().calls.load() > 0, "every-load mode: the reader was never asked");
+  std::printf("ResourceMaterializationTests: every-load reader asked %u times\n", Probe().calls.load());
+#endif
   std::puts("ResourceMaterializationTests: all cases passed");
   return 0;
 }

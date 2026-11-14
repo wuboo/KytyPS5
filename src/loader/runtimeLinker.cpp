@@ -25,6 +25,7 @@
 #include "graphics/host_gpu/renderer/cleanWalk.h"
 #include "graphics/shader/recompiler/ir/passes/SrtWalker.h"
 #include "graphics/shader/recompiler/ir/passes/rfGpuPatch.h"
+#include "graphics/shader/recompiler/ir/passes/walkNoFault.h"
 #include "kernel/fileSystem.h"
 #include "kernel/memory.h"
 #include "kernel/pthread.h"
@@ -1104,6 +1105,38 @@ CleanWalkShadow& CleanWalkPending() {
 	return pending;
 }
 
+// S594 (KYTY_WALK_NOFAULT=1, walkNoFault.h): a walker load on a hot page asks here before its mov. The same decision as TryServeCleanWalk
+// (served only in mode 1, from the backing, when the dword is not GPU-dirty, not in flight and the tracker answered); otherwise the
+// ordinary load runs and, on a protected page, faults into the path below exactly as before.
+uint64_t WalkNoFaultRead(uint64_t address) {
+	namespace NF = Libs::Graphics::ShaderRecompiler::IR::WalkNoFault;
+	bool       dirty = true, inflight = true, busy = true;
+	const bool queried = Libs::LibKernel::Memory::QueryGuestFaultBytes(address, 4, &dirty, &inflight, &busy);
+	const auto action  = Libs::Graphics::CleanWalk::Decide(Libs::Graphics::CleanWalk::EnvMode(), queried && dirty, queried && inflight,
+	                                                       !queried || busy);
+	uint8_t bytes[4] {};
+	if (action != Libs::Graphics::CleanWalk::Action::Serve || !Libs::LibKernel::Memory::TryReadBacking(address, bytes, 4)) {
+		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::WalkNfOrdinaryN);
+		return 0;
+	}
+	uint32_t dword = 0;
+	std::memcpy(&dword, bytes, 4);
+	Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::WalkNfServeN);
+	return NF::Served(dword);
+}
+
+// S594: a served walker load makes its page hot for the no-fault check (KYTY_WALK_NOFAULT=1 only).
+void NoteWalkNoFaultPage(uint64_t address) {
+	namespace NF = Libs::Graphics::ShaderRecompiler::IR::WalkNoFault;
+	if (NF::Current() != NF::Mode::On) return;
+	static const bool installed = [] {
+		NF::ReaderHook().store(&WalkNoFaultRead, std::memory_order_release);
+		return true;
+	}();
+	(void)installed;
+	if (NF::NoteHot(address)) Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::WalkNfHotN);
+}
+
 bool TryServeCleanWalk(const Common::HostException::ExceptionInfo* info, uint32_t length) {
 	auto& pending = CleanWalkPending();
 	pending.armed = false;
@@ -1125,6 +1158,7 @@ bool TryServeCleanWalk(const Common::HostException::ExceptionInfo* info, uint32_
 		std::memcpy(&eax, pending.bytes, 4);
 		Loader::X64InstructionEmulator::CompleteLoad(info->native_context, length, eax);
 		Libs::Graphics::FrameTiming::Add(Libs::Graphics::FrameTiming::Counter::RbCleanWalkN);
+		NoteWalkNoFaultPage(info->access_violation_vaddr);
 		return true;
 	}
 	pending.armed = true;

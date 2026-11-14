@@ -1690,6 +1690,34 @@ target_include_directories(clean_walk_tests PRIVATE ${inc_headers})
 add_executable(clean_walk_mutant_serve_dirty_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CleanWalkTests.cpp")
 target_include_directories(clean_walk_mutant_serve_dirty_tests PRIVATE ${inc_headers})
 target_compile_definitions(clean_walk_mutant_serve_dirty_tests PRIVATE KYTY_CLEANWALK_MUTANT_SERVE_DIRTY=1)
+# S594 (KYTY_WALK_NOFAULT): walk_nofault_tests = the table / parse / served encoding (header only). The walker side runs in the resource
+# materialization suite: walk_nofault_every_load_tests = the whole suite with every walker load through the reader call (must pass);
+# mutants (WILL_FAIL): a pipeline worker's load is served; a refused read skips the ordinary load.
+add_executable(walk_nofault_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/WalkNoFaultTests.cpp")
+target_include_directories(walk_nofault_tests PRIVATE ${inc_headers})
+foreach(variant IN ITEMS EVERY_LOAD MUTANT_WORKER_SERVED MUTANT_IGNORE_REFUSAL)
+	string(TOLOWER ${variant} variant_lower)
+	add_executable(walk_nofault_${variant_lower}_tests EXCLUDE_FROM_ALL
+		"${KYTY_TESTS_DIR}/ResourceMaterializationTests.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/guest_gpu/gpu_format.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/ResourceMaterialization.cpp"
+		"${KYTY_SOURCE_DIR}/graphics/shader/recompiler/ir/passes/SrtWalker.cpp"
+	)
+	target_link_libraries(walk_nofault_${variant_lower}_tests fmt::fmt xbyak::xbyak)
+	target_include_directories(walk_nofault_${variant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(walk_nofault_${variant_lower}_tests PRIVATE KYTY_WALKNF_${variant}=1)
+endforeach()
+# S594 (KYTY_PAGE_STAMP_OFF): memory_tracker_tests run again with the switch on (TestPageStampOff). Mutant (WILL_FAIL): stamps are always off.
+add_executable(memory_tracker_mutant_pagestamp_always_off_tests EXCLUDE_FROM_ALL
+	"${KYTY_TESTS_DIR}/MemoryTrackerTests.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/pageManager.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/memoryTracker.cpp"
+	"${KYTY_SOURCE_DIR}/graphics/host_gpu/hostMemory.cpp"
+)
+target_link_libraries(memory_tracker_mutant_pagestamp_always_off_tests fmt::fmt common)
+target_include_directories(memory_tracker_mutant_pagestamp_always_off_tests PRIVATE ${inc_headers})
+target_compile_definitions(memory_tracker_mutant_pagestamp_always_off_tests PRIVATE KYTY_PAGESTAMP_MUTANT_ALWAYS_OFF=1)
 # S511: deferred buffer-write barrier (mutant skips every read) and DrawRenderState fast init (mutant zeroes unused slots).
 add_executable(defer_write_barrier_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/DeferWriteBarrierTests.cpp")
 target_include_directories(defer_write_barrier_tests PRIVATE ${inc_headers})
@@ -2085,6 +2113,16 @@ if(BUILD_TESTING)
 	add_test(NAME clean_walk COMMAND $<TARGET_FILE:clean_walk_tests>)
 	add_test(NAME clean_walk_mutant_serve_dirty COMMAND $<TARGET_FILE:clean_walk_mutant_serve_dirty_tests>)
 	set_tests_properties(clean_walk_mutant_serve_dirty PROPERTIES WILL_FAIL TRUE)
+	add_test(NAME walk_nofault COMMAND $<TARGET_FILE:walk_nofault_tests>)
+	add_test(NAME walk_nofault_every_load COMMAND $<TARGET_FILE:walk_nofault_every_load_tests>)
+	foreach(mutant IN ITEMS worker_served ignore_refusal)
+		add_test(NAME walk_nofault_mutant_${mutant} COMMAND $<TARGET_FILE:walk_nofault_mutant_${mutant}_tests>)
+		set_tests_properties(walk_nofault_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME memory_tracker_page_stamp_off COMMAND $<TARGET_FILE:memory_tracker_tests>)
+	set_tests_properties(memory_tracker_page_stamp_off PROPERTIES ENVIRONMENT "KYTY_PAGE_STAMP_OFF=1")
+	add_test(NAME memory_tracker_mutant_pagestamp_always_off COMMAND $<TARGET_FILE:memory_tracker_mutant_pagestamp_always_off_tests>)
+	set_tests_properties(memory_tracker_mutant_pagestamp_always_off PROPERTIES WILL_FAIL TRUE)
 	add_test(NAME defer_write_barrier COMMAND $<TARGET_FILE:defer_write_barrier_tests>)
 	add_test(NAME defer_write_barrier_mutant_skip COMMAND $<TARGET_FILE:defer_write_barrier_mutant_skip_tests>)
 	set_tests_properties(defer_write_barrier_mutant_skip PROPERTIES WILL_FAIL TRUE)
@@ -2882,6 +2920,8 @@ if(BUILD_TESTING)
 	add_dependencies(kyty_tests rfop_diag_tests rfop_diag_mutant_no_opcode_tests rfop_diag_mutant_no_site_tests
 	                 rfop_diag_mutant_walk_no_grow_tests rfop_diag_mutant_window_ignored_tests rfop_diag_mutant_hash_dropped_tests
 	                 clean_walk_tests clean_walk_mutant_serve_dirty_tests
+	                 walk_nofault_tests walk_nofault_every_load_tests walk_nofault_mutant_worker_served_tests walk_nofault_mutant_ignore_refusal_tests
+	                 memory_tracker_mutant_pagestamp_always_off_tests
 	                 defer_write_barrier_tests defer_write_barrier_mutant_skip_tests
 	                 drs_no_zero_tests drs_no_zero_mutant_zero_all_tests
 	                 image_size_memo_tests image_size_memo_mutant_NO_ADDRESS_tests image_size_memo_mutant_NO_SIZE_tests image_size_memo_mutant_NO_MIPS_tests

@@ -6,6 +6,7 @@
 #include <xbyak/xbyak.h>
 
 #include <csignal>
+#include <cstdio>
 #include <cstddef>
 #include <cstdlib>
 #include <iterator>
@@ -68,17 +69,6 @@ private:
   static constexpr int kSignals[] = {SIGSEGV};
 #endif
   static void Handle(int, siginfo_t *, void *context) {
-    auto &registers = static_cast<ucontext_t *>(context)->uc_mcontext.gregs;
-    // As the emulator's handler: a pipeline worker's walker completes a faulting load as zero at once.
-    if (const auto worker =
-            Libs::Graphics::ShaderRecompiler::IR::SrtWalkerWorkerFaultLength(registers[REG_RIP])) {
-      registers[REG_RAX] = 0;
-      registers[REG_RIP] += worker;
-      return;
-    }
-    const auto length =
-        Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(registers[REG_RIP]);
-
     auto *native = static_cast<ucontext_t *>(context);
 #if defined(__APPLE__)
     auto &rip = native->uc_mcontext->__ss.__rip;
@@ -89,8 +79,17 @@ private:
     auto &rax = native->uc_mcontext.gregs[REG_RAX];
     const auto r10 = native->uc_mcontext.gregs[REG_R10];
 #endif
+    // As the emulator's handler: a pipeline worker's walker completes a faulting load as zero at once.
+    if (const auto worker = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerWorkerFaultLength(rip)) {
+      rax = 0;
+      rip += worker;
+      return;
+    }
     const auto length = Libs::Graphics::ShaderRecompiler::IR::SrtWalkerLoadLength(rip);
-    if (length == 0) std::abort();
+    if (length == 0) {
+      std::fprintf(stderr, "FakeGuestMemory: a fault outside the walker at rip %#llx\n", static_cast<unsigned long long>(rip));
+      std::abort();
+    }
     rax = Read(r10);
     rip += length;
   }

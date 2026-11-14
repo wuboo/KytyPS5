@@ -11,6 +11,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <memory>
 #include <mutex>
 #include <utility>
@@ -81,6 +82,21 @@ private:
 
 static_assert(std::atomic_uint32_t::is_always_lock_free);
 
+// S594 (KYTY_PAGE_STAMP_OFF=1, unset = stamps as before): the only reader of the stamps was the VS-store range memo (pvRangeGen.h), which
+// is not built since S487 (MemoryTracker::QueryPageGeneration has no caller outside tests). 1 skips the clock increment and the per-page
+// stores; the dirty bits, the region generation (Bump) and the protection are unchanged.
+inline bool PageStampOff() {
+#if defined(KYTY_PAGESTAMP_MUTANT_ALWAYS_OFF)
+	return true;
+#else
+	static const bool off = [] {
+		const char* text = std::getenv("KYTY_PAGE_STAMP_OFF");
+		return text != nullptr && text[0] == '1' && text[1] == '\0';
+	}();
+	return off;
+#endif
+}
+
 // S406 (KYTY_PV_RANGE_GEN): one stamp per page, taken from a process-wide clock every time the page BECOMES CPU- or GPU-modified.
 // A stamp is greater than every stamp given before it, so the maximum over a range grows whenever any page of it changes; a
 // cached result is valid while the range is clean (neither CPU- nor GPU-modified: its pages are write-protected, so a write would
@@ -136,8 +152,10 @@ public:
 			constexpr bool stamp = true;
 #endif
 			if constexpr (stamp) {
-				const auto value = PageStampClock().fetch_add(1, std::memory_order_relaxed) + 1;
-				for (size_t page = start; page < end; ++page) m_stamps[page] = value;
+				if (!PageStampOff()) {
+					const auto value = PageStampClock().fetch_add(1, std::memory_order_relaxed) + 1;
+					for (size_t page = start; page < end; ++page) m_stamps[page] = value;
+				}
 			}
 			bits.SetRange(start, end);
 		} else {
