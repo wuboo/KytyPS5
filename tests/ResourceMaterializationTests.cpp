@@ -28,6 +28,10 @@ namespace {
 void Check(bool value, const char *text) {
   if (!value) {
     std::fprintf(stderr, "ResourceMaterializationTests: failed: %s\n", text);
+#if defined(KYTY_WALKNF_MUTANT_WORKER_SERVED) || defined(KYTY_WALKNF_MUTANT_IGNORE_REFUSAL) || \
+    defined(KYTY_CPPIPE_MUTANT_SCRATCH_SHARED) || defined(KYTY_CPPIPE_MUTANT_WORKER_FAULT_IGNORED)
+    std::_Exit(1); // a mutant must fail with an exit code (an abort is not inverted by WILL_FAIL)
+#endif
     std::abort();
   }
 }
