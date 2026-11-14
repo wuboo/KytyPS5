@@ -1469,6 +1469,13 @@ foreach(mutant IN ITEMS IGNORE_FLAG SWAP_AXES KEY_CONSTANT)
 	target_compile_definitions(present_rect_mutant_${mutant_lower}_tests PRIVATE KYTY_PRESENTRECT_MUTANT_${mutant}=1)
 endforeach()
 
+# S496: KYTY_HAVOK_PRIO host band. Mutant OLD_BAND keeps 478 even when the switch is on (test must fail).
+add_executable(havok_prio_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/HavokPrioTests.cpp")
+target_include_directories(havok_prio_tests PRIVATE ${inc_headers})
+add_executable(havok_prio_mutant_old_band_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/HavokPrioTests.cpp")
+target_include_directories(havok_prio_mutant_old_band_tests PRIVATE ${inc_headers})
+target_compile_definitions(havok_prio_mutant_old_band_tests PRIVATE KYTY_HAVOK_PRIO_MUTANT_OLD_BAND=1)
+
 add_executable(signal_census_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/SignalCensusTests.cpp")
 target_include_directories(signal_census_tests PRIVATE ${inc_headers})
 # S276 mutants (each must be caught, WILL_FAIL): SIGBUS counted as SIGSEGV; every thread counted as main; top list unsorted; repeat hits not accumulated; opcode copy ignores the page end; csv row shifted by one column.
@@ -2450,6 +2457,7 @@ if(BUILD_TESTING)
 	add_test(NAME desc_assert COMMAND $<TARGET_FILE:desc_assert_tests>)
 	add_test(NAME frame_dump_flips COMMAND $<TARGET_FILE:frame_dump_flips_tests>)
 	add_test(NAME present_rect COMMAND $<TARGET_FILE:present_rect_tests>)
+	add_test(NAME havok_prio COMMAND $<TARGET_FILE:havok_prio_tests>)
 	add_test(NAME signal_census COMMAND $<TARGET_FILE:signal_census_tests>)
 	add_test(NAME bc7 COMMAND $<TARGET_FILE:bc7_tests>)
 	add_test(NAME bc_dump COMMAND $<TARGET_FILE:bc_dump_tests>)
@@ -2482,6 +2490,7 @@ if(BUILD_TESTING)
 			cp_counters_mutant_native_swap cp_counters_mutant_no_clamp cp_counters_mutant_flag_any cp_counters_mutant_skip_ignored
 			frame_dump_flips_mutant_keep_zero frame_dump_flips_mutant_off_by_one
 			present_rect_mutant_ignore_flag present_rect_mutant_swap_axes present_rect_mutant_key_constant
+			havok_prio_mutant_old_band
 			depth_ro_union_mutant_ignore_dirty depth_ro_union_mutant_allow_general
 			desc_dyn_mutant_offset_in_key desc_dyn_mutant_no_gen desc_dyn_mutant_shadow_ignores_range
 			desc_assert_mutant_sample_never desc_assert_mutant_off_runs desc_assert_mutant_on_samples
@@ -2827,6 +2836,8 @@ if(BUILD_TESTING)
 		frame_dump_flips_mutant_keep_zero_tests
 		frame_dump_flips_mutant_off_by_one_tests
 		present_rect_tests
+		havok_prio_tests
+		havok_prio_mutant_old_band_tests
 		present_rect_mutant_ignore_flag_tests
 		present_rect_mutant_swap_axes_tests
 		present_rect_mutant_key_constant_tests
