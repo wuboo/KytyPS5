@@ -21,6 +21,7 @@
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/cache/bufTouchSkip.h"
+#include "graphics/host_gpu/renderer/cache/bdaOneBarrier.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
 #include "kernel/memory.h"
 
@@ -1114,7 +1115,7 @@ BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
 }
 
 bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t size, bool is_written,
-                                    bool is_texel_buffer) {
+                                    bool is_texel_buffer, uint64_t* uploaded_bytes) {
 	if (is_written) {
 		NoteGpuWrite(vaddr, size);
 	}
@@ -1128,6 +1129,9 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 		    total_size += bytes;
 	    },
 	    [&]() noexcept { source = UploadCopies(buffer, copies, total_size); });
+	if (uploaded_bytes != nullptr) {
+		*uploaded_bytes = source ? total_size : 0;
+	}
 	if (source) {
 		auto& command = m_scheduler.Current();
 		if (command.IsRendering()) {
@@ -1608,7 +1612,7 @@ RangeSet BufferCache::TakeBdaSync() {
 	return taken;
 }
 
-void BufferCache::SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size) {
+void BufferCache::SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size, uint64_t& pieces, uint64_t& bytes) {
 	const auto end = vaddr + size;
 	auto       it  = m_buffers.upper_bound(vaddr);
 	if (it != m_buffers.begin()) {
@@ -1619,9 +1623,102 @@ void BufferCache::SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size) {
 		const auto start  = std::max(buffer.CpuAddress(), vaddr);
 		const auto finish = std::min(buffer.CpuAddress() + buffer.Size(), end);
 		if (start < finish) {
-			(void)SynchronizeBuffer(buffer, start, finish - start, false, false);
+			uint64_t uploaded = 0;
+			(void)SynchronizeBuffer(buffer, start, finish - start, false, false, &uploaded);
+			pieces += uploaded != 0 ? 1 : 0;
+			bytes += uploaded;
 		}
 	}
+}
+
+// S603 (KYTY_BDA_ONE_BARRIER=1): port of KytyPS5 upstream commit b510053e8 by nmzik, see bdaOneBarrier.h. The same pieces as the
+// TakeBdaSync / SynchronizeBuffersInRange path (queued range x mapped range x buffer, read-only), but every piece only collects its
+// copies; one staging allocation, one EndRendering and one global barrier pair cover them all. Our line's counters stay: upload_sync_n
+// counts the one synchronization, upload_pass_break_n the one pass it may break; NARROW_BARRIER does not apply to it (production: off).
+void BufferCache::SynchronizeBda(const RangeSet& mapped) {
+	const auto                                 queued = TakeBdaSync(); // keeps the S487 hot-page hook
+	std::vector<vk::BufferCopy>                copies;
+	std::vector<BdaOneBarrier::Upload<Buffer>> uploads;
+	uint64_t                                   total_size = 0;
+	uint64_t                                   pieces     = 0;
+	queued.ForEach([&](uint64_t begin, uint64_t end) {
+		mapped.ForEachInRange(begin, end - begin, [&](uint64_t start, uint64_t finish) {
+			auto it = m_buffers.upper_bound(start);
+			if (it != m_buffers.begin()) {
+				--it;
+			}
+			for (; it != m_buffers.end() && it->first < finish; ++it) {
+				auto&      buffer = m_slot_buffers[it->second];
+				const auto first  = std::max(buffer.CpuAddress(), start);
+				const auto last   = std::min(buffer.CpuAddress() + buffer.Size(), finish);
+				if (first < last) {
+					// Reads follow every range's protection; a write in between re-queues its page.
+					const auto before = copies.size();
+					m_memory_tracker.ForEachUploadRange(
+					    first, last - first, false,
+					    [&](uint64_t address, uint64_t bytes) noexcept {
+						    BdaOneBarrier::Append(uploads, copies, total_size, &buffer, buffer.Offset(address), bytes);
+					    },
+					    []() noexcept {});
+					pieces += copies.size() != before ? 1 : 0;
+				}
+			}
+		});
+	});
+	if (copies.empty()) {
+		return;
+	}
+	FrameTiming::Add(FrameTiming::Counter::BdaSyncN);
+	FrameTiming::Add(FrameTiming::Counter::BdaSyncBufN, pieces);
+	FrameTiming::Add(FrameTiming::Counter::BdaSyncBytes, total_size);
+	FrameTiming::Add(FrameTiming::Counter::BdaOneBarrierN);
+	Common::DebugCounters::Add(Common::DebugCounters::Counter::BufferUploadBytes, total_size);
+	FrameTiming::Add(FrameTiming::Counter::UploadBytes, total_size);
+
+	const auto source = UploadMemory(m_graphics, m_scheduler, m_staging_buffer, total_size, 4,
+	    vk::BufferUsageFlagBits::eTransferSrc, [&](uint8_t* staging, uint64_t base_offset) {
+		    BdaOneBarrier::Fill<Buffer, vk::BufferCopy>(uploads, copies, staging, base_offset,
+		                                                [](uint64_t address, uint8_t* destination, uint64_t bytes) {
+			                                                if (!LibKernel::Memory::CopySparseMemory(address, destination, bytes)) {
+				                                                EXIT("BufferCache: failed to read sparse guest buffer memory\n");
+			                                                }
+		                                                });
+	    });
+	auto& command = m_scheduler.Current();
+	if (command.IsRendering()) {
+		FrameTiming::Add(FrameTiming::Counter::UploadPassBreakN);
+	}
+	command.EndRendering();
+	const auto native = command.EmitIfPending(); // S565: follows the KYTY_CP_EMIT IR when it holds commands
+	FrameTiming::Add(FrameTiming::Counter::UploadSyncN);
+	uint64_t buffer_bytes = 0;
+	for (const auto& upload: uploads) {
+		buffer_bytes += upload.buffer->Size();
+	}
+	FrameTiming::Add(FrameTiming::Counter::UploadBufferBytes, buffer_bytes);
+	FrameTiming::Add(FrameTiming::Counter::UploadBarrierBytes, buffer_bytes);
+	// The masks of the whole-buffer pair in SynchronizeBuffer, as one global memory barrier for all the buffers.
+	vk::MemoryBarrier before {};
+	before.srcAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite | vk::AccessFlagBits::eTransferRead |
+	                       vk::AccessFlagBits::eTransferWrite;
+	before.dstAccessMask = vk::AccessFlagBits::eTransferWrite;
+	native.pipelineBarrier(vk::PipelineStageFlagBits::eAllCommands, vk::PipelineStageFlagBits::eTransfer, vk::DependencyFlagBits::eByRegion,
+	                       1, &before, 0, nullptr, 0, nullptr);
+	const auto source_handle = source.first->Handle();
+	GpuLabel::With(
+	    native, GpuLabel::Class::Upload,
+	    [&] {
+		    BdaOneBarrier::ForEachUpload<Buffer, vk::BufferCopy>(uploads, copies, [&](Buffer& buffer, std::span<vk::BufferCopy> part) {
+			    native.copyBuffer(source_handle, buffer.Handle(), static_cast<uint32_t>(part.size()), part.data());
+		    });
+	    },
+	    "I.up.bda%u", static_cast<uint32_t>(uploads.size()));
+	GpuLabel::NoteCause(GpuLabel::Cause::Upload);
+	vk::MemoryBarrier after {};
+	after.srcAccessMask = vk::AccessFlagBits::eTransferWrite;
+	after.dstAccessMask = vk::AccessFlagBits::eMemoryRead | vk::AccessFlagBits::eMemoryWrite;
+	native.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eAllCommands, vk::DependencyFlagBits::eByRegion,
+	                       1, &after, 0, nullptr, 0, nullptr);
 }
 
 } // namespace Libs::Graphics

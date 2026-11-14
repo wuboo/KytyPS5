@@ -5,6 +5,7 @@
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/gfDiag.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
+#include "graphics/host_gpu/renderer/cache/bdaOneBarrier.h"
 #include "graphics/host_gpu/renderer/cache/guestWait.h"
 #include "kernel/memory.h"
 #include "graphics/shader/recompiler/ir/passes/srtProtAvoid.h"
@@ -60,6 +61,11 @@ RenderContext::RenderContext(GraphicContext& graphics, const std::filesystem::pa
 		std::printf("Environment: KYTY_KRF3=%s window=%u trial_window=%u hit_div=%u ban_min=%" PRIu64 " ban_max=%" PRIu64 " early=%d halve=%d\n",
 		            ShaderRecompiler::IR::RfGpuPatch::Krf3ModeName(krf3), c.window, c.trial_window, c.hit_div, c.ban_min, c.ban_max, c.early ? 1 : 0,
 		            c.halve ? 1 : 0);
+		std::fflush(stdout);
+	}
+	// S603: KYTY_BDA_ONE_BARRIER read here (main thread); one line when set.
+	if (BdaOneBarrier::EnvOn()) {
+		std::printf("Environment: KYTY_BDA_ONE_BARRIER=1 (BDA sync ranges uploaded behind one barrier pair, port of upstream b510053e8)\n");
 		std::fflush(stdout);
 	}
 	m_command_scheduler.EnableAsyncSubmit();
@@ -511,11 +517,24 @@ void RenderContext::UnmapMemory(uint64_t vaddr, uint64_t size) {
 
 void RenderContext::PrepareBda() {
 	std::shared_lock lock(m_mapped_ranges_mutex);
-	m_buffer_cache.TakeBdaSync().ForEach([this](uint64_t begin, uint64_t end) {
-		m_mapped_ranges.ForEachInRange(begin, end - begin, [this](uint64_t start, uint64_t finish) {
-			m_buffer_cache.SynchronizeBuffersInRange(start, finish - start);
+	if (BdaOneBarrier::EnvOn()) {
+		// S603 (KYTY_BDA_ONE_BARRIER=1, port of upstream b510053e8): one staging allocation and one barrier pair for all the pieces.
+		m_buffer_cache.SynchronizeBda(m_mapped_ranges);
+	} else {
+		uint64_t pieces = 0;
+		uint64_t bytes  = 0;
+		m_buffer_cache.TakeBdaSync().ForEach([&](uint64_t begin, uint64_t end) {
+			m_mapped_ranges.ForEachInRange(begin, end - begin, [&](uint64_t start, uint64_t finish) {
+				m_buffer_cache.SynchronizeBuffersInRange(start, finish - start, pieces, bytes);
+			});
 		});
-	});
+		// S603: the same counters as SynchronizeBda; bda_sync_buf_n - bda_sync_n = barrier pairs the switch would save.
+		if (pieces != 0) {
+			FrameTiming::Add(FrameTiming::Counter::BdaSyncN);
+			FrameTiming::Add(FrameTiming::Counter::BdaSyncBufN, pieces);
+			FrameTiming::Add(FrameTiming::Counter::BdaSyncBytes, bytes);
+		}
+	}
 	m_fault_process_pending = true;
 }
 

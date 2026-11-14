@@ -121,7 +121,11 @@ public:
 	// S406 (KYTY_PV_RANGE_GEN): see MemoryTracker::QueryPageGeneration; `clean` also needs no GPU-dirty byte range.
 	[[nodiscard]] MemoryTracker::PageGeneration QueryPageGeneration(uint64_t vaddr, uint64_t size);
 	void               ProcessFaultBuffer();
-	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size);
+	// S603: `pieces` / `bytes` count the buffers that uploaded and their bytes (counters bda_sync_buf_n / bda_sync_bytes).
+	void               SynchronizeBuffersInRange(uint64_t vaddr, uint64_t size, uint64_t& pieces, uint64_t& bytes);
+	// S603 (KYTY_BDA_ONE_BARRIER=1, port of upstream b510053e8 by nmzik, bdaOneBarrier.h): uploads the CPU-dirty bytes of the queued
+	// ranges `mapped` covers from one staging allocation behind one barrier pair.
+	void               SynchronizeBda(const RangeSet& mapped);
 	// Queue after the range's state change becomes visible, or a drain could consume it first.
 	void                   QueueBdaSync(uint64_t vaddr, uint64_t size);
 	[[nodiscard]] RangeSet TakeBdaSync();
@@ -156,8 +160,9 @@ private:
 	template <bool insert>
 	void ChangeRegister(BufferId id);
 	void DeleteBuffer(BufferId id);
+	// S603: `uploaded_bytes` (optional) receives the bytes this call uploaded.
 	[[nodiscard]] bool SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t size,
-	                                     bool is_written, bool is_texel_buffer);
+	                                     bool is_written, bool is_texel_buffer, uint64_t* uploaded_bytes = nullptr);
 	[[nodiscard]] vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
 	                                      uint64_t total_size);
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);

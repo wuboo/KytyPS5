@@ -548,6 +548,10 @@ enum class Counter : uint32_t {
 	// 16-flip window was starved (CP wait on the guest >= 20 %, flips >= 25 ms on average), and per closed flip the pages not banned that the
 	// guest faulted on >= 2 times (a storm; the guard's own flip log, so a flip the CP drains late may hold several).
 	Krf4BurstBanN, Krf4StarveBanN, Krf4StarveFlipN, Krf4StormN,
+	// S603 (KYTY_BDA_ONE_BARRIER, bdaOneBarrier.h; the first three on both paths): PrepareBda calls that uploaded, the buffer pieces they
+	// uploaded (each one SynchronizeBuffer with its own barrier pair without the switch; bda_sync_buf_n - bda_sync_n = pairs saved with it),
+	// their bytes, and the PrepareBda uploads that went behind one barrier pair (0 without the switch).
+	BdaSyncN, BdaSyncBufN, BdaSyncBytes, BdaOneBarrierN,
 	Count,
 };
 
