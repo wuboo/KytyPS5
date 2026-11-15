@@ -914,12 +914,18 @@ struct WorkerPc {
 	};
 	std::array<Entry, 256>  entries {};
 	std::vector<uint64_t>*  log = nullptr;
+	// S608 (KYTY_WCW_BACKING_BYTES=1): the byte ranges of the same reads (per page piece, touching pieces merged).
+	std::vector<std::pair<uint64_t, uint64_t>>* bytes = nullptr;
 };
 thread_local WorkerPc t_worker_pc;
 } // namespace
 
 void SetWorkerReadLog(std::vector<uint64_t>* log) {
 	t_worker_pc.log = log;
+}
+
+void SetWorkerReadBytesLog(std::vector<std::pair<uint64_t, uint64_t>>* log) {
+	t_worker_pc.bytes = log;
 }
 
 bool TryReadBackingWorker(uint64_t vaddr, void* data, uint64_t size) {
@@ -944,6 +950,13 @@ bool TryReadBackingWorker(uint64_t vaddr, void* data, uint64_t size) {
 			}
 		}
 		if (pc.log != nullptr && (pc.log->empty() || pc.log->back() != page)) pc.log->push_back(page);
+		if (pc.bytes != nullptr) {
+			if (!pc.bytes->empty() && pc.bytes->back().first + pc.bytes->back().second == cur) {
+				pc.bytes->back().second += n;
+			} else {
+				pc.bytes->emplace_back(cur, n);
+			}
+		}
 		if (host != nullptr) {
 			std::memcpy(out + (cur - vaddr), host + (cur - page), n);
 		} else if (!TryReadBacking(cur, out + (cur - vaddr), n)) {
@@ -955,10 +968,13 @@ bool TryReadBackingWorker(uint64_t vaddr, void* data, uint64_t size) {
 }
 
 bool TryReadBackingWorkerUnlogged(uint64_t vaddr, void* data, uint64_t size) {
-	auto* const log  = t_worker_pc.log;
-	t_worker_pc.log  = nullptr;
-	const bool  read = TryReadBackingWorker(vaddr, data, size);
-	t_worker_pc.log  = log;
+	auto* const log   = t_worker_pc.log;
+	auto* const bytes = t_worker_pc.bytes;
+	t_worker_pc.log   = nullptr;
+	t_worker_pc.bytes = nullptr;
+	const bool  read  = TryReadBackingWorker(vaddr, data, size);
+	t_worker_pc.log   = log;
+	t_worker_pc.bytes = bytes;
 	return read;
 }
 

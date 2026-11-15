@@ -249,7 +249,10 @@ bool JoinJob(GfpJob& job) {
 		FrameTiming::Add(C::WcwJoinNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - cw0));
 	}
 	switch (verdict) {
-		case W::Verdict::PageDirty: FrameTiming::Add(C::PipeJoinDirtyN); return false;
+		case W::Verdict::PageDirty:
+			FrameTiming::Add(C::PipeJoinDirtyN);
+			if (cw) FrameTiming::Add(C::WcwJoinPageN); // S608: a job with served loads refused by a page check
+			return false;
 		case W::Verdict::BytesDirty: FrameTiming::Add(C::WcwJoinDirtyN); return false;
 		case W::Verdict::Written:
 			FrameTiming::Add(C::PipeJoinPubN);
@@ -331,9 +334,10 @@ void CommandProcessor::PipeInit() {
 			CpPipe::InstallWorkerCleanWalk();
 			W::ActiveFlag().store(true, std::memory_order_release);
 		}
-		std::printf("Environment: KYTY_WORKER_CLEAN_WALK=%s active=%d clean_walk=%d nofault=%d spin=%d\n", W::ModeName(mode), active ? 1 : 0,
+		std::printf("Environment: KYTY_WORKER_CLEAN_WALK=%s active=%d clean_walk=%d nofault=%d spin=%d backing_bytes=%d\n", W::ModeName(mode), active ? 1 : 0,
 		            CleanWalk::EnvMode() == CleanWalk::Mode::On ? 1 : 0,
-		            ShaderRecompiler::IR::WalkNoFault::Current() == ShaderRecompiler::IR::WalkNoFault::Mode::On ? 1 : 0, W::EnvSpin());
+		            ShaderRecompiler::IR::WalkNoFault::Current() == ShaderRecompiler::IR::WalkNoFault::Mode::On ? 1 : 0, W::EnvSpin(),
+		            W::EnvBackingBytes() ? 1 : 0);
 		// S608 (cpWalkQuery.h): the CP's clean-walk byte query from its own view.
 		std::printf("Environment: KYTY_CP_WALK_QUERY=%s spin=%d\n", CpWalkQuery::ModeName(CpWalkQuery::EnvMode()), CpWalkQuery::kInflightSpin);
 	}

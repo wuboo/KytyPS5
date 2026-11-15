@@ -1596,10 +1596,14 @@ void CpPipe::RunGfpJob(CpPipe::GfpJob& job) {
 	Libs::LibKernel::Memory::SetWorkerReadLog(&job.pages);
 	const bool cw_on = CpPipe::WorkerCleanWalk::Active();
 	auto&      cw    = CpPipe::WorkerCleanWalk::WorkerLog();
+	// S608 (KYTY_WCW_BACKING_BYTES=1): the walk's reads through the backing are logged by bytes as well.
+	const bool cw_bb = cw_on && CpPipe::WorkerCleanWalk::EnvBackingBytes();
 	if (cw_on) cw.Begin();
+	if (cw_bb) Libs::LibKernel::Memory::SetWorkerReadBytesLog(&cw.backing);
 	bool answered = DrawHasValidVertexShader(*job.sh);
 	if (!answered) job.out.fail = 4;
 	answered = answered && job.cache->GetGraphicsProgramsOffThread(*job.ctx, *job.ucfg, *job.sh, job.out);
+	if (cw_bb) Libs::LibKernel::Memory::SetWorkerReadBytesLog(nullptr);
 	if (cw_on) cw.End();
 	Libs::LibKernel::Memory::SetWorkerReadLog(nullptr);
 	ScoutTableLog::Active() = nullptr;
@@ -1632,8 +1636,11 @@ void CpPipe::RunGfpJob(CpPipe::GfpJob& job) {
 		constexpr size_t                           kMaxPages = 4096;
 		std::vector<std::pair<uint64_t, uint64_t>> reads(job.out.vs_res.specialization_reads);
 		if (job.out.ps_active) reads.insert(reads.end(), job.out.ps_res.specialization_reads.begin(), job.out.ps_res.specialization_reads.end());
-		if (!CpPipe::WorkerCleanWalk::SplitReads(job.pages, cw.served, reads, job.cw_bytes, job.cw_pages, kMaxPages)) answered = false;
+		if (!CpPipe::WorkerCleanWalk::SplitReads(job.pages, cw.served, reads, job.cw_bytes, job.cw_pages, kMaxPages, cw_bb ? &cw.backing : nullptr)) {
+			answered = false;
+		}
 		if (answered) job.cw_served = static_cast<uint32_t>(cw.served.size());
+		if (cw_bb && !cw.backing.empty()) FrameTiming::AddAlways(FrameTiming::Counter::WcwBackingN, cw.backing.size());
 	}
 	if (cw_on) {
 		if (!cw.served.empty()) FrameTiming::AddAlways(FrameTiming::Counter::WcwServedN, cw.served.size());

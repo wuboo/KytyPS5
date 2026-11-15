@@ -8,6 +8,7 @@
 #include "kernel/srtReadPass.h"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace Libs::Graphics {
@@ -191,6 +192,8 @@ void                   InstallGpuResources(Graphics::RenderContext* renderer) no
 [[nodiscard]] bool QueryCleanWalkBytesBusy(uint64_t vaddr, uint64_t size);
 // S607: TryReadBackingWorker without logging the page (the served dword of a walker load: the join checks its bytes, not its page).
 bool TryReadBackingWorkerUnlogged(uint64_t vaddr, void* data, uint64_t size);
+// S608 (KYTY_WCW_BACKING_BYTES=1): the byte ranges the calling thread reads through TryReadBackingWorker are appended to `log` too (nullptr: off).
+void SetWorkerReadBytesLog(std::vector<std::pair<uint64_t, uint64_t>>* log);
 // S585 (KYTY_GUEST_WAIT=1, guestWait.h): a guest thread's read fault on bytes that are not GPU-dirty but whose copy is in flight waits for that
 // copy's tick and its publish (not for a newer download of the page). Returns 1 when the bytes may be clean now (it waited, or the copy was
 // published meanwhile: the caller queries them again), 0 when today's path applies (dirty, copy not submitted), -1 when the range is not

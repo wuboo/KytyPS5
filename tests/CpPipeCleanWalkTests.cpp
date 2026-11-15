@@ -9,6 +9,10 @@
 //   PAGE_CHECKS_SERVED   - the served pages keep the page check (never wrong, nothing gained: the split cases and the oracle's count of jobs
 //                          used although their served page held other GPU-dirty bytes);
 //   SPLIT_IGNORES_BACKING - a served page the worker also read through the backing is checked by bytes only (the oracle: that read is stale).
+// S608 (KYTY_WCW_BACKING_BYTES=1): the reads through the backing are logged by bytes and checked by bytes:
+//   BACKING_BYTES_DROPPED - the logged backing ranges are not checked at all (the oracle: a stale backing read is used);
+//   BACKING_KEEPS_PAGES   - the backing pages keep the page check (never wrong, nothing gained: the split cases and the oracle's count of jobs
+//                          used although a backing read's page held other GPU-dirty bytes).
 // The oracle runs the real tracker pieces (GpuDirtyRanges, InflightRanges, BackingWriteLog): a CP thread that marks GPU writes, records downloads
 // and joins jobs, a publish thread that writes the downloaded bytes into the backing, and three workers that walk jobs as RunGfpJob does.
 
@@ -55,6 +59,7 @@ void ModeTests() {
 	          ParseSpin("128") == 128 && ParseSpin("99999999") == kDefaultSpin,
 	      "spin: default, junk, value");
 	Check(ActiveFor(Mode::On, true, true, true) && ActiveFor(Mode::Shadow, true, true, true), "active with the pipe, clean walk and nofault");
+	Check(!ParseBackingBytes(nullptr) && !ParseBackingBytes("0") && !ParseBackingBytes("yes") && ParseBackingBytes("1"), "backing bytes: default off, 1 = on");
 	Check(!ActiveFor(Mode::Off, true, true, true) && !ActiveFor(Mode::On, false, true, true) && !ActiveFor(Mode::On, true, false, true) &&
 	          !ActiveFor(Mode::On, true, true, false),
 	      "inactive without any of them");
@@ -131,6 +136,20 @@ void SplitTests() {
 		std::vector<uint64_t>       cw;
 		Check(!SplitReads(pages, served, reads, bytes, cw, 8), "a range of more pages than the limit");
 	}
+	// S608 backing bytes: a served page the worker also read through the backing: the backing read is checked by bytes, no page check is left.
+	{
+		std::vector<uint64_t>       pages {P + 0x1000, P + 0x5000};
+		const std::vector<Range>    backing {{P + 0x1040, 16}, {P + 0x5ff8, 16}};
+		const std::vector<uint64_t> served {P + 0x1010};
+		const std::vector<Range>    reads {{P + 0x1010, 4}, {P + 0x5100, 4}, {P + 0x3000, 4}};
+		std::vector<Range>          bytes;
+		std::vector<uint64_t>       cw;
+		Check(SplitReads(pages, served, reads, bytes, cw, 4096, &backing), "split ok (backing bytes)");
+		Check(HasRange(bytes, P + 0x1010, 4) && HasRange(bytes, P + 0x1040, 16) && HasRange(bytes, P + 0x5ff8, 16), "served dword and backing reads by bytes");
+		Check(HasRange(bytes, P + 0x5100, 4), "a plain read on a backing page is checked by bytes");
+		Check(pages.size() == 1 && Has(pages, P + 0x3000), "only the plain page elsewhere keeps the page check");
+		Check(Has(cw, P + 0x1000) && Has(cw, P + 0x5000) && Has(cw, P + 0x6000) && cw.size() == 3, "every byte page is asked for backing writes");
+	}
 	// Random cases against a reference written from the rule, not from the code.
 	std::mt19937_64 rng(607);
 	for (int round = 0; round < 4000; round++) {
@@ -158,6 +177,38 @@ void SplitTests() {
 		std::vector<Range>    bytes;
 		std::vector<uint64_t> cw;
 		Check(SplitReads(pages, served, reads, bytes, cw, 4096), "random split ok");
+		// S608 backing bytes: the backing reads are byte ranges, their pages byte pages; nothing of the page log is left.
+		{
+			std::vector<Range> bb;
+			for (const uint64_t pg: backing) bb.emplace_back(pg + (rng() % 1000) * 4, 4 * (1 + rng() % 8));
+			std::set<uint64_t> bpages;
+			for (const uint64_t a: served) bpages.insert(PageOf(a));
+			for (const auto& [a, n]: bb) {
+				for (uint64_t p = PageOf(a); p <= PageOf(a + n - 1); p += kPage) bpages.insert(p);
+			}
+			std::set<uint64_t> wp, wc, wcover;
+			std::vector<Range> all(reads);
+			all.insert(all.end(), bb.begin(), bb.end());
+			for (const auto& [a, n]: all) {
+				bool touches = false;
+				for (uint64_t p = PageOf(a); p <= PageOf(a + n - 1); p += kPage) touches = touches || bpages.count(p) != 0;
+				for (uint64_t p = PageOf(a); p <= PageOf(a + n - 1); p += kPage) (touches ? wc : wp).insert(p);
+				if (touches) {
+					for (uint64_t x = a; x < a + n; x += 4) wcover.insert(x);
+				}
+			}
+			std::vector<uint64_t> pg2 = backing;
+			std::vector<Range>    by2;
+			std::vector<uint64_t> cw2;
+			Check(SplitReads(pg2, served, reads, by2, cw2, 4096, &bb), "random split ok (backing bytes)");
+			Check(std::set<uint64_t>(pg2.begin(), pg2.end()) == wp && pg2.size() == wp.size(), "random split (backing bytes): the page checks");
+			Check(std::set<uint64_t>(cw2.begin(), cw2.end()) == wc && cw2.size() == wc.size(), "random split (backing bytes): the pages asked for writes");
+			std::set<uint64_t> cov;
+			for (const auto& [a, n]: by2) {
+				for (uint64_t x = a; x < a + n; x += 4) cov.insert(x);
+			}
+			Check(cov == wcover, "random split (backing bytes): the byte checks cover exactly the reads on byte pages");
+		}
 		Check(std::set<uint64_t>(pages.begin(), pages.end()) == want_pages && pages.size() == want_pages.size(), "random split: the page checks");
 		Check(std::set<uint64_t>(cw.begin(), cw.end()) == want_cw && cw.size() == want_cw.size(), "random split: the pages asked for writes");
 		// The byte checks cover exactly the bytes of the wanted ranges (merged: compare the covered dwords) and do not overlap.
@@ -226,6 +277,7 @@ struct Job {
 	std::vector<Range>    bytes;
 	std::vector<uint64_t> cw_pages;
 	std::vector<uint64_t> served;
+	std::vector<Range>    backing; // S608: the backing reads by bytes (KYTY_WCW_BACKING_BYTES=1)
 };
 
 struct World {
@@ -258,10 +310,11 @@ struct World {
 };
 
 // The worker's walk of one job, as RunGfpJob with the reader of renderDraw.cpp (WorkerCleanRead).
-void Walk(World& w, Job& job) {
+void Walk(World& w, Job& job, bool backing_bytes) {
 	auto& cw = WorkerLog();
 	cw.Begin();
 	job.pages.clear();
+	job.backing.clear();
 	job.write_seq = w.log.Seq();
 	std::vector<Range> reads;
 	bool               answered = true;
@@ -270,6 +323,7 @@ void Walk(World& w, Job& job) {
 		if (load.kind == Kind::Backing) {
 			load.value = w.backing[i].load(std::memory_order_relaxed);
 			job.pages.push_back(PageOf(load.addr)); // TryReadBackingWorker logs the page, no range
+			if (backing_bytes) job.backing.emplace_back(load.addr, 4); // S608: and the bytes
 			continue;
 		}
 		if (load.kind == Kind::Served) {
@@ -301,7 +355,7 @@ void Walk(World& w, Job& job) {
 	job.bytes.clear();
 	job.cw_pages.clear();
 	if (answered && !job.served.empty()) {
-		answered = SplitReads(job.pages, job.served, reads, job.bytes, job.cw_pages, 4096);
+		answered = SplitReads(job.pages, job.served, reads, job.bytes, job.cw_pages, 4096, backing_bytes ? &job.backing : nullptr);
 	} else if (answered) {
 		for (const auto& [a, n]: reads) job.pages.push_back(PageOf(a));
 		SortUnique(job.pages);
@@ -311,13 +365,14 @@ void Walk(World& w, Job& job) {
 
 struct Stats {
 	uint64_t joined = 0, used = 0, used_served = 0, used_dirty_page = 0, bytes_dirty = 0, page_dirty = 0, written = 0, bails = 0, served = 0;
+	uint64_t used_backing_dirty_page = 0; // S608: used jobs with a backing read on a page with other GPU-dirty bytes (the gain of backing bytes)
 };
 
-void Oracle(uint64_t seed, int jobs_total, Stats& st) {
+void Oracle(uint64_t seed, int jobs_total, Stats& st, bool backing_bytes) {
 	World w;
 	std::vector<std::thread> threads;
 	for (int t = 0; t < 3; t++) {
-		threads.emplace_back([&w] {
+		threads.emplace_back([&w, backing_bytes] {
 			for (;;) {
 				Job* job = nullptr;
 				{
@@ -327,7 +382,7 @@ void Oracle(uint64_t seed, int jobs_total, Stats& st) {
 					job = w.job_queue.front();
 					w.job_queue.pop_front();
 				}
-				Walk(w, *job);
+				Walk(w, *job, backing_bytes);
 				job->state.store(1, std::memory_order_release);
 			}
 		});
@@ -377,7 +432,7 @@ void Oracle(uint64_t seed, int jobs_total, Stats& st) {
         if (!job.served.empty()) st.used_served++;
         st.served += job.served.size();
         // Every value the job used is the one the CP's own walk reads now: the bytes are neither GPU-dirty nor in flight, and the backing holds them.
-        bool dirty_page = false;
+        bool dirty_page = false, backing_dirty_page = false;
         for (const auto& load: job.loads) {
             const bool now_dirty    = w.dirty.Intersects(load.addr, 4);
             const bool now_inflight = w.inflight.Intersects(load.addr, 4);
@@ -386,8 +441,10 @@ void Oracle(uint64_t seed, int jobs_total, Stats& st) {
             Check(!now_inflight, "a used value has a copy in flight at the join");
             Check(load.value == now, "a used value differs from the backing at the join");
             if (load.served && w.dirty.Intersects(PageOf(load.addr), kPage)) dirty_page = true;
+            if (load.kind == Kind::Backing && w.dirty.Intersects(PageOf(load.addr), kPage)) backing_dirty_page = true;
         }
         if (dirty_page) st.used_dirty_page++;
+        if (backing_dirty_page) st.used_backing_dirty_page++;
 	};
 	while (submitted < jobs_total || !pending.empty()) {
 		const int op = static_cast<int>(rng() % 100);
@@ -452,12 +509,13 @@ void Oracle(uint64_t seed, int jobs_total, Stats& st) {
 }
 
 void OracleTests() {
+	for (const bool bb: {false, true})
 	for (const uint64_t seed: {1u, 2u, 3u}) {
 		Stats st;
-		Oracle(seed, 20000, st);
-		std::printf("oracle seed %llu: joined %llu, used %llu (with served loads %llu, %llu of them on a page with other GPU-dirty bytes, %llu served dwords); "
+		Oracle(seed, 20000, st, bb);
+		std::printf("oracle%s seed %llu: joined %llu, used %llu (with served loads %llu, %llu of them on a page with other GPU-dirty bytes, %llu served dwords); "
 		            "refused: bytes %llu, page %llu, written %llu; not answered %llu\n",
-		            static_cast<unsigned long long>(seed), static_cast<unsigned long long>(st.joined), static_cast<unsigned long long>(st.used),
+		            bb ? " (backing bytes)" : "", static_cast<unsigned long long>(seed), static_cast<unsigned long long>(st.joined), static_cast<unsigned long long>(st.used),
 		            static_cast<unsigned long long>(st.used_served), static_cast<unsigned long long>(st.used_dirty_page),
 		            static_cast<unsigned long long>(st.served), static_cast<unsigned long long>(st.bytes_dirty), static_cast<unsigned long long>(st.page_dirty),
 		            static_cast<unsigned long long>(st.written), static_cast<unsigned long long>(st.bails));
@@ -465,6 +523,9 @@ void OracleTests() {
 		Check(st.used_served > 1000, "the oracle uses many jobs with served loads");
 		Check(st.used_dirty_page > 100, "jobs with a served load on a page with other GPU-dirty bytes are used (the gain)");
 		Check(st.bytes_dirty > 0 && st.written > 0, "the join refuses both ways (bytes dirty now, a backing write since)");
+		std::printf("  used with a backing read on a page with other GPU-dirty bytes: %llu\n", static_cast<unsigned long long>(st.used_backing_dirty_page));
+		if (bb) Check(st.used_backing_dirty_page > 50, "backing bytes: jobs whose backing read's page holds other GPU-dirty bytes are used (the gain)");
+		else Check(st.used_backing_dirty_page == 0, "backing pages: a backing read on a dirty page is never used");
 	}
 }
 

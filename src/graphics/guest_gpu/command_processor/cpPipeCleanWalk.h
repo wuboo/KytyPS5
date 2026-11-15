@@ -23,6 +23,14 @@
 // (a non-served read on a served page is checked neither by page nor by bytes), KYTY_WCW_MUTANT_PAGE_CHECKS_SERVED (the served pages keep
 // the page check: never wrong, but nothing is gained), KYTY_WCW_MUTANT_SPLIT_IGNORES_BACKING (a served page also read through the backing
 // is checked by bytes only).
+//
+// S608 (KYTY_WCW_BACKING_BYTES=0|1, unset = 0; only with KYTY_WORKER_CLEAN_WALK active): the worker's reads through the backing
+// (TryReadBackingWorker: specialization and fetch reads) are logged as byte ranges as well, and for a job with served loads they go to the
+// join's byte check instead of the page check (S608a: with KYTY_CP_WALK_QUERY=1, 369 of the ~380 jobs/flip the served loads took over were
+// refused by the page check of such a read: its page holds other GPU-written bytes, as every served page does). The same rule as for a served
+// dword: the bytes are neither GPU-dirty nor in flight at the join and no backing write touched their pages since the job started, so the
+// backing held them when the worker read them and holds them now. Mutants: KYTY_WCW_MUTANT_BACKING_BYTES_DROPPED (the logged ranges are not
+// checked), KYTY_WCW_MUTANT_BACKING_KEEPS_PAGES (the backing pages keep the page check: never wrong, nothing gained).
 
 #include <algorithm>
 #include <atomic>
@@ -72,6 +80,15 @@ inline int EnvSpin() {
 	return spin;
 }
 
+// S608: KYTY_WCW_BACKING_BYTES=1.
+inline bool ParseBackingBytes(const char* text) {
+	return text != nullptr && std::strcmp(text, "1") == 0;
+}
+inline bool EnvBackingBytes() {
+	static const bool on = ParseBackingBytes(std::getenv("KYTY_WCW_BACKING_BYTES"));
+	return on;
+}
+
 // The switch is in effect (set once by the CP when the pipeline starts, before the workers).
 constexpr bool ActiveFor(Mode mode, bool pipe_on_with_workers, bool clean_walk_on, bool nofault_on) {
 	return mode != Mode::Off && pipe_on_with_workers && clean_walk_on && nofault_on;
@@ -104,11 +121,14 @@ constexpr Answer Decide(bool clean_walk_on, bool queried, bool dirty, bool infli
 struct ThreadLog {
 	bool                  active = false;
 	std::vector<uint64_t> served; // addresses of the served dwords, in load order
+	// S608 (KYTY_WCW_BACKING_BYTES=1): the byte ranges the walk read through the backing (Memory::SetWorkerReadBytesLog), in read order.
+	std::vector<std::pair<uint64_t, uint64_t>> backing;
 	uint32_t              busy  = 0;
 	uint32_t              dirty = 0;
 
 	void Begin() {
 		served.clear();
+		backing.clear();
 		busy   = 0;
 		dirty  = 0;
 		active = true;
@@ -139,14 +159,29 @@ inline void SortUnique(std::vector<uint64_t>& values) {
 // `cw_pages`: out, their pages, which the join asks for backing writes too (sorted, unique; a page may be in both lists when a plain read and a
 // read across a byte page share it: then both checks run). False: a range spans more
 // than `max_pages` pages or wraps (the job is left to the CP, as AppendPages decides).
+// S608 (KYTY_WCW_BACKING_BYTES=1): `backing` = the byte ranges of the reads through the backing (the same reads `pages` logged as pages). Then
+// `pages` in is dropped, every backing range goes to the byte check, and its pages count as byte pages (a plain read there is checked by bytes).
 inline bool SplitReads(std::vector<uint64_t>& pages, std::span<const uint64_t> served, std::span<const std::pair<uint64_t, uint64_t>> reads,
-                       std::vector<std::pair<uint64_t, uint64_t>>& bytes, std::vector<uint64_t>& cw_pages, size_t max_pages) {
+                       std::vector<std::pair<uint64_t, uint64_t>>& bytes, std::vector<uint64_t>& cw_pages, size_t max_pages,
+                       const std::vector<std::pair<uint64_t, uint64_t>>* backing = nullptr) {
 	bytes.clear();
 	cw_pages.clear();
 	SortUnique(pages);
 	std::vector<uint64_t> byte_pages;
 	byte_pages.reserve(served.size());
 	for (const uint64_t address: served) byte_pages.push_back(PageOf(address));
+#if defined(KYTY_WCW_MUTANT_BACKING_KEEPS_PAGES)
+	backing = nullptr;
+#endif
+	if (backing != nullptr) {
+		for (const auto& [address, size]: *backing) {
+			if (size == 0) continue;
+			if (UINT64_MAX - address < size) return false;
+			if ((PageOf(address + size - 1) - PageOf(address)) / kPage >= max_pages) return false;
+			for (uint64_t page = PageOf(address); page <= PageOf(address + size - 1); page += kPage) byte_pages.push_back(page);
+		}
+		pages.clear(); // the same reads, known by bytes now
+	}
 	SortUnique(byte_pages);
 #if !defined(KYTY_WCW_MUTANT_SPLIT_IGNORES_BACKING)
 	// A served page the worker also read through the backing (a specialization or fetch read, logged as a page) keeps the page check.
@@ -186,6 +221,13 @@ inline bool SplitReads(std::vector<uint64_t>& pages, std::span<const uint64_t> s
 	for (const uint64_t address: served) {
 		if (!add(address, 4)) return false;
 	}
+#if !defined(KYTY_WCW_MUTANT_BACKING_BYTES_DROPPED)
+	if (backing != nullptr) {
+		for (const auto& [address, size]: *backing) {
+			if (!add(address, size)) return false;
+		}
+	}
+#endif
 	SortUnique(pages);
 	SortUnique(cw_pages);
 	// Overlapping and touching ranges are merged (a descriptor is 4 or 8 consecutive dwords): the same bytes, fewer questions in the join.

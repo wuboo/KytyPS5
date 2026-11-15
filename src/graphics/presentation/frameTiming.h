@@ -572,6 +572,9 @@ enum class Counter : uint32_t {
 	// the GPU-thread queries that came back busy (mode 0: a reader held a tracker lock at the one try; then the walker load drains when it faults);
 	// mode 1: queries whose in-flight lock was held at the first try (waited out by the spin).
 	CpwqN, CpwqBusyN, CpwqSpunN,
+	// S608 (KYTY_WCW_BACKING_BYTES=1): backing byte ranges of served jobs moved to the join's byte check (worker); jobs with served loads the
+	// join refused by a page check (every mode of KYTY_WORKER_CLEAN_WALK; part of pipe_join_dirty_n).
+	WcwBackingN, WcwJoinPageN,
 	Count,
 };
 
