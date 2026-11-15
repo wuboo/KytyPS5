@@ -39,11 +39,14 @@
 // (RELEASE_MEM counts as a packet that writes no guest memory), KYTY_UPAS_MUTANT_SHADOW_BLIND (the shadow compare never reports),
 // KYTY_UPAS_MUTANT_FAIL_NO_ZERO (a failed read leaves the destination as it was), KYTY_UPAS_MUTANT_GUEST_HELPS (a thread other than the producer runs copies
 // in its join), KYTY_UPAS_MUTANT_STAGE_AS_RACE (a difference on a protected source is counted as a stream race), KYTY_UPAS_MUTANT_REDIRTY_AFTER (a
-// stage difference whose page's write hook ran after the hand-over is excused as a re-dirty), KYTY_UPAS_MUTANT_SHADOW_LATE_PUBLISH
+// stage difference whose page's write hook ran after the hand-over is excused as a re-dirty), KYTY_UPAS_MUTANT_HOOK_SEEN_STRICT (a hook whose scan
+// stopped exactly before the item counts as having seen it), KYTY_UPAS_MUTANT_OVERLAP_FIRST_PAGE (a write join compares only the first page of a
+// copy), KYTY_UPAS_MUTANT_SHADOW_LATE_PUBLISH
 // (the S605 shadow: the verify is handed over after the recorder's copy, so a write that faults in between finds nothing to join and is reported).
 
 #include "graphics/guest_gpu/pm4.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -83,6 +86,20 @@ inline Mode EnvMode() {
 	return mode;
 }
 
+// S605d: KYTY_UPLOAD_ASYNC_SHADOW_FROM=<guest flip> (shadow only, default 0): before that flip the shadow copies as mode 0 and verifies nothing.
+// The shadow's own cost (the recorder's copy through scratch, guest write faults that wait for a verify) made the garden load 15 s instead of 4 s
+// and the timed pad replay missed level 10 (S605c); verifying from just before the measured window keeps the run on its route.
+inline uint64_t ParseShadowFrom(const char* text) {
+	if (text == nullptr || text[0] == '\0') return 0;
+	char*      end   = nullptr;
+	const auto value = std::strtoull(text, &end, 10);
+	return end != nullptr && *end == '\0' ? value : 0;
+}
+inline uint64_t EnvShadowFrom() {
+	static const uint64_t from = ParseShadowFrom(std::getenv("KYTY_UPLOAD_ASYNC_SHADOW_FROM"));
+	return from;
+}
+
 enum class Kind : uint8_t { Stage, Stream };
 enum class Reason : uint8_t { Submit, Packet, Write, Full, Count };
 
@@ -110,7 +127,7 @@ struct NeInfo {
 	uint8_t  last_join  = 0xff;  // Reason of the last join that waited (0xff: none yet)
 	uint8_t  recorded   = 0;     // the recorder's byte at first_off
 	uint8_t  reread     = 0;     // the helper's byte there
-	int64_t  hook_dt_ns = 0;     // last write hook on the differing page minus the hand-over (shadow; INT64_MIN: none remembered)
+	int64_t  hook_dt_ns = 0;     // S605d: newest write hook's m_published minus (seq + 1) (< 0: the hook could not see the item; INT64_MIN: none)
 	uint8_t  verdict    = 0;     // 0 error (counted in ne_n), 1 redirty (before the hand-over), 2 stream race
 };
 using NeObserver = void (*)(const NeInfo& info);
@@ -305,6 +322,8 @@ public:
 	}
 	[[nodiscard]] static uint64_t Pieces(uint64_t size) { return (size + kChunk - 1) / kChunk; }
 
+	[[nodiscard]] uint64_t Published() const { return m_published.load(std::memory_order_acquire); }
+
 	// Nothing handed over is still waiting or running (two loads).
 	[[nodiscard]] bool Idle() const {
 		return m_watermark.load(std::memory_order_acquire) == m_published.load(std::memory_order_acquire);
@@ -325,47 +344,55 @@ public:
 		NoteJoin(reason, t0);
 	}
 
-	// Shadow: remembers the last two times a write hook ran for each 4 KiB page (direct-mapped, 65536 entries, time in ns modulo 2^36 = 68 s; a write
-	// of more than 64 pages is noted for its first and last 32), so a difference can tell a fault before the hand-over (the store raced the copy,
-	// as in mode 0) from one the join missed.
-	void NoteWriteHook(uint64_t vaddr, uint64_t size) {
+	// Shadow (S605d): remembers, for the last two write hooks of each 4 KiB page (direct-mapped, 65536 slots), how many copies were handed over
+	// when the hook's join looked (the m_published its scan used). A hook that looked before an item existed could not wait for it: its store may
+	// land in the item's copy (the page is dirty again: the race of mode 0). A hook that saw the item and still let a store under it is an error.
+	// S605b compared hook and hand-over times instead; the hand-over time was taken before m_published was stored, so a hook that ran in between
+	// (the recorder preempted there for 1-3 us) looked "after" by time although its scan could not see the item (S605c: 2 errors).
+	void NoteWriteHook(uint64_t vaddr, uint64_t size, uint64_t published_seen) {
 		if (!m_shadow || size == 0) return;
 		const auto first = vaddr >> 12u, last = (vaddr + size - 1) >> 12u;
-		const auto now   = static_cast<uint64_t>(NowNs()) & kHookTimeMask;
+		const auto seen  = (published_seen + 1) & kHookSeenMask; // stored + 1: 0 is an empty slot
 		for (auto page = first; page <= last; ++page) {
 			if (last - first > 64 && page == first + 32) page = last - 31;
 			const auto slot = page & (kHooks - 1);
-			const auto old  = m_hooks[slot].exchange(((page & kHookPageMask) << kHookTimeBits) | now, std::memory_order_relaxed);
-			if (old != 0 && (old >> kHookTimeBits) == (page & kHookPageMask)) m_hooks_prev[slot].store(old, std::memory_order_relaxed);
+			const auto key  = (page >> 16u) & kHookKeyMask;
+			const auto old  = m_hooks[slot].exchange((key << kHookSeenBits) | seen, std::memory_order_relaxed);
+			if (old != 0 && (old >> kHookSeenBits) == key) m_hooks_prev[slot].store(old, std::memory_order_relaxed);
 		}
 	}
-	// Shadow: did a write hook of `page` run before `t_ns` (within 34 s)? *dt_ns: the newest remembered hook minus t_ns (INT64_MIN: none).
-	[[nodiscard]] bool HookBefore(uint64_t page, int64_t t_ns, int64_t* dt_ns) const {
-		*dt_ns       = INT64_MIN;
-		bool before  = false;
-		const auto t = static_cast<uint64_t>(t_ns) & kHookTimeMask;
+	// Shadow: did a write hook of `page` look before item `seq` was handed over (recently: within 2^20 copies)? *delta: the newest remembered hook's
+	// m_published minus (seq + 1) (< 0: it could not see the item; >= 0: its scan covered it; INT64_MIN: none remembered).
+	[[nodiscard]] bool HookBefore(uint64_t page, uint64_t seq, int64_t* delta) const {
+		*delta      = INT64_MIN;
+		bool before = false;
+		const auto key = (page >> 16u) & kHookKeyMask;
 		for (const auto* table: {&m_hooks, &m_hooks_prev}) {
 			const auto v = (*table)[page & (kHooks - 1)].load(std::memory_order_relaxed);
-			if (v == 0 || (v >> kHookTimeBits) != (page & kHookPageMask)) continue;
-			constexpr uint64_t half = (kHookTimeMask + 1) / 2;
-			const auto         dt   = static_cast<int64_t>(((v & kHookTimeMask) - t + half) & kHookTimeMask) - static_cast<int64_t>(half);
-			if (*dt_ns == INT64_MIN) *dt_ns = dt;
-			if (dt < 0) before = true;
+			if (v == 0 || (v >> kHookSeenBits) != key) continue;
+			const auto seen = ((v & kHookSeenMask) - 1) & kHookSeenMask;
+			const auto d    = static_cast<int64_t>(seen) - static_cast<int64_t>((seq + 1) & kHookSeenMask);
+			if (*delta == INT64_MIN) *delta = d;
+#ifdef KYTY_UPAS_MUTANT_HOOK_SEEN_STRICT
+			if (d < -1 && d > -(int64_t {1} << 20)) before = true;
+#else
+			if (d < 0 && d > -(int64_t {1} << 20)) before = true; // its scan stopped below seq + 1: the item was not there
+#endif
 		}
 		return before;
 	}
 
 	// Any thread: before a write of [vaddr, vaddr + size) lands, the copies that read any of these bytes are done.
 	void JoinOverlap(uint64_t vaddr, uint64_t size) {
-		NoteWriteHook(vaddr, size);
+		const auto target = m_published.load(std::memory_order_acquire); // what this join can see (and the shadow's hook record says so)
+		NoteWriteHook(vaddr, size, target);
 #ifdef KYTY_UPAS_MUTANT_NO_WRITE_JOIN
 		(void)vaddr;
 		(void)size;
 		return;
 #endif
-		if (size == 0 || Idle()) return;
-		const auto target = m_published.load(std::memory_order_acquire);
-		auto       first  = m_watermark.load(std::memory_order_acquire);
+		auto first = m_watermark.load(std::memory_order_acquire);
+		if (size == 0 || first >= target) return;
 		if (target - first > kMaxScan) { // far behind: no point in a long scan
 			JoinAll(Reason::Write);
 			return;
@@ -375,7 +402,11 @@ public:
 			const auto& it = m_items[seq & m_mask];
 			if (it.done_tag.load(std::memory_order_acquire) > seq) continue; // done (or the slot was reused, which needs it done)
 			const auto src   = it.src.load(std::memory_order_relaxed);
+#ifdef KYTY_UPAS_MUTANT_OVERLAP_FIRST_PAGE
+			const auto bytes = std::min<uint64_t>(it.size.load(std::memory_order_relaxed), 4096); // only the first page of a copy is compared
+#else
 			const auto bytes = it.size.load(std::memory_order_relaxed);
+#endif
 			if (Overlaps(src, bytes, vaddr, size)) last = seq + 1;
 		}
 		if (last == 0) return;
@@ -385,7 +416,11 @@ public:
 		for (auto seq = first; seq < last; ++seq) {
 			const auto& it = m_items[seq & m_mask];
 			if (it.done_tag.load(std::memory_order_acquire) > seq) continue;
+#ifdef KYTY_UPAS_MUTANT_OVERLAP_FIRST_PAGE
+			if (Overlaps(it.src.load(std::memory_order_relaxed), std::min<uint64_t>(it.size.load(std::memory_order_relaxed), 4096), vaddr, size)) WaitDone(seq);
+#else
 			if (Overlaps(it.src.load(std::memory_order_relaxed), it.size.load(std::memory_order_relaxed), vaddr, size)) WaitDone(seq);
+#endif
 		}
 		NoteJoin(Reason::Write, t0);
 	}
@@ -409,6 +444,16 @@ private:
 		static thread_local bool producer = false;
 		return producer;
 	}
+#ifdef KYTY_UPAS_TESTING
+public:
+	using PauseFn = void (*)(uint64_t seq);
+	static PauseFn& TestPublishPause() {
+		static PauseFn fn = nullptr;
+		return fn;
+	}
+
+private:
+#endif
 	static bool MayHelp() {
 #ifdef KYTY_UPAS_MUTANT_GUEST_HELPS
 		return true;
@@ -451,6 +496,9 @@ private:
 		slot.kind     = kind;
 		slot.t_pub    = expected != nullptr ? NowNs() : 0;
 		slot.ready.store(ready, std::memory_order_relaxed); // published by the seq_cst store below
+#ifdef KYTY_UPAS_TESTING
+		if (TestPublishPause() != nullptr) TestPublishPause()(seq); // tests: the recorder "preempted" between the hand-over time and the publication
+#endif
 		m_published.store(seq + 1, std::memory_order_seq_cst);
 		if (m_sleeping.load(std::memory_order_seq_cst)) {
 			std::lock_guard lock(m_sleep_mutex);
@@ -516,8 +564,8 @@ private:
 #endif
 				// Stage: a write hook on the differing page before the hand-over = the page faulted before the copy was handed over (there was nothing
 				// to join), the store raced the copy itself and the page is dirty again: the same in mode 0. After it, or none: an error.
-				int64_t    hook_dt   = INT64_MIN;
-				const bool before    = HookBefore((src + first) >> 12u, it.t_pub, &hook_dt);
+				int64_t    hook_dt   = INT64_MIN; // S605d: hook's m_published - (seq + 1), not a time
+				const bool before    = HookBefore((src + first) >> 12u, seq, &hook_dt);
 #ifdef KYTY_UPAS_MUTANT_REDIRTY_AFTER
 				const bool redirty = !race && hook_dt != INT64_MIN;
 #else
@@ -642,9 +690,9 @@ private:
 	std::atomic<uint64_t>         m_ne_stage_index {0};
 	std::atomic<uint64_t>         m_ne_error_logged {0};
 	static constexpr uint64_t     kHooks        = 65536;
-	static constexpr uint32_t     kHookTimeBits = 36;
-	static constexpr uint64_t     kHookTimeMask = (uint64_t {1} << kHookTimeBits) - 1;
-	static constexpr uint64_t     kHookPageMask = (uint64_t {1} << (64 - kHookTimeBits)) - 1;
+	static constexpr uint32_t     kHookSeenBits = 44;
+	static constexpr uint64_t     kHookSeenMask = (uint64_t {1} << kHookSeenBits) - 1;
+	static constexpr uint64_t     kHookKeyMask  = (uint64_t {1} << (64 - kHookSeenBits)) - 1; // page bits 16..35 (the slot holds bits 0..15)
 	using HookTable = std::unique_ptr<std::atomic<uint64_t>[]>;
 	HookTable                     m_hooks {new std::atomic<uint64_t>[kHooks] {}};
 	HookTable                     m_hooks_prev {new std::atomic<uint64_t>[kHooks] {}};

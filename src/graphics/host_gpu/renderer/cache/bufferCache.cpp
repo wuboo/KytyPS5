@@ -89,10 +89,10 @@ void LogUploadShadowNe(const UploadAsync::NeInfo& n) {
 	char line[480];
 	std::snprintf(line, sizeof(line),
 	              "[upload-async] shadow ne #%" PRIu64 ": flip=%" PRIu64 " path=%s src_protected=%d addr=0x%016" PRIx64 " size=%" PRIu64 " page=0x%016" PRIx64
-	              " first_off=%" PRIu64 " diff_bytes=%" PRIu64 " rec=0x%02x now=0x%02x age_us=%" PRId64 " pending=%" PRIu64 " last_join=%s page_now=%s verdict=%s hook_dt_us=%" PRId64 "\n",
+	              " first_off=%" PRIu64 " diff_bytes=%" PRIu64 " rec=0x%02x now=0x%02x age_us=%" PRId64 " pending=%" PRIu64 " last_join=%s page_now=%s verdict=%s hook_seen=%" PRId64 "\n",
 	              n.index, FrameTiming::GuestFlips(), UploadAsync::KindName(n.kind), n.kind == UploadAsync::Kind::Stage ? 1 : 0, n.src, n.size, page,
 	              n.first_off, n.diff_bytes, n.recorded, n.reread, n.age_ns / 1000, n.pending, UploadAsync::ReasonName(n.last_join), state,
-	              n.verdict == 2 ? "race" : (n.verdict == 1 ? "redirty" : "error"), n.hook_dt_ns == INT64_MIN ? INT64_MIN : n.hook_dt_ns / 1000);
+	              n.verdict == 2 ? "race" : (n.verdict == 1 ? "redirty" : "error"), n.hook_dt_ns);
 	Common::DiagOut::Write(line);
 }
 
@@ -466,10 +466,10 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 		UploadAsync::Global().store(m_upload_async.get(), std::memory_order_release);
 		Libs::LibKernel::Memory::SetBackingWriteHook(&UploadAsync::BeforeCpuWrite);
 	}
-	std::printf("Environment: KYTY_UPLOAD_ASYNC=%s staging_coherent=%d stream_coherent=%d backing_nolock=%s chunk=%u\n",
+	std::printf("Environment: KYTY_UPLOAD_ASYNC=%s staging_coherent=%d stream_coherent=%d backing_nolock=%s chunk=%u shadow_from=%llu\n",
 	            UploadAsync::ModeName(UploadAsync::EnvMode()), m_staging_buffer.IsCoherent() ? 1 : 0, m_stream_buffer.IsCoherent() ? 1 : 0,
 	            std::getenv("KYTY_BACKING_READ_NOLOCK") != nullptr ? std::getenv("KYTY_BACKING_READ_NOLOCK") : "-",
-	            static_cast<unsigned>(UploadAsync::Engine::kChunk));
+	            static_cast<unsigned>(UploadAsync::Engine::kChunk), static_cast<unsigned long long>(UploadAsync::EnvShadowFrom()));
 	std::fflush(stdout);
 	m_scheduler.SetBeforeQueueHook([this] { UploadAsyncBeforeQueue(); });
 	std::memset(m_gds_buffer.Mapped().data(), 0, static_cast<size_t>(m_gds_buffer.Size()));
@@ -1264,7 +1264,7 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 
 	const auto source = UploadMemory(m_graphics, m_scheduler, m_staging_buffer, total_size, 4,
 	    vk::BufferUsageFlagBits::eTransferSrc, [&](uint8_t* mapped, uint64_t base_offset, bool coherent) {
-		if (m_upload_async != nullptr && m_upload_async->Shadow()) {
+		if (m_upload_async != nullptr && m_upload_async->Shadow() && FrameTiming::GuestFlips() >= UploadAsync::EnvShadowFrom()) {
 			// S605b: the batch's verifies are handed over before any of its copies (as mode 1 hands the copies over), see ShadowCopyBatch.
 			std::vector<UploadAsync::BatchPiece> pieces(copies.size());
 			for (size_t i = 0; i < copies.size(); i++) {
@@ -1313,6 +1313,10 @@ void BufferCache::GuestCopy(uint64_t src, uint8_t* dst, uint64_t size, UploadAsy
 	UploadAsync::Engine::SetProducerThread();
 	if (!engine->Shadow()) {
 		engine->Copy(src, dst, size, kind);
+		return;
+	}
+	if (FrameTiming::GuestFlips() < UploadAsync::EnvShadowFrom()) { // S605d: no verify before the window
+		SyncGuestCopy(src, dst, size);
 		return;
 	}
 	// S605b shadow: the verify is handed over before the recorder's copy (the copy the GPU gets, as with 0), see ShadowCopyBatch.

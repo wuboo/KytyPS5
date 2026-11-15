@@ -12,9 +12,12 @@
 //   SHADOW_LATE_PUBLISH - the S605 shadow: the verify is handed over after the recorder's copy, so a write that faults (joins) right after the
 //                    recorder's copy finds nothing to wait for and is reported although mode 1 would have ordered it;
 //   REDIRTY_AFTER  - a stage difference whose page's write hook ran after the hand-over (a join that did not hold) is excused as a re-dirty;
+//   HOOK_SEEN_STRICT - a write hook whose join looked just before the item was published counts as having seen it (S605c's 2 "errors");
+//   OVERLAP_FIRST_PAGE - a write join compares a pending copy's first page only: a fault on page k > 0 of a multi-page copy does not wait;
 //   SHADOW_PER_COPY - a shadow batch hands each verify over just before its own copy: a write that faults on a later range while an earlier one
 //                    is copied finds nothing to join (mode 1 hands the whole batch over before any copy).
 
+#define KYTY_UPAS_TESTING 1
 #include "graphics/host_gpu/renderer/cache/uploadAsync.h"
 
 #include <array>
@@ -86,6 +89,7 @@ void ModeTests() {
 	Check(ParseMode("0") == Mode::Off && ParseMode("") == Mode::Off && ParseMode("yes") == Mode::Off, "anything else = off");
 	Check(ParseMode("1") == Mode::On, "1 = on");
 	Check(ParseMode("shadow") == Mode::Shadow, "shadow");
+	Check(ParseShadowFrom(nullptr) == 0 && ParseShadowFrom("") == 0 && ParseShadowFrom("4900") == 4900 && ParseShadowFrom("49x") == 0, "shadow window");
 	Check(std::strcmp(ModeName(Mode::Shadow), "shadow") == 0 && std::strcmp(ModeName(Mode::On), "1") == 0 && std::strcmp(ModeName(Mode::Off), "0") == 0, "names");
 }
 
@@ -456,7 +460,7 @@ void ShadowVerdictTests() {
 	e.Start();
 	const auto run = [&](uint64_t at, int how) {
 		Fill(at, 4096, static_cast<uint8_t>(at >> 12u));
-		if (how == 0) e.NoteWriteHook(at + 7, 1); // the fault before the hand-over
+		if (how == 0) e.NoteWriteHook(at + 7, 1, e.Published()); // the fault before the hand-over
 		std::this_thread::sleep_for(std::chrono::microseconds(50));
 		g_in_hold    = false;
 		g_hold       = true;
@@ -467,7 +471,7 @@ void ShadowVerdictTests() {
 		std::memcpy(scratch, g_mem.data() + at, 4096);
 		e.VerifyReady(token);
 		while (!g_in_hold.load()) std::this_thread::yield(); // the helper is inside its read of the piece
-		if (how == 1) e.NoteWriteHook(at + 7, 1);           // a hook after the hand-over whose join did not hold
+		if (how == 1) e.NoteWriteHook(at + 7, 1, e.Published());           // a hook after the hand-over whose join did not hold
 		std::atomic_ref<uint8_t>(g_mem[at + 7]).store(static_cast<uint8_t>(g_mem[at + 7] + 1u));
 		g_hold = false;
 		e.JoinAll(Reason::Submit);
@@ -480,6 +484,88 @@ void ShadowVerdictTests() {
 	Check(e.GetStats().ne_n.load() == 1 && e.GetStats().ne_redirty_n.load() == 1, "a hook after the hand-over that did not hold the store: an error");
 	run((890000 & ~uint64_t {4095}) + 16384, 2);
 	Check(e.GetStats().ne_n.load() == 2 && e.GetStats().ne_redirty_n.load() == 1, "a store no hook saw: an error");
+	e.Stop();
+}
+
+// S605d (mode 1): a copy of 6 pages is handed over; a write fault on page 5 right after must wait for the copy (OVERLAP_FIRST_PAGE).
+void MultiPageTests() {
+	ResetSlow();
+	Engine e(&TestRead, false, 64);
+	Engine::SetProducerThread();
+	e.Start();
+	constexpr uint64_t at = 600000 & ~uint64_t {4095};
+	Fill(at, 6 * 4096, 13);
+	std::vector<uint8_t> want(g_mem.begin() + at, g_mem.begin() + at + 6 * 4096), dst(6 * 4096, 0);
+	g_in_hold    = false;
+	g_hold       = true;
+	g_hold_begin = at;
+	g_hold_end   = at + 1;
+	e.Copy(at, dst.data(), 6 * 4096, Kind::Stage);
+	while (!g_in_hold.load()) std::this_thread::yield(); // the upload thread is inside the copy
+	std::atomic<bool> landed {false};
+	std::thread       guest([&] {
+        e.JoinOverlap(at + 5 * 4096 + 100, 1); // the write fault of page 5
+        std::atomic_ref<uint8_t>(g_mem[at + 5 * 4096 + 100]).store(static_cast<uint8_t>(g_mem[at + 5 * 4096 + 100] ^ 0xffu));
+        landed = true;
+    });
+	std::this_thread::sleep_for(std::chrono::milliseconds(20));
+	const bool early = landed.load();
+	g_hold = false;
+	guest.join();
+	e.JoinAll(Reason::Submit);
+	g_hold_begin = 0;
+	g_hold_end   = 0;
+	Check(!early, "a write fault on page 5 of a 6-page copy waits for the copy");
+	Check(dst == want, "the copy has the bytes of before the write on its last page");
+	e.Stop();
+}
+
+// S605d (shadow): the recorder is "preempted" between the hand-over time and the publication of a verify; a guest write fault in that gap finds
+// nothing to wait for (correctly: mode 1 would not have published the copy either), its store lands after the recorder's copy. The difference is
+// a re-dirty (the hook's join could not see the item), not an error (HOOK_SEEN_STRICT).
+std::atomic<int>  g_pause_state {0};
+std::thread*      g_pause_guest = nullptr;
+std::atomic<bool> g_guest_store {false};
+Engine*           g_pause_engine = nullptr;
+constexpr uint64_t kPauseAt = 640000 & ~uint64_t {4095};
+void PausePublish(uint64_t) {
+	if (g_pause_state.exchange(1) != 0) return;
+	g_pause_guest = new std::thread([] {
+		g_pause_engine->JoinOverlap(kPauseAt + 2 * 4096 + 9, 1); // sees the item not yet published: returns at once
+		g_pause_state = 2;
+		while (!g_guest_store.load()) std::this_thread::yield();
+		std::atomic_ref<uint8_t>(g_mem[kPauseAt + 2 * 4096 + 9]).store(static_cast<uint8_t>(g_mem[kPauseAt + 2 * 4096 + 9] + 1u));
+	});
+	while (g_pause_state.load() != 2) std::this_thread::yield();
+}
+void PreemptedPublishTests() {
+	ResetSlow();
+	Engine e(&TestRead, true, 64, 1u << 16u);
+	Engine::SetProducerThread();
+	e.Start();
+	g_pause_engine = &e;
+	Fill(kPauseAt, 3 * 4096, 23);
+	const auto before_ne = e.GetStats().ne_n.load();
+	g_in_hold    = false;
+	g_hold       = true;
+	g_hold_begin = kPauseAt;
+	g_hold_end   = kPauseAt + 1;
+	Engine::TestPublishPause() = &PausePublish;
+	auto*      scratch = e.ShadowScratch(3 * 4096);
+	const auto token   = e.VerifyBegin(kPauseAt, scratch, 3 * 4096, Kind::Stage);
+	Engine::TestPublishPause() = nullptr;
+	std::memcpy(scratch, g_mem.data() + kPauseAt, 3 * 4096); // the recorder's copy, before the store
+	e.VerifyReady(token);
+	while (!g_in_hold.load()) std::this_thread::yield(); // the helper is inside its re-read
+	g_guest_store = true;                                 // the store lands now: after the recorder's copy, before the re-read
+	g_pause_guest->join();
+	delete g_pause_guest;
+	g_hold = false;
+	e.JoinAll(Reason::Submit);
+	g_hold_begin = 0;
+	g_hold_end   = 0;
+	Check(e.GetStats().ne_n.load() == before_ne, "a fault in the gap before the publication is not an error");
+	Check(e.GetStats().ne_redirty_n.load() == 1, "it is a re-dirty (the join could not see the item, as in mode 1)");
 	e.Stop();
 }
 
@@ -550,6 +636,8 @@ int main() {
 	ShadowMomentTests();
 	ShadowBatchTests();
 	ShadowVerdictTests();
+	MultiPageTests();
+	PreemptedPublishTests();
 	OracleTests(400);
 	std::printf("UploadAsyncTests: OK\n");
 	return 0;
