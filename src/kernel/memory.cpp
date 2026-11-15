@@ -7,6 +7,7 @@
 #include "common/stringUtils.h"
 #include "common/threads.h"
 #include "common/virtualMemory.h"
+#include "graphics/guest_gpu/command_processor/cpPipeCleanWalk.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/hotPages.h"
 #include "graphics/host_gpu/protectRing.h"
@@ -952,6 +953,14 @@ bool TryReadBackingWorker(uint64_t vaddr, void* data, uint64_t size) {
 	return true;
 }
 
+bool TryReadBackingWorkerUnlogged(uint64_t vaddr, void* data, uint64_t size) {
+	auto* const log  = t_worker_pc.log;
+	t_worker_pc.log  = nullptr;
+	const bool  read = TryReadBackingWorker(vaddr, data, size);
+	t_worker_pc.log  = log;
+	return read;
+}
+
 bool QueryShaderGpuDirty(uint64_t vaddr, uint64_t size) {
 	if (size == 0 || g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
 		return false;
@@ -1226,6 +1235,26 @@ bool QueryGuestFaultBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* infl
 		return false;
 	}
 	return true;
+}
+
+bool QueryGuestFaultBytesSpin(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight, bool* busy, int tries) noexcept {
+	*busy = false;
+	if (size == 0 || g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size)) {
+		return false;
+	}
+	if (!g_gpu_resources->GetBufferCache().QueryGuestBytes(vaddr, size, dirty, inflight, nullptr, tries)) {
+		*busy = true;
+		return false;
+	}
+	return true;
+}
+
+bool QueryCleanWalkBytesBusy(uint64_t vaddr, uint64_t size) {
+	if (size == 0 || g_gpu_resources == nullptr || !IsGpuAddressRange(vaddr, size) || !Graphics::GuestGpu::IsGpuThread()) {
+		return true;
+	}
+	auto& buffers = GetGpuResources().GetBufferCache();
+	return Graphics::CpPipe::WorkerCleanWalk::BytesBusy(buffers.HasGpuDirtyBytes(vaddr, size), buffers.HasInflightDownloadBytes(vaddr, size));
 }
 
 int WaitGuestFaultBytes(uint64_t vaddr, uint64_t size) noexcept {

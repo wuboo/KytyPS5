@@ -12,15 +12,18 @@
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/cpPipe.h"
+#include "graphics/guest_gpu/command_processor/cpPipeCleanWalk.h"
 #include "graphics/guest_gpu/command_processor/cpPipeJob.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/cache/uploadAsync.h"
+#include "graphics/host_gpu/renderer/cleanWalk.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/shader/recompiler/ir/passes/walkNoFault.h"
 #include "kernel/memory.h"
 
 #include <atomic>
@@ -231,16 +234,27 @@ bool JoinJob(GfpJob& job) {
 		return false;
 	}
 	// A page the worker read that holds GPU-written bytes the backing does not have yet (or an unpublished download of them): the CP computes the programs itself, which drains.
-	for (const uint64_t page: job.pages) {
-		if (Libs::LibKernel::Memory::QueryShaderGpuDirty(page, 4096)) {
-			FrameTiming::Add(C::PipeJoinDirtyN);
-			return false;
-		}
-	}
+	// S607 (KYTY_WORKER_CLEAN_WALK): the reads on the pages of served walker loads are checked byte by byte instead (cw_bytes; empty without served loads).
 	// A write into the backing after the worker started (the publish of a download, an upload) that touched a page it read: the bytes it saw may be older than the draw's.
-	if (!job.pages.empty() && Libs::LibKernel::Memory::BackingWrittenSince(job.write_seq, job.pages.data(), job.pages.size())) {
-		FrameTiming::Add(C::PipeJoinPubN);
-		return false;
+	namespace W       = WorkerCleanWalk;
+	const bool    cw  = !job.cw_bytes.empty();
+	const int64_t cw0 = cw ? FrameTiming::SteadyNowNs() : 0;
+	const auto    verdict = W::Join(
+        job.pages, job.cw_bytes, job.cw_pages, [](uint64_t page) { return Libs::LibKernel::Memory::QueryShaderGpuDirty(page, 4096); },
+        [](uint64_t address, uint64_t size) { return Libs::LibKernel::Memory::QueryCleanWalkBytesBusy(address, size); },
+        [&job](const std::vector<uint64_t>& pages) { return Libs::LibKernel::Memory::BackingWrittenSince(job.write_seq, pages.data(), pages.size()); });
+	if (cw) {
+		FrameTiming::Add(C::WcwJoinBytesN, job.cw_bytes.size());
+		FrameTiming::Add(C::WcwJoinNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - cw0));
+	}
+	switch (verdict) {
+		case W::Verdict::PageDirty: FrameTiming::Add(C::PipeJoinDirtyN); return false;
+		case W::Verdict::BytesDirty: FrameTiming::Add(C::WcwJoinDirtyN); return false;
+		case W::Verdict::Written:
+			FrameTiming::Add(C::PipeJoinPubN);
+			if (cw) FrameTiming::Add(C::WcwJoinPubN);
+			return false;
+		case W::Verdict::Ok: break;
 	}
 	return true;
 }
@@ -306,6 +320,20 @@ CommandProcessor::~CommandProcessor() = default;
 void CommandProcessor::PipeInit() {
 	if (m_pipe != nullptr || IsAsyncComputeQueue() || EnvMode() == CpPipe::Mode::Off) return;
 	m_pipe = std::make_unique<PipeState>(EnvDepth());
+	// S607 (KYTY_WORKER_CLEAN_WALK, cpPipeCleanWalk.h): the workers' reader of hot-page walker loads, before the workers start.
+	{
+		namespace W       = CpPipe::WorkerCleanWalk;
+		const auto mode   = W::EnvMode();
+		const bool active = W::ActiveFor(mode, EnvMode() == CpPipe::Mode::On && EnvWorkers() != 0, CleanWalk::EnvMode() == CleanWalk::Mode::On,
+		                                 ShaderRecompiler::IR::WalkNoFault::Current() == ShaderRecompiler::IR::WalkNoFault::Mode::On);
+		if (active) {
+			CpPipe::InstallWorkerCleanWalk();
+			W::ActiveFlag().store(true, std::memory_order_release);
+		}
+		std::printf("Environment: KYTY_WORKER_CLEAN_WALK=%s active=%d clean_walk=%d nofault=%d spin=%d\n", W::ModeName(mode), active ? 1 : 0,
+		            CleanWalk::EnvMode() == CleanWalk::Mode::On ? 1 : 0,
+		            ShaderRecompiler::IR::WalkNoFault::Current() == ShaderRecompiler::IR::WalkNoFault::Mode::On ? 1 : 0, W::EnvSpin());
+	}
 	if (EnvWorkers() != 0) CpPipe::Workers::Instance().Start(EnvWorkers(), EnvShard());
 	LOGF("[cp-pipe] on: mode=%s depth=%zu workers=%zu shard=%d signals=%d\n", EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", m_pipe->depth, EnvWorkers(), EnvShard() ? 1 : 0, static_cast<int>(EnvSignals()));
 	// S558 (KYTY_CP_PREDECODE): the workers decode the T#s of the jobs they answer; the recorder takes them only with KYTY_CP_PIPE=1 (shadow: none used).

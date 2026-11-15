@@ -560,6 +560,14 @@ enum class Counter : uint32_t {
 	// S605b: shadow differences on a protected source whose page faulted before the hand-over (the store raced the copy itself, as in mode 0; the page
 	// is dirty again). Not an error; upas_ne_n keeps the ones the joins should have ordered.
 	UpasNeRedirtyN,
+	// S607 (KYTY_WORKER_CLEAN_WALK, cpPipeCleanWalk.h): walker loads a pipeline worker served from the backing / refused because the tracker's
+	// lock spin gave up / refused because the bytes were GPU-dirty or in flight; jobs with a served load (of them: not answered for another
+	// reason); at the join: byte ranges checked, jobs refused because served bytes were dirty or in flight now / because a backing write touched
+	// their pages, the recorder's ns in the joins of such jobs; jobs whose result the recorder used; shadow: jobs the recorder recomputed and
+	// compared, differences (must be 0), the recorder's GetGraphicsPrograms ns on them (what mode 1 does not spend). Every mode: the recorder's
+	// own GetGraphicsPrograms in PrepareDrawRenderState (calls, ns; as S606).
+	WcwServedN, WcwBusyN, WcwDirtyN, WcwJobN, WcwBailN, WcwJoinBytesN, WcwJoinDirtyN, WcwJoinPubN, WcwJoinNs, WcwUsedN, WcwShadowN, WcwShadowNeN,
+	WcwShadowCpNs, PipeCpGfpN, PipeCpGfpNs,
 	Count,
 };
 

@@ -183,6 +183,14 @@ void                   InstallGpuResources(Graphics::RenderContext* renderer) no
 // caches (or the buffer cache state is being changed: then *busy = true); else *dirty = GPU-written bytes the backing does not have yet, *inflight = a
 // GPU->host copy of them is not published yet. S428: never blocks (try_lock), safe in a signal handler.
 [[nodiscard]] bool QueryGuestFaultBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight, bool* busy) noexcept;
+// S607 (KYTY_WORKER_CLEAN_WALK): QueryGuestFaultBytes for a pipeline worker, with a bounded spin of `tries` on each lock of the tracker instead
+// of one try (*busy = a spin gave up). Never blocks without bound.
+[[nodiscard]] bool QueryGuestFaultBytesSpin(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight, bool* busy, int tries) noexcept;
+// S607: the recorder's join of a job with served walker loads: are the bytes GPU-dirty or is a GPU->host copy of them in flight (the CP's
+// clean-walk question, CleanWalk::Decide)? GPU thread only (true off it: the caller then does not use the job).
+[[nodiscard]] bool QueryCleanWalkBytesBusy(uint64_t vaddr, uint64_t size);
+// S607: TryReadBackingWorker without logging the page (the served dword of a walker load: the join checks its bytes, not its page).
+bool TryReadBackingWorkerUnlogged(uint64_t vaddr, void* data, uint64_t size);
 // S585 (KYTY_GUEST_WAIT=1, guestWait.h): a guest thread's read fault on bytes that are not GPU-dirty but whose copy is in flight waits for that
 // copy's tick and its publish (not for a newer download of the page). Returns 1 when the bytes may be clean now (it waited, or the copy was
 // published meanwhile: the caller queries them again), 0 when today's path applies (dirty, copy not submitted), -1 when the range is not

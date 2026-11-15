@@ -330,6 +330,17 @@ uint64_t ProbeReader(uint64_t address) {
   probe.last.store(address);
   return probe.refuse ? 0 : Libs::Graphics::ShaderRecompiler::IR::WalkNoFault::Served(probe.value);
 }
+// S607 (KYTY_WORKER_CLEAN_WALK): the workers' reader.
+NoFaultProbe &WorkerProbe() {
+  static NoFaultProbe probe;
+  return probe;
+}
+uint64_t WorkerProbeReader(uint64_t address) {
+  auto &probe = WorkerProbe();
+  probe.calls.fetch_add(1);
+  probe.last.store(address);
+  return probe.refuse ? 0 : Libs::Graphics::ShaderRecompiler::IR::WalkNoFault::Served(probe.value);
+}
 // KYTY_WALKNF_EVERY_LOAD: every walker load asks this reader, which answers every readable address with its bytes.
 uint64_t SafeReader(uint64_t address) {
   Probe().calls.fetch_add(1);
@@ -422,6 +433,40 @@ void TestWalkNoFault() {
     SetScratchPerThread(false);
   }).join();
   Check(worker_ok && probe.calls == 0, "on, worker: the load is not served, the fault is the worker's");
+  // S607: with the workers' reader installed, a worker's hot-page load asks it (never the CP's reader) and takes its dword without a fault;
+  // refused, the ordinary load faults and is counted as the worker's. The CP's own load still asks the CP's reader only.
+  {
+    auto &wprobe = WorkerProbe();
+    wprobe.value = 0x77c1ea70u;
+    wprobe.refuse = false;
+    wprobe.calls = 0;
+    probe.calls = 0;
+    NF::WorkerReaderHook().store(&WorkerProbeReader);
+    bool served_ok = false, refused_ok = false;
+    std::thread([&] {
+      SetScratchPerThread(true);
+      SetSrtWalkerWorker(true);
+      std::vector<uint32_t> worker_flat;
+      served_ok = WalkSrt(plan_nf, runtime, worker_flat, nullptr) && worker_flat.size() == 1u && worker_flat[0] == 0x77c1ea70u &&
+                  SrtWalkerWorkerFaults() == 0u && WorkerProbe().last == address;
+      SetSrtWalkerWorker(false);
+      SetSrtWalkerWorker(true);
+      WorkerProbe().refuse = true;
+      refused_ok = WalkSrt(plan_nf, runtime, worker_flat, nullptr) && worker_flat[0] == 0u && SrtWalkerWorkerFaults() == 1u;
+      SetSrtWalkerWorker(false);
+      SetScratchPerThread(false);
+    }).join();
+#if !defined(KYTY_WALKNF_MUTANT_WORKER_SERVED)
+    Check(served_ok && wprobe.calls == 2 && probe.calls == 0, "on, worker with its reader: served by the workers' reader, not the CP's");
+    Check(refused_ok, "on, worker with its reader, refused: the ordinary load faults, counted");
+#endif
+    wprobe.refuse = false;
+    wprobe.calls = 0;
+    probe.calls = 0;
+    Check(WalkSrt(plan_nf, runtime, flat, nullptr) && flat[0] == 0x5e7e0001u && probe.calls == 1 && wprobe.calls == 0,
+          "on, CP with the workers' reader installed: the CP's reader only");
+    NF::WorkerReaderHook().store(nullptr);
+  }
   // The walker of an off compile never asks, hot or not.
   probe.calls = 0;
   g_fault_reads = 0;

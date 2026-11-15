@@ -910,6 +910,21 @@ foreach(mutant IN ITEMS NO_WRITE_JOIN JOIN_NO_WAIT OVERLAP_END SLOT_REUSE LABEL_
 	target_include_directories(upload_async_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(upload_async_mutant_${mutant_lower}_tests PRIVATE KYTY_UPAS_MUTANT_${mutant}=1)
 endforeach()
+# S607 (KYTY_WORKER_CLEAN_WALK, cpPipeCleanWalk.h): the worker's decision on a hot-page walker load, the split of a job's reads into page and byte
+# checks, the recorder's join, and an oracle over the real tracker pieces (GpuDirtyRanges, InflightRanges, BackingWriteLog) with a CP, a publish thread and
+# three workers. Mutants (each must be caught, WILL_FAIL, exit code 1): a busy query serves, the join skips the served bytes / forgets copies in flight /
+# does not ask the served pages for backing writes, a plain read on a served page is dropped, the served pages keep the page check, a served page read
+# through the backing is checked by bytes only.
+add_executable(cp_pipe_clean_walk_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPipeCleanWalkTests.cpp")
+target_link_libraries(cp_pipe_clean_walk_tests common fmt::fmt)
+target_include_directories(cp_pipe_clean_walk_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS BUSY_SERVES JOIN_NO_BYTES JOIN_NO_INFLIGHT JOIN_NO_WRITTEN SPLIT_DROPS_READ PAGE_CHECKS_SERVED SPLIT_IGNORES_BACKING)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(cp_pipe_clean_walk_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPipeCleanWalkTests.cpp")
+	target_link_libraries(cp_pipe_clean_walk_mutant_${mutant_lower}_tests common fmt::fmt)
+	target_include_directories(cp_pipe_clean_walk_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_pipe_clean_walk_mutant_${mutant_lower}_tests PRIVATE KYTY_WCW_MUTANT_${mutant}=1)
+endforeach()
 # S479 (KYTY_CP_PIPE): the log of the writes into the guest's backing (header only). Mutants (each must be caught, WILL_FAIL): a running write is no danger, a wrapped ring
 # answers from what is left, the pages are not compared.
 add_executable(backing_write_log_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BackingWriteLogTests.cpp")
@@ -2309,6 +2324,12 @@ if(BUILD_TESTING)
 	foreach(mutant IN ITEMS ignore_running no_wrap_guard any_range no_fast_path_guard)
 		add_test(NAME backing_write_log_mutant_${mutant} COMMAND $<TARGET_FILE:backing_write_log_mutant_${mutant}_tests>)
 		set_tests_properties(backing_write_log_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME cp_pipe_clean_walk COMMAND $<TARGET_FILE:cp_pipe_clean_walk_tests>)
+	set_tests_properties(cp_pipe_clean_walk PROPERTIES TIMEOUT 120)
+	foreach(mutant IN ITEMS busy_serves join_no_bytes join_no_inflight join_no_written split_drops_read page_checks_served split_ignores_backing)
+		add_test(NAME cp_pipe_clean_walk_mutant_${mutant} COMMAND $<TARGET_FILE:cp_pipe_clean_walk_mutant_${mutant}_tests>)
+		set_tests_properties(cp_pipe_clean_walk_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 120)
 	endforeach()
 	add_test(NAME upload_async COMMAND $<TARGET_FILE:upload_async_tests>)
 	set_tests_properties(upload_async PROPERTIES TIMEOUT 120)

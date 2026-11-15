@@ -14,6 +14,7 @@
 #include <array>
 #include <atomic>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 namespace Libs::Graphics::CpPipe {
@@ -45,7 +46,16 @@ struct GfpJob {
 	// by the worker only (RunGfpJob, before state = Done), read by the recorder only after JoinJob.
 	PreStages pre;
 	int64_t   pre_ns = 0;
+	// S607 (KYTY_WORKER_CLEAN_WALK, cpPipeCleanWalk.h): walker loads of the job the worker served from the backing (0: none, then the two lists
+	// are empty and JoinJob is S490's), the read ranges on their pages that JoinJob checks byte by byte, and those pages (asked for backing writes).
+	uint32_t                                   cw_served = 0;
+	std::vector<std::pair<uint64_t, uint64_t>> cw_bytes;
+	std::vector<uint64_t>                      cw_pages;
 };
+
+// S607: installs the workers' reader of hot-page walker loads (KYTY_WORKER_CLEAN_WALK; renderDraw.cpp). Called once by the CP before the
+// workers start, only when the switch is active.
+void InstallWorkerCleanWalk();
 
 // The worker's body (renderDraw.cpp: it needs the draw's own register decoding).
 void RunGfpJob(GfpJob& job);

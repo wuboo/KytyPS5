@@ -1588,12 +1588,12 @@ bool BufferCache::TryQueryGuestFault(uint64_t vaddr, uint64_t size, bool* dirty,
 	return m_inflight_download_ranges.TryIntersects(vaddr, size, inflight);
 }
 
-bool BufferCache::QueryGuestBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight, uint64_t* copy_tick) const {
+bool BufferCache::QueryGuestBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight, uint64_t* copy_tick, int tries) const {
 	// The same order as TryQueryGuestFault, each lock taken with GuestWait::SpinTryLock.
-	if (!m_gpu_modified_ranges.TryIntersectsSpin(vaddr, size, dirty)) {
+	if (!m_gpu_modified_ranges.TryIntersectsSpin(vaddr, size, dirty, tries)) {
 		return false;
 	}
-	return m_inflight_download_ranges.TryIntersectsSpin(vaddr, size, inflight, copy_tick);
+	return m_inflight_download_ranges.TryIntersectsSpin(vaddr, size, inflight, copy_tick, tries);
 }
 
 GuestWait::ByteDecision BufferCache::GuestByteWait(uint64_t vaddr, uint64_t size, bool* busy) {

@@ -1828,8 +1828,12 @@ thread_local uint32_t t_worker_faults = 0;
 
 uint64_t KYTY_SYSV_ABI WalkNoFaultLoad(uint64_t address) {
 #if !defined(KYTY_WALKNF_MUTANT_WORKER_SERVED)
-	// A pipeline worker keeps its zero read and bail (S490): its walk runs ahead of the command processor.
-	if (t_walker_worker) return 0;
+	// A pipeline worker keeps its zero read and bail (S490): its walk runs ahead of the command processor. S607 (KYTY_WORKER_CLEAN_WALK): only
+	// the worker's own reader may serve it (the recorder checks the served bytes again when it joins the job); never the CP's.
+	if (t_walker_worker) {
+		const auto worker_reader = WalkNoFault::WorkerReaderHook().load(std::memory_order_acquire);
+		return worker_reader != nullptr ? worker_reader(address) : 0;
+	}
 #endif
 	const auto reader = WalkNoFault::ReaderHook().load(std::memory_order_acquire);
 	return reader != nullptr ? reader(address) : 0;

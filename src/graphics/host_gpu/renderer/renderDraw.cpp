@@ -14,6 +14,7 @@
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/tile.h"
 #include "graphics/host_gpu/graphicContext.h"
+#include "graphics/host_gpu/renderer/cleanWalk.h"
 #include "graphics/host_gpu/renderer/colorRenderTarget.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/drsNoZero.h"
@@ -22,6 +23,7 @@
 #include "graphics/host_gpu/renderer/narrowBarrierVk.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/guest_gpu/command_processor/cpPipe.h"
+#include "graphics/guest_gpu/command_processor/cpPipeCleanWalk.h"
 #include "graphics/guest_gpu/command_processor/cpPipeJob.h"
 #include "graphics/host_gpu/renderer/drawRepeatDiag.h"
 #include "graphics/presentation/cpPhaseScope.h"
@@ -34,6 +36,7 @@
 #include "graphics/shader/recompiler/BufferFormat.h"
 #include "graphics/shader/recompiler/ir/ShaderIR.h"
 #include "graphics/shader/recompiler/ir/passes/ResourceMaterialization.h"
+#include "graphics/shader/recompiler/ir/passes/walkNoFault.h"
 #include "graphics/shader/shader.h"
 #include "graphics/shader/shaderCompiler.h"
 #include "kernel/eventQueue.h"
@@ -843,7 +846,7 @@ static bool ResolvePrimitiveRestart(const CommandBuffer& buffer,
 	return false;
 }
 
-static void CompareWithJob(const DrawRenderState& state, const CpPipe::GfpJob& job); // S479 shadow, below
+static void CompareWithJob(const DrawRenderState& state, const CpPipe::GfpJob& job, bool clean_walk = false); // S479 shadow (S607: of a served job), below
 
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
                                             DrawRenderState& state) {
@@ -852,20 +855,33 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	// cached, the pages the worker read are not GPU-dirty and nothing was written into them since: CpPipe::JoinJob).
 	CpPipe::GfpJob* const job      = CpPipe::CurrentJob();
 	const bool            job_used = job != nullptr && CpPipe::JoinJob(*job);
+	// S607 (KYTY_WORKER_CLEAN_WALK=shadow): a job with served walker loads is computed by the CP as well and compared, its result is not used.
+	const bool cw_job    = job_used && job->cw_served != 0;
+	const bool cw_shadow = cw_job && CpPipe::WorkerCleanWalk::EnvMode() == CpPipe::WorkerCleanWalk::Mode::Shadow;
 	// S558: JoinJob waited for the worker (acquire), so its predecode is readable; the stages are bound by ExecutePreparedDraw of this draw.
-	m_predecode_joined = job_used;
+	m_predecode_joined = job_used && !cw_shadow;
 	if (job != nullptr && job->pre_ns != 0) FrameTiming::Add(FrameTiming::Counter::PredecodeWorkerNs, static_cast<uint64_t>(job->pre_ns));
-	if (job_used && CpPipe::EnvMode() == CpPipe::Mode::On) {
+	if (job_used && !cw_shadow && CpPipe::EnvMode() == CpPipe::Mode::On) {
 		state.vertex_info[0] = job->out.vertex_info[0];
 		state.ps_input_info  = job->out.pixel_info;
 		state.ps_active      = job->out.ps_active;
 		state.mrt_mask       = job->out.mrt_mask;
 		FrameTiming::Add(FrameTiming::Counter::PipeUsedN);
+		if (cw_job) FrameTiming::Add(FrameTiming::Counter::WcwUsedN);
 	} else {
 		if (job != nullptr && !job_used) FrameTiming::Add(FrameTiming::Counter::PipeFallbackN);
 		CpPhases::Scope shaders(CpPhases::Phase::DrawShaders);
+		const int64_t gfp0 = FrameTiming::SteadyNowNs();
 		m_context.GetPipelineCache().GetGraphicsPrograms(buffer, state);
-		if (job_used) CompareWithJob(state, *job);
+		const int64_t gfp_ns = FrameTiming::SteadyNowNs() - gfp0;
+		FrameTiming::Add(FrameTiming::Counter::PipeCpGfpN);
+		FrameTiming::Add(FrameTiming::Counter::PipeCpGfpNs, static_cast<uint64_t>(gfp_ns));
+		if (cw_shadow) {
+			FrameTiming::Add(FrameTiming::Counter::WcwShadowCpNs, static_cast<uint64_t>(gfp_ns));
+			CompareWithJob(state, *job, true);
+		} else if (job_used) {
+			CompareWithJob(state, *job);
+		}
 	}
 	// Vertex programs beyond the host mesh limits or with unsupported call targets are not
 	// compiled.
@@ -1535,6 +1551,32 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 // S479 (KYTY_CP_PIPE): the worker's GetGraphicsPrograms for a deferred draw, on the registers snapshotted with it. S490: upstream reads a draw's programs from the
 // command buffer, so the worker runs the same function on the snapshot (PipelineCache::GetGraphicsProgramsOffThread: lookup only, resources in the job's own
 // snapshot). Everything the walk read is logged as pages, which JoinJob checks against GPU-written bytes when the recorder asks for the result.
+// S607 (KYTY_WORKER_CLEAN_WALK, cpPipeCleanWalk.h): a worker's walker load on a hot page. The CP's clean-walk question on the bytes (with a
+// bounded spin on the tracker's locks), then the backing's dword, not logged as a page: JoinJob checks these bytes again on the CP.
+static uint64_t WorkerCleanRead(uint64_t address) {
+	namespace W = CpPipe::WorkerCleanWalk;
+	auto& log   = W::WorkerLog();
+	if (!log.active) return 0;
+	bool       dirty = true, inflight = true, busy = true;
+	const bool queried = Libs::LibKernel::Memory::QueryGuestFaultBytesSpin(address, 4, &dirty, &inflight, &busy, W::EnvSpin()) && !busy;
+	const auto answer  = W::Decide(CleanWalk::EnvMode() == CleanWalk::Mode::On, queried, dirty, inflight);
+	if (answer == W::Answer::Busy) {
+		log.busy++;
+		return 0;
+	}
+	uint32_t dword = 0;
+	if (answer != W::Answer::Serve || !Libs::LibKernel::Memory::TryReadBackingWorkerUnlogged(address, &dword, 4)) {
+		log.dirty++;
+		return 0;
+	}
+	log.served.push_back(address);
+	return ShaderRecompiler::IR::WalkNoFault::Served(dword);
+}
+
+void CpPipe::InstallWorkerCleanWalk() {
+	ShaderRecompiler::IR::WalkNoFault::WorkerReaderHook().store(&WorkerCleanRead, std::memory_order_release);
+}
+
 void CpPipe::RunGfpJob(CpPipe::GfpJob& job) {
 	const int64_t t0 = FrameTiming::SteadyNowNs();
 	CpPipe::WorkerScope worker_flag;
@@ -1546,12 +1588,19 @@ void CpPipe::RunGfpJob(CpPipe::GfpJob& job) {
 	job.tables.words.clear();
 	job.tables.unsafe = false;
 	job.pages.clear();
+	job.cw_served = 0;
+	job.cw_bytes.clear();
+	job.cw_pages.clear();
 	job.write_seq = Libs::LibKernel::Memory::BackingWriteSeq(); // before the first read
 	ScoutTableLog::Active() = &job.tables;
 	Libs::LibKernel::Memory::SetWorkerReadLog(&job.pages);
+	const bool cw_on = CpPipe::WorkerCleanWalk::Active();
+	auto&      cw    = CpPipe::WorkerCleanWalk::WorkerLog();
+	if (cw_on) cw.Begin();
 	bool answered = DrawHasValidVertexShader(*job.sh);
 	if (!answered) job.out.fail = 4;
 	answered = answered && job.cache->GetGraphicsProgramsOffThread(*job.ctx, *job.ucfg, *job.sh, job.out);
+	if (cw_on) cw.End();
 	Libs::LibKernel::Memory::SetWorkerReadLog(nullptr);
 	ScoutTableLog::Active() = nullptr;
 	// A guest load of the walker that faulted (a tracked page) was completed as zero: the walk is not the CP's.
@@ -1564,7 +1613,8 @@ void CpPipe::RunGfpJob(CpPipe::GfpJob& job) {
 		job.out.fail = 7;
 	}
 	ShaderRecompiler::IR::SetSrtWalkerWorker(false);
-	if (answered) {
+	const bool cw_served = cw_on && !cw.served.empty();
+	if (answered && !cw_served) {
 		// The pages the compiled walker and the specialization reads touched (the backing reads logged theirs already).
 		constexpr size_t kMaxPages = 4096;
 		const auto       add_reads = [&](const ShaderRecompiler::IR::ResourceSnapshot& res) {
@@ -1577,6 +1627,26 @@ void CpPipe::RunGfpJob(CpPipe::GfpJob& job) {
 		std::sort(job.pages.begin(), job.pages.end());
 		job.pages.erase(std::unique(job.pages.begin(), job.pages.end()), job.pages.end());
 		if (job.pages.size() > kMaxPages) answered = false;
+	} else if (answered) {
+		// S607: the reads on the pages of the served loads go to the byte check of JoinJob, the rest to its page check as above.
+		constexpr size_t                           kMaxPages = 4096;
+		std::vector<std::pair<uint64_t, uint64_t>> reads(job.out.vs_res.specialization_reads);
+		if (job.out.ps_active) reads.insert(reads.end(), job.out.ps_res.specialization_reads.begin(), job.out.ps_res.specialization_reads.end());
+		if (!CpPipe::WorkerCleanWalk::SplitReads(job.pages, cw.served, reads, job.cw_bytes, job.cw_pages, kMaxPages)) answered = false;
+		if (answered) job.cw_served = static_cast<uint32_t>(cw.served.size());
+	}
+	if (cw_on) {
+		if (!cw.served.empty()) FrameTiming::AddAlways(FrameTiming::Counter::WcwServedN, cw.served.size());
+		if (cw.busy != 0) FrameTiming::AddAlways(FrameTiming::Counter::WcwBusyN, cw.busy);
+		if (cw.dirty != 0) FrameTiming::AddAlways(FrameTiming::Counter::WcwDirtyN, cw.dirty);
+		if (cw_served) {
+			FrameTiming::AddAlways(FrameTiming::Counter::WcwJobN);
+			if (!answered) FrameTiming::AddAlways(FrameTiming::Counter::WcwBailN);
+		}
+		if (!answered) {
+			job.cw_bytes.clear();
+			job.cw_pages.clear();
+		}
 	}
 	if (!answered) {
 		const uint32_t code = job.out.fail == 0 ? 10u : (job.out.fail > 11u ? 11u : job.out.fail);
@@ -1608,9 +1678,9 @@ void CpPipe::RunGfpJob(CpPipe::GfpJob& job) {
 }
 
 // S479 shadow: the result the CP computed (state) against the worker's (job), field by field of everything the draw is built from.
-static void CompareWithJob(const DrawRenderState& state, const CpPipe::GfpJob& job) {
+static void CompareWithJob(const DrawRenderState& state, const CpPipe::GfpJob& job, bool clean_walk) {
 	using C = FrameTiming::Counter;
-	FrameTiming::Add(C::PipeShadowN);
+	FrameTiming::Add(clean_walk ? C::WcwShadowN : C::PipeShadowN);
 	const auto& out   = job.out;
 	const bool  ne_vs = state.vertex_info[0].stage.module != out.vertex_info[0].stage.module;
 	const bool  ne_ps = state.ps_active != out.ps_active || (state.ps_active && state.ps_input_info.stage.module != out.pixel_info.stage.module) ||
@@ -1652,10 +1722,11 @@ static void CompareWithJob(const DrawRenderState& state, const CpPipe::GfpJob& j
 	};
 	const bool ne_info = !same_vs(state.vertex_info[0], out.vertex_info[0]) || (state.ps_active && !same_ps(state.ps_input_info, out.pixel_info));
 	if (ne_vs || ne_ps || ne_res || ne_info) {
-		FrameTiming::Add(C::PipeShadowNeN);
+		FrameTiming::Add(clean_walk ? C::WcwShadowNeN : C::PipeShadowNeN);
 		static std::atomic<uint32_t> logged {0};
 		if (logged.fetch_add(1) < 16) {
-			std::fprintf(stderr, "[cp-pipe] shadow ne: vs=%d ps=%d res=%d info=%d\n", ne_vs, ne_ps, ne_res, ne_info);
+			std::fprintf(stderr, "[cp-pipe] shadow ne: vs=%d ps=%d res=%d info=%d clean_walk=%d served=%u\n", ne_vs, ne_ps, ne_res, ne_info, clean_walk ? 1 : 0,
+			             job.cw_served);
 			std::fflush(stderr);
 		}
 	}

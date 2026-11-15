@@ -921,6 +921,21 @@ constexpr const char* kCounterNames[] = {
     "upas_ne_race_n",
     "upas_ne_bytes",
     "upas_ne_redirty_n",
+    "wcw_served_n",
+    "wcw_busy_n",
+    "wcw_dirty_n",
+    "wcw_job_n",
+    "wcw_bail_n",
+    "wcw_join_bytes_n",
+    "wcw_join_dirty_n",
+    "wcw_join_pub_n",
+    "wcw_join_ns",
+    "wcw_used_n",
+    "wcw_shadow_n",
+    "wcw_shadow_ne_n",
+    "wcw_shadow_cp_ns",
+    "pipe_cp_gfp_n",
+    "pipe_cp_gfp_ns",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

@@ -99,6 +99,13 @@ inline std::atomic<Reader>& ReaderHook() {
 	return hook;
 }
 
+// S607 (KYTY_WORKER_CLEAN_WALK, cpPipeCleanWalk.h): the reader of a pipeline worker's load on a hot page (nullptr: the worker keeps the ordinary
+// load and its fault, as in S594). A worker never asks ReaderHook (the CP's reader).
+inline std::atomic<Reader>& WorkerReaderHook() {
+	static std::atomic<Reader> hook {nullptr};
+	return hook;
+}
+
 constexpr uint64_t Served(uint32_t dword) {
 	return kServed | dword;
 }

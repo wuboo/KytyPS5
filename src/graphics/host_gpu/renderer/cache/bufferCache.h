@@ -111,7 +111,9 @@ public:
 	[[nodiscard]] bool TryQueryGuestFault(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight) const;
 	// S585 (guestWait.h): the same query with a bounded spin on each lock (any thread); *copy_tick = newest tick of the in-flight copies of the
 	// bytes (0 = unknown / none). False when a spin gave up.
-	[[nodiscard]] bool QueryGuestBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight, uint64_t* copy_tick = nullptr) const;
+	// S607: `tries` = the spin on each lock (KYTY_WORKER_CLEAN_WALK_SPIN for a pipeline worker).
+	[[nodiscard]] bool QueryGuestBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight, uint64_t* copy_tick = nullptr,
+	                                   int tries = GuestWait::kSpinTries) const;
 	// S585 (KYTY_GUEST_WAIT=1): a guest thread's read of [vaddr, vaddr + size): GuestWait::DecideBytes on the bytes' state; for Wait the call
 	// has waited for the tick of the bytes' own copy and its publish (the caller queries again and emulates). *busy = a lock spin gave up.
 	GuestWait::ByteDecision GuestByteWait(uint64_t vaddr, uint64_t size, bool* busy);
