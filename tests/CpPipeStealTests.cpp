@@ -99,6 +99,7 @@ void ModelTests() {
 		Check(m.JobNs(0x2000) == 1500, "the job time of a shader is learned");
 		Check(Decide(Mode::On, m, 0x2000, 0, kMargin, kOverdue).action == Action::Wait, "a shader with short jobs: wait");
 		Check(Decide(Mode::On, m, 0x3000, 0, kMargin, kOverdue).action == Action::Wait, "an unseen shader uses the learned global job time");
+		Check(Decide(Mode::On, m, 0x2000, -2000, kMargin, kOverdue).action == Action::Steal, "a short job still queued after 2 us of waiting: steal");
 	}
 	{
 		Model m;

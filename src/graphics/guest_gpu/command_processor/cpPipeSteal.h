@@ -190,8 +190,9 @@ struct Decision {
 	Why    why    = Why::None;
 };
 
-// The job is not done. elapsed_ns: since a worker started it (0 when it is still queued). Steal when what is left of the job (its estimate
-// minus what already ran) is longer than the CP's own computation plus the margin, or when it runs much longer than its estimate.
+// The job is not done. elapsed_ns: since a worker started it; a job still queued passes minus the time the recorder has waited for it (the job
+// still has all of its time ahead plus the queue). Steal when what is left of the job (its estimate minus what already ran) is longer than the
+// CP's own computation plus the margin, or when it runs much longer than its estimate.
 inline Decision Decide(Mode mode, const Model& model, uint64_t key, int64_t elapsed_ns, int64_t margin_ns, int64_t overdue_ns) {
 	if (mode == Mode::Off) return {};
 	const int64_t job = model.JobNs(key);
@@ -199,7 +200,7 @@ inline Decision Decide(Mode mode, const Model& model, uint64_t key, int64_t elap
 #ifdef KYTY_CPSTEAL_MUTANT_MODEL_IGNORES_ELAPSED
 	const int64_t left = job;
 #else
-	const int64_t left = job - (elapsed_ns > 0 ? elapsed_ns : 0);
+	const int64_t left = job - elapsed_ns;
 #endif
 	Why why = Why::None;
 	if (left > cp + margin_ns) {

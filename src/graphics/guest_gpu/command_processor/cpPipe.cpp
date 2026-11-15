@@ -260,7 +260,7 @@ bool WaitOrSteal(GfpJob& job) {
 		if (t_would == 0 && (i & 63u) == 0) {
 			const int64_t now     = i == 0 ? t0 : FrameTiming::SteadyNowNs();
 			const uint8_t state   = job.state.load(std::memory_order_acquire);
-			const int64_t elapsed = state == GfpJob::Running ? now - job.run_ns.load(std::memory_order_relaxed) : 0;
+			const int64_t elapsed = state == GfpJob::Running ? now - job.run_ns.load(std::memory_order_relaxed) : -(now - t0); // queued: what it waited
 			const auto    d       = Steal::Decide(mode, model, job.shard_key, elapsed, Steal::EnvMarginNs(), Steal::EnvOverdueNs());
 			if (d.action != Steal::Action::Wait) {
 				bool queued = false;
