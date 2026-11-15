@@ -38,7 +38,8 @@
 // misses a write on the last byte of a copy), KYTY_UPAS_MUTANT_SLOT_REUSE (a ring slot is refilled without checking that its copy has run), KYTY_UPAS_MUTANT_LABEL_NO_JOIN
 // (RELEASE_MEM counts as a packet that writes no guest memory), KYTY_UPAS_MUTANT_SHADOW_BLIND (the shadow compare never reports),
 // KYTY_UPAS_MUTANT_FAIL_NO_ZERO (a failed read leaves the destination as it was), KYTY_UPAS_MUTANT_GUEST_HELPS (a thread other than the producer runs copies
-// in its join), KYTY_UPAS_MUTANT_STAGE_AS_RACE (a difference on a protected source is counted as a stream race), KYTY_UPAS_MUTANT_SHADOW_LATE_PUBLISH
+// in its join), KYTY_UPAS_MUTANT_STAGE_AS_RACE (a difference on a protected source is counted as a stream race), KYTY_UPAS_MUTANT_REDIRTY_AFTER (a
+// stage difference whose page's write hook ran after the hand-over is excused as a re-dirty), KYTY_UPAS_MUTANT_SHADOW_LATE_PUBLISH
 // (the S605 shadow: the verify is handed over after the recorder's copy, so a write that faults in between finds nothing to join and is reported).
 
 #include "graphics/guest_gpu/pm4.h"
@@ -109,6 +110,8 @@ struct NeInfo {
 	uint8_t  last_join  = 0xff;  // Reason of the last join that waited (0xff: none yet)
 	uint8_t  recorded   = 0;     // the recorder's byte at first_off
 	uint8_t  reread     = 0;     // the helper's byte there
+	int64_t  hook_dt_ns = 0;     // last write hook on the differing page minus the hand-over (shadow; INT64_MIN: none remembered)
+	uint8_t  verdict    = 0;     // 0 error (counted in ne_n), 1 redirty (before the hand-over), 2 stream race
 };
 using NeObserver = void (*)(const NeInfo& info);
 
@@ -183,7 +186,10 @@ struct Stats {
 	std::atomic<uint64_t> other_join_ns {0};       // time in joins on other threads (a guest's write fault, the front)
 	alignas(64) std::atomic<uint64_t> worker_ns {0}; // helper thread: time copying (shadow: reading + comparing)
 	std::atomic<uint64_t> help_n {0};              // copies the producer did itself in a join
-	std::atomic<uint64_t> ne_n {0};                // shadow: differences on a protected source (stage path): a store that bypassed the joins
+	std::atomic<uint64_t> ne_n {0};                // shadow: differences on a protected source (stage path) the joins should have ordered: the page's last
+	                                               // write hook ran after the hand-over (a join that did not hold) or there was none (a write no hook sees)
+	std::atomic<uint64_t> ne_redirty_n {0};        // shadow: stage differences whose page faulted (write hook) before the hand-over: the store raced the copy
+	                                               // itself, as in mode 0, and the page is dirty again (uploaded once more)
 	std::atomic<uint64_t> ne_race_n {0};           // shadow: differences on a writable source (stream path): an unsynchronized guest store
 	std::atomic<uint64_t> ne_bytes {0};            // shadow: differing bytes (both kinds)
 	std::atomic<uint64_t> fail_n {0};              // reads the backing no longer served (zero-filled, like a read that races an unmap)
@@ -319,8 +325,39 @@ public:
 		NoteJoin(reason, t0);
 	}
 
+	// Shadow: remembers the last two times a write hook ran for each 4 KiB page (direct-mapped, 4096 entries, time in ns modulo 2^36 = 68 s; a write
+	// of more than 64 pages is noted for its first and last 32), so a difference can tell a fault before the hand-over (the store raced the copy,
+	// as in mode 0) from one the join missed.
+	void NoteWriteHook(uint64_t vaddr, uint64_t size) {
+		if (!m_shadow || size == 0) return;
+		const auto first = vaddr >> 12u, last = (vaddr + size - 1) >> 12u;
+		const auto now   = static_cast<uint64_t>(NowNs()) & kHookTimeMask;
+		for (auto page = first; page <= last; ++page) {
+			if (last - first > 64 && page == first + 32) page = last - 31;
+			const auto slot = page & (kHooks - 1);
+			const auto old  = m_hooks[slot].exchange(((page & kHookPageMask) << kHookTimeBits) | now, std::memory_order_relaxed);
+			if (old != 0 && (old >> kHookTimeBits) == (page & kHookPageMask)) m_hooks_prev[slot].store(old, std::memory_order_relaxed);
+		}
+	}
+	// Shadow: did a write hook of `page` run before `t_ns` (within 34 s)? *dt_ns: the newest remembered hook minus t_ns (INT64_MIN: none).
+	[[nodiscard]] bool HookBefore(uint64_t page, int64_t t_ns, int64_t* dt_ns) const {
+		*dt_ns       = INT64_MIN;
+		bool before  = false;
+		const auto t = static_cast<uint64_t>(t_ns) & kHookTimeMask;
+		for (const auto* table: {&m_hooks, &m_hooks_prev}) {
+			const auto v = (*table)[page & (kHooks - 1)].load(std::memory_order_relaxed);
+			if (v == 0 || (v >> kHookTimeBits) != (page & kHookPageMask)) continue;
+			constexpr uint64_t half = (kHookTimeMask + 1) / 2;
+			const auto         dt   = static_cast<int64_t>(((v & kHookTimeMask) - t + half) & kHookTimeMask) - static_cast<int64_t>(half);
+			if (*dt_ns == INT64_MIN) *dt_ns = dt;
+			if (dt < 0) before = true;
+		}
+		return before;
+	}
+
 	// Any thread: before a write of [vaddr, vaddr + size) lands, the copies that read any of these bytes are done.
 	void JoinOverlap(uint64_t vaddr, uint64_t size) {
+		NoteWriteHook(vaddr, size);
 #ifdef KYTY_UPAS_MUTANT_NO_WRITE_JOIN
 		(void)vaddr;
 		(void)size;
@@ -477,10 +514,19 @@ private:
 #else
 				const bool race = kind == Kind::Stream;
 #endif
-				(race ? m_stats.ne_race_n : m_stats.ne_n).fetch_add(1, std::memory_order_relaxed);
+				// Stage: a write hook on the differing page before the hand-over = the page faulted before the copy was handed over (there was nothing
+				// to join), the store raced the copy itself and the page is dirty again: the same in mode 0. After it, or none: an error.
+				int64_t    hook_dt   = INT64_MIN;
+				const bool before    = HookBefore((src + first) >> 12u, it.t_pub, &hook_dt);
+#ifdef KYTY_UPAS_MUTANT_REDIRTY_AFTER
+				const bool redirty = !race && hook_dt != INT64_MIN;
+#else
+				const bool redirty = !race && before;
+#endif
+				(race ? m_stats.ne_race_n : (redirty ? m_stats.ne_redirty_n : m_stats.ne_n)).fetch_add(1, std::memory_order_relaxed);
 				m_stats.ne_bytes.fetch_add(diff, std::memory_order_relaxed);
 				const auto index = m_ne_index.fetch_add(1, std::memory_order_relaxed);
-				if (!race) {
+				if (!race && !redirty) {
 					const auto stage_index = m_ne_stage_index.fetch_add(1, std::memory_order_relaxed);
 					if (stage_index < 8) m_ne_first[stage_index].store(src, std::memory_order_relaxed);
 				}
@@ -498,6 +544,8 @@ private:
 					info.last_join  = m_last_join.load(std::memory_order_relaxed);
 					info.recorded   = rec_byte;
 					info.reread     = new_byte;
+					info.hook_dt_ns = hook_dt;
+					info.verdict    = race ? 2 : (redirty ? 1 : 0);
 					observer(info);
 				}
 			}
@@ -590,6 +638,13 @@ private:
 	std::atomic<NeObserver>       m_ne_observer {nullptr};
 	std::atomic<uint64_t>         m_ne_index {0};
 	std::atomic<uint64_t>         m_ne_stage_index {0};
+	static constexpr uint64_t     kHooks        = 4096;
+	static constexpr uint32_t     kHookTimeBits = 36;
+	static constexpr uint64_t     kHookTimeMask = (uint64_t {1} << kHookTimeBits) - 1;
+	static constexpr uint64_t     kHookPageMask = (uint64_t {1} << (64 - kHookTimeBits)) - 1;
+	using HookTable = std::unique_ptr<std::atomic<uint64_t>[]>;
+	HookTable                     m_hooks {new std::atomic<uint64_t>[kHooks] {}};
+	HookTable                     m_hooks_prev {new std::atomic<uint64_t>[kHooks] {}};
 	std::atomic<uint8_t>          m_last_join {0xff};
 	std::mutex                    m_sleep_mutex;
 	std::condition_variable       m_sleep_cv;

@@ -557,6 +557,9 @@ enum class Counter : uint32_t {
 	// S605b: shadow differences on a writable (stream-path, CPU-dirty) source: an unsynchronized guest store between the record and the deferred read
 	// (no error: the GPU reads such a buffer at execution); differing bytes of all shadow differences.
 	UpasNeRaceN, UpasNeBytes,
+	// S605b: shadow differences on a protected source whose page faulted before the hand-over (the store raced the copy itself, as in mode 0; the page
+	// is dirty again). Not an error; upas_ne_n keeps the ones the joins should have ordered.
+	UpasNeRedirtyN,
 	Count,
 };
 

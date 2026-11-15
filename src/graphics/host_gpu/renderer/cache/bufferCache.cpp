@@ -86,12 +86,13 @@ void LogUploadShadowNe(const UploadAsync::NeInfo& n) {
 		const bool gpu = tracker->IsRegionGpuModified(page, 4096);
 		state = cpu ? (gpu ? "cpu+gpu" : "cpu") : (gpu ? "gpu" : "clean");
 	}
-	char line[416];
+	char line[480];
 	std::snprintf(line, sizeof(line),
 	              "[upload-async] shadow ne #%" PRIu64 ": flip=%" PRIu64 " path=%s src_protected=%d addr=0x%016" PRIx64 " size=%" PRIu64 " page=0x%016" PRIx64
-	              " first_off=%" PRIu64 " diff_bytes=%" PRIu64 " rec=0x%02x now=0x%02x age_us=%" PRId64 " pending=%" PRIu64 " last_join=%s page_now=%s\n",
+	              " first_off=%" PRIu64 " diff_bytes=%" PRIu64 " rec=0x%02x now=0x%02x age_us=%" PRId64 " pending=%" PRIu64 " last_join=%s page_now=%s verdict=%s hook_dt_us=%" PRId64 "\n",
 	              n.index, FrameTiming::GuestFlips(), UploadAsync::KindName(n.kind), n.kind == UploadAsync::Kind::Stage ? 1 : 0, n.src, n.size, page,
-	              n.first_off, n.diff_bytes, n.recorded, n.reread, n.age_ns / 1000, n.pending, UploadAsync::ReasonName(n.last_join), state);
+	              n.first_off, n.diff_bytes, n.recorded, n.reread, n.age_ns / 1000, n.pending, UploadAsync::ReasonName(n.last_join), state,
+	              n.verdict == 2 ? "race" : (n.verdict == 1 ? "redirty" : "error"), n.hook_dt_ns == INT64_MIN ? INT64_MIN : n.hook_dt_ns / 1000);
 	Common::DiagOut::Write(line);
 }
 
@@ -1349,6 +1350,7 @@ void BufferCache::UploadAsyncBeforeQueue() {
 	FrameTiming::Add(C::UpasNeN, take(s.ne_n));
 	FrameTiming::Add(C::UpasNeRaceN, take(s.ne_race_n));
 	FrameTiming::Add(C::UpasNeBytes, take(s.ne_bytes));
+	FrameTiming::Add(C::UpasNeRedirtyN, take(s.ne_redirty_n));
 }
 
 bool BufferCache::LatestGpuWriteIsFill(uint64_t vaddr, uint64_t size, uint32_t* value) const {

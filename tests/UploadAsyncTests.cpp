@@ -11,6 +11,7 @@
 //   STAGE_AS_RACE  - a shadow difference on a protected (stage) source is counted as a stream race instead of an error;
 //   SHADOW_LATE_PUBLISH - the S605 shadow: the verify is handed over after the recorder's copy, so a write that faults (joins) right after the
 //                    recorder's copy finds nothing to wait for and is reported although mode 1 would have ordered it;
+//   REDIRTY_AFTER  - a stage difference whose page's write hook ran after the hand-over (a join that did not hold) is excused as a re-dirty;
 //   SHADOW_PER_COPY - a shadow batch hands each verify over just before its own copy: a write that faults on a later range while an earlier one
 //                    is copied finds nothing to join (mode 1 hands the whole batch over before any copy).
 
@@ -438,6 +439,40 @@ void ShadowBatchTests() {
 	e.Stop();
 }
 
+// S605b: a stage difference is excused (ne_redirty_n) only when the page's write hook ran before the hand-over: the page faulted before there was
+// anything to join and its store raced the copy (the page is dirty again, as in mode 0). A hook after the hand-over that did not hold the store
+// (simulated: NoteWriteHook without the join) and a store with no hook at all are errors (ne_n).
+void ShadowVerdictTests() {
+	ResetSlow();
+	Engine e(&TestRead, true, 64, 1u << 16u);
+	Engine::SetProducerThread();
+	e.Start();
+	const auto run = [&](uint64_t at, int how) {
+		Fill(at, 4096, static_cast<uint8_t>(at >> 12u));
+		if (how == 0) e.NoteWriteHook(at + 7, 1); // the fault before the hand-over
+		std::this_thread::sleep_for(std::chrono::microseconds(50));
+		g_slow_begin = at;
+		g_slow_end   = at + 1;
+		g_slow_ms    = 10;
+		auto*      scratch = e.ShadowScratch(4096);
+		const auto token   = e.VerifyBegin(at, scratch, 4096, Kind::Stage);
+		std::memcpy(scratch, g_mem.data() + at, 4096);
+		e.VerifyReady(token);
+		std::this_thread::sleep_for(std::chrono::milliseconds(2)); // the helper holds the piece inside its read
+		if (how == 1) e.NoteWriteHook(at + 7, 1);                   // a hook after the hand-over whose join did not hold
+		std::atomic_ref<uint8_t>(g_mem[at + 7]).store(static_cast<uint8_t>(g_mem[at + 7] + 1u));
+		e.JoinAll(Reason::Submit);
+		ResetSlow();
+	};
+	run(890000 & ~uint64_t {4095}, 0);
+	Check(e.GetStats().ne_redirty_n.load() == 1 && e.GetStats().ne_n.load() == 0, "a fault before the hand-over: a re-dirty, not an error");
+	run((890000 & ~uint64_t {4095}) + 8192, 1);
+	Check(e.GetStats().ne_n.load() == 1 && e.GetStats().ne_redirty_n.load() == 1, "a hook after the hand-over that did not hold the store: an error");
+	run((890000 & ~uint64_t {4095}) + 16384, 2);
+	Check(e.GetStats().ne_n.load() == 2 && e.GetStats().ne_redirty_n.load() == 1, "a store no hook saw: an error");
+	e.Stop();
+}
+
 // Joins from other threads (a guest's write fault, the front) while the producer keeps handing copies over.
 void CrossThreadTests() {
 	ResetSlow();
@@ -504,6 +539,7 @@ int main() {
 	GuestWaitsTests();
 	ShadowMomentTests();
 	ShadowBatchTests();
+	ShadowVerdictTests();
 	OracleTests(400);
 	std::printf("UploadAsyncTests: OK\n");
 	return 0;
