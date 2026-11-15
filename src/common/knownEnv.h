@@ -37,7 +37,8 @@ inline constexpr std::string_view kKnownKytyEnv[] = {
     "KYTY_UPLOAD_ASYNC", // S605: the buffer upload copies run on an upload thread (joined before the submit)
     "KYTY_UPLOAD_ASYNC_SHADOW_FROM", // S605d: the guest flip from which the upload shadow verifies
     "KYTY_WORKER_CLEAN_WALK", "KYTY_WORKER_CLEAN_WALK_SPIN", // S607: a pipeline worker serves a clean walker load on a hot page from the backing
-    "KYTY_CP_WALK_QUERY", "KYTY_WCW_BACKING_BYTES" // S608: the CP's clean-walk byte query from its own view (never busy because a reader holds a tracker lock)
+    "KYTY_CP_WALK_QUERY", "KYTY_WCW_BACKING_BYTES", // S608: the CP's clean-walk byte query from its own view (never busy because a reader holds a tracker lock)
+    "KYTY_PASS_PROBE", "KYTY_PASS_PROBE_FILE" // S611: the recorder's per-item log over a flip window (passProbe.h)
 #ifdef KYTY_KNOWNENV_MUTANT_UNCLASSIFIED
     , "KYTY_ZZ_UNCLASSIFIED" // a new switch added to the known list and to neither classification (tests/EnvClassificationTests.cpp must fail)
 #endif
@@ -67,6 +68,8 @@ inline constexpr std::string_view kNonCodegenKytyEnv[] = {
     , "KYTY_CP_WALK_QUERY"
     // S608: whether the join checks a served job's backing reads by bytes or by pages (KYTY_WCW_BACKING_BYTES): the CP's result either way.
     , "KYTY_WCW_BACKING_BYTES"
+    // S611: a measurement of the recorder (KYTY_PASS_PROBE, KYTY_PASS_PROBE_FILE): it only times and logs, never what the recompiler emits.
+    , "KYTY_PASS_PROBE", "KYTY_PASS_PROBE_FILE"
     // S585: KYTY_GF_EMULATE moved here from kCodegenKytyEnv: it only decides how a guest read fault is served (loader/guestReadEmulator.cpp,
     // runtimeLinker.cpp), never what the recompiler emits; in the key it only cost a cold program cache for every emulation run.
 };

@@ -625,6 +625,8 @@ private:
 void Set(Counter counter, uint64_t value);
 void Max(Counter counter, uint64_t value);
 uint64_t Get(Counter counter);
+// S611 (KYTY_PASS_PROBE): the counter of a KYTY_FRAME_LOG column name (false: no such column).
+bool CounterByName(const char* name, Counter* counter);
 // vkQueueSubmits so far (the `submits` column of KYTY_FRAME_LOG).
 uint64_t QueueSubmits();
 

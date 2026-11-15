@@ -15,6 +15,7 @@
 #include "graphics/guest_gpu/command_processor/cpPipeChecked.h"
 #include "graphics/guest_gpu/command_processor/cpPipeCleanWalk.h"
 #include "graphics/guest_gpu/command_processor/cpPipeJob.h"
+#include "graphics/guest_gpu/command_processor/passProbe.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -28,11 +29,13 @@
 #include "graphics/shader/recompiler/ir/passes/walkNoFault.h"
 #include "kernel/memory.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <string>
 #include <thread>
 #if defined(_MSC_VER) || defined(__x86_64__)
 #include <immintrin.h>
@@ -888,6 +891,153 @@ void CommandProcessor::PipeFrontEnd() {
 	ring.Commit();     // the last write of this stream by the front: the execution belongs to Thread_Gpu again after the End item
 }
 
+namespace {
+
+// S611 (KYTY_PASS_PROBE=<from>,<to>, passProbe.h): the recorder's per-item log over a flip window, for the potential of a recorder split across threads.
+// Only Thread_Gpu touches it (PipeFrontRun), so no lock. Off: one load of `active` per item.
+struct PassProbeState {
+	PassProbe::Window                                 window;
+	bool                                              active = false;
+	const char*                                       file   = nullptr;
+	std::array<FrameTiming::Counter, PassProbe::kCols> counters {};
+	std::array<bool, PassProbe::kCols>                known {};
+	std::vector<PassProbe::Rec>                       recs;
+	size_t                                            cap     = 0;
+	uint64_t                                          dropped = 0;
+	uint64_t                                          first_flip = 0;
+	uint64_t                                          last_flip  = 0;
+};
+
+PassProbeState& PassProbeGet() {
+	static PassProbeState* state = [] {
+		auto* st   = new PassProbeState; // never destroyed (the recorder lives as long as the process)
+		st->window = PassProbe::ParseWindow(std::getenv("KYTY_PASS_PROBE"));
+		st->file   = std::getenv("KYTY_PASS_PROBE_FILE");
+		std::string unknown;
+		for (size_t i = 0; i < PassProbe::kCols; i++) {
+			st->known[i] = FrameTiming::CounterByName(PassProbe::kColumns[i], &st->counters[i]);
+			if (!st->known[i]) unknown += std::string(" ") + PassProbe::kColumns[i];
+		}
+		if (st->window.on) {
+			st->cap = static_cast<size_t>(st->window.to - st->window.from) * 12000u; // ~7500 items per garden flip
+			if (st->cap > 4'000'000u) st->cap = 4'000'000u;
+			st->recs.reserve(st->cap);
+			st->active = true;
+		}
+		std::fprintf(stderr, "Environment: KYTY_PASS_PROBE=%s on=%d from=%llu to=%llu cap=%zu file=%s unknown_cols=[%s]\n",
+		             std::getenv("KYTY_PASS_PROBE") != nullptr ? std::getenv("KYTY_PASS_PROBE") : "", st->window.on ? 1 : 0,
+		             static_cast<unsigned long long>(st->window.from), static_cast<unsigned long long>(st->window.to), st->cap,
+		             st->file != nullptr ? st->file : "", unknown.c_str());
+		std::fflush(stderr);
+		return st;
+	}();
+	return *state;
+}
+
+void PassProbeReport(PassProbeState& st) {
+	namespace P = PassProbe;
+	const double flips = static_cast<double>(st.window.to - st.window.from);
+	const auto   ms    = [flips](uint64_t ns) { return static_cast<double>(ns) / 1e6 / flips; };
+	uint64_t     dt = 0, wait = 0, by_kind[4] = {}, n_kind[4] = {}, passes = 0;
+	for (const auto& r: st.recs) {
+		dt += r.dt_ns;
+		const uint64_t w = P::WaitNs(r);
+		wait += w < r.dt_ns ? w : r.dt_ns;
+		by_kind[r.kind & 3u] += r.dt_ns > w ? r.dt_ns - w : 0;
+		n_kind[r.kind & 3u]++;
+		passes += r.d[P::ColPasses];
+	}
+	std::fprintf(stderr, "[pass-probe] window %llu..%llu (flips seen %llu..%llu) items %zu dropped %llu | per flip: items %.1f draws %.1f dispatches %.1f ordered %.1f sync %.1f passes %.1f\n",
+	             static_cast<unsigned long long>(st.window.from), static_cast<unsigned long long>(st.window.to), static_cast<unsigned long long>(st.first_flip),
+	             static_cast<unsigned long long>(st.last_flip), st.recs.size(), static_cast<unsigned long long>(st.dropped), st.recs.size() / flips,
+	             n_kind[0] / flips, n_kind[1] / flips, n_kind[2] / flips, n_kind[3] / flips, passes / flips);
+	std::fprintf(stderr, "[pass-probe] ms/flip: items %.3f waits %.3f work %.3f | work draw %.3f dispatch %.3f ordered %.3f sync %.3f\n", ms(dt), ms(wait),
+	             ms(dt - wait), ms(by_kind[0]), ms(by_kind[1]), ms(by_kind[2]), ms(by_kind[3]));
+	const auto base_items = P::ToItems(st.recs, P::kPolicies[0]);
+	const auto g          = P::Groups(base_items);
+	std::fprintf(stderr, "[pass-probe] pass groups/flip %.1f work %.3f ms/flip | group p50 %.1f us p90 %.1f us max %.3f ms | top 10%% of groups %.1f%% of the work\n",
+	             g.groups / flips, ms(g.work_ns), g.p50_ns / 1e3, g.p90_ns / 1e3, g.max_group_ns / 1e6, g.work_ns != 0 ? 100.0 * g.top10_ns / g.work_ns : 0.0);
+	static constexpr uint32_t kThreads[] = {1, 2, 3, 4};
+	static constexpr uint32_t kChunks[]  = {0, 64, 16};
+	static constexpr uint64_t kOver[]    = {0, 3000};
+	for (const auto& policy: P::kPolicies) {
+		const auto items  = P::ToItems(st.recs, policy);
+		uint64_t   serial = 0, n_serial = 0;
+		for (const auto& it: items) {
+			if (it.serial) {
+				serial += it.work_ns;
+				n_serial++;
+			}
+		}
+		for (const uint64_t over: kOver) {
+			std::string line;
+			char        buf[96];
+			for (const uint32_t chunk: kChunks) {
+				std::snprintf(buf, sizeof(buf), " | %s", chunk == 0 ? "pass" : (chunk == 64 ? "c64" : "c16"));
+				line += buf;
+				for (const uint32_t t: kThreads) {
+					const auto r = P::Makespan(items, P::Model {t, chunk, over});
+					std::snprintf(buf, sizeof(buf), " T%u %.2f", t, ms(r.total_ns));
+					line += buf;
+					if (t == 1) {
+						std::snprintf(buf, sizeof(buf), " (units %.0f)", r.units / flips);
+						line += buf;
+					}
+				}
+			}
+			std::fprintf(stderr, "[pass-probe] policy %s overhead %llu ns: serial %.3f ms/flip (%.1f items/flip)%s\n", policy.name,
+			             static_cast<unsigned long long>(over), ms(serial), n_serial / flips, line.c_str());
+		}
+	}
+	if (st.file != nullptr && *st.file != '\0') {
+		const bool ok = P::WriteRecords(st.file, st.recs, st.window);
+		std::fprintf(stderr, "[pass-probe] file %s %s\n", st.file, ok ? "written" : "FAILED");
+	}
+	std::fflush(stderr);
+}
+
+// One FIFO item under the probe: the counter deltas over PipeFrontExecute and its duration.
+template <class F>
+void PassProbeItem(PassProbeState& st, CpPipe::OpClass cls, uint32_t opcode, uint32_t sync_kind, F&& execute) {
+	namespace P        = PassProbe;
+	const uint64_t flip = FrameTiming::GuestFlips();
+	if (!P::InWindow(st.window, flip)) {
+		if (flip >= st.window.to) {
+			st.active = false; // the window is over: report once, the recorder runs unprobed from now on
+			PassProbeReport(st);
+			st.recs = {};
+		}
+		execute();
+		return;
+	}
+	if (st.recs.size() >= st.cap) {
+		st.dropped++;
+		execute();
+		return;
+	}
+	if (st.first_flip == 0) st.first_flip = flip;
+	st.last_flip = flip;
+	std::array<uint64_t, P::kCols> before {};
+	for (size_t i = 0; i < P::kCols; i++) before[i] = st.known[i] ? FrameTiming::Get(st.counters[i]) : 0;
+	const int64_t t0 = FrameTiming::SteadyNowNs();
+	execute();
+	const int64_t t1 = FrameTiming::SteadyNowNs();
+	P::Rec r;
+	r.t0_ns  = static_cast<uint64_t>(t0);
+	r.dt_ns  = P::Sat32(static_cast<uint64_t>(t1 - t0));
+	r.flip   = static_cast<uint32_t>(flip);
+	r.opcode = static_cast<uint16_t>(opcode);
+	r.kind   = static_cast<uint8_t>(sync_kind != 0 ? P::Kind::Sync
+	                                               : (cls == CpPipe::OpClass::Draw ? P::Kind::Draw : (cls == CpPipe::OpClass::Dispatch ? P::Kind::Dispatch : P::Kind::Ordered)));
+	for (size_t i = 0; i < P::kCols; i++) {
+		const uint64_t now = st.known[i] ? FrameTiming::Get(st.counters[i]) : 0;
+		r.d[i]             = P::Sat32(now >= before[i] ? now - before[i] : 0);
+	}
+	st.recs.push_back(r);
+}
+
+} // namespace
+
 void CommandProcessor::PipeFrontRun(Pm4Execution& execution, GuestGpu* gpu) {
 	using C    = FrameTiming::Counter;
 	auto& p    = *m_pipe;
@@ -911,7 +1061,14 @@ void CommandProcessor::PipeFrontRun(Pm4Execution& execution, GuestGpu* gpu) {
 			FrameTiming::Add(C::FrontRecWaitNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
 		}
 		const bool end = p.items[ring.Slot(seq)].sync_kind == kSyncEnd;
-		if (!end) PipeFrontExecute(seq);
+		if (!end) {
+			if (auto& probe = PassProbeGet(); probe.active) [[unlikely]] {
+				const auto& it = p.items[ring.Slot(seq)];
+				PassProbeItem(probe, it.cls, it.opcode, it.sync_kind, [this, seq] { PipeFrontExecute(seq); });
+			} else {
+				PipeFrontExecute(seq);
+			}
+		}
 		ring.MarkDone(seq);
 		if (end) break;
 		PipeFrontRelease(seq);

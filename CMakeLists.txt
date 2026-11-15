@@ -937,6 +937,19 @@ foreach(mutant IN ITEMS NO_CAPTURE UNKNOWN_NO_GATE JOIN_IGNORES_WRITES PRUNE_NEX
 	target_include_directories(cp_pipe_checked_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(cp_pipe_checked_mutant_${mutant_lower}_tests PRIVATE KYTY_CPCHK_MUTANT_${mutant}=1)
 endforeach()
+# S611 (KYTY_PASS_PROBE, passProbe.h): the recorder probe's window, the item table (work = duration - waits, which items are serial per policy), the
+# model of a recorder split across N threads (pass groups / chunks, list scheduling, unit overhead) against an oracle that recomputes it from the raw
+# records with its own code, and the record file. Mutants (each must be caught, WILL_FAIL, exit code 1): a serial item does not cut, a pass begin does
+# not start a unit, no unit overhead, chunks of K + 1 draws, waits kept in the work, Sync items parallel, round robin instead of the first free thread,
+# the window's end recorded.
+add_executable(pass_probe_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PassProbeTests.cpp")
+target_include_directories(pass_probe_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS SERIAL_IGNORED PASS_IGNORED NO_OVERHEAD CHUNK_PLUS_ONE WAIT_KEPT SYNC_PARALLEL ROUND_ROBIN WINDOW_OPEN_END)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(pass_probe_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PassProbeTests.cpp")
+	target_include_directories(pass_probe_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(pass_probe_mutant_${mutant_lower}_tests PRIVATE KYTY_PASSPROBE_MUTANT_${mutant}=1)
+endforeach()
 # S608 (KYTY_CP_WALK_QUERY, cpWalkQuery.h): the CP's clean-walk byte query from its own view (dirty without the lock, in flight with a bounded spin), the gate,
 # answers with a reader holding a lock, and an oracle over the real GpuDirtyRanges/InflightRanges with a CP, a publish thread and three readers. Mutants
 # (each must be caught, WILL_FAIL, exit code 1): the view without the switch / off the GPU thread, one try_lock on the dirty lock, no in-flight question,
@@ -2362,6 +2375,12 @@ if(BUILD_TESTING)
 	foreach(mutant IN ITEMS no_capture unknown_no_gate join_ignores_writes prune_next release_none occlusion_small host_occlusion_known last_page dma_none)
 		add_test(NAME cp_pipe_checked_mutant_${mutant} COMMAND $<TARGET_FILE:cp_pipe_checked_mutant_${mutant}_tests>)
 		set_tests_properties(cp_pipe_checked_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 180)
+	endforeach()
+	add_test(NAME pass_probe COMMAND $<TARGET_FILE:pass_probe_tests>)
+	set_tests_properties(pass_probe PROPERTIES TIMEOUT 180)
+	foreach(mutant IN ITEMS serial_ignored pass_ignored no_overhead chunk_plus_one wait_kept sync_parallel round_robin window_open_end)
+		add_test(NAME pass_probe_mutant_${mutant} COMMAND $<TARGET_FILE:pass_probe_mutant_${mutant}_tests>)
+		set_tests_properties(pass_probe_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 180)
 	endforeach()
 	add_test(NAME cp_walk_query COMMAND $<TARGET_FILE:cp_walk_query_tests>)
 	set_tests_properties(cp_walk_query PROPERTIES TIMEOUT 120)

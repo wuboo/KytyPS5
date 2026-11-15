@@ -1451,6 +1451,17 @@ uint64_t Get(Counter counter) {
 	return g_counters[static_cast<size_t>(counter)].load(std::memory_order_relaxed);
 }
 
+bool CounterByName(const char* name, Counter* counter) {
+	if (name == nullptr) return false;
+	for (size_t i = 0; i < std::size(kCounterNames); i++) {
+		if (std::string_view(kCounterNames[i]) == name) {
+			*counter = static_cast<Counter>(i);
+			return true;
+		}
+	}
+	return false;
+}
+
 void Max(Counter counter, uint64_t value) {
 	auto& slot  = g_counters[static_cast<size_t>(counter)];
 	auto  known = slot.load(std::memory_order_relaxed);
