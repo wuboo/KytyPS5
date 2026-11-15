@@ -925,6 +925,20 @@ foreach(mutant IN ITEMS BUSY_SERVES JOIN_NO_BYTES JOIN_NO_INFLIGHT JOIN_NO_WRITT
 	target_include_directories(cp_pipe_clean_walk_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(cp_pipe_clean_walk_mutant_${mutant_lower}_tests PRIVATE KYTY_WCW_MUTANT_${mutant}=1)
 endforeach()
+# S608 (KYTY_CP_WALK_QUERY, cpWalkQuery.h): the CP's clean-walk byte query from its own view (dirty without the lock, in flight with a bounded spin), the gate,
+# answers with a reader holding a lock, and an oracle over the real GpuDirtyRanges/InflightRanges with a CP, a publish thread and three readers. Mutants
+# (each must be caught, WILL_FAIL, exit code 1): the view without the switch / off the GPU thread, one try_lock on the dirty lock, no in-flight question,
+# no dirty question, an unbounded in-flight lock.
+add_executable(cp_walk_query_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpWalkQueryTests.cpp")
+target_link_libraries(cp_walk_query_tests common fmt::fmt)
+target_include_directories(cp_walk_query_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS MODE_IGNORED ANY_THREAD TRY_LOCK NO_INFLIGHT NO_DIRTY INFLIGHT_BLOCKS)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(cp_walk_query_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpWalkQueryTests.cpp")
+	target_link_libraries(cp_walk_query_mutant_${mutant_lower}_tests common fmt::fmt)
+	target_include_directories(cp_walk_query_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_walk_query_mutant_${mutant_lower}_tests PRIVATE KYTY_CPWQ_MUTANT_${mutant}=1)
+endforeach()
 # S479 (KYTY_CP_PIPE): the log of the writes into the guest's backing (header only). Mutants (each must be caught, WILL_FAIL): a running write is no danger, a wrapped ring
 # answers from what is left, the pages are not compared.
 add_executable(backing_write_log_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BackingWriteLogTests.cpp")
@@ -2330,6 +2344,12 @@ if(BUILD_TESTING)
 	foreach(mutant IN ITEMS busy_serves join_no_bytes join_no_inflight join_no_written split_drops_read page_checks_served split_ignores_backing)
 		add_test(NAME cp_pipe_clean_walk_mutant_${mutant} COMMAND $<TARGET_FILE:cp_pipe_clean_walk_mutant_${mutant}_tests>)
 		set_tests_properties(cp_pipe_clean_walk_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 120)
+	endforeach()
+	add_test(NAME cp_walk_query COMMAND $<TARGET_FILE:cp_walk_query_tests>)
+	set_tests_properties(cp_walk_query PROPERTIES TIMEOUT 120)
+	foreach(mutant IN ITEMS mode_ignored any_thread try_lock no_inflight no_dirty inflight_blocks)
+		add_test(NAME cp_walk_query_mutant_${mutant} COMMAND $<TARGET_FILE:cp_walk_query_mutant_${mutant}_tests>)
+		set_tests_properties(cp_walk_query_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 120)
 	endforeach()
 	add_test(NAME upload_async COMMAND $<TARGET_FILE:upload_async_tests>)
 	set_tests_properties(upload_async PROPERTIES TIMEOUT 120)

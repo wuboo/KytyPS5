@@ -11,6 +11,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/host_gpu/hotPages.h"
 #include "graphics/host_gpu/protectRing.h"
+#include "graphics/host_gpu/renderer/cache/cpWalkQuery.h"
 #include "graphics/host_gpu/renderer/gfDiag.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
 #include "graphics/presentation/cpPhaseScope.h"
@@ -1230,7 +1231,25 @@ bool QueryGuestFaultBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* infl
 		return false;
 	}
 	// S428 (B2): called from a signal handler on a guest thread: try-locks only, the handler never waits for the command processor.
-	if (!g_gpu_resources->GetBufferCache().TryQueryGuestFault(vaddr, size, dirty, inflight)) {
+	// S608 (KYTY_CP_WALK_QUERY=1, cpWalkQuery.h): on the GPU thread the CP's own view instead (never busy because a reader holds a lock).
+	namespace Q           = Graphics::CpWalkQuery;
+	using C               = Graphics::FrameTiming::Counter;
+	const bool gpu_thread = Graphics::GuestGpu::IsGpuThread();
+	bool       answered   = false;
+	if (Q::UseCpView(Q::EnvMode(), gpu_thread)) {
+		auto&      spin  = Graphics::GuestWait::ThreadSpin();
+		const auto saved = spin;
+		spin             = {};
+		answered         = g_gpu_resources->GetBufferCache().QueryGuestBytesCp(vaddr, size, dirty, inflight);
+		Graphics::FrameTiming::Add(C::CpwqN);
+		if (spin.spun != 0) Graphics::FrameTiming::Add(C::CpwqSpunN);
+		spin = saved;
+	} else {
+		answered = g_gpu_resources->GetBufferCache().TryQueryGuestFault(vaddr, size, dirty, inflight);
+	}
+	if (!answered) {
+		// S608: every mode: a GPU-thread query that came back busy (mode 0: a reader held a lock at the one try).
+		if (gpu_thread) Graphics::FrameTiming::Add(C::CpwqBusyN);
 		*busy = true;
 		return false;
 	}

@@ -18,6 +18,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
+#include "graphics/host_gpu/renderer/cache/cpWalkQuery.h"
 #include "graphics/host_gpu/renderer/cache/uploadAsync.h"
 #include "graphics/host_gpu/renderer/cleanWalk.h"
 #include "graphics/host_gpu/renderer/render.h"
@@ -333,6 +334,8 @@ void CommandProcessor::PipeInit() {
 		std::printf("Environment: KYTY_WORKER_CLEAN_WALK=%s active=%d clean_walk=%d nofault=%d spin=%d\n", W::ModeName(mode), active ? 1 : 0,
 		            CleanWalk::EnvMode() == CleanWalk::Mode::On ? 1 : 0,
 		            ShaderRecompiler::IR::WalkNoFault::Current() == ShaderRecompiler::IR::WalkNoFault::Mode::On ? 1 : 0, W::EnvSpin());
+		// S608 (cpWalkQuery.h): the CP's clean-walk byte query from its own view.
+		std::printf("Environment: KYTY_CP_WALK_QUERY=%s spin=%d\n", CpWalkQuery::ModeName(CpWalkQuery::EnvMode()), CpWalkQuery::kInflightSpin);
 	}
 	if (EnvWorkers() != 0) CpPipe::Workers::Instance().Start(EnvWorkers(), EnvShard());
 	LOGF("[cp-pipe] on: mode=%s depth=%zu workers=%zu shard=%d signals=%d\n", EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", m_pipe->depth, EnvWorkers(), EnvShard() ? 1 : 0, static_cast<int>(EnvSignals()));

@@ -21,6 +21,7 @@
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/cache/bufTouchSkip.h"
+#include "graphics/host_gpu/renderer/cache/cpWalkQuery.h"
 #include "graphics/host_gpu/renderer/cache/uploadAsync.h"
 #include "common/cpTuning.h"
 #include "common/diagOut.h"
@@ -1594,6 +1595,10 @@ bool BufferCache::QueryGuestBytes(uint64_t vaddr, uint64_t size, bool* dirty, bo
 		return false;
 	}
 	return m_inflight_download_ranges.TryIntersectsSpin(vaddr, size, inflight, copy_tick, tries);
+}
+
+bool BufferCache::QueryGuestBytesCp(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight) const {
+	return CpWalkQuery::Query(m_gpu_modified_ranges, m_inflight_download_ranges, vaddr, size, dirty, inflight);
 }
 
 GuestWait::ByteDecision BufferCache::GuestByteWait(uint64_t vaddr, uint64_t size, bool* busy) {

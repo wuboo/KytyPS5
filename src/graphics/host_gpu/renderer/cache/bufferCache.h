@@ -114,6 +114,9 @@ public:
 	// S607: `tries` = the spin on each lock (KYTY_WORKER_CLEAN_WALK_SPIN for a pipeline worker).
 	[[nodiscard]] bool QueryGuestBytes(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight, uint64_t* copy_tick = nullptr,
 	                                   int tries = GuestWait::kSpinTries) const;
+	// S608 (KYTY_CP_WALK_QUERY=1, cpWalkQuery.h): the same question on the GPU thread from the CP's own view: dirty without the lock (the CP is the set's
+	// only writer), in flight with a bounded spin. Never busy because a reader holds a lock; false only when the in-flight spin gave up.
+	[[nodiscard]] bool QueryGuestBytesCp(uint64_t vaddr, uint64_t size, bool* dirty, bool* inflight) const;
 	// S585 (KYTY_GUEST_WAIT=1): a guest thread's read of [vaddr, vaddr + size): GuestWait::DecideBytes on the bytes' state; for Wait the call
 	// has waited for the tick of the bytes' own copy and its publish (the caller queries again and emulates). *busy = a lock spin gave up.
 	GuestWait::ByteDecision GuestByteWait(uint64_t vaddr, uint64_t size, bool* busy);

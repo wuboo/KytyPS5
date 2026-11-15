@@ -568,6 +568,10 @@ enum class Counter : uint32_t {
 	// own GetGraphicsPrograms in PrepareDrawRenderState (calls, ns; as S606).
 	WcwServedN, WcwBusyN, WcwDirtyN, WcwJobN, WcwBailN, WcwJoinBytesN, WcwJoinDirtyN, WcwJoinPubN, WcwJoinNs, WcwUsedN, WcwShadowN, WcwShadowNeN,
 	WcwShadowCpNs, PipeCpGfpN, PipeCpGfpNs,
+	// S608 (KYTY_CP_WALK_QUERY, cpWalkQuery.h): GPU-thread byte queries of Memory::QueryGuestFaultBytes answered from the CP view (mode 1); of every mode
+	// the GPU-thread queries that came back busy (mode 0: a reader held a tracker lock at the one try; then the walker load drains when it faults);
+	// mode 1: queries whose in-flight lock was held at the first try (waited out by the spin).
+	CpwqN, CpwqBusyN, CpwqSpunN,
 	Count,
 };
 

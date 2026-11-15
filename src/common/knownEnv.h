@@ -36,7 +36,8 @@ inline constexpr std::string_view kKnownKytyEnv[] = {
     "KYTY_WIDE_STORE_HOT", "KYTY_WIDE_STORE_MOVE", "KYTY_OPENXR", "KYTY_WALK_NOFAULT", "KYTY_PAGE_STAMP_OFF",
     "KYTY_UPLOAD_ASYNC", // S605: the buffer upload copies run on an upload thread (joined before the submit)
     "KYTY_UPLOAD_ASYNC_SHADOW_FROM", // S605d: the guest flip from which the upload shadow verifies
-    "KYTY_WORKER_CLEAN_WALK", "KYTY_WORKER_CLEAN_WALK_SPIN" // S607: a pipeline worker serves a clean walker load on a hot page from the backing
+    "KYTY_WORKER_CLEAN_WALK", "KYTY_WORKER_CLEAN_WALK_SPIN", // S607: a pipeline worker serves a clean walker load on a hot page from the backing
+    "KYTY_CP_WALK_QUERY" // S608: the CP's clean-walk byte query from its own view (never busy because a reader holds a tracker lock)
 #ifdef KYTY_KNOWNENV_MUTANT_UNCLASSIFIED
     , "KYTY_ZZ_UNCLASSIFIED" // a new switch added to the known list and to neither classification (tests/EnvClassificationTests.cpp must fail)
 #endif
@@ -62,6 +63,8 @@ inline constexpr std::string_view kNonCodegenKytyEnv[] = {
     , "KYTY_UPLOAD_ASYNC", "KYTY_UPLOAD_ASYNC_SHADOW_FROM"
     // S607: whether a pipeline worker or the recorder reads a clean walker dword of a hot page (KYTY_WORKER_CLEAN_WALK): the CP's dword either way.
     , "KYTY_WORKER_CLEAN_WALK", "KYTY_WORKER_CLEAN_WALK_SPIN"
+    // S608: how the CP's clean-walk byte query takes the tracker's locks (KYTY_CP_WALK_QUERY): the same answer, never what the recompiler emits.
+    , "KYTY_CP_WALK_QUERY"
     // S585: KYTY_GF_EMULATE moved here from kCodegenKytyEnv: it only decides how a guest read fault is served (loader/guestReadEmulator.cpp,
     // runtimeLinker.cpp), never what the recompiler emits; in the key it only cost a cold program cache for every emulation run.
 };
