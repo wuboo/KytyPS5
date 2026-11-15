@@ -19,6 +19,9 @@
 namespace Libs::Graphics {
 
 class GuestGpu;
+namespace CpPipe {
+struct GfpJob;
+} // namespace CpPipe
 
 // S540 (KYTY_FLUSH_DRAWS=N, default 0 = off): read once per command processor.
 inline uint32_t FlushDrawsFromEnv() {
@@ -154,6 +157,10 @@ private:
 	void     PipeFrontEnqueue(CpPipe::OpClass cls, uint32_t opcode, const uint32_t* packet, uint32_t packet_dw);
 	[[nodiscard]] bool PipeFrontCommandsPending() const;
 	void PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const uint32_t* packet, uint32_t packet_dw);
+	// S609 (KYTY_CP_PIPE_SIGNALS, cpPipeChecked.h): the gate of a draw's job parsed after item `done` ran (0: it starts now; fills job.gated/early/cpu_writes),
+	// and the CPU-write range of an item just committed.
+	uint64_t PipeJobGate(CpPipe::GfpJob& job, uint64_t done);
+	void     PipeCheckedNote(CpPipe::OpClass cls, uint32_t opcode, const uint32_t* packet, uint32_t packet_dw, uint64_t seq);
 	void PipeExecuteFront();
 	bool PipeOverlaps(uint64_t address, uint64_t size) const;
 	bool PipeWaitVirtual(uint64_t address, uint64_t size, uint32_t func, uint64_t ref, uint64_t mask, bool* satisfied);

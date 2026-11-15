@@ -609,13 +609,31 @@ private:
 // it (CPU writes, dispatches, signals, barriers, flips) has run, which is the order the guest memory saw before the pipeline existed; it costs about 0.5 ms/flip (S479).
 // writes: after the CPU writes and dispatches before it. parse: as far as it likes (S477 D2: the bytes a draw reads did not change between the parse and the end of the
 // call in 65 million reads; shadow compare: no difference in 2.4 million draws).
-enum class SignalPolicy : uint8_t { Parse, Writes, Fifo };
+// S609 checked (cpPipeChecked.h): at parse time, except behind an item whose CPU writes have no known extent; the join refuses a job that read a page one of
+// the CPU writes still in the FIFO at its parse touches. checked_shadow: the same, and the recorder computes every job that started earlier than fifo would
+// have let it and compares (pipe_chk_shadow_ne_n must be 0; the result is not used).
+enum class SignalPolicy : uint8_t { Parse, Writes, Fifo, Checked };
 
 inline SignalPolicy ParseSignalPolicy(const char* text) {
 	if (text == nullptr) return SignalPolicy::Fifo;
 	if (std::strcmp(text, "parse") == 0) return SignalPolicy::Parse;
 	if (std::strcmp(text, "writes") == 0) return SignalPolicy::Writes;
+	if (std::strcmp(text, "checked") == 0 || std::strcmp(text, "checked_shadow") == 0) return SignalPolicy::Checked;
 	return SignalPolicy::Fifo;
+}
+
+inline bool ParseCheckedShadow(const char* text) {
+	return text != nullptr && std::strcmp(text, "checked_shadow") == 0;
+}
+
+inline const char* SignalPolicyName(SignalPolicy policy, bool shadow) {
+	switch (policy) {
+		case SignalPolicy::Parse: return "parse";
+		case SignalPolicy::Writes: return "writes";
+		case SignalPolicy::Checked: return shadow ? "checked_shadow" : "checked";
+		case SignalPolicy::Fifo: break;
+	}
+	return "fifo";
 }
 
 // The newest FIFO item a later job must wait for, per policy. Item sequence numbers come from Ring::Commit.
@@ -633,7 +651,8 @@ public:
 		(void)front_seq;
 		return 0;
 #else
-		const uint64_t gate = policy == SignalPolicy::Fifo ? m_all : (policy == SignalPolicy::Writes ? m_writes : 0u);
+		// Checked holds jobs with its own tracker (cpPipeChecked.h); asked here it answers as fifo.
+		const uint64_t gate = policy == SignalPolicy::Fifo || policy == SignalPolicy::Checked ? m_all : (policy == SignalPolicy::Writes ? m_writes : 0u);
 		return gate >= front_seq ? gate : 0u;
 #endif
 	}

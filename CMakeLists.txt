@@ -925,6 +925,18 @@ foreach(mutant IN ITEMS BUSY_SERVES JOIN_NO_BYTES JOIN_NO_INFLIGHT JOIN_NO_WRITT
 	target_include_directories(cp_pipe_clean_walk_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(cp_pipe_clean_walk_mutant_${mutant_lower}_tests PRIVATE KYTY_WCW_MUTANT_${mutant}=1)
 endforeach()
+# S609 (KYTY_CP_PIPE_SIGNALS=checked, cpPipeChecked.h): what an ordered item stores from the CPU, the front's ranges and gate of a job, the join's overlap
+# check, and an oracle of the protocol (front, recorder, three workers, a page-versioned memory with CPU stores, GPU-dirty pages and a write log). Mutants
+# (each must be caught, WILL_FAIL, exit code 1): no ranges, no gate behind an unknown item, no overlap check, the next item's ranges dropped, RELEASE_MEM /
+# DMA_DATA store nothing, a one-qword occlusion dump, host occlusion queries ignored, a range's last page not checked.
+add_executable(cp_pipe_checked_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPipeCheckedTests.cpp")
+target_include_directories(cp_pipe_checked_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS NO_CAPTURE UNKNOWN_NO_GATE JOIN_IGNORES_WRITES PRUNE_NEXT RELEASE_NONE OCCLUSION_SMALL HOST_OCCLUSION_KNOWN LAST_PAGE DMA_NONE)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(cp_pipe_checked_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPipeCheckedTests.cpp")
+	target_include_directories(cp_pipe_checked_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_pipe_checked_mutant_${mutant_lower}_tests PRIVATE KYTY_CPCHK_MUTANT_${mutant}=1)
+endforeach()
 # S608 (KYTY_CP_WALK_QUERY, cpWalkQuery.h): the CP's clean-walk byte query from its own view (dirty without the lock, in flight with a bounded spin), the gate,
 # answers with a reader holding a lock, and an oracle over the real GpuDirtyRanges/InflightRanges with a CP, a publish thread and three readers. Mutants
 # (each must be caught, WILL_FAIL, exit code 1): the view without the switch / off the GPU thread, one try_lock on the dirty lock, no in-flight question,
@@ -2344,6 +2356,12 @@ if(BUILD_TESTING)
 	foreach(mutant IN ITEMS busy_serves join_no_bytes join_no_inflight join_no_written split_drops_read page_checks_served split_ignores_backing backing_bytes_dropped backing_keeps_pages)
 		add_test(NAME cp_pipe_clean_walk_mutant_${mutant} COMMAND $<TARGET_FILE:cp_pipe_clean_walk_mutant_${mutant}_tests>)
 		set_tests_properties(cp_pipe_clean_walk_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 120)
+	endforeach()
+	add_test(NAME cp_pipe_checked COMMAND $<TARGET_FILE:cp_pipe_checked_tests>)
+	set_tests_properties(cp_pipe_checked PROPERTIES TIMEOUT 180)
+	foreach(mutant IN ITEMS no_capture unknown_no_gate join_ignores_writes prune_next release_none occlusion_small host_occlusion_known last_page dma_none)
+		add_test(NAME cp_pipe_checked_mutant_${mutant} COMMAND $<TARGET_FILE:cp_pipe_checked_mutant_${mutant}_tests>)
+		set_tests_properties(cp_pipe_checked_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 180)
 	endforeach()
 	add_test(NAME cp_walk_query COMMAND $<TARGET_FILE:cp_walk_query_tests>)
 	set_tests_properties(cp_walk_query PROPERTIES TIMEOUT 120)

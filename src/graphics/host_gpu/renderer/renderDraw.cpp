@@ -846,7 +846,9 @@ static bool ResolvePrimitiveRestart(const CommandBuffer& buffer,
 	return false;
 }
 
-static void CompareWithJob(const DrawRenderState& state, const CpPipe::GfpJob& job, bool clean_walk = false); // S479 shadow (S607: of a served job), below
+// S479 shadow (S607: of a served job, S609: of a job KYTY_CP_PIPE_SIGNALS=checked_shadow started early), below.
+enum class ShadowKind : uint8_t { Pipe, CleanWalk, Checked };
+static void CompareWithJob(const DrawRenderState& state, const CpPipe::GfpJob& job, ShadowKind kind = ShadowKind::Pipe);
 
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
                                             DrawRenderState& state) {
@@ -858,10 +860,13 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	// S607 (KYTY_WORKER_CLEAN_WALK=shadow): a job with served walker loads is computed by the CP as well and compared, its result is not used.
 	const bool cw_job    = job_used && job->cw_served != 0;
 	const bool cw_shadow = cw_job && CpPipe::WorkerCleanWalk::EnvMode() == CpPipe::WorkerCleanWalk::Mode::Shadow;
+	// S609 (KYTY_CP_PIPE_SIGNALS=checked_shadow): a job that started earlier than fifo would have let it is computed by the CP as well and compared.
+	const bool chk_shadow = job_used && job->shadow;
+	const bool shadowed   = cw_shadow || chk_shadow;
 	// S558: JoinJob waited for the worker (acquire), so its predecode is readable; the stages are bound by ExecutePreparedDraw of this draw.
-	m_predecode_joined = job_used && !cw_shadow;
+	m_predecode_joined = job_used && !shadowed;
 	if (job != nullptr && job->pre_ns != 0) FrameTiming::Add(FrameTiming::Counter::PredecodeWorkerNs, static_cast<uint64_t>(job->pre_ns));
-	if (job_used && !cw_shadow && CpPipe::EnvMode() == CpPipe::Mode::On) {
+	if (job_used && !shadowed && CpPipe::EnvMode() == CpPipe::Mode::On) {
 		state.vertex_info[0] = job->out.vertex_info[0];
 		state.ps_input_info  = job->out.pixel_info;
 		state.ps_active      = job->out.ps_active;
@@ -876,9 +881,12 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		const int64_t gfp_ns = FrameTiming::SteadyNowNs() - gfp0;
 		FrameTiming::Add(FrameTiming::Counter::PipeCpGfpN);
 		FrameTiming::Add(FrameTiming::Counter::PipeCpGfpNs, static_cast<uint64_t>(gfp_ns));
-		if (cw_shadow) {
-			FrameTiming::Add(FrameTiming::Counter::WcwShadowCpNs, static_cast<uint64_t>(gfp_ns));
-			CompareWithJob(state, *job, true);
+		if (shadowed) {
+			if (cw_shadow) {
+				FrameTiming::Add(FrameTiming::Counter::WcwShadowCpNs, static_cast<uint64_t>(gfp_ns));
+				CompareWithJob(state, *job, ShadowKind::CleanWalk);
+			}
+			if (chk_shadow) CompareWithJob(state, *job, ShadowKind::Checked);
 		} else if (job_used) {
 			CompareWithJob(state, *job);
 		}
@@ -1685,9 +1693,10 @@ void CpPipe::RunGfpJob(CpPipe::GfpJob& job) {
 }
 
 // S479 shadow: the result the CP computed (state) against the worker's (job), field by field of everything the draw is built from.
-static void CompareWithJob(const DrawRenderState& state, const CpPipe::GfpJob& job, bool clean_walk) {
-	using C = FrameTiming::Counter;
-	FrameTiming::Add(clean_walk ? C::WcwShadowN : C::PipeShadowN);
+static void CompareWithJob(const DrawRenderState& state, const CpPipe::GfpJob& job, ShadowKind kind) {
+	using C               = FrameTiming::Counter;
+	const bool clean_walk = kind == ShadowKind::CleanWalk;
+	FrameTiming::Add(kind == ShadowKind::CleanWalk ? C::WcwShadowN : (kind == ShadowKind::Checked ? C::PipeChkShadowN : C::PipeShadowN));
 	const auto& out   = job.out;
 	const bool  ne_vs = state.vertex_info[0].stage.module != out.vertex_info[0].stage.module;
 	const bool  ne_ps = state.ps_active != out.ps_active || (state.ps_active && state.ps_input_info.stage.module != out.pixel_info.stage.module) ||
@@ -1729,11 +1738,11 @@ static void CompareWithJob(const DrawRenderState& state, const CpPipe::GfpJob& j
 	};
 	const bool ne_info = !same_vs(state.vertex_info[0], out.vertex_info[0]) || (state.ps_active && !same_ps(state.ps_input_info, out.pixel_info));
 	if (ne_vs || ne_ps || ne_res || ne_info) {
-		FrameTiming::Add(clean_walk ? C::WcwShadowNeN : C::PipeShadowNeN);
+		FrameTiming::Add(kind == ShadowKind::CleanWalk ? C::WcwShadowNeN : (kind == ShadowKind::Checked ? C::PipeChkShadowNeN : C::PipeShadowNeN));
 		static std::atomic<uint32_t> logged {0};
 		if (logged.fetch_add(1) < 16) {
-			std::fprintf(stderr, "[cp-pipe] shadow ne: vs=%d ps=%d res=%d info=%d clean_walk=%d served=%u\n", ne_vs, ne_ps, ne_res, ne_info, clean_walk ? 1 : 0,
-			             job.cw_served);
+			std::fprintf(stderr, "[cp-pipe] shadow ne: vs=%d ps=%d res=%d info=%d clean_walk=%d served=%u checked=%d cpu_writes=%zu\n", ne_vs, ne_ps, ne_res, ne_info,
+			             clean_walk ? 1 : 0, job.cw_served, kind == ShadowKind::Checked ? 1 : 0, job.cpu_writes.size());
 			std::fflush(stderr);
 		}
 	}

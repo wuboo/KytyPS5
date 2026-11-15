@@ -12,6 +12,7 @@
 #include "common/logging/log.h"
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/cpPipe.h"
+#include "graphics/guest_gpu/command_processor/cpPipeChecked.h"
 #include "graphics/guest_gpu/command_processor/cpPipeCleanWalk.h"
 #include "graphics/guest_gpu/command_processor/cpPipeJob.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
@@ -78,6 +79,12 @@ bool EnvAffinityPipe() {
 CpPipe::SignalPolicy EnvSignals() {
 	static const CpPipe::SignalPolicy policy = CpPipe::ParseSignalPolicy(std::getenv("KYTY_CP_PIPE_SIGNALS"));
 	return policy;
+}
+
+// S609: KYTY_CP_PIPE_SIGNALS=checked_shadow.
+bool EnvCheckedShadow() {
+	static const bool shadow = CpPipe::ParseCheckedShadow(std::getenv("KYTY_CP_PIPE_SIGNALS"));
+	return shadow;
 }
 
 bool EnvShard() {
@@ -206,8 +213,9 @@ private:
 	std::vector<std::thread> m_threads;
 };
 
-void WaitDone(GfpJob& job) {
-	if (job.state.load(std::memory_order_acquire) == GfpJob::Done) return;
+// The ns it waited (-1: the job was done already).
+int64_t WaitDone(GfpJob& job) {
+	if (job.state.load(std::memory_order_acquire) == GfpJob::Done) return -1;
 	const int64_t t0 = FrameTiming::SteadyNowNs();
 	for (uint32_t i = 0; job.state.load(std::memory_order_acquire) != GfpJob::Done; i++) {
 		CpuRelax();
@@ -220,7 +228,9 @@ void WaitDone(GfpJob& job) {
 			}
 		}
 	}
-	FrameTiming::Add(FrameTiming::Counter::PipeStallNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
+	const int64_t waited = FrameTiming::SteadyNowNs() - t0;
+	FrameTiming::Add(FrameTiming::Counter::PipeStallNs, static_cast<uint64_t>(waited));
+	return waited;
 }
 
 } // namespace
@@ -228,7 +238,14 @@ void WaitDone(GfpJob& job) {
 bool JoinJob(GfpJob& job) {
 	using C = FrameTiming::Counter;
 	if (job.state.load(std::memory_order_acquire) == GfpJob::Idle) return false;
-	WaitDone(job);
+	// S609: which waits a gate caused (the job was held at parse and released when the recorder ran its gate).
+	if (const int64_t waited = WaitDone(job); waited >= 0) {
+		FrameTiming::Add(C::PipeWaitN);
+		if (job.gated) {
+			FrameTiming::Add(C::PipeWaitGatedN);
+			FrameTiming::Add(C::PipeWaitGatedNs, static_cast<uint64_t>(waited));
+		}
+	}
 	FrameTiming::Add(C::PipeJobN);
 	if (!job.answered) {
 		FrameTiming::Add(C::PipeJobBailN);
@@ -259,6 +276,12 @@ bool JoinJob(GfpJob& job) {
 			if (cw) FrameTiming::Add(C::WcwJoinPubN);
 			return false;
 		case W::Verdict::Ok: break;
+	}
+	// S609 (KYTY_CP_PIPE_SIGNALS=checked): a CPU store of an ordered item that was still in the FIFO when the job started may have landed on a page it read
+	// (the pages of the served bytes included): the CP computes the programs itself, as it would have after the store.
+	if (!job.cpu_writes.empty() && (Checked::Overlaps(job.cpu_writes, job.pages) || Checked::Overlaps(job.cpu_writes, job.cw_pages))) {
+		FrameTiming::Add(C::PipeJoinCpuwN);
+		return false;
 	}
 	return true;
 }
@@ -298,6 +321,11 @@ struct CommandProcessor::PipeState {
 		uint64_t        gate; // the FIFO item that has to run before the job may start
 	};
 	std::deque<Held> held;      // jobs waiting for a gate, oldest first (their gates only grow)
+	// S609 (KYTY_CP_PIPE_SIGNALS=checked, cpPipeChecked.h): the CPU-write ranges of the ordered items in the FIFO (front only). checked_on: the policy is
+	// checked and the host occlusion queries do not defer dumps (then checked runs as fifo).
+	CpPipe::Checked::Tracker checked;
+	bool                     checked_on     = false;
+	bool                     checked_shadow = false;
 	bool             executing = false; // an item runs: the pipeline is transparent for the handlers it calls
 	// S549 (KYTY_CP_FRONT_THREAD): the hand-over ring (items keep living in `items`, slot = seq % depth), the stream the front parses, the recorder's cursor over the
 	// committed items whose job waits for its gate.
@@ -340,6 +368,13 @@ void CommandProcessor::PipeInit() {
 		            W::EnvBackingBytes() ? 1 : 0);
 		// S608 (cpWalkQuery.h): the CP's clean-walk byte query from its own view.
 		std::printf("Environment: KYTY_CP_WALK_QUERY=%s spin=%d\n", CpWalkQuery::ModeName(CpWalkQuery::EnvMode()), CpWalkQuery::kInflightSpin);
+	}
+	{
+		const bool host_occlusion = m_renderer.GetOcclusionQueries().Enabled();
+		m_pipe->checked_on        = EnvSignals() == CpPipe::SignalPolicy::Checked && !host_occlusion;
+		m_pipe->checked_shadow    = m_pipe->checked_on && EnvCheckedShadow();
+		std::printf("Environment: KYTY_CP_PIPE_SIGNALS=%s active=%d host_occlusion=%d\n", CpPipe::SignalPolicyName(EnvSignals(), EnvCheckedShadow()),
+		            m_pipe->checked_on ? 1 : 0, host_occlusion ? 1 : 0);
 	}
 	if (EnvWorkers() != 0) CpPipe::Workers::Instance().Start(EnvWorkers(), EnvShard());
 	LOGF("[cp-pipe] on: mode=%s depth=%zu workers=%zu shard=%d signals=%d\n", EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", m_pipe->depth, EnvWorkers(), EnvShard() ? 1 : 0, static_cast<int>(EnvSignals()));
@@ -395,7 +430,7 @@ void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const u
 		it.job.sh        = &it.job.sh_copy;
 		it.job.ucfg      = &it.job.ucfg_copy;
 		it.job.shard_key = it.sh.GetPs().ps_regs.data_addr != 0 ? it.sh.GetPs().ps_regs.data_addr : it.sh.GetVs().es_regs.data_addr;
-		const uint64_t gate = p.gates.GateFor(EnvSignals(), p.ring.FrontSeq());
+		const uint64_t gate = PipeJobGate(it.job, p.ring.FrontSeq() - 1u);
 		if (gate != 0) {
 			it.job.state.store(CpPipe::GfpJob::Held, std::memory_order_relaxed);
 			p.held.push_back({&it.job, gate});
@@ -405,6 +440,7 @@ void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const u
 	}
 	const uint64_t seq = p.ring.Commit();
 	p.gates.NoteItem(cls, opcode, seq);
+	PipeCheckedNote(cls, opcode, packet, packet_dw, seq);
 	FrameTiming::Add(C::PipeEnqN);
 	FrameTiming::Add(cls == CpPipe::OpClass::Draw ? C::PipeDrawN : (cls == CpPipe::OpClass::Dispatch ? C::PipeDispatchN : C::PipeOrderedN));
 
@@ -447,6 +483,37 @@ void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const u
 			break;
 		default: break;
 	}
+}
+
+uint64_t CommandProcessor::PipeJobGate(CpPipe::GfpJob& job, uint64_t done) {
+	using C          = FrameTiming::Counter;
+	auto&          p = *m_pipe;
+	const uint64_t fifo_gate = p.gates.GateFor(CpPipe::SignalPolicy::Fifo, done + 1u);
+	uint64_t       gate      = 0;
+	if (p.checked_on) {
+		// S609: the job carries the CPU-write ranges of the items after `done` (a superset when `done` is stale) and waits only for an item of unknown extent.
+		gate      = p.checked.Capture(done, &job.cpu_writes);
+		job.early  = fifo_gate > gate;
+		job.shadow = job.early && p.checked_shadow;
+		if (job.early) FrameTiming::Add(C::PipeChkEarlyN);
+		if (gate != 0) FrameTiming::Add(C::PipeChkHeldN);
+		if (!job.cpu_writes.empty()) FrameTiming::Add(C::PipeChkWritesN, job.cpu_writes.size());
+	} else {
+		job.cpu_writes.clear();
+		job.early  = false;
+		job.shadow = false;
+		gate      = EnvSignals() == CpPipe::SignalPolicy::Fifo || EnvSignals() == CpPipe::SignalPolicy::Checked ? fifo_gate
+		                                                                                                         : p.gates.GateFor(EnvSignals(), done + 1u);
+	}
+	job.gated = gate != 0;
+	return gate;
+}
+
+void CommandProcessor::PipeCheckedNote(CpPipe::OpClass cls, uint32_t opcode, const uint32_t* packet, uint32_t packet_dw, uint64_t seq) {
+	auto& p = *m_pipe;
+	if (!p.checked_on) return;
+	const uint32_t r = opcode == Pm4::IT_NOP ? KYTY_PM4_R(packet[0]) : 0u;
+	p.checked.Note(seq, CpPipe::Checked::ClassifyItem(cls, opcode, r, packet + 1, packet_dw, IsAsyncComputeQueue(), false)); // host occlusion: checked_on is off
 }
 
 void CommandProcessor::PipeExecuteFront() {
@@ -691,7 +758,7 @@ void CommandProcessor::PipeFrontEnqueue(CpPipe::OpClass cls, uint32_t opcode, co
 		it.job.sh        = &it.job.sh_copy;
 		it.job.ucfg      = &it.job.ucfg_copy;
 		it.job.shard_key = it.sh.GetPs().ps_regs.data_addr != 0 ? it.sh.GetPs().ps_regs.data_addr : it.sh.GetVs().es_regs.data_addr;
-		const uint64_t gate = p.gates.GateFor(EnvSignals(), ring.Done() + 1); // a stale `done` only holds the job longer
+		const uint64_t gate = PipeJobGate(it.job, ring.Done()); // a stale `done` only holds the job longer
 		if (gate != 0) {
 			it.gate = gate;
 			it.job.state.store(CpPipe::GfpJob::Held, std::memory_order_relaxed); // the recorder releases it (PipeFrontRelease) or submits it when it executes the item
@@ -703,6 +770,7 @@ void CommandProcessor::PipeFrontEnqueue(CpPipe::OpClass cls, uint32_t opcode, co
 	p.pending.RetireUpTo(ring.Done());
 	ring.Commit();
 	p.gates.NoteItem(cls, opcode, seq);
+	PipeCheckedNote(cls, opcode, packet, packet_dw, seq);
 	FrameTiming::Add(C::PipeEnqN);
 	FrameTiming::Add(cls == CpPipe::OpClass::Draw ? C::PipeDrawN : (cls == CpPipe::OpClass::Dispatch ? C::PipeDispatchN : C::PipeOrderedN));
 

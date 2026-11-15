@@ -5,6 +5,7 @@
 // when the draw is executed (RefreshShaders) and uses the result or, when the worker could not answer or a page it read has become GPU-dirty, computes the
 // programs itself as before.
 
+#include "graphics/guest_gpu/command_processor/cpPipe.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -51,6 +52,13 @@ struct GfpJob {
 	uint32_t                                   cw_served = 0;
 	std::vector<std::pair<uint64_t, uint64_t>> cw_bytes;
 	std::vector<uint64_t>                      cw_pages;
+	// S609 (KYTY_CP_PIPE_SIGNALS, cpPipeChecked.h): set by the front before the job is handed out. gated: held at parse (every policy; the join counts its
+	// waits apart). early: checked let it start before the item fifo would have waited for. cpu_writes: the CPU-write ranges of the ordered items still in
+	// the FIFO at its parse (checked only; the join refuses the job when a page it read lies in one).
+	bool                    gated  = false;
+	bool                    early  = false;
+	bool                    shadow = false; // checked_shadow and early: the recorder computes the programs as well and compares (the result is not used)
+	std::vector<WriteRange> cpu_writes;
 };
 
 // S607: installs the workers' reader of hot-page walker loads (KYTY_WORKER_CLEAN_WALK; renderDraw.cpp). Called once by the CP before the

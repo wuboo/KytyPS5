@@ -575,6 +575,11 @@ enum class Counter : uint32_t {
 	// S608 (KYTY_WCW_BACKING_BYTES=1): backing byte ranges of served jobs moved to the join's byte check (worker); jobs with served loads the
 	// join refused by a page check (every mode of KYTY_WORKER_CLEAN_WALK; part of pipe_join_dirty_n).
 	WcwBackingN, WcwJoinPageN,
+	// S609 (KYTY_CP_PIPE_SIGNALS, cpPipeChecked.h). Every policy: joins that waited for their worker (pipe_stall_ns is their time), of them the joins of
+	// jobs held at parse (released by a gate) and their ns. checked: jobs started earlier than fifo would have let them / held behind an item of unknown
+	// extent; CPU-write ranges copied into jobs; jobs the join refused because a page they read lies in one; checked_shadow: early jobs the recorder
+	// recomputed and compared, differences (must be 0).
+	PipeWaitN, PipeWaitGatedN, PipeWaitGatedNs, PipeChkEarlyN, PipeChkHeldN, PipeChkWritesN, PipeJoinCpuwN, PipeChkShadowN, PipeChkShadowNeN,
 	Count,
 };
 
