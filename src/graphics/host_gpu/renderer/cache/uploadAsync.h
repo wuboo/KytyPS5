@@ -31,7 +31,7 @@
 //            too (it is only a question of when the copy runs). The GPU reads such a buffer when it executes the draw, after the submit, so a store
 //            between the record and the deferred copy is one the hardware shows too; an ordered writer (a CP label, a download, a DMA, a file read)
 //            still joins first. These differences are counted apart (upas_ne_race_n) and are not an error.
-// Every difference goes to an observer (first 64 always, then every 256th) with its address, path, first differing byte, bytes, age.
+// Every difference goes to an observer (every error up to 64, the first 32 others, then every 256th) with its address, path, first differing byte, bytes, age.
 //
 // Mutants (WILL_FAIL, tests/UploadAsyncTests.cpp, each ends in exit(1)): KYTY_UPAS_MUTANT_NO_WRITE_JOIN (a write does not wait for the copies
 // under it), KYTY_UPAS_MUTANT_JOIN_NO_WAIT (a join returns while a copy it needs is still running), KYTY_UPAS_MUTANT_OVERLAP_END (the overlap test
@@ -325,7 +325,7 @@ public:
 		NoteJoin(reason, t0);
 	}
 
-	// Shadow: remembers the last two times a write hook ran for each 4 KiB page (direct-mapped, 4096 entries, time in ns modulo 2^36 = 68 s; a write
+	// Shadow: remembers the last two times a write hook ran for each 4 KiB page (direct-mapped, 65536 entries, time in ns modulo 2^36 = 68 s; a write
 	// of more than 64 pages is noted for its first and last 32), so a difference can tell a fault before the hand-over (the store raced the copy,
 	// as in mode 0) from one the join missed.
 	void NoteWriteHook(uint64_t vaddr, uint64_t size) {
@@ -531,7 +531,9 @@ private:
 					if (stage_index < 8) m_ne_first[stage_index].store(src, std::memory_order_relaxed);
 				}
 				const auto observer = m_ne_observer.load(std::memory_order_acquire);
-				if (observer != nullptr && (index < 64 || (index & 255u) == 0)) {
+				const bool error    = !race && !redirty;
+				const auto err_seen = error ? m_ne_error_logged.fetch_add(1, std::memory_order_relaxed) : uint64_t {0};
+				if (observer != nullptr && ((error && err_seen < 64) || index < 32 || (index & 255u) == 0)) {
 					NeInfo info;
 					info.src        = src;
 					info.size       = size;
@@ -638,7 +640,8 @@ private:
 	std::atomic<NeObserver>       m_ne_observer {nullptr};
 	std::atomic<uint64_t>         m_ne_index {0};
 	std::atomic<uint64_t>         m_ne_stage_index {0};
-	static constexpr uint64_t     kHooks        = 4096;
+	std::atomic<uint64_t>         m_ne_error_logged {0};
+	static constexpr uint64_t     kHooks        = 65536;
 	static constexpr uint32_t     kHookTimeBits = 36;
 	static constexpr uint64_t     kHookTimeMask = (uint64_t {1} << kHookTimeBits) - 1;
 	static constexpr uint64_t     kHookPageMask = (uint64_t {1} << (64 - kHookTimeBits)) - 1;

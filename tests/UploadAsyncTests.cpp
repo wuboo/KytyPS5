@@ -48,10 +48,17 @@ std::atomic<uint64_t>        g_slow_begin {0}, g_slow_end {0};
 std::atomic<int>             g_slow_ms {0};
 std::atomic<uint64_t>        g_fail_begin {0}, g_fail_end {0};
 std::atomic<uint64_t>        g_reads {0};
+// A read that starts inside [g_hold_begin, g_hold_end) waits while g_hold is set (g_in_hold tells the test it is there): no timing assumptions.
+std::atomic<uint64_t>        g_hold_begin {0}, g_hold_end {0};
+std::atomic<bool>            g_hold {false}, g_in_hold {false};
 
 bool TestRead(uint64_t src, void* dst, uint64_t size) {
 	g_reads.fetch_add(1, std::memory_order_relaxed);
 	if (src >= g_fail_begin.load() && src < g_fail_end.load()) return false;
+	if (src >= g_hold_begin.load() && src < g_hold_end.load()) {
+		g_in_hold = true;
+		while (g_hold.load()) std::this_thread::yield();
+	}
 	if (src >= g_slow_begin.load() && src < g_slow_end.load() && g_slow_ms.load() > 0) {
 		std::this_thread::sleep_for(std::chrono::milliseconds(g_slow_ms.load()));
 	}
@@ -451,18 +458,21 @@ void ShadowVerdictTests() {
 		Fill(at, 4096, static_cast<uint8_t>(at >> 12u));
 		if (how == 0) e.NoteWriteHook(at + 7, 1); // the fault before the hand-over
 		std::this_thread::sleep_for(std::chrono::microseconds(50));
-		g_slow_begin = at;
-		g_slow_end   = at + 1;
-		g_slow_ms    = 10;
+		g_in_hold    = false;
+		g_hold       = true;
+		g_hold_begin = at;
+		g_hold_end   = at + 1;
 		auto*      scratch = e.ShadowScratch(4096);
 		const auto token   = e.VerifyBegin(at, scratch, 4096, Kind::Stage);
 		std::memcpy(scratch, g_mem.data() + at, 4096);
 		e.VerifyReady(token);
-		std::this_thread::sleep_for(std::chrono::milliseconds(2)); // the helper holds the piece inside its read
-		if (how == 1) e.NoteWriteHook(at + 7, 1);                   // a hook after the hand-over whose join did not hold
+		while (!g_in_hold.load()) std::this_thread::yield(); // the helper is inside its read of the piece
+		if (how == 1) e.NoteWriteHook(at + 7, 1);           // a hook after the hand-over whose join did not hold
 		std::atomic_ref<uint8_t>(g_mem[at + 7]).store(static_cast<uint8_t>(g_mem[at + 7] + 1u));
+		g_hold = false;
 		e.JoinAll(Reason::Submit);
-		ResetSlow();
+		g_hold_begin = 0;
+		g_hold_end   = 0;
 	};
 	run(890000 & ~uint64_t {4095}, 0);
 	Check(e.GetStats().ne_redirty_n.load() == 1 && e.GetStats().ne_n.load() == 0, "a fault before the hand-over: a re-dirty, not an error");

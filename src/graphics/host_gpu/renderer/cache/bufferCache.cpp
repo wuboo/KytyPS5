@@ -68,7 +68,7 @@ std::pair<Buffer*, uint64_t> UploadMemory(GraphicContext& graphics, CommandSched
 	return {buffer, 0};
 }
 
-// S605b (KYTY_UPLOAD_ASYNC=shadow): one line per shadow difference (the engine rate-limits: first 64, then every 256th), to the diag file (the bench's
+// S605b (KYTY_UPLOAD_ASYNC=shadow): one line per shadow difference (the engine rate-limits: every error up to 64, the first 32 others, then every 256th), to the diag file (the bench's
 // printf direction is Silent, so LOGF lines never reach a file). Called on the upload thread: reads only atomics.
 std::atomic<MemoryTracker*> g_upas_tracker {nullptr}; // S605b DIAG: the tracker of the page state in the shadow line (KYTY_TRACKER_QUERY_NOLOCK=1 only)
 
