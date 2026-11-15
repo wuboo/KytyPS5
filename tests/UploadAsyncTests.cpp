@@ -10,7 +10,9 @@
 //   GUEST_HELPS    - a thread other than the producer runs copies in its join (a guest thread the game can suspend would then hold a copy);
 //   STAGE_AS_RACE  - a shadow difference on a protected (stage) source is counted as a stream race instead of an error;
 //   SHADOW_LATE_PUBLISH - the S605 shadow: the verify is handed over after the recorder's copy, so a write that faults (joins) right after the
-//                    recorder's copy finds nothing to wait for and is reported although mode 1 would have ordered it.
+//                    recorder's copy finds nothing to wait for and is reported although mode 1 would have ordered it;
+//   SHADOW_PER_COPY - a shadow batch hands each verify over just before its own copy: a write that faults on a later range while an earlier one
+//                    is copied finds nothing to join (mode 1 hands the whole batch over before any copy).
 
 #include "graphics/host_gpu/renderer/cache/uploadAsync.h"
 
@@ -399,6 +401,43 @@ void ShadowMomentTests() {
 	e.Stop();
 }
 
+// S605b: a batch (ForEachUploadRange consumed every range first). While the recorder copies range 0, a guest write faults on range 2: it must wait
+// for range 2's verify, which mode 1 would have handed over already. Also: the destinations get the recorder's bytes; ineligible pieces go straight.
+void ShadowBatchTests() {
+	ResetSlow();
+	Engine e(&TestRead, true, 64, 1u << 16u);
+	Engine::SetProducerThread();
+	e.Start();
+	constexpr uint64_t base = 880000;
+	Fill(base, 4 * 4096, 91);
+	std::vector<uint8_t> want(g_mem.begin() + base, g_mem.begin() + base + 4 * 4096);
+	std::vector<uint8_t> dst(4 * 4096, 0);
+	BatchPiece pieces[4] = {{base, dst.data(), 4096, true}, {base + 4096, dst.data() + 4096, 4096, true}, {base + 8192, dst.data() + 8192, 4096, true},
+	                        {base + 12288, dst.data() + 12288, 4096, false}};
+	std::atomic<bool> landed {false};
+	bool              early = false;
+	std::thread       guest;
+	ShadowCopyBatch(e, pieces, 4, Kind::Stage, [&](uint64_t src, uint8_t* out, uint64_t size) {
+		std::memcpy(out, g_mem.data() + src, size); // the recorder's copy
+		if (src == base) {                          // while range 0 is being copied, the guest writes range 2 (a write fault: Write join first)
+			guest = std::thread([&] {
+				e.JoinOverlap(base + 8192 + 40, 4);
+				for (uint64_t i = 40; i < 44; i++) std::atomic_ref<uint8_t>(g_mem[base + 8192 + i]).store(static_cast<uint8_t>(g_mem[base + 8192 + i] ^ 0x33u));
+				landed = true;
+			});
+			std::this_thread::sleep_for(std::chrono::milliseconds(15));
+			early = landed.load();
+		}
+	});
+	guest.join();
+	e.JoinAll(Reason::Submit);
+	Check(!early, "a write on a later range of the batch waits for its verify");
+	Check(e.GetStats().ne_n.load() == 0, "shadow batch at the moment of mode 1: no difference");
+	Check(std::memcmp(dst.data(), want.data(), dst.size()) == 0, "every destination holds the recorder's bytes (ineligible piece copied straight)");
+	Check(e.GetStats().stage_n.load() == 3, "three verifies, the ineligible piece is not one");
+	e.Stop();
+}
+
 // Joins from other threads (a guest's write fault, the front) while the producer keeps handing copies over.
 void CrossThreadTests() {
 	ResetSlow();
@@ -464,6 +503,7 @@ int main() {
 	CrossThreadTests();
 	GuestWaitsTests();
 	ShadowMomentTests();
+	ShadowBatchTests();
 	OracleTests(400);
 	std::printf("UploadAsyncTests: OK\n");
 	return 0;

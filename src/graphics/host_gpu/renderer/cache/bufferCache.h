@@ -170,6 +170,7 @@ private:
 	// 1: handed to the upload thread; shadow: here, through a scratch copy the upload thread compares with its own later read.
 	void GuestCopy(uint64_t src, uint8_t* dst, uint64_t size, UploadAsync::Kind kind, bool coherent);
 	void SyncGuestCopy(uint64_t src, uint8_t* dst, uint64_t size);
+	[[nodiscard]] bool UploadEligible(uint64_t src, uint64_t size, bool coherent) const;
 	void UploadAsyncBeforeQueue(); // the scheduler's before-queue hook: joins the copies, moves the counters to FrameTiming
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.

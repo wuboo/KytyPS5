@@ -1248,6 +1248,21 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 
 	const auto source = UploadMemory(m_graphics, m_scheduler, m_staging_buffer, total_size, 4,
 	    vk::BufferUsageFlagBits::eTransferSrc, [&](uint8_t* mapped, uint64_t base_offset, bool coherent) {
+		if (m_upload_async != nullptr && m_upload_async->Shadow()) {
+			// S605b: the batch's verifies are handed over before any of its copies (as mode 1 hands the copies over), see ShadowCopyBatch.
+			std::vector<UploadAsync::BatchPiece> pieces(copies.size());
+			for (size_t i = 0; i < copies.size(); i++) {
+				const auto address = buffer.CpuAddress() + copies[i].dstOffset;
+				pieces[i]          = {address, mapped + copies[i].srcOffset, copies[i].size, UploadEligible(address, copies[i].size, coherent)};
+			}
+			UploadAsync::Engine::SetProducerThread();
+			UploadAsync::ShadowCopyBatch(*m_upload_async, pieces.data(), pieces.size(), UploadAsync::Kind::Stage,
+			                             [this](uint64_t src, uint8_t* dst, uint64_t size) { SyncGuestCopy(src, dst, size); });
+			for (auto& copy: copies) {
+				copy.srcOffset += base_offset;
+			}
+			return;
+		}
 		for (auto& copy: copies) {
 			const auto address = buffer.CpuAddress() + copy.dstOffset;
 			GuestCopy(address, mapped + copy.srcOffset, copy.size, UploadAsync::Kind::Stage, coherent);
@@ -1267,26 +1282,26 @@ void BufferCache::SyncGuestCopy(uint64_t src, uint8_t* dst, uint64_t size) {
 	if (timed) m_upas_sync_ns += 16u * static_cast<uint64_t>(FrameTiming::ElapsedNs(t0, FrameTiming::SteadyNowNs()));
 }
 
+// Deferred only on the recorder (the ring has one producer), into host-coherent memory (no flush after the copy), from a range the lock-free
+// backing read serves (the upload thread never faults and never locks).
+bool BufferCache::UploadEligible(uint64_t src, uint64_t size, bool coherent) const {
+	return m_upload_async != nullptr && coherent && size != 0 && GuestGpu::IsGpuThread() && LibKernel::Memory::CanReadBackingNoLock(src, size);
+}
+
 void BufferCache::GuestCopy(uint64_t src, uint8_t* dst, uint64_t size, UploadAsync::Kind kind, bool coherent) {
-	auto* engine = m_upload_async.get();
-	// Deferred only on the recorder (the ring has one producer), into host-coherent memory (no flush after the copy), from a range the lock-free
-	// backing read serves (the upload thread never faults and never locks).
-	if (engine != nullptr && coherent && size != 0 && GuestGpu::IsGpuThread() && LibKernel::Memory::CanReadBackingNoLock(src, size)) {
-		UploadAsync::Engine::SetProducerThread();
-		if (!engine->Shadow()) {
-			engine->Copy(src, dst, size, kind);
-			return;
-		}
-		if (auto* scratch = engine->ShadowScratch(size); scratch != nullptr) {
-			// S605b: handed over first (where mode 1 hands the copy over), so a write after this point joins the verify as it would join the copy.
-			const auto token = engine->VerifyBegin(src, scratch, size, kind);
-			SyncGuestCopy(src, scratch, size); // the copy the GPU gets, as with 0
-			engine->VerifyReady(token);
-			std::memcpy(dst, scratch, static_cast<size_t>(size));
-			return;
-		}
+	if (!UploadEligible(src, size, coherent)) {
+		SyncGuestCopy(src, dst, size);
+		return;
 	}
-	SyncGuestCopy(src, dst, size);
+	auto* engine = m_upload_async.get();
+	UploadAsync::Engine::SetProducerThread();
+	if (!engine->Shadow()) {
+		engine->Copy(src, dst, size, kind);
+		return;
+	}
+	// S605b shadow: the verify is handed over before the recorder's copy (the copy the GPU gets, as with 0), see ShadowCopyBatch.
+	UploadAsync::BatchPiece piece {src, dst, size, true};
+	UploadAsync::ShadowCopyBatch(*engine, &piece, 1, kind, [this](uint64_t s, uint8_t* d, uint64_t n) { SyncGuestCopy(s, d, n); });
 }
 
 void BufferCache::UploadAsyncBeforeQueue() {

@@ -290,6 +290,14 @@ public:
 	}
 	// Producer, shadow: VerifyBegin + VerifyReady with the bytes already in `expected` (tests).
 	void Verify(uint64_t src, const uint8_t* expected, uint64_t size, Kind kind) { VerifyReady(VerifyBegin(src, expected, size, kind)); }
+	// Producer, shadow: makes room in the ring for `pieces` pieces, so that the VerifyBegin calls of one batch never join (they would wait for the
+	// verifies of the same batch, which are not ready yet). False when the batch does not fit at all.
+	[[nodiscard]] bool ReserveVerify(uint64_t pieces) {
+		if (pieces > m_mask + 1) return false;
+		if (m_published.load(std::memory_order_relaxed) + pieces > m_mask + 1 + m_watermark.load(std::memory_order_acquire)) JoinAll(Reason::Full);
+		return true;
+	}
+	[[nodiscard]] static uint64_t Pieces(uint64_t size) { return (size + kChunk - 1) / kChunk; }
 
 	// Nothing handed over is still waiting or running (two loads).
 	[[nodiscard]] bool Idle() const {
@@ -588,6 +596,64 @@ private:
 	Stats                         m_stats;
 	std::thread                   m_thread;
 };
+
+// S605b: one upload batch in shadow mode (ForEachUploadRange consumes every range of the batch first, then the copies run one after another).
+// Mode 1 hands all of them over within nanoseconds, before any byte is copied, so the shadow hands all verifies over first, then the recorder copies
+// (each eligible piece through scratch, the rest straight), then the verifies become ready and the scratch goes to its destination. Without the
+// batch order (KYTY_UPAS_MUTANT_SHADOW_PER_COPY) a write that faults while an earlier range is copied finds nothing to join for a later one.
+struct BatchPiece {
+	uint64_t src      = 0;
+	uint8_t* dst      = nullptr;
+	uint64_t size     = 0;
+	bool     eligible = false; // deferred in mode 1 (backed, coherent, on the recorder)
+};
+template <typename SyncCopy>
+void ShadowCopyBatch(Engine& e, BatchPiece* pieces, size_t n, Kind kind, SyncCopy&& sync_copy) {
+	uint64_t bytes = 0, ring = 0;
+	for (size_t i = 0; i < n; i++) {
+		if (!pieces[i].eligible) continue;
+		bytes += (pieces[i].size + 15u) & ~uint64_t {15};
+		ring += Engine::Pieces(pieces[i].size);
+	}
+	uint8_t* scratch = bytes != 0 ? e.ShadowScratch(bytes) : nullptr;
+	if (scratch == nullptr || !e.ReserveVerify(ring)) {
+		for (size_t i = 0; i < n; i++) sync_copy(pieces[i].src, pieces[i].dst, pieces[i].size);
+		return;
+	}
+	constexpr size_t kInline = 64;
+	Engine::VerifyToken inline_tokens[kInline];
+	std::vector<Engine::VerifyToken> more;
+	if (n > kInline) more.resize(n);
+	auto* tokens = n > kInline ? more.data() : inline_tokens;
+	uint64_t off = 0;
+	std::vector<uint64_t> offsets_more;
+	uint64_t inline_offsets[kInline];
+	if (n > kInline) offsets_more.resize(n);
+	auto* offsets = n > kInline ? offsets_more.data() : inline_offsets;
+	for (size_t i = 0; i < n; i++) {
+		offsets[i] = off;
+		if (!pieces[i].eligible) continue;
+#ifndef KYTY_UPAS_MUTANT_SHADOW_PER_COPY
+		tokens[i] = e.VerifyBegin(pieces[i].src, scratch + off, pieces[i].size, kind);
+#endif
+		off += (pieces[i].size + 15u) & ~uint64_t {15};
+	}
+	for (size_t i = 0; i < n; i++) {
+		if (!pieces[i].eligible) {
+			sync_copy(pieces[i].src, pieces[i].dst, pieces[i].size);
+			continue;
+		}
+#ifdef KYTY_UPAS_MUTANT_SHADOW_PER_COPY
+		tokens[i] = e.VerifyBegin(pieces[i].src, scratch + offsets[i], pieces[i].size, kind);
+#endif
+		sync_copy(pieces[i].src, scratch + offsets[i], pieces[i].size);
+	}
+	for (size_t i = 0; i < n; i++) {
+		if (!pieces[i].eligible) continue;
+		e.VerifyReady(tokens[i]);
+		std::memcpy(pieces[i].dst, scratch + offsets[i], static_cast<size_t>(pieces[i].size));
+	}
+}
 
 // The renderer's engine (nullptr until the buffer cache starts it; never with KYTY_UPLOAD_ASYNC=0).
 inline std::atomic<Engine*>& Global() {
