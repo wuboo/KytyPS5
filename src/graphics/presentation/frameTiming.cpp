@@ -918,6 +918,8 @@ constexpr const char* kCounterNames[] = {
     "upas_other_join_ns",
     "upas_ne_n",
     "upas_fail_n",
+    "upas_ne_race_n",
+    "upas_ne_bytes",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

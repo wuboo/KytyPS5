@@ -554,6 +554,9 @@ enum class Counter : uint32_t {
 	// recorder's time in joins and the other threads'; shadow differences (must be 0); reads the backing no longer served (zero-filled).
 	UpasStageN, UpasStreamN, UpasBytes, UpasSyncN, UpasSyncNs, UpasWorkerNs, UpasHelpN, UpasJoinSubmitN, UpasJoinPacketN, UpasJoinWriteN, UpasJoinFullN,
 	UpasJoinNs, UpasOtherJoinNs, UpasNeN, UpasFailN,
+	// S605b: shadow differences on a writable (stream-path, CPU-dirty) source: an unsynchronized guest store between the record and the deferred read
+	// (no error: the GPU reads such a buffer at execution); differing bytes of all shadow differences.
+	UpasNeRaceN, UpasNeBytes,
 	Count,
 };
 

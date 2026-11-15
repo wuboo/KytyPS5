@@ -7,7 +7,8 @@
 //   LABEL_NO_JOIN  - RELEASE_MEM counts as a packet that writes no guest memory;
 //   SHADOW_BLIND   - the shadow compare never reports a difference;
 //   FAIL_NO_ZERO   - a read the backing no longer serves leaves the destination as it was;
-//   GUEST_HELPS    - a thread other than the producer runs copies in its join (a guest thread the game can suspend would then hold a copy).
+//   GUEST_HELPS    - a thread other than the producer runs copies in its join (a guest thread the game can suspend would then hold a copy);
+//   STAGE_AS_RACE  - a shadow difference on a protected (stage) source is counted as a stream race instead of an error.
 
 #include "graphics/host_gpu/renderer/cache/uploadAsync.h"
 
@@ -261,11 +262,20 @@ void OracleTests(uint32_t rounds) {
 	Check(writes.load() > 0, "the writer ran");
 }
 
-// shadow: the recorder's copy is the reference; the helper's read at its later time must equal it. A write without its join is reported.
+std::mutex           g_ne_mutex;
+std::vector<NeInfo>  g_ne_seen;
+void NoteNe(const NeInfo& info) {
+	std::lock_guard lock(g_ne_mutex);
+	g_ne_seen.push_back(info);
+}
+
+// shadow: the recorder's copy is the reference; the helper's read at its later time must equal it. A write without its join is reported: as an
+// error on a protected (stage) source, as a race on a writable (stream) source, with its address, first byte and age either way (S605b).
 void ShadowTests() {
 	ResetSlow();
 	Engine e(&TestRead, true, 64, 1u << 16u);
 	Engine::SetProducerThread();
+	e.SetNeObserver(&NoteNe);
 	e.Start();
 	Fill(800000, 8192, 31);
 	// agreeing copies
@@ -294,10 +304,53 @@ void ShadowTests() {
 	std::memcpy(scratch, g_mem.data() + 801000, 256);
 	e.Verify(801000, scratch, 256, Kind::Stage);
 	std::this_thread::sleep_for(std::chrono::milliseconds(3));
-	Fill(801000, 256, 99); // no JoinOverlap: the missing join shadow exists to find
+	const uint8_t before = g_mem[801000 + 10];
+	for (uint64_t i = 10; i < 14; i++) std::atomic_ref<uint8_t>(g_mem[801000 + i]).store(static_cast<uint8_t>(g_mem[801000 + i] ^ 0x5au));
+	// no JoinOverlap: the missing join shadow exists to find
 	e.JoinAll(Reason::Submit);
-	Check(e.GetStats().ne_n.load() == 1, "shadow: a store under a pending copy is reported");
+	Check(e.GetStats().ne_n.load() == 1, "shadow: a store under a pending copy of a protected source is an error");
+	Check(e.GetStats().ne_race_n.load() == 0, "and not a race");
 	Check(e.m_ne_first[0].load() == 801000, "with its address");
+	{
+		std::lock_guard lock(g_ne_mutex);
+		Check(g_ne_seen.size() == 1, "the observer sees the difference");
+		const auto& n = g_ne_seen[0];
+		Check(n.src == 801000 && n.size == 256 && n.kind == Kind::Stage, "address, size, path");
+		Check(n.first_off == 10 && n.diff_bytes == 4, "first differing byte and count");
+		Check(n.recorded == before && n.reread == static_cast<uint8_t>(before ^ 0x5au), "the two bytes");
+		Check(n.age_ns >= 10'000'000, "age: the helper read it after the store (>= the 20 ms hold minus the wait)");
+		Check(n.last_join == 0xff || n.last_join <= 3, "last join reason");
+	}
+	// the same unsynchronized store on a writable (stream) source: a race, counted apart, not an error
+	g_slow_begin = 802000;
+	g_slow_end   = 802001;
+	scratch      = e.ShadowScratch(128);
+	std::memcpy(scratch, g_mem.data() + 802000, 128);
+	e.Verify(802000, scratch, 128, Kind::Stream);
+	std::this_thread::sleep_for(std::chrono::milliseconds(3));
+	std::atomic_ref<uint8_t>(g_mem[802000 + 127]).store(static_cast<uint8_t>(g_mem[802000 + 127] + 1u));
+	e.JoinAll(Reason::Submit);
+	Check(e.GetStats().ne_race_n.load() == 1, "shadow: a store on a writable source is a race");
+	Check(e.GetStats().ne_n.load() == 1, "and does not count as an error");
+	Check(e.GetStats().ne_bytes.load() == 5, "differing bytes of both");
+	{
+		std::lock_guard lock(g_ne_mutex);
+		Check(g_ne_seen.size() == 2 && g_ne_seen[1].kind == Kind::Stream && g_ne_seen[1].first_off == 127 && g_ne_seen[1].index == 1,
+		      "the observer sees the race with its path");
+	}
+	// the same store through its Write join: no difference at all, on either path
+	for (const auto kind: {Kind::Stage, Kind::Stream}) {
+		g_slow_begin = 803000;
+		g_slow_end   = 803001;
+		scratch      = e.ShadowScratch(64);
+		std::memcpy(scratch, g_mem.data() + 803000, 64);
+		e.Verify(803000, scratch, 64, kind);
+		std::this_thread::sleep_for(std::chrono::milliseconds(3));
+		e.JoinOverlap(803000 + 5, 1);
+		std::atomic_ref<uint8_t>(g_mem[803000 + 5]).store(static_cast<uint8_t>(g_mem[803000 + 5] + 1u));
+		e.JoinAll(Reason::Submit);
+	}
+	Check(e.GetStats().ne_n.load() == 1 && e.GetStats().ne_race_n.load() == 1, "a joined store is no difference");
 	ResetSlow();
 	e.Stop();
 }

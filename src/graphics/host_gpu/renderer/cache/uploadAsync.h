@@ -21,14 +21,21 @@
 // (not backed, non-coherent memory, a producer other than the recorder) is copied by the recorder as before.
 //
 // shadow: the recorder copies as before (through a scratch arena: the GPU sees exactly the off bytes); the helper reads the same range again at
-// its (later) time, with all join points active, and compares: upas_ne_n counts the copies the deferral would have changed (must be 0).
+// its (later) time, with all join points active, and compares. S605b: the difference is classified by the protection of the source at record time:
+//   Stage  - the consume write-protected the pages before the copy, so every later store faults into a Write join: a difference is a store that
+//            bypassed the joins (upas_ne_n, must be 0);
+//   Stream - ObtainBuffer's stream path copies CPU-dirty pages, which are writable: a guest store lands there with no fault and no join, in mode 0
+//            too (it is only a question of when the copy runs). The GPU reads such a buffer when it executes the draw, after the submit, so a store
+//            between the record and the deferred copy is one the hardware shows too; an ordered writer (a CP label, a download, a DMA, a file read)
+//            still joins first. These differences are counted apart (upas_ne_race_n) and are not an error.
+// Every difference goes to an observer (first 64 always, then every 256th) with its address, path, first differing byte, bytes, age.
 //
 // Mutants (WILL_FAIL, tests/UploadAsyncTests.cpp, each ends in exit(1)): KYTY_UPAS_MUTANT_NO_WRITE_JOIN (a write does not wait for the copies
 // under it), KYTY_UPAS_MUTANT_JOIN_NO_WAIT (a join returns while a copy it needs is still running), KYTY_UPAS_MUTANT_OVERLAP_END (the overlap test
 // misses a write on the last byte of a copy), KYTY_UPAS_MUTANT_SLOT_REUSE (a ring slot is refilled without checking that its copy has run), KYTY_UPAS_MUTANT_LABEL_NO_JOIN
 // (RELEASE_MEM counts as a packet that writes no guest memory), KYTY_UPAS_MUTANT_SHADOW_BLIND (the shadow compare never reports),
 // KYTY_UPAS_MUTANT_FAIL_NO_ZERO (a failed read leaves the destination as it was), KYTY_UPAS_MUTANT_GUEST_HELPS (a thread other than the producer runs copies
-// in its join).
+// in its join), KYTY_UPAS_MUTANT_STAGE_AS_RACE (a difference on a protected source is counted as a stream race).
 
 #include "graphics/guest_gpu/pm4.h"
 
@@ -73,6 +80,33 @@ inline Mode EnvMode() {
 
 enum class Kind : uint8_t { Stage, Stream };
 enum class Reason : uint8_t { Submit, Packet, Write, Full, Count };
+
+inline const char* KindName(Kind kind) { return kind == Kind::Stage ? "stage" : "stream"; }
+inline const char* ReasonName(uint8_t reason) {
+	switch (reason) {
+		case 0: return "submit";
+		case 1: return "packet";
+		case 2: return "write";
+		case 3: return "full";
+		default: return "none";
+	}
+}
+
+// S605b: one shadow difference (the observer's argument).
+struct NeInfo {
+	uint64_t src        = 0;     // guest address of the piece
+	uint64_t size       = 0;
+	uint64_t first_off  = 0;     // first differing byte, from src
+	uint64_t diff_bytes = 0;     // differing bytes in the piece
+	int64_t  age_ns     = 0;     // from the recorder's copy to the helper's read
+	uint64_t pending    = 0;     // copies handed over and not done when the helper read it
+	uint64_t index      = 0;     // differences so far (all kinds)
+	Kind     kind       = Kind::Stage;
+	uint8_t  last_join  = 0xff;  // Reason of the last join that waited (0xff: none yet)
+	uint8_t  recorded   = 0;     // the recorder's byte at first_off
+	uint8_t  reread     = 0;     // the helper's byte there
+};
+using NeObserver = void (*)(const NeInfo& info);
 
 // Does the handler of this packet possibly store into guest memory on the CP (the label of a signal, a CPU-side DMA, a flip's state, an unknown
 // packet)? The list of the packets that do not is the CP pipeline's Inline / Draw / Dispatch / Wait classes (cpPipe.h Classify) minus nothing:
@@ -145,7 +179,9 @@ struct Stats {
 	std::atomic<uint64_t> other_join_ns {0};       // time in joins on other threads (a guest's write fault, the front)
 	alignas(64) std::atomic<uint64_t> worker_ns {0}; // helper thread: time copying (shadow: reading + comparing)
 	std::atomic<uint64_t> help_n {0};              // copies the producer did itself in a join
-	std::atomic<uint64_t> ne_n {0};                // shadow: copies whose bytes the deferral would have changed
+	std::atomic<uint64_t> ne_n {0};                // shadow: differences on a protected source (stage path): a store that bypassed the joins
+	std::atomic<uint64_t> ne_race_n {0};           // shadow: differences on a writable source (stream path): an unsynchronized guest store
+	std::atomic<uint64_t> ne_bytes {0};            // shadow: differing bytes (both kinds)
 	std::atomic<uint64_t> fail_n {0};              // reads the backing no longer served (zero-filled, like a read that races an unmap)
 };
 
@@ -183,6 +219,7 @@ public:
 	}
 	[[nodiscard]] bool Running() const { return m_thread.joinable(); }
 	[[nodiscard]] bool Shadow() const { return m_shadow; }
+	void               SetNeObserver(NeObserver observer) { m_ne_observer.store(observer, std::memory_order_release); }
 	[[nodiscard]] Stats& GetStats() { return m_stats; }
 
 	// Producer (one thread). Mode 1: the helper copies `size` bytes of guest `src` into `dst` before the next join that needs them.
@@ -191,7 +228,7 @@ public:
 		m_stats.bytes.fetch_add(size, std::memory_order_relaxed);
 		for (uint64_t done = 0; done < size;) {
 			const auto piece = size - done < kChunk ? size - done : kChunk;
-			Publish(src + done, dst + done, nullptr, piece);
+			Publish(src + done, dst + done, nullptr, piece, kind);
 			done += piece;
 		}
 	}
@@ -214,7 +251,7 @@ public:
 		m_stats.bytes.fetch_add(size, std::memory_order_relaxed);
 		for (uint64_t done = 0; done < size;) {
 			const auto piece = size - done < kChunk ? size - done : kChunk;
-			Publish(src + done, nullptr, expected + done, piece);
+			Publish(src + done, nullptr, expected + done, piece, kind);
 			done += piece;
 		}
 	}
@@ -306,9 +343,11 @@ private:
 		std::atomic<uint64_t> size {0};
 		uint8_t*              dst      = nullptr; // mode 1
 		const uint8_t*        expected = nullptr; // shadow
+		int64_t               t_pub    = 0;       // shadow: when the recorder copied it
+		Kind                  kind     = Kind::Stage;
 	};
 
-	void Publish(uint64_t src, uint8_t* dst, const uint8_t* expected, uint64_t size) {
+	void Publish(uint64_t src, uint8_t* dst, const uint8_t* expected, uint64_t size, Kind kind) {
 		const auto seq  = m_published.load(std::memory_order_relaxed);
 		auto&      slot = m_items[seq & m_mask];
 #ifndef KYTY_UPAS_MUTANT_SLOT_REUSE
@@ -320,6 +359,8 @@ private:
 		slot.size.store(size, std::memory_order_relaxed);
 		slot.dst      = dst;
 		slot.expected = expected;
+		slot.kind     = kind;
+		slot.t_pub    = expected != nullptr ? NowNs() : 0;
 		m_published.store(seq + 1, std::memory_order_seq_cst);
 		if (m_sleeping.load(std::memory_order_seq_cst)) {
 			std::lock_guard lock(m_sleep_mutex);
@@ -347,21 +388,56 @@ private:
 				m_stats.fail_n.fetch_add(1, std::memory_order_relaxed);
 			}
 		} else {
-			uint8_t tmp[4096];
-			bool    same = true;
-			for (uint64_t off = 0; off < size && same; off += sizeof(tmp)) {
+			uint8_t  tmp[4096];
+			uint64_t diff = 0, first = UINT64_MAX;
+			uint8_t  rec_byte = 0, new_byte = 0;
+			for (uint64_t off = 0; off < size; off += sizeof(tmp)) {
 				const auto n = size - off < sizeof(tmp) ? size - off : sizeof(tmp);
 				if (!m_read(src + off, tmp, n)) {
 					m_stats.fail_n.fetch_add(1, std::memory_order_relaxed);
 					std::memset(tmp, 0, n);
 				}
-				same = std::memcmp(tmp, exp + off, n) == 0;
+				if (std::memcmp(tmp, exp + off, n) == 0) continue;
+				for (uint64_t i = 0; i < n; i++) {
+					if (tmp[i] == exp[off + i]) continue;
+					if (first == UINT64_MAX) {
+						first    = off + i;
+						rec_byte = exp[off + i];
+						new_byte = tmp[i];
+					}
+					diff++;
+				}
 			}
 #ifndef KYTY_UPAS_MUTANT_SHADOW_BLIND
-			if (!same) {
-				const auto n = m_stats.ne_n.fetch_add(1, std::memory_order_relaxed);
-				if (n < 8) {
-					m_ne_first[n].store(src, std::memory_order_relaxed);
+			if (diff != 0) {
+				const auto kind = it.kind;
+#ifdef KYTY_UPAS_MUTANT_STAGE_AS_RACE
+				const bool race = true;
+#else
+				const bool race = kind == Kind::Stream;
+#endif
+				(race ? m_stats.ne_race_n : m_stats.ne_n).fetch_add(1, std::memory_order_relaxed);
+				m_stats.ne_bytes.fetch_add(diff, std::memory_order_relaxed);
+				const auto index = m_ne_index.fetch_add(1, std::memory_order_relaxed);
+				if (!race) {
+					const auto stage_index = m_ne_stage_index.fetch_add(1, std::memory_order_relaxed);
+					if (stage_index < 8) m_ne_first[stage_index].store(src, std::memory_order_relaxed);
+				}
+				const auto observer = m_ne_observer.load(std::memory_order_acquire);
+				if (observer != nullptr && (index < 64 || (index & 255u) == 0)) {
+					NeInfo info;
+					info.src        = src;
+					info.size       = size;
+					info.first_off  = first;
+					info.diff_bytes = diff;
+					info.age_ns     = NowNs() - it.t_pub;
+					info.pending    = m_published.load(std::memory_order_relaxed) - m_watermark.load(std::memory_order_relaxed);
+					info.index      = index;
+					info.kind       = kind;
+					info.last_join  = m_last_join.load(std::memory_order_relaxed);
+					info.recorded   = rec_byte;
+					info.reread     = new_byte;
+					observer(info);
 				}
 			}
 #endif
@@ -397,6 +473,7 @@ private:
 
 	void NoteJoin(Reason reason, int64_t t0) {
 		const auto ns = static_cast<uint64_t>(NowNs() - t0);
+		m_last_join.store(static_cast<uint8_t>(reason), std::memory_order_relaxed);
 		m_stats.join_n[static_cast<size_t>(reason)].fetch_add(1, std::memory_order_relaxed);
 		(ProducerTls() ? m_stats.join_ns : m_stats.other_join_ns).fetch_add(ns, std::memory_order_relaxed);
 	}
@@ -434,7 +511,7 @@ private:
 	}
 
 public:
-	// Shadow: the guest addresses of the first differing copies (diagnostics).
+	// Shadow: the guest addresses of the first differing copies on a protected source (diagnostics).
 	std::atomic<uint64_t> m_ne_first[8] {};
 
 private:
@@ -449,6 +526,10 @@ private:
 	alignas(64) std::atomic<uint64_t> m_watermark {0}; // every copy below it is done
 	alignas(64) std::atomic<bool> m_sleeping {false};
 	std::atomic<bool>             m_stop {false};
+	std::atomic<NeObserver>       m_ne_observer {nullptr};
+	std::atomic<uint64_t>         m_ne_index {0};
+	std::atomic<uint64_t>         m_ne_stage_index {0};
+	std::atomic<uint8_t>          m_last_join {0xff};
 	std::mutex                    m_sleep_mutex;
 	std::condition_variable       m_sleep_cv;
 	Stats                         m_stats;

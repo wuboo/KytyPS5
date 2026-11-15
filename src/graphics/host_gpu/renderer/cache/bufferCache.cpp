@@ -23,6 +23,7 @@
 #include "graphics/host_gpu/renderer/cache/bufTouchSkip.h"
 #include "graphics/host_gpu/renderer/cache/uploadAsync.h"
 #include "common/cpTuning.h"
+#include "common/diagOut.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
 #include "kernel/memory.h"
 
@@ -65,6 +66,19 @@ std::pair<Buffer*, uint64_t> UploadMemory(GraphicContext& graphics, CommandSched
 	auto* buffer = temporary.get();
 	scheduler.DeferOperation([owner = std::move(temporary)]() mutable { owner.reset(); });
 	return {buffer, 0};
+}
+
+// S605b (KYTY_UPLOAD_ASYNC=shadow): one line per shadow difference (the engine rate-limits: first 64, then every 256th), to the diag file (the bench's
+// printf direction is Silent, so LOGF lines never reach a file). Called on the upload thread: reads only atomics.
+void LogUploadShadowNe(const UploadAsync::NeInfo& n) {
+	char line[384];
+	std::snprintf(line, sizeof(line),
+	              "[upload-async] shadow ne #%" PRIu64 ": flip=%" PRIu64 " path=%s src_protected=%d addr=0x%016" PRIx64 " size=%" PRIu64 " page=0x%016" PRIx64
+	              " first_off=%" PRIu64 " diff_bytes=%" PRIu64 " rec=0x%02x now=0x%02x age_us=%" PRId64 " pending=%" PRIu64 " last_join=%s\n",
+	              n.index, FrameTiming::GuestFlips(), UploadAsync::KindName(n.kind), n.kind == UploadAsync::Kind::Stage ? 1 : 0, n.src, n.size,
+	              (n.src + n.first_off) & ~uint64_t {4095}, n.first_off, n.diff_bytes, n.recorded, n.reread, n.age_ns / 1000, n.pending,
+	              UploadAsync::ReasonName(n.last_join));
+	Common::DiagOut::Write(line);
 }
 
 } // namespace
@@ -432,6 +446,7 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 		m_upload_async = std::make_unique<UploadAsync::Engine>(&Libs::LibKernel::Memory::ReadBackingNoLock,
 		                                                       UploadAsync::EnvMode() == UploadAsync::Mode::Shadow);
 		m_upload_async->Start(&Common::CpTuning::ApplyToUploadThread);
+		m_upload_async->SetNeObserver(&LogUploadShadowNe);
 		UploadAsync::Global().store(m_upload_async.get(), std::memory_order_release);
 		Libs::LibKernel::Memory::SetBackingWriteHook(&UploadAsync::BeforeCpuWrite);
 	}
@@ -1299,15 +1314,9 @@ void BufferCache::UploadAsyncBeforeQueue() {
 	FrameTiming::Add(C::UpasJoinNs, take(s.join_ns));
 	FrameTiming::Add(C::UpasOtherJoinNs, take(s.other_join_ns));
 	FrameTiming::Add(C::UpasFailN, take(s.fail_n));
-	const auto ne = take(s.ne_n);
-	if (ne != 0) {
-		FrameTiming::Add(C::UpasNeN, ne);
-		static std::atomic<uint32_t> logged {0};
-		if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
-			LOGF("[upload-async] shadow: %" PRIu64 " deferred copies would have read other bytes; first at 0x%016" PRIx64 "\n", ne,
-			     m_upload_async->m_ne_first[0].load(std::memory_order_relaxed));
-		}
-	}
+	FrameTiming::Add(C::UpasNeN, take(s.ne_n));
+	FrameTiming::Add(C::UpasNeRaceN, take(s.ne_race_n));
+	FrameTiming::Add(C::UpasNeBytes, take(s.ne_bytes));
 }
 
 bool BufferCache::LatestGpuWriteIsFill(uint64_t vaddr, uint64_t size, uint32_t* value) const {
