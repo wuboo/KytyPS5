@@ -898,6 +898,18 @@ foreach(mutant IN ITEMS FRONT_LIVE_STATE RECORDER_WRITES_FRONT FRONT_EARLY_REUSE
 	target_include_directories(cp_front_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(cp_front_mutant_${mutant_lower}_tests PRIVATE KYTY_CPPIPE_MUTANT_${mutant}=1)
 endforeach()
+# S606 (KYTY_CP_PIPE_STEAL): the state machine of a pipeline job the recorder may abandon, the cost model and the decision (header only); a gated
+# interleaving and an oracle of front, recorder and workers. Mutants (each must be caught, WILL_FAIL, exit code 1): a worker runs a cancelled job, the
+# recorder cancels a running job, the front reclaims a running job's slot, the decision ignores the elapsed time / the CP cost, the model does not learn,
+# count mode steals, the recorder uses a cancelled job a worker skipped.
+add_executable(cp_pipe_steal_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPipeStealTests.cpp")
+target_include_directories(cp_pipe_steal_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS WORKER_RUNS_CANCELLED CANCEL_RUNNING RECLAIM_RUNNING MODEL_IGNORES_ELAPSED MODEL_IGNORES_CP NO_LEARN COUNT_STEALS USE_CANCELLED)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(cp_pipe_steal_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPipeStealTests.cpp")
+	target_include_directories(cp_pipe_steal_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_pipe_steal_mutant_${mutant_lower}_tests PRIVATE KYTY_CPSTEAL_MUTANT_${mutant}=1)
+endforeach()
 # S605 (KYTY_UPLOAD_ASYNC): the deferred upload copies (header only); an oracle of consumes, guest writes and joins on threads. Mutants (each must be caught,
 # WILL_FAIL, exit code 1): a write does not join, a join does not wait for a running copy, the overlap misses the last byte, a ring slot is refilled unchecked,
 # RELEASE_MEM does not join, the shadow compare is blind, a failed read is not zero-filled, a guest thread runs copies in its join, a shadow difference on a
@@ -2315,6 +2327,12 @@ if(BUILD_TESTING)
 	foreach(mutant IN ITEMS no_write_join join_no_wait overlap_end slot_reuse label_no_join shadow_blind fail_no_zero guest_helps stage_as_race shadow_late_publish shadow_per_copy redirty_after hook_seen_strict overlap_first_page)
 		add_test(NAME upload_async_mutant_${mutant} COMMAND $<TARGET_FILE:upload_async_mutant_${mutant}_tests>)
 		set_tests_properties(upload_async_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 120)
+	endforeach()
+	add_test(NAME cp_pipe_steal COMMAND $<TARGET_FILE:cp_pipe_steal_tests>)
+	set_tests_properties(cp_pipe_steal PROPERTIES TIMEOUT 120)
+	foreach(mutant IN ITEMS worker_runs_cancelled cancel_running reclaim_running model_ignores_elapsed model_ignores_cp no_learn count_steals use_cancelled)
+		add_test(NAME cp_pipe_steal_mutant_${mutant} COMMAND $<TARGET_FILE:cp_pipe_steal_mutant_${mutant}_tests>)
+		set_tests_properties(cp_pipe_steal_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 120)
 	endforeach()
 	add_test(NAME cp_front COMMAND $<TARGET_FILE:cp_front_tests>)
 	foreach(mutant IN ITEMS front_live_state recorder_writes_front front_early_reuse)

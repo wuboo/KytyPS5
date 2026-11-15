@@ -560,6 +560,13 @@ enum class Counter : uint32_t {
 	// S605b: shadow differences on a protected source whose page faulted before the hand-over (the store raced the copy itself, as in mode 0; the page
 	// is dirty again). Not an error; upas_ne_n keeps the ones the joins should have ordered.
 	UpasNeRedirtyN,
+	// S606 (KYTY_CP_PIPE_STEAL, cpPipeSteal.h), every mode: joins that found the job not done; the CP's own GetGraphicsPrograms in
+	// PrepareDrawRenderState (calls, ns). Mode 1 (count: would): jobs the recorder abandoned and computed itself (of them: not started yet /
+	// taken over as overdue), held jobs computed by the CP without a worker, the CP time of the abandoned draws, the time the recorder would
+	// have waited for them (1: the worker's end minus the steal, taken when the front reclaims the slot; count: the real wait); front waits
+	// at a slot whose abandoned job was still running.
+	PipeWaitN, PipeCpGfpN, PipeCpGfpNs, PipeStealN, PipeStealQueuedN, PipeStealOverdueN, PipeStealHeldN, PipeStealCpNs, PipeStealWaitNs,
+	PipeReclaimWaitN, PipeReclaimWaitNs,
 	Count,
 };
 

@@ -5,6 +5,7 @@
 // when the draw is executed (RefreshShaders) and uses the result or, when the worker could not answer or a page it read has become GPU-dirty, computes the
 // programs itself as before.
 
+#include "graphics/guest_gpu/command_processor/cpPipeSteal.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/host_gpu/renderer/pipeline/descriptors.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
@@ -19,9 +20,17 @@
 namespace Libs::Graphics::CpPipe {
 
 struct GfpJob {
-	enum : uint8_t { Idle, Queued, Done, Held }; // Held: parsed, not handed to a worker yet (KYTY_CP_PIPE_SIGNALS)
+	// Held: parsed, not handed to a worker yet (KYTY_CP_PIPE_SIGNALS). S606 (KYTY_CP_PIPE_STEAL, cpPipeSteal.h): Running = a worker started it,
+	// Cancelled = the recorder took it before any worker did (the worker only marks it Done).
+	enum : uint8_t { Idle = Steal::kIdle, Queued = Steal::kQueued, Done = Steal::kDone, Held = Steal::kHeld, Running = Steal::kRunning, Cancelled = Steal::kCancelled };
 
 	std::atomic<uint8_t> state {Idle};
+	// S606: the recorder computed the draw's programs itself and no longer waits for this job (it set abandoned and steal_ns before the item's
+	// MarkDone; the front reads them after WaitSlot and waits for Done before it rewrites the slot). run_ns / done_ns: the worker's start and end.
+	bool                 abandoned = false;
+	int64_t              steal_ns  = 0;
+	std::atomic<int64_t> run_ns {0};
+	std::atomic<int64_t> done_ns {0};
 
 	// inputs: the worker's own copy of the registers (the recorder executes the draw on the FIFO item's copy and the renderer may write to it)
 	PipelineCache*        cache = nullptr;
@@ -53,8 +62,13 @@ void RunGfpJob(GfpJob& job);
 // The job of the draw the recorder is executing (nullptr: none). CP thread only.
 GfpJob*& CurrentJob();
 
-// cpPipe.cpp: wait for the job; true when its result may be used (answered, and none of the pages it read is GPU-dirty now).
+// cpPipe.cpp: wait for the job; true when its result may be used (answered, and none of the pages it read is GPU-dirty now). S606: false with
+// job.abandoned set = the recorder did not wait (KYTY_CP_PIPE_STEAL=1); it computes the programs itself and must not read the job any more.
 bool JoinJob(GfpJob& job);
+
+// S606 (KYTY_CP_PIPE_STEAL): on (1 or count, with the front thread); the CP's own GetGraphicsPrograms time for a draw that had a job (cost model).
+bool StealActive();
+void NoteCpPrograms(const GfpJob* job, int64_t ns);
 
 } // namespace Libs::Graphics::CpPipe
 

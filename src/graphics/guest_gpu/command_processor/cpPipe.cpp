@@ -102,6 +102,23 @@ GfpJob*& CurrentJob() {
 	return job;
 }
 
+// S606 (KYTY_CP_PIPE_STEAL, cpPipeSteal.h): on only with the front thread (PipeInit), so the front is the one that reclaims an abandoned job's slot.
+namespace {
+std::atomic<bool> g_steal_active {false};
+Steal::Model&     StealModel() { // recorder thread only
+	static Steal::Model* model = new Steal::Model;
+	return *model;
+}
+} // namespace
+
+bool StealActive() {
+	return g_steal_active.load(std::memory_order_relaxed);
+}
+
+void NoteCpPrograms(const GfpJob* job, int64_t ns) {
+	if (job != nullptr && StealActive()) StealModel().NoteCp(job->shard_key, ns);
+}
+
 namespace {
 
 inline void CpuRelax() {
@@ -188,8 +205,20 @@ private:
 				queue.size.fetch_sub(1, std::memory_order_release);
 			}
 			if (job->submit_ns != 0) FrameTiming::AddAlways(FrameTiming::Counter::PipeQueueNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - job->submit_ns));
+			// S606: the start is published with Running (the recorder's estimate of what is left); a job the recorder cancelled is only marked Done.
+			const bool steal = StealActive();
+			if (steal) {
+				const int64_t now = FrameTiming::SteadyNowNs();
+				job->run_ns.store(now, std::memory_order_relaxed);
+				if (!Steal::WorkerStart(job->state)) {
+					job->done_ns.store(now, std::memory_order_relaxed);
+					job->state.store(GfpJob::Done, std::memory_order_release);
+					continue;
+				}
+			}
 			RunGfpJob(*job);
 			FrameTiming::AddAlways(FrameTiming::Counter::PipeWorkerNs, static_cast<uint64_t>(job->worker_ns));
+			if (steal) job->done_ns.store(FrameTiming::SteadyNowNs(), std::memory_order_relaxed);
 			job->state.store(GfpJob::Done, std::memory_order_release);
 		}
 	}
@@ -219,12 +248,68 @@ void WaitDone(GfpJob& job) {
 	FrameTiming::Add(FrameTiming::Counter::PipeStallNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
 }
 
+// S606 (KYTY_CP_PIPE_STEAL): wait for the job unless the cost model says the CP computes the programs sooner than the worker ends; re-decided every
+// 64 spins (a worker that is preempted becomes overdue). True: the job is abandoned (the caller computes the programs itself, the front reclaims the slot).
+bool WaitOrSteal(GfpJob& job) {
+	using C               = FrameTiming::Counter;
+	const auto     mode   = Steal::EnvMode();
+	const auto&    model  = StealModel();
+	const int64_t  t0     = FrameTiming::SteadyNowNs();
+	int64_t        t_would = 0;
+	for (uint32_t i = 0; job.state.load(std::memory_order_acquire) != GfpJob::Done; i++) {
+		if (t_would == 0 && (i & 63u) == 0) {
+			const int64_t now     = i == 0 ? t0 : FrameTiming::SteadyNowNs();
+			const uint8_t state   = job.state.load(std::memory_order_acquire);
+			const int64_t elapsed = state == GfpJob::Running ? now - job.run_ns.load(std::memory_order_relaxed) : 0;
+			const auto    d       = Steal::Decide(mode, model, job.shard_key, elapsed, Steal::EnvMarginNs(), Steal::EnvOverdueNs());
+			if (d.action != Steal::Action::Wait) {
+				bool queued = false;
+				if (d.action == Steal::Action::Steal) {
+					if (!Steal::Abandon(job.state, &queued)) break; // it ended meanwhile: use it
+				} else {
+					queued = state == GfpJob::Queued;
+				}
+				FrameTiming::Add(C::PipeStealN);
+				if (queued) FrameTiming::Add(C::PipeStealQueuedN);
+				if (d.why == Steal::Why::Overdue) FrameTiming::Add(C::PipeStealOverdueN);
+				if (d.action == Steal::Action::Steal) {
+					job.abandoned = true;
+					job.steal_ns  = now;
+					FrameTiming::Add(C::PipeStallNs, static_cast<uint64_t>(now - t0));
+					return true;
+				}
+				t_would = now;
+			}
+		}
+		CpuRelax();
+		if ((i & 255u) == 255u) {
+			std::this_thread::yield();
+			if ((i & 0xffffu) == 0xffffu && FrameTiming::SteadyNowNs() - t0 > 2'000'000'000ll) {
+				static std::atomic<uint32_t> logged {0};
+				if (logged.fetch_add(1) < 4) LOGF("[cp-pipe] stall: a worker has not finished a job for 2 s (steal)\n");
+			}
+		}
+	}
+	const int64_t end = FrameTiming::SteadyNowNs();
+	FrameTiming::Add(C::PipeStallNs, static_cast<uint64_t>(end - t0));
+	if (t_would != 0) FrameTiming::Add(C::PipeStealWaitNs, static_cast<uint64_t>(end - t_would));
+	return false;
+}
+
 } // namespace
 
 bool JoinJob(GfpJob& job) {
 	using C = FrameTiming::Counter;
 	if (job.state.load(std::memory_order_acquire) == GfpJob::Idle) return false;
-	WaitDone(job);
+	if (job.state.load(std::memory_order_acquire) != GfpJob::Done) {
+		FrameTiming::Add(C::PipeWaitN);
+		if (StealActive()) {
+			if (WaitOrSteal(job)) return false;
+		} else {
+			WaitDone(job);
+		}
+	}
+	if (StealActive()) StealModel().NoteJob(job.shard_key, job.worker_ns);
 	FrameTiming::Add(C::PipeJobN);
 	if (!job.answered) {
 		FrameTiming::Add(C::PipeJobBailN);
@@ -306,6 +391,20 @@ CommandProcessor::~CommandProcessor() = default;
 void CommandProcessor::PipeInit() {
 	if (m_pipe != nullptr || IsAsyncComputeQueue() || EnvMode() == CpPipe::Mode::Off) return;
 	m_pipe = std::make_unique<PipeState>(EnvDepth());
+	// S606 (KYTY_CP_PIPE_STEAL): only with the front thread (it reclaims the slots of abandoned jobs) and workers; set before the workers start.
+	{
+		const bool front_thread = CpPipe::FrontEnvMode() != CpPipe::FrontMode::Off && EnvMode() == CpPipe::Mode::On;
+		const auto steal        = CpPipe::Steal::EnvMode();
+		const bool active       = steal != CpPipe::Steal::Mode::Off && front_thread && EnvWorkers() != 0;
+		if (active) CpPipe::g_steal_active.store(true, std::memory_order_relaxed);
+		static std::atomic<bool> printed {false};
+		if (!printed.exchange(true)) {
+			std::printf("Environment: KYTY_CP_PIPE_STEAL=%s active=%d margin_ns=%lld overdue_ns=%lld prior_job_ns=%lld prior_cp_ns=%lld\n", CpPipe::Steal::ModeName(steal),
+			            active ? 1 : 0, static_cast<long long>(CpPipe::Steal::EnvMarginNs()), static_cast<long long>(CpPipe::Steal::EnvOverdueNs()),
+			            static_cast<long long>(CpPipe::Steal::Model::kPriorJobNs), static_cast<long long>(CpPipe::Steal::Model::kPriorCpNs));
+			std::fflush(stdout);
+		}
+	}
 	if (EnvWorkers() != 0) CpPipe::Workers::Instance().Start(EnvWorkers(), EnvShard());
 	LOGF("[cp-pipe] on: mode=%s depth=%zu workers=%zu shard=%d signals=%d\n", EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", m_pipe->depth, EnvWorkers(), EnvShard() ? 1 : 0, static_cast<int>(EnvSignals()));
 	// S558 (KYTY_CP_PREDECODE): the workers decode the T#s of the jobs they answer; the recorder takes them only with KYTY_CP_PIPE=1 (shadow: none used).
@@ -582,6 +681,26 @@ uint64_t SnapshotHash(const PipeItem& it) {
 	return CpPipe::HashBytes(it.dw.data(), it.dw.size() * sizeof(uint32_t), h);
 }
 
+// S606 (KYTY_CP_PIPE_STEAL=1): front thread, before it rewrites a slot. The recorder abandoned the slot's job (set before the item's MarkDone, which
+// WaitSlot acquired); a worker may still read the job's snapshot, so the slot is rewritten only after the worker's Done.
+void ReclaimSlot(PipeItem& it) {
+	using C = FrameTiming::Counter;
+	if (!it.job.abandoned) return;
+	if (!CpPipe::Steal::Reclaimable(it.job.state)) {
+		const int64_t t0 = FrameTiming::SteadyNowNs();
+		for (uint32_t i = 0; !CpPipe::Steal::Reclaimable(it.job.state); i++) {
+			CpPipe::FrontCpuRelax();
+			if ((i & 255u) == 255u) std::this_thread::yield();
+		}
+		FrameTiming::Add(C::PipeReclaimWaitN);
+		FrameTiming::Add(C::PipeReclaimWaitNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
+	}
+	const int64_t done = it.job.done_ns.load(std::memory_order_relaxed);
+	if (done > it.job.steal_ns) FrameTiming::Add(C::PipeStealWaitNs, static_cast<uint64_t>(done - it.job.steal_ns));
+	it.job.abandoned = false;
+	it.job.state.store(CpPipe::GfpJob::Idle, std::memory_order_relaxed);
+}
+
 } // namespace
 
 bool CommandProcessor::PipeFrontOn() const {
@@ -635,6 +754,7 @@ void CommandProcessor::PipeFrontEnqueue(CpPipe::OpClass cls, uint32_t opcode, co
 	}
 	const uint64_t seq = ring.NextSeq();
 	auto&          it  = p.items[ring.Slot(seq)];
+	ReclaimSlot(it); // S606
 	it.cls             = cls;
 	it.opcode          = opcode;
 	it.sync_kind       = kSyncNone;
@@ -738,6 +858,7 @@ uint32_t CommandProcessor::PipeFrontSync(uint32_t kind, uint32_t opcode, const u
 	ring.WaitSlot();
 	const uint64_t seq = ring.NextSeq();
 	auto&          it  = p.items[ring.Slot(seq)];
+	ReclaimSlot(it); // S606
 	it.cls             = CpPipe::OpClass::Drain;
 	it.opcode          = opcode;
 	it.sync_kind       = kind;
@@ -777,6 +898,7 @@ void CommandProcessor::PipeFrontEnd() {
 	if (ring.Done() < ring.LastCommitted()) FrameTiming::Add(FrameTiming::Counter::PipeDrainEndN);
 	ring.WaitSlot();
 	auto& it       = p.items[ring.Slot(ring.NextSeq())];
+	ReclaimSlot(it); // S606
 	it.cls         = CpPipe::OpClass::Drain;
 	it.sync_kind   = kSyncEnd;
 	it.gate        = 0;
@@ -877,9 +999,15 @@ void CommandProcessor::PipeFrontExecute(uint64_t seq) {
 	}
 	{
 		uint8_t held = CpPipe::GfpJob::Held;
-		if (it.job.state.load(std::memory_order_acquire) == CpPipe::GfpJob::Held &&
-		    it.job.state.compare_exchange_strong(held, CpPipe::GfpJob::Queued, std::memory_order_acq_rel)) {
-			SubmitJob(&it.job); // its gate is older than the item and has run
+		if (it.job.state.load(std::memory_order_acquire) == CpPipe::GfpJob::Held) {
+			// S606 (KYTY_CP_PIPE_STEAL=1): a job still held when its draw runs would be joined right after the hand-over: the CP computes the programs itself.
+			const bool steal = CpPipe::StealActive();
+			if (steal) FrameTiming::Add(C::PipeStealHeldN);
+			if (steal && CpPipe::Steal::EnvMode() == CpPipe::Steal::Mode::On) {
+				it.job.state.store(CpPipe::GfpJob::Idle, std::memory_order_relaxed);
+			} else if (it.job.state.compare_exchange_strong(held, CpPipe::GfpJob::Queued, std::memory_order_acq_rel)) {
+				SubmitJob(&it.job); // its gate is older than the item and has run
+			}
 		}
 		if (it.job.state.load(std::memory_order_relaxed) != CpPipe::GfpJob::Idle) CpPipe::CurrentJob() = &it.job;
 		CpPhases::Scope handler_phase(CpPhases::Phase::Handler);
@@ -904,7 +1032,8 @@ void CommandProcessor::PipeFrontExecute(uint64_t seq) {
 		}
 	}
 	CpPipe::CurrentJob() = nullptr;
-	if (it.job.state.load(std::memory_order_relaxed) != CpPipe::GfpJob::Idle) { // the draw never asked for its programs: the worker may still read the snapshot
+	// the draw never asked for its programs: the worker may still read the snapshot. S606: an abandoned job is waited for by the front (ReclaimSlot).
+	if (!it.job.abandoned && it.job.state.load(std::memory_order_relaxed) != CpPipe::GfpJob::Idle) {
 		CpPipe::WaitDone(it.job);
 		it.job.state.store(CpPipe::GfpJob::Idle, std::memory_order_relaxed);
 	}

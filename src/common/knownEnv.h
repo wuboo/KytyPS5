@@ -35,7 +35,8 @@ inline constexpr std::string_view kKnownKytyEnv[] = {
     "KYTY_SPEC_COND", "KYTY_SPEC_READ_FAST", "KYTY_SPLIT_WIDE_STORES", "KYTY_SPV_NOCONTRACT", "KYTY_SRT_FAST", "KYTY_SRT_JIT_COVER", "KYTY_SRT_READER", "KYTY_PROGS_MEMO", "KYTY_SRT_SLOT_BATCH", "KYTY_SRT_PROT_AVOID", "KYTY_TEX_RESOLVE_MEMO", "KYTY_TEX_SAMPLED_NOTE", "KYTY_TSHARP_MINLOD_APPLE", "KYTY_VS_LANE_FROM_INDEX", "KYTY_WF_FAST_HANDLER", "KYTY_WF_FLIP_UNPROTECT", "KYTY_WF_HOT_UNPROTECT",
     "KYTY_WIDE_STORE_HOT", "KYTY_WIDE_STORE_MOVE", "KYTY_OPENXR", "KYTY_WALK_NOFAULT", "KYTY_PAGE_STAMP_OFF",
     "KYTY_UPLOAD_ASYNC", // S605: the buffer upload copies run on an upload thread (joined before the submit)
-    "KYTY_UPLOAD_ASYNC_SHADOW_FROM" // S605d: the guest flip from which the upload shadow verifies
+    "KYTY_UPLOAD_ASYNC_SHADOW_FROM", // S605d: the guest flip from which the upload shadow verifies
+    "KYTY_CP_PIPE_STEAL", "KYTY_CP_PIPE_STEAL_MARGIN_NS", "KYTY_CP_PIPE_STEAL_OVERDUE_NS" // S606: the recorder computes a late job's programs itself
 #ifdef KYTY_KNOWNENV_MUTANT_UNCLASSIFIED
     , "KYTY_ZZ_UNCLASSIFIED" // a new switch added to the known list and to neither classification (tests/EnvClassificationTests.cpp must fail)
 #endif
@@ -59,6 +60,8 @@ inline constexpr std::string_view kNonCodegenKytyEnv[] = {
     , "KYTY_WALK_NOFAULT", "KYTY_PAGE_STAMP_OFF"
     // S605: which thread copies the bytes of a buffer upload (KYTY_UPLOAD_ASYNC): never what the recompiler emits.
     , "KYTY_UPLOAD_ASYNC", "KYTY_UPLOAD_ASYNC_SHADOW_FROM"
+    // S606: whether the recorder waits for a pipeline worker or computes the draw's programs itself (KYTY_CP_PIPE_STEAL): the same programs either way.
+    , "KYTY_CP_PIPE_STEAL", "KYTY_CP_PIPE_STEAL_MARGIN_NS", "KYTY_CP_PIPE_STEAL_OVERDUE_NS"
     // S585: KYTY_GF_EMULATE moved here from kCodegenKytyEnv: it only decides how a guest read fault is served (loader/guestReadEmulator.cpp,
     // runtimeLinker.cpp), never what the recompiler emits; in the key it only cost a cold program cache for every emulation run.
 };

@@ -852,9 +852,11 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	// cached, the pages the worker read are not GPU-dirty and nothing was written into them since: CpPipe::JoinJob).
 	CpPipe::GfpJob* const job      = CpPipe::CurrentJob();
 	const bool            job_used = job != nullptr && CpPipe::JoinJob(*job);
+	// S606 (KYTY_CP_PIPE_STEAL=1): JoinJob did not wait; a worker may still write the job, so nothing of it is read here.
+	const bool stolen = job != nullptr && !job_used && job->abandoned;
 	// S558: JoinJob waited for the worker (acquire), so its predecode is readable; the stages are bound by ExecutePreparedDraw of this draw.
 	m_predecode_joined = job_used;
-	if (job != nullptr && job->pre_ns != 0) FrameTiming::Add(FrameTiming::Counter::PredecodeWorkerNs, static_cast<uint64_t>(job->pre_ns));
+	if (job != nullptr && !stolen && job->pre_ns != 0) FrameTiming::Add(FrameTiming::Counter::PredecodeWorkerNs, static_cast<uint64_t>(job->pre_ns));
 	if (job_used && CpPipe::EnvMode() == CpPipe::Mode::On) {
 		state.vertex_info[0] = job->out.vertex_info[0];
 		state.ps_input_info  = job->out.pixel_info;
@@ -862,9 +864,15 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 		state.mrt_mask       = job->out.mrt_mask;
 		FrameTiming::Add(FrameTiming::Counter::PipeUsedN);
 	} else {
-		if (job != nullptr && !job_used) FrameTiming::Add(FrameTiming::Counter::PipeFallbackN);
+		if (job != nullptr && !job_used && !stolen) FrameTiming::Add(FrameTiming::Counter::PipeFallbackN);
 		CpPhases::Scope shaders(CpPhases::Phase::DrawShaders);
+		const int64_t gfp0 = FrameTiming::SteadyNowNs();
 		m_context.GetPipelineCache().GetGraphicsPrograms(buffer, state);
+		const int64_t gfp_ns = FrameTiming::SteadyNowNs() - gfp0;
+		FrameTiming::Add(FrameTiming::Counter::PipeCpGfpN);
+		FrameTiming::Add(FrameTiming::Counter::PipeCpGfpNs, static_cast<uint64_t>(gfp_ns));
+		if (stolen) FrameTiming::Add(FrameTiming::Counter::PipeStealCpNs, static_cast<uint64_t>(gfp_ns));
+		CpPipe::NoteCpPrograms(job, gfp_ns); // S606 cost model (only with KYTY_CP_PIPE_STEAL)
 		if (job_used) CompareWithJob(state, *job);
 	}
 	// Vertex programs beyond the host mesh limits or with unsupported call targets are not
