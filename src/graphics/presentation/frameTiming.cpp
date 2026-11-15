@@ -903,6 +903,14 @@ constexpr const char* kCounterNames[] = {
     "krf4_starve_ban_n",
     "krf4_starve_flip_n",
     "krf4_storm_n",
+    "nodrain_cx_n",
+    "nodrain_uc_n",
+    "nodrain_sh_n",
+    "nodrain_wait_n",
+    "nodrain_kept_n",
+    "nodrain_shadow_n",
+    "nodrain_ne_n",
+    "nodrain_mono_ne_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

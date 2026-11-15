@@ -156,6 +156,7 @@ private:
 	void PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const uint32_t* packet, uint32_t packet_dw);
 	void PipeExecuteFront();
 	bool PipeOverlaps(uint64_t address, uint64_t size) const;
+	void PipeTableCheck(uint32_t opcode, const uint32_t* payload); // S604: drains before a SET_*_REG_INDIRECT whose table a pending write touches (KYTY_PIPE_NODRAIN: which view)
 	bool PipeWaitVirtual(uint64_t address, uint64_t size, uint32_t func, uint64_t ref, uint64_t mask, bool* satisfied);
 	[[nodiscard]] HW::Shader&     ExecSh() { return m_exec_sh != nullptr ? *m_exec_sh : m_sh_ctx; }
 	[[nodiscard]] HW::UserConfig& ExecUcfg() { return m_exec_ucfg != nullptr ? *m_exec_ucfg : m_ucfg; }

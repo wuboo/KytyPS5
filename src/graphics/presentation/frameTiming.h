@@ -548,6 +548,10 @@ enum class Counter : uint32_t {
 	// 16-flip window was starved (CP wait on the guest >= 20 %, flips >= 25 ms on average), and per closed flip the pages not banned that the
 	// guest faulted on >= 2 times (a storm; the guard's own flip log, so a flip the CP drains late may hold several).
 	Krf4BurstBanN, Krf4StarveBanN, Krf4StarveFlipN, Krf4StormN,
+	// S604 (KYTY_PIPE_NODRAIN=1|shadow, cpPipeNoDrain.h): front drains the S479 view of the pending writes asks for and the precise view does not (1: avoided, shadow:
+	// would be), per key: SET_CONTEXT_REG_INDIRECT / SET_UCONFIG_REG_INDIRECT / SET_SH_REG_INDIRECT tables and waits; drains both views ask for (kept); shadow
+	// compares (the bytes before and after the drain) and the differences (must be 0); reads where the precise view would drain and the S479 one not (must be 0).
+	NoDrainCxN, NoDrainUcN, NoDrainShN, NoDrainWaitN, NoDrainKeptN, NoDrainShadowN, NoDrainNeN, NoDrainMonoNeN,
 	Count,
 };
 

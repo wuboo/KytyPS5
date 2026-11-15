@@ -898,6 +898,17 @@ foreach(mutant IN ITEMS FRONT_LIVE_STATE RECORDER_WRITES_FRONT FRONT_EARLY_REUSE
 	target_include_directories(cp_front_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(cp_front_mutant_${mutant_lower}_tests PRIVATE KYTY_CPPIPE_MUTANT_${mutant}=1)
 endforeach()
+# S604 (KYTY_PIPE_NODRAIN): the precise view of the CP pipeline's pending writes (header only); an oracle over random PM4 streams. Mutants (each must be caught,
+# WILL_FAIL, exit code 1): the occlusion dump writes nothing / 8 bytes, a DMA to memory is dropped, WRITE_DATA to one address keeps the first dword, the precise mode
+# changes the S479 view, the shadow compare is blind, a sub-range ignores its offset, a read past the write is answered from it.
+add_executable(cp_pipe_nodrain_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPipeNoDrainTests.cpp")
+target_include_directories(cp_pipe_nodrain_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS EVENT_NO_WRITE DUMP_SHORT DMA_REAL_DROPPED WRITE_DATA_FIRST S479_VIEW_CHANGED SHADOW_BLIND SUBRANGE_NO_SHIFT PARTIAL_COVER)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(cp_pipe_nodrain_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/CpPipeNoDrainTests.cpp")
+	target_include_directories(cp_pipe_nodrain_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(cp_pipe_nodrain_mutant_${mutant_lower}_tests PRIVATE KYTY_PIPEND_MUTANT_${mutant}=1)
+endforeach()
 # S479 (KYTY_CP_PIPE): the log of the writes into the guest's backing (header only). Mutants (each must be caught, WILL_FAIL): a running write is no danger, a wrapped ring
 # answers from what is left, the pages are not compared.
 add_executable(backing_write_log_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BackingWriteLogTests.cpp")
@@ -2302,6 +2313,11 @@ if(BUILD_TESTING)
 	foreach(mutant IN ITEMS front_live_state recorder_writes_front front_early_reuse)
 		add_test(NAME cp_front_mutant_${mutant} COMMAND $<TARGET_FILE:cp_front_mutant_${mutant}_tests>)
 		set_tests_properties(cp_front_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME cp_pipe_nodrain COMMAND $<TARGET_FILE:cp_pipe_nodrain_tests>)
+	foreach(mutant IN ITEMS event_no_write dump_short dma_real_dropped write_data_first s479_view_changed shadow_blind subrange_no_shift partial_cover)
+		add_test(NAME cp_pipe_nodrain_mutant_${mutant} COMMAND $<TARGET_FILE:cp_pipe_nodrain_mutant_${mutant}_tests>)
+		set_tests_properties(cp_pipe_nodrain_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
 	endforeach()
 	add_test(NAME cp_pipe COMMAND $<TARGET_FILE:cp_pipe_tests>)
 	foreach(mutant IN ITEMS signal_at_parse virtual_wait_ignores_mask drain_skips_unknown worker_writes_cp retire_all overlap_ignored gate_ignored pages_first_only)

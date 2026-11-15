@@ -165,12 +165,30 @@ inline bool WaitCompare(uint64_t value, uint64_t ref, uint64_t mask, uint32_t fu
 }
 
 // A write that sits in the FIFO and has not reached guest memory yet. `known` = the packet fixes the bytes (an immediate value); a timestamp or a GDS read does not.
+// S604 (KYTY_PIPE_NODRAIN, cpPipeNoDrain.h): two views of the same FIFO. The S479 view (`kModelS479`, what Resolve/Overlaps answer, byte for byte as before) and
+// the precise view (`kModelPrecise`, ResolvePrecise/OverlapsPrecise): the bytes the handler really writes (an occlusion dump its 256 bytes, not all memory; a DMA
+// to nowhere or to GDS nothing) and the values the packet fixes (WRITE_DATA's immediates). An entry belongs to one view or to both.
+inline constexpr uint8_t kModelS479    = 1u;
+inline constexpr uint8_t kModelPrecise = 2u;
+inline constexpr uint8_t kModelBoth    = kModelS479 | kModelPrecise;
+
 struct PendingWrite {
 	uint64_t address = 0;
 	uint64_t size    = 0;
 	uint64_t value   = 0; // little endian, the low `size` bytes (size <= 8)
 	bool     known   = false;
 	uint64_t seq     = 0; // the FIFO item that will perform it
+	uint8_t  models  = kModelBoth;
+	bool     known_p = false; // the precise view's `known`
+	uint16_t src     = 0;     // S604 DIAG: (opcode << 8) | subtype of the packet that will write (the culprit of a drain)
+};
+
+// S604 DIAG: why a read could not be answered from the FIFO. None: nothing pending (or a value); Unknown: the bytes are not known; Partial: a known value, but not of
+// exactly the bytes read (S479) / not covering them (precise); Fail: the value is known and the wait would not pass on it (the wait has to see the memory).
+enum class Reason : uint8_t { None, Unknown, Partial, Fail };
+struct Culprit {
+	uint16_t src    = 0;
+	Reason   reason = Reason::None;
 };
 
 class PendingWrites {
@@ -183,20 +201,84 @@ public:
 
 	void Note(uint64_t address, uint64_t size, bool known, uint64_t value, uint64_t seq) {
 		if (size == 0) return;
-		m_writes.push_back({address, size, value, known && size <= 8u, seq});
+		m_writes.push_back({address, size, value, known && size <= 8u, seq, kModelBoth, known && size <= 8u, 0});
+	}
+	// S604: an entry of one view or of both, with its own `known` per view and the culprit tag.
+	void NoteViews(uint64_t address, uint64_t size, bool known, bool known_p, uint64_t value, uint64_t seq, uint8_t models, uint16_t src) {
+		if (size == 0 || models == 0) return;
+		m_writes.push_back({address, size, value, known && size <= 8u, seq, models, known_p && size <= 8u, src});
 	}
 
-	[[nodiscard]] Verdict Resolve(uint64_t address, uint64_t size, uint64_t* value) const {
+	// The S479 view: the newest write that overlaps decides; a value only when it is known and of exactly the bytes read.
+	[[nodiscard]] Verdict Resolve(uint64_t address, uint64_t size, uint64_t* value, Culprit* culprit = nullptr) const {
 		for (size_t i = m_writes.size(); i-- > 0;) {
 			const auto& w = m_writes[i];
+			if ((w.models & kModelS479) == 0) continue;
 			if (address >= w.address + w.size || w.address >= address + size) continue; // disjoint
 			if (w.address == address && w.size == size && w.known) {
 				*value = w.value;
+				if (culprit != nullptr) *culprit = {w.src, Reason::None};
 				return Verdict::Value;
 			}
+			if (culprit != nullptr) *culprit = {w.src, w.known ? Reason::Partial : Reason::Unknown};
 			return Verdict::Unknown;
 		}
 		return Verdict::NoPending;
+	}
+
+	// S604, the precise view: the newest write of the view that overlaps decides; a value when it is known and covers every byte read (the bytes are cut out of it).
+	// Mutants: KYTY_PIPEND_MUTANT_SUBRANGE_NO_SHIFT (the low bytes of the write, wherever the read starts), KYTY_PIPEND_MUTANT_PARTIAL_COVER (a read that runs past
+	// the end of the write is answered from it).
+	[[nodiscard]] Verdict ResolvePrecise(uint64_t address, uint64_t size, uint64_t* value, Culprit* culprit = nullptr) const {
+		for (size_t i = m_writes.size(); i-- > 0;) {
+			const auto& w = m_writes[i];
+			if ((w.models & kModelPrecise) == 0) continue;
+			if (address >= w.address + w.size || w.address >= address + size) continue; // disjoint
+#ifdef KYTY_PIPEND_MUTANT_PARTIAL_COVER
+			const bool covers = address >= w.address && address < w.address + w.size;
+#else
+			const bool covers = address >= w.address && address + size <= w.address + w.size;
+#endif
+			if (w.known_p && w.size <= 8u && size <= 8u && size != 0 && covers) {
+#ifdef KYTY_PIPEND_MUTANT_SUBRANGE_NO_SHIFT
+				const uint64_t shift = 0;
+#else
+				const uint64_t shift = (address - w.address) * 8u; // < 64: the read starts inside the write, which is at most 8 bytes
+#endif
+				uint64_t v = w.value >> shift;
+				if (size < 8u) v &= (uint64_t {1} << (size * 8u)) - 1u;
+				*value = v;
+				if (culprit != nullptr) *culprit = {w.src, Reason::None};
+				return Verdict::Value;
+			}
+			if (culprit != nullptr) *culprit = {w.src, w.known_p ? Reason::Partial : Reason::Unknown};
+			return Verdict::Unknown;
+		}
+		return Verdict::NoPending;
+	}
+
+	// S604: true when some write of the precise view touches the range.
+	[[nodiscard]] bool OverlapsPrecise(uint64_t address, uint64_t size, Culprit* culprit = nullptr) const {
+		for (size_t i = m_writes.size(); i-- > 0;) {
+			const auto& w = m_writes[i];
+			if ((w.models & kModelPrecise) == 0) continue;
+			if (address >= w.address + w.size || w.address >= address + size) continue;
+			if (culprit != nullptr) *culprit = {w.src, Reason::Unknown};
+			return true;
+		}
+		return false;
+	}
+
+	// S604 DIAG: the S479 view's answer to a table read, with the culprit.
+	[[nodiscard]] bool OverlapsS479(uint64_t address, uint64_t size, Culprit* culprit) const {
+		for (size_t i = m_writes.size(); i-- > 0;) {
+			const auto& w = m_writes[i];
+			if ((w.models & kModelS479) == 0) continue;
+			if (address >= w.address + w.size || w.address >= address + size) continue;
+			if (culprit != nullptr) *culprit = {w.src, Reason::Unknown};
+			return true;
+		}
+		return false;
 	}
 
 	// True when some write in the FIFO touches the range.

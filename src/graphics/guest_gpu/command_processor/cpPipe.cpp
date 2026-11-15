@@ -13,6 +13,7 @@
 #include "graphics/guest_gpu/command_processor/commandProcessor.h"
 #include "graphics/guest_gpu/command_processor/cpPipe.h"
 #include "graphics/guest_gpu/command_processor/cpPipeJob.h"
+#include "graphics/guest_gpu/command_processor/cpPipeNoDrain.h"
 #include "graphics/guest_gpu/command_processor/pm4Dispatch.h"
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
@@ -307,6 +308,10 @@ void CommandProcessor::PipeInit() {
 	m_pipe = std::make_unique<PipeState>(EnvDepth());
 	if (EnvWorkers() != 0) CpPipe::Workers::Instance().Start(EnvWorkers(), EnvShard());
 	LOGF("[cp-pipe] on: mode=%s depth=%zu workers=%zu shard=%d signals=%d\n", EnvMode() == CpPipe::Mode::Shadow ? "shadow" : "1", m_pipe->depth, EnvWorkers(), EnvShard() ? 1 : 0, static_cast<int>(EnvSignals()));
+	if (CpPipe::NoDrainEnvMode() != CpPipe::NoDrainMode::Off) { // S604
+		LOGF("[cp-pipe] nodrain: mode=%s (the precise view of the pending writes decides the table and wait drains)\n", CpPipe::NoDrainModeName(CpPipe::NoDrainEnvMode()));
+		std::fprintf(stderr, "[cp-pipe] nodrain: mode=%s\n", CpPipe::NoDrainModeName(CpPipe::NoDrainEnvMode()));
+	}
 	// S558 (KYTY_CP_PREDECODE): the workers decode the T#s of the jobs they answer; the recorder takes them only with KYTY_CP_PIPE=1 (shadow: none used).
 	if (Predecode::EnvMode() != Predecode::Mode::Off) {
 		LOGF("[cp-predecode] on: mode=%s pipe=%s workers=%zu sizeof(PreTex)=%zu slim=%d\n", Predecode::ModeName(Predecode::EnvMode()),
@@ -372,45 +377,8 @@ void CommandProcessor::PipeEnqueue(CpPipe::OpClass cls, uint32_t opcode, const u
 	FrameTiming::Add(C::PipeEnqN);
 	FrameTiming::Add(cls == CpPipe::OpClass::Draw ? C::PipeDrawN : (cls == CpPipe::OpClass::Dispatch ? C::PipeDispatchN : C::PipeOrderedN));
 
-	// The writes this item will do, for the WAIT_REG_MEM that follows it in the stream.
-	constexpr uint64_t kEverything = ~uint64_t {0} >> 1u;
-	const auto*        payload     = packet + 1;
-	const auto         r           = opcode == Pm4::IT_NOP ? KYTY_PM4_R(packet[0]) : 0u;
-	const bool         async       = IsAsyncComputeQueue();
-	uint64_t           address     = 0;
-	auto               note_signal = [&](const CpPipe::SignalWrite& w) {
-        if (w.writes) p.pending.Note(address, w.size, w.known, w.value, seq);
-	};
-	switch (opcode) {
-		case Pm4::IT_NOP:
-			if (r == Pm4::R_FLIP || r == Pm4::R_ZERO) p.pending.Note(0, kEverything, false, 0, seq); // a flip writes labels
-			break;
-		case Pm4::IT_RELEASE_MEM:
-			if (packet_dw >= 8u) note_signal(CpPipe::DecodeReleaseMem(payload, async, &address));
-			break;
-		case Pm4::IT_EVENT_WRITE:
-			if (packet_dw > 3u) p.pending.Note(0, kEverything, false, 0, seq); // event types that write an address
-			break;
-		case Pm4::IT_WRITE_DATA:
-			if (packet_dw >= 5u) {
-				const auto w = CpPipe::DecodeWriteData(payload, packet_dw);
-				p.pending.Note(w.address, w.size, false, 0, seq);
-			}
-			break;
-		case Pm4::IT_DMA_DATA:
-			if (packet_dw >= 7u) {
-				const auto w = CpPipe::DecodeDmaData(payload);
-				p.pending.Note(w.address, w.size, false, 0, seq);
-			}
-			break;
-		case Pm4::IT_COPY_DATA:
-			if (packet_dw >= 6u) {
-				const auto w = CpPipe::DecodeCopyData(payload);
-				p.pending.Note(w.address, w.size, false, 0, seq);
-			}
-			break;
-		default: break;
-	}
+	// The writes this item will do, for the WAIT_REG_MEM that follows it in the stream (S604: the shared decoder, cpPipeNoDrain.h).
+	CpPipe::NoteItemWrites(p.pending, opcode, packet, packet_dw, IsAsyncComputeQueue(), seq, CpPipe::NoDrainEnvMode() != CpPipe::NoDrainMode::Off);
 }
 
 void CommandProcessor::PipeExecuteFront() {
@@ -498,6 +466,57 @@ std::atomic<uint64_t> g_drain_by_key[512];
 std::atomic<uint64_t> g_drain_items;
 std::atomic<uint64_t> g_dump_flip {0};
 
+// S604 (KYTY_PIPE_NODRAIN=1|shadow) DIAG: per drain key, the culprit in the S479 view and in the precise view (or "avoided"); one front thread writes, the dump
+// below runs on it too (atomics only so that a second CP could never tear an entry). Keys never change once set; a full table drops (counted).
+struct NoDrainHistEntry {
+	std::atomic<uint64_t> key {0};
+	std::atomic<uint64_t> n {0};
+};
+constexpr uint32_t    kNoDrainHist = 256;
+NoDrainHistEntry      g_nd_hist[kNoDrainHist];
+std::atomic<uint64_t> g_nd_hist_dropped {0};
+
+void NoDrainHistAdd(uint32_t drain_key, CpPipe::Culprit s479, bool avoided, CpPipe::Culprit precise) {
+	const uint64_t key = CpPipe::NoDrainHistKey(drain_key, s479, avoided, precise);
+	uint32_t       i   = static_cast<uint32_t>((key ^ (key >> 17u) ^ (key >> 40u)) * 0x9e3779b1u) % kNoDrainHist;
+	for (uint32_t probe = 0; probe < kNoDrainHist; probe++, i = (i + 1u) % kNoDrainHist) {
+		uint64_t seen = g_nd_hist[i].key.load(std::memory_order_relaxed);
+		if (seen == 0 && g_nd_hist[i].key.compare_exchange_strong(seen, key, std::memory_order_relaxed)) seen = key;
+		if (seen == key) {
+			g_nd_hist[i].n.fetch_add(1, std::memory_order_relaxed);
+			return;
+		}
+	}
+	g_nd_hist_dropped.fetch_add(1, std::memory_order_relaxed);
+}
+
+void DumpNoDrainHistogram(uint64_t flips, uint64_t last) {
+	char line[200];
+	std::snprintf(line, sizeof(line), "[pipe-nodrain] flip=%" PRIu64 " since=%" PRIu64 " mode=%s dropped=%" PRIu64 "\n", flips, last,
+	              CpPipe::NoDrainModeName(CpPipe::NoDrainEnvMode()), g_nd_hist_dropped.load(std::memory_order_relaxed));
+	Common::DiagOut::Write(line);
+	for (auto& e: g_nd_hist) {
+		const uint64_t key = e.key.load(std::memory_order_relaxed);
+		const uint64_t n   = key != 0 ? e.n.exchange(0, std::memory_order_relaxed) : 0;
+		if (n == 0) continue;
+		const auto s479_src   = static_cast<uint32_t>(key & 0xffffu);
+		const auto s479_why   = CpPipe::ReasonLetter(static_cast<CpPipe::Reason>((key >> 16u) & 0x3u));
+		const auto prec_src   = static_cast<uint32_t>((key >> 18u) & 0xffffu);
+		const auto prec_why   = CpPipe::ReasonLetter(static_cast<CpPipe::Reason>((key >> 34u) & 0x3u));
+		const bool avoided    = ((key >> 36u) & 0x1u) != 0;
+		const auto drain_key  = static_cast<uint32_t>((key >> 40u) & 0x1ffu);
+		char       precise[32];
+		if (avoided) {
+			std::snprintf(precise, sizeof(precise), "avoided");
+		} else {
+			std::snprintf(precise, sizeof(precise), "0x%04x/%c", prec_src, prec_why);
+		}
+		std::snprintf(line, sizeof(line), "[pipe-nodrain]   key=0x%x s479=0x%04x/%c precise=%s n=%" PRIu64 " per_flip=%.2f\n", drain_key, s479_src, s479_why, precise, n,
+		              static_cast<double>(n) / static_cast<double>(flips - last));
+		Common::DiagOut::Write(line);
+	}
+}
+
 void DumpDrainHistogram() {
 	const uint64_t flips = FrameTiming::GuestFlips();
 	uint64_t last = g_dump_flip.load(std::memory_order_relaxed);
@@ -510,6 +529,19 @@ void DumpDrainHistogram() {
 		if (n == 0) continue;
 		std::snprintf(line, sizeof(line), "[pipe-drain]   key=0x%x n=%" PRIu64 " per_flip=%.2f\n", key, n, static_cast<double>(n) / static_cast<double>(flips - last));
 		Common::DiagOut::Write(line);
+	}
+	if (CpPipe::NoDrainEnvMode() != CpPipe::NoDrainMode::Off) DumpNoDrainHistogram(flips, last);
+}
+
+uint64_t ReadGuestValue(uint64_t address, uint64_t size) {
+	return size == 8u ? *reinterpret_cast<const volatile uint64_t*>(address) : *reinterpret_cast<const volatile uint32_t*>(address);
+}
+
+FrameTiming::Counter NoDrainTableCounter(uint32_t opcode) {
+	switch (opcode) {
+		case Pm4::IT_SET_CONTEXT_REG_INDIRECT: return FrameTiming::Counter::NoDrainCxN;
+		case Pm4::IT_SET_UCONFIG_REG_INDIRECT: return FrameTiming::Counter::NoDrainUcN;
+		default: return FrameTiming::Counter::NoDrainShN;
 	}
 }
 
@@ -535,7 +567,58 @@ bool CommandProcessor::PipeOverlaps(uint64_t address, uint64_t size) const {
 	return m_pipe != nullptr && m_pipe->pending.Overlaps(address, size);
 }
 
+// The table of a SET_*_REG_INDIRECT is read at parse time: a write still in the FIFO that touches it has to run first. S604 (KYTY_PIPE_NODRAIN): which view decides.
+void CommandProcessor::PipeTableCheck(uint32_t opcode, const uint32_t* payload) {
+	using C = FrameTiming::Counter;
+	uint64_t table = 0, table_size = 0;
+	if (!CpPipe::IndirectTableRange(payload, &table, &table_size)) return;
+	const auto mode = CpPipe::NoDrainEnvMode();
+	if (mode == CpPipe::NoDrainMode::Off) {
+		if (PipeOverlaps(table, table_size)) PipeDrain(0, opcode);
+		return;
+	}
+	auto& p = *m_pipe;
+	if (p.front != nullptr) {
+		if (!OnFrontThread()) return; // as PipeDrain: only the front drains
+		p.pending.RetireUpTo(p.front->Done());
+	} else if (p.executing) {
+		return;
+	}
+	CpPipe::Culprit s479, precise;
+	const bool      s479_overlap    = p.pending.OverlapsS479(table, table_size, &s479);
+	const bool      precise_overlap = p.pending.OverlapsPrecise(table, table_size, &precise);
+	if (!s479_overlap) {
+		if (precise_overlap) { // the precise view is never wider than the S479 one (tests); counted, and drained to be safe
+			FrameTiming::Add(C::NoDrainMonoNeN);
+			PipeDrain(0, opcode);
+		}
+		return;
+	}
+	NoDrainHistAdd(opcode, s479, !precise_overlap, precise);
+	if (precise_overlap) {
+		FrameTiming::Add(C::NoDrainKeptN);
+		PipeDrain(0, opcode);
+		return;
+	}
+	FrameTiming::Add(NoDrainTableCounter(opcode));
+	if (mode == CpPipe::NoDrainMode::On) return; // the handler reads the table now: no write in the FIFO touches it
+	// Shadow: the bytes the handler would have read without the drain against the bytes it reads after it.
+	const uint64_t before = CpPipe::HashBytes(reinterpret_cast<const void*>(table), table_size);
+	PipeDrain(0, opcode);
+	const uint64_t after = CpPipe::HashBytes(reinterpret_cast<const void*>(table), table_size);
+	FrameTiming::Add(C::NoDrainShadowN);
+	if (before != after) {
+		FrameTiming::Add(C::NoDrainNeN);
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1) < 8) {
+			LOGF("[pipe-nodrain] shadow: the table of opcode 0x%x at 0x%016" PRIx64 " (%" PRIu64 " bytes) changed across the drain (S479 culprit 0x%04x)\n", opcode, table,
+			     table_size, s479.src);
+		}
+	}
+}
+
 bool CommandProcessor::PipeWaitVirtual(uint64_t address, uint64_t size, uint32_t func, uint64_t ref, uint64_t mask, bool* satisfied) {
+	using C  = FrameTiming::Counter;
 	auto&    p = *m_pipe;
 	if (p.front != nullptr) {
 		if (!OnFrontThread()) return false; // a wait the recorder runs (none today): nothing ahead of it
@@ -543,19 +626,58 @@ bool CommandProcessor::PipeWaitVirtual(uint64_t address, uint64_t size, uint32_t
 	} else if (p.executing) {
 		return false;
 	}
-	uint64_t value = 0;
-	switch (p.pending.Resolve(address, size, &value)) {
-		case CpPipe::PendingWrites::Verdict::NoPending: return false;
-		case CpPipe::PendingWrites::Verdict::Value:
-			if (CpPipe::WaitCompare(value, ref, mask, func)) {
-				FrameTiming::Add(FrameTiming::Counter::PipeWaitVirtN);
-				*satisfied = true;
-				return true;
-			}
-			break;
-		case CpPipe::PendingWrites::Verdict::Unknown: break;
+	const auto      mode  = CpPipe::NoDrainEnvMode();
+	uint64_t        value = 0;
+	CpPipe::Culprit s479;
+	const auto      verdict = p.pending.Resolve(address, size, &value, mode != CpPipe::NoDrainMode::Off ? &s479 : nullptr);
+	if (!CpPipe::WaitNeedsDrain(verdict, value, ref, mask, func)) {
+		if (mode != CpPipe::NoDrainMode::Off) { // the precise view is never more careful than the S479 one (tests); counted
+			uint64_t   precise_value   = 0;
+			const auto precise_verdict = p.pending.ResolvePrecise(address, size, &precise_value);
+			if (CpPipe::WaitNeedsDrain(precise_verdict, precise_value, ref, mask, func)) FrameTiming::Add(C::NoDrainMonoNeN);
+		}
+		if (verdict == CpPipe::PendingWrites::Verdict::NoPending) return false;
+		FrameTiming::Add(C::PipeWaitVirtN);
+		*satisfied = true;
+		return true;
 	}
+	if (mode == CpPipe::NoDrainMode::Off) {
+		PipeDrain(1, 0x1f1);
+		return false;
+	}
+	if (verdict == CpPipe::PendingWrites::Verdict::Value) s479.reason = CpPipe::Reason::Fail;
+	uint64_t        precise_value = 0;
+	CpPipe::Culprit precise;
+	const auto      precise_verdict = p.pending.ResolvePrecise(address, size, &precise_value, &precise);
+	const bool      precise_drain   = CpPipe::WaitNeedsDrain(precise_verdict, precise_value, ref, mask, func);
+	if (precise_drain && precise_verdict == CpPipe::PendingWrites::Verdict::Value) precise.reason = CpPipe::Reason::Fail;
+	NoDrainHistAdd(0x1f1, s479, !precise_drain, precise);
+	if (precise_drain) {
+		FrameTiming::Add(C::NoDrainKeptN);
+		PipeDrain(1, 0x1f1);
+		return false;
+	}
+	FrameTiming::Add(C::NoDrainWaitN);
+	if (mode == CpPipe::NoDrainMode::On) {
+		if (precise_verdict == CpPipe::PendingWrites::Verdict::NoPending) return false; // the handler reads guest memory: no write in the FIFO touches it
+		FrameTiming::Add(C::PipeWaitVirtN);
+		*satisfied = true;
+		return true;
+	}
+	// Shadow: what the wait would have decided without the drain against what it decides after it (the handler then reads the memory as before).
+	const uint64_t before = ReadGuestValue(address, size);
 	PipeDrain(1, 0x1f1);
+	const uint64_t after = ReadGuestValue(address, size);
+	FrameTiming::Add(C::NoDrainShadowN);
+	if (!CpPipe::ShadowWaitAgrees(precise_verdict, precise_value, before, after, ref, mask, func)) {
+		FrameTiming::Add(C::NoDrainNeN);
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1) < 8) {
+			LOGF("[pipe-nodrain] shadow: the wait on 0x%016" PRIx64 " (%" PRIu64 " bytes, func %u ref 0x%" PRIx64 " mask 0x%" PRIx64 ") decides otherwise after the drain:"
+			     " precise %s 0x%" PRIx64 ", before 0x%" PRIx64 ", after 0x%" PRIx64 " (S479 culprit 0x%04x)\n",
+			     address, size, func, ref, mask, precise_verdict == CpPipe::PendingWrites::Verdict::Value ? "value" : "memory", precise_value, before, after, s479.src);
+		}
+	}
 	return false;
 }
 
@@ -670,44 +792,7 @@ void CommandProcessor::PipeFrontEnqueue(CpPipe::OpClass cls, uint32_t opcode, co
 	FrameTiming::Add(cls == CpPipe::OpClass::Draw ? C::PipeDrawN : (cls == CpPipe::OpClass::Dispatch ? C::PipeDispatchN : C::PipeOrderedN));
 
 	// The writes this item will do, for the WAIT_REG_MEM that follows it in the stream (as PipeEnqueue).
-	constexpr uint64_t kEverything = ~uint64_t {0} >> 1u;
-	const auto*        payload     = packet + 1;
-	const auto         r           = opcode == Pm4::IT_NOP ? KYTY_PM4_R(packet[0]) : 0u;
-	const bool         async       = IsAsyncComputeQueue();
-	uint64_t           address     = 0;
-	switch (opcode) {
-		case Pm4::IT_NOP:
-			if (r == Pm4::R_FLIP || r == Pm4::R_ZERO) p.pending.Note(0, kEverything, false, 0, seq);
-			break;
-		case Pm4::IT_RELEASE_MEM:
-			if (packet_dw >= 8u) {
-				const auto w = CpPipe::DecodeReleaseMem(payload, async, &address);
-				if (w.writes) p.pending.Note(address, w.size, w.known, w.value, seq);
-			}
-			break;
-		case Pm4::IT_EVENT_WRITE:
-			if (packet_dw > 3u) p.pending.Note(0, kEverything, false, 0, seq);
-			break;
-		case Pm4::IT_WRITE_DATA:
-			if (packet_dw >= 5u) {
-				const auto w = CpPipe::DecodeWriteData(payload, packet_dw);
-				p.pending.Note(w.address, w.size, false, 0, seq);
-			}
-			break;
-		case Pm4::IT_DMA_DATA:
-			if (packet_dw >= 7u) {
-				const auto w = CpPipe::DecodeDmaData(payload);
-				p.pending.Note(w.address, w.size, false, 0, seq);
-			}
-			break;
-		case Pm4::IT_COPY_DATA:
-			if (packet_dw >= 6u) {
-				const auto w = CpPipe::DecodeCopyData(payload);
-				p.pending.Note(w.address, w.size, false, 0, seq);
-			}
-			break;
-		default: break;
-	}
+	CpPipe::NoteItemWrites(p.pending, opcode, packet, packet_dw, IsAsyncComputeQueue(), seq, CpPipe::NoDrainEnvMode() != CpPipe::NoDrainMode::Off);
 }
 
 // S577 (KYTY_NUMINST_LAZY, numInstLazy.h). Off: NumInstances() as before (the read of an indirect draw's record faults when the GPU wrote it).
