@@ -21,6 +21,7 @@
 
 #include <array>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <span>
 #include <unordered_map>
@@ -35,6 +36,11 @@ class TextureCache;
 
 using BufferId = Common::SlotId;
 inline constexpr BufferId NULL_BUFFER_ID {0};
+
+namespace UploadAsync {
+class Engine;
+enum class Kind : uint8_t;
+} // namespace UploadAsync
 
 class BufferCache {
 public:
@@ -160,6 +166,11 @@ private:
 	                                     bool is_written, bool is_texel_buffer);
 	[[nodiscard]] vk::Buffer UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> copies,
 	                                      uint64_t total_size);
+	// S605 (KYTY_UPLOAD_ASYNC): the guest -> mapped buffer copy of an upload. Off (or not eligible): CopySparseMemory here, as before;
+	// 1: handed to the upload thread; shadow: here, through a scratch copy the upload thread compares with its own later read.
+	void GuestCopy(uint64_t src, uint8_t* dst, uint64_t size, UploadAsync::Kind kind, bool coherent);
+	void SyncGuestCopy(uint64_t src, uint8_t* dst, uint64_t size);
+	void UploadAsyncBeforeQueue(); // the scheduler's before-queue hook: joins the copies, moves the counters to FrameTiming
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
@@ -225,6 +236,10 @@ private:
 	uint64_t m_critical_gc_memory = 2ull * 1024 * 1024 * 1024;
 	uint64_t m_gc_tick            = 0;
 	uint64_t m_stat_touch_skip    = 0; // S562 KYTY_BUF_TOUCH_SKIP: skips since start (added to FrameTiming per 1024)
+	std::unique_ptr<UploadAsync::Engine> m_upload_async; // S605: nullptr with KYTY_UPLOAD_ASYNC=0
+	uint64_t m_upas_sync_n  = 0; // S605: copies done here (every mode), GPU thread
+	uint64_t m_upas_sync_ns = 0; // S605: their time, every 16th copy timed and counted 16 times
+	uint64_t m_upas_sample  = 0; // S605: copies since start (which one is timed)
 
 	struct EagerPage {
 		uint64_t tick = 0; // submission carrying the download; 0 when none is in flight

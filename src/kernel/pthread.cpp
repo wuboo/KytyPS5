@@ -4510,6 +4510,11 @@ void ApplyToFrontThread() {
 	ApplyToGuestThread();
 }
 
+void ApplyToUploadThread() {
+	NameCurrentThreadWin("CpUpload");
+	ApplyToGuestThread();
+}
+
 // S565: the emitter thread (KYTY_CP_EMIT=thread). KYTY_CP_EMIT_AFFINITY: guest (default; with KYTY_CP_AFFINITY off the CP's core like a guest
 // thread), sibling (the other logical processor of the CP's core), none, or a logical processor number.
 void ApplyToEmitThread() {
@@ -4539,6 +4544,7 @@ namespace Common::CpTuning {
 void ApplyToCpThread() {}
 void ApplyToGuestThread() {}
 void ApplyToFrontThread() {}
+void ApplyToUploadThread() {}
 void ApplyToEmitThread() {}
 } // namespace Common::CpTuning
 #endif

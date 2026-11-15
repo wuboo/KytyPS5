@@ -898,6 +898,17 @@ foreach(mutant IN ITEMS FRONT_LIVE_STATE RECORDER_WRITES_FRONT FRONT_EARLY_REUSE
 	target_include_directories(cp_front_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(cp_front_mutant_${mutant_lower}_tests PRIVATE KYTY_CPPIPE_MUTANT_${mutant}=1)
 endforeach()
+# S605 (KYTY_UPLOAD_ASYNC): the deferred upload copies (header only); an oracle of consumes, guest writes and joins on threads. Mutants (each must be caught,
+# WILL_FAIL, exit code 1): a write does not join, a join does not wait for a running copy, the overlap misses the last byte, a ring slot is refilled unchecked,
+# RELEASE_MEM does not join, the shadow compare is blind, a failed read is not zero-filled, a guest thread runs copies in its join.
+add_executable(upload_async_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/UploadAsyncTests.cpp")
+target_include_directories(upload_async_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS NO_WRITE_JOIN JOIN_NO_WAIT OVERLAP_END SLOT_REUSE LABEL_NO_JOIN SHADOW_BLIND FAIL_NO_ZERO GUEST_HELPS)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(upload_async_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/UploadAsyncTests.cpp")
+	target_include_directories(upload_async_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(upload_async_mutant_${mutant_lower}_tests PRIVATE KYTY_UPAS_MUTANT_${mutant}=1)
+endforeach()
 # S479 (KYTY_CP_PIPE): the log of the writes into the guest's backing (header only). Mutants (each must be caught, WILL_FAIL): a running write is no danger, a wrapped ring
 # answers from what is left, the pages are not compared.
 add_executable(backing_write_log_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/BackingWriteLogTests.cpp")
@@ -2297,6 +2308,12 @@ if(BUILD_TESTING)
 	foreach(mutant IN ITEMS ignore_running no_wrap_guard any_range no_fast_path_guard)
 		add_test(NAME backing_write_log_mutant_${mutant} COMMAND $<TARGET_FILE:backing_write_log_mutant_${mutant}_tests>)
 		set_tests_properties(backing_write_log_mutant_${mutant} PROPERTIES WILL_FAIL TRUE)
+	endforeach()
+	add_test(NAME upload_async COMMAND $<TARGET_FILE:upload_async_tests>)
+	set_tests_properties(upload_async PROPERTIES TIMEOUT 120)
+	foreach(mutant IN ITEMS no_write_join join_no_wait overlap_end slot_reuse label_no_join shadow_blind fail_no_zero guest_helps)
+		add_test(NAME upload_async_mutant_${mutant} COMMAND $<TARGET_FILE:upload_async_mutant_${mutant}_tests>)
+		set_tests_properties(upload_async_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 120)
 	endforeach()
 	add_test(NAME cp_front COMMAND $<TARGET_FILE:cp_front_tests>)
 	foreach(mutant IN ITEMS front_live_state recorder_writes_front front_early_reuse)

@@ -482,6 +482,7 @@ uint64_t CommandScheduler::Submit(SubmitInfo submit) {
 	const int64_t t_first_rec = m_command.m_recorded ? m_command.m_t_first_rec : 0; // S410 (End() below marks the buffer recorded)
 	m_command.End();
 	ConsumeSegPassEnd(); // End() closed the last pass; the first pass end of the segment may be that one
+	if (m_before_queue) m_before_queue(); // S605: the bytes of the buffer's upload copies are in place before vkQueueSubmit
 	const auto buffer   = m_command.m_buffer;
 	auto&      graphics = m_graphics;
 	EXIT_IF(graphics.queue == nullptr);

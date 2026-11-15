@@ -54,6 +54,8 @@ public:
 	// Runs on the recording thread just before a command buffer is closed for submission, so
 	// callers can append work that must follow everything recorded so far (not re-entrant).
 	void SetPreSubmitHook(std::function<void()> hook) { m_pre_submit = std::move(hook); }
+	// S605 (KYTY_UPLOAD_ASYNC): runs after the command buffer is closed and before it goes to the queue (the deferred upload copies join here).
+	void SetBeforeQueueHook(std::function<void()> hook) { m_before_queue = std::move(hook); }
 	// Hand finished command buffers to a submit thread (KYTY_OPT_OFF=async_submit disables).
 	// MoltenVK encodes the whole Metal command buffer inside vkQueueSubmit, which was a quarter of
 	// the GPU thread in menus. Submissions keep their tick order; ones that wait on or signal a
@@ -98,6 +100,7 @@ public:
 private:
 	std::function<void()> m_pre_submit;
 	bool                  m_in_pre_submit = false;
+	std::function<void()> m_before_queue; // S605
 
 	struct SubmitJob {
 		vk::CommandBuffer buffer;

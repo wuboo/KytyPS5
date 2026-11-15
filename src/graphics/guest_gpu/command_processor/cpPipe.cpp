@@ -17,6 +17,7 @@
 #include "graphics/guest_gpu/graphicsRun.h"
 #include "graphics/guest_gpu/hardwareContext.h"
 #include "graphics/guest_gpu/pm4.h"
+#include "graphics/host_gpu/renderer/cache/uploadAsync.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
@@ -455,6 +456,7 @@ void CommandProcessor::PipeExecuteFront() {
 		if (rf_op) {
 			RfOp::BeginPacket(it.opcode, it.dw.data(), packet_dw);
 		}
+		UploadAsync::BeforeHandler(it.opcode, it.opcode == Pm4::IT_NOP ? KYTY_PM4_R(it.dw[0]) : 0u); // S605
 		const auto consumed  = handler(*this, it.dw[0] & ~1u, it.dw.data() + 1, packet_dw, packet_dw) + 1;
 		if (rf_op) {
 			RfOp::EndPacket();
@@ -852,6 +854,7 @@ void CommandProcessor::PipeFrontExecute(uint64_t seq) {
 			const auto handler = g_cp_op_func[it.opcode];
 			EXIT_IF(handler == nullptr || it.live_packet == nullptr);
 			CpPhases::Scope handler_phase(CpPhases::Phase::Handler);
+			UploadAsync::BeforeHandler(it.opcode, it.opcode == Pm4::IT_NOP ? KYTY_PM4_R(it.live_packet[0]) : 0u); // S605
 			it.result_dw = handler(*this, it.live_packet[0] & ~1u, it.live_packet + 1, it.remaining_dw, it.total_dw) + 1;
 		}
 		return;
@@ -890,6 +893,7 @@ void CommandProcessor::PipeFrontExecute(uint64_t seq) {
 		if (CpSampler::Active().load(std::memory_order_relaxed)) CpSampler::CpOpcode().store(it.opcode, std::memory_order_relaxed);
 		const bool rf_op = RfOp::Enabled();
 		if (rf_op) RfOp::BeginPacket(it.opcode, it.dw.data(), packet_dw);
+		UploadAsync::BeforeHandler(it.opcode, it.opcode == Pm4::IT_NOP ? KYTY_PM4_R(it.dw[0]) : 0u); // S605
 		const auto consumed = handler(*this, it.dw[0] & ~1u, it.dw.data() + 1, packet_dw, packet_dw) + 1;
 		if (rf_op) RfOp::EndPacket();
 		if (CpSampler::Active().load(std::memory_order_relaxed)) CpSampler::CpOpcode().store(CpSampler::kNoOpcode, std::memory_order_relaxed);

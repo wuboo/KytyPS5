@@ -136,6 +136,13 @@ int AllocateDirectMemory(int64_t search_start, int64_t search_end, size_t size, 
 int MapAutomaticMemory(uint64_t vaddr, size_t size, int type, int prot);
 int UnmapAmmMemory(uint64_t vaddr, size_t size);
 bool                   TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size);
+// S605 (KYTY_UPLOAD_ASYNC): called with the range before every TryWriteBacking writes it (nullptr: none). The deferred upload copies join there.
+using BackingWriteHook = void (*)(uint64_t vaddr, uint64_t size);
+void                   SetBackingWriteHook(BackingWriteHook hook) noexcept;
+// S605: CopySparseMemory's lock-free first step on its own: Can = would it serve the range now (KYTY_BACKING_READ_NOLOCK=1, every page backed);
+// Read = copy it (no lock, never faults; a page unmapped meanwhile reads as zeros); false, nothing copied, when not served.
+bool                   CanReadBackingNoLock(uint64_t vaddr, uint64_t size);
+bool                   ReadBackingNoLock(uint64_t vaddr, void* data, uint64_t size);
 bool                   TryReadBacking(uint64_t vaddr, void* data, uint64_t size);
 bool                   TryReadBufferBacking(uint64_t vaddr, void* data, uint64_t size);
 // S425 (KYTY_SRT_FAST): reads of one SRT pass. A 4 KiB page that holds no GPU-dirty bytes and (KYTY_CP_READ_BACKING != 0) no

@@ -548,6 +548,12 @@ enum class Counter : uint32_t {
 	// 16-flip window was starved (CP wait on the guest >= 20 %, flips >= 25 ms on average), and per closed flip the pages not banned that the
 	// guest faulted on >= 2 times (a storm; the guard's own flip log, so a flip the CP drains late may hold several).
 	Krf4BurstBanN, Krf4StarveBanN, Krf4StarveFlipN, Krf4StormN,
+	// S605 (KYTY_UPLOAD_ASYNC, uploadAsync.h): upload copies handed to the upload thread (staging / stream path; shadow: verified) and their bytes; copies the
+	// recorder did itself (every mode) and their time (every 16th timed, x16: the recorder's pure copy cost with 0); the upload thread's copy time; copies a
+	// joiner did itself; joins that waited or copied, by reason (submit / packet that writes guest memory / CPU write over a pending copy / full ring); the
+	// recorder's time in joins and the other threads'; shadow differences (must be 0); reads the backing no longer served (zero-filled).
+	UpasStageN, UpasStreamN, UpasBytes, UpasSyncN, UpasSyncNs, UpasWorkerNs, UpasHelpN, UpasJoinSubmitN, UpasJoinPacketN, UpasJoinWriteN, UpasJoinFullN,
+	UpasJoinNs, UpasOtherJoinNs, UpasNeN, UpasFailN,
 	Count,
 };
 

@@ -868,8 +868,27 @@ bool BackingWrittenSince(uint64_t seq0, const uint64_t* pages, size_t count) {
 	return g_backing_writes.WrittenSince(seq0, pages, count);
 }
 
+namespace {
+std::atomic<BackingWriteHook> g_backing_write_hook {nullptr}; // S605
+} // namespace
+
+void SetBackingWriteHook(BackingWriteHook hook) noexcept {
+	g_backing_write_hook.store(hook, std::memory_order_release);
+}
+
+bool CanReadBackingNoLock(uint64_t vaddr, uint64_t size) {
+	return g_guest_address_space != nullptr && g_guest_address_space->CanReadNoLock(vaddr, size);
+}
+
+bool ReadBackingNoLock(uint64_t vaddr, void* data, uint64_t size) {
+	return g_guest_address_space != nullptr && g_guest_address_space->TryReadNoLock(vaddr, data, size);
+}
+
 bool TryWriteBacking(uint64_t vaddr, const void* data, uint64_t size) {
 	if (g_guest_address_space == nullptr) return false;
+	if (const auto hook = g_backing_write_hook.load(std::memory_order_acquire); hook != nullptr) {
+		hook(vaddr, size); // S605: the deferred upload copies that read these bytes run first
+	}
 	const auto token  = g_backing_writes.Begin(vaddr, size);
 	const bool result = g_guest_address_space->TryWriteBacking(vaddr, data, size);
 	g_backing_writes.End(token);

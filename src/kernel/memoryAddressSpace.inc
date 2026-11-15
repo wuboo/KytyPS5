@@ -194,6 +194,9 @@ public:
 		return true;
 	}
 
+	// S605 (KYTY_UPLOAD_ASYNC): would TryReadNoLock serve this range right now (switch on, every page backed)?
+	[[nodiscard]] bool CanReadNoLock(uint64_t vaddr, uint64_t size) const { return BackingReadNoLock() && IsBackedNoLock(vaddr, size); }
+
 	// S546 (KYTY_BACKING_READ_NOLOCK=1): copies a range the page table shows fully backed without
 	// m_mutex (as TryReadBacking does). False, with nothing copied, when the switch is off or a page
 	// of the range is not backed.
@@ -822,6 +825,12 @@ public:
 
 	[[nodiscard]] bool IsBackedNoLock(uint64_t vaddr, uint64_t size) const {
 		return m_backing->IsBackedNoLock(vaddr, size);
+	}
+
+	// S605 (KYTY_UPLOAD_ASYNC): the lock-free backing read of CopySparseMemory's first step on its own (no lock, no fault; false = not served).
+	[[nodiscard]] bool CanReadNoLock(uint64_t vaddr, uint64_t size) const { return m_backing->CanReadNoLock(vaddr, size); }
+	bool               TryReadNoLock(uint64_t vaddr, void* data, uint64_t size) const {
+		return data != nullptr && m_backing->TryReadNoLock(vaddr, data, size);
 	}
 
 	bool TryResolveBackingPage(uint64_t page, const uint8_t** host, uint64_t* seq) {

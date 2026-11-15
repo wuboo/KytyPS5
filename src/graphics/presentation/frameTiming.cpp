@@ -903,6 +903,21 @@ constexpr const char* kCounterNames[] = {
     "krf4_starve_ban_n",
     "krf4_starve_flip_n",
     "krf4_storm_n",
+    "upas_stage_n",
+    "upas_stream_n",
+    "upas_bytes",
+    "upas_sync_n",
+    "upas_sync_ns",
+    "upas_worker_ns",
+    "upas_help_n",
+    "upas_join_submit_n",
+    "upas_join_packet_n",
+    "upas_join_write_n",
+    "upas_join_full_n",
+    "upas_join_ns",
+    "upas_other_join_ns",
+    "upas_ne_n",
+    "upas_fail_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));

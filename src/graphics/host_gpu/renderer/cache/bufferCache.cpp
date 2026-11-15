@@ -21,6 +21,8 @@
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/cache/bufTouchSkip.h"
+#include "graphics/host_gpu/renderer/cache/uploadAsync.h"
+#include "common/cpTuning.h"
 #include "graphics/shader/recompiler/ir/passes/specShadow.h"
 #include "kernel/memory.h"
 
@@ -49,15 +51,16 @@ std::pair<Buffer*, uint64_t> UploadMemory(GraphicContext& graphics, CommandSched
                                         vk::BufferUsageFlags usage, const auto& write) {
 	const auto [mapped, offset] = staging.Map(size, alignment);
 	if (mapped != nullptr) {
-		write(mapped, offset);
+		write(mapped, offset, staging.IsCoherent());
 		staging.Commit();
 		return {&staging, offset};
 	}
 
 	// Large transfers use the same one-time host allocation as ordinary buffer uploads.
+	// (S605: freed by a deferred operation, i.e. after the GPU ran the submit, which a deferred copy into it precedes.)
 	auto temporary = std::make_unique<Buffer>(graphics, scheduler, MemoryUsage::Upload, 0,
 	                                         usage, size);
-	write(temporary->Mapped().data(), 0);
+	write(temporary->Mapped().data(), 0, temporary->IsCoherent());
 	temporary->Flush(0, size);
 	auto* buffer = temporary.get();
 	scheduler.DeferOperation([owner = std::move(temporary)]() mutable { owner.reset(); });
@@ -423,6 +426,21 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 		HotPages::UploadObserver().store(&NoteUploadForWriteFaultDiag, std::memory_order_relaxed);
 	}
 	m_scheduler.SetPreSubmitHook([this] { FlushEagerReadbacks(); });
+	// S605 (KYTY_UPLOAD_ASYNC): the upload copy thread; every command buffer waits for its copies before it is queued. The hook also moves the
+	// copy counters into FrameTiming (every mode).
+	if (UploadAsync::EnvMode() != UploadAsync::Mode::Off) {
+		m_upload_async = std::make_unique<UploadAsync::Engine>(&Libs::LibKernel::Memory::ReadBackingNoLock,
+		                                                       UploadAsync::EnvMode() == UploadAsync::Mode::Shadow);
+		m_upload_async->Start(&Common::CpTuning::ApplyToUploadThread);
+		UploadAsync::Global().store(m_upload_async.get(), std::memory_order_release);
+		Libs::LibKernel::Memory::SetBackingWriteHook(&UploadAsync::BeforeCpuWrite);
+	}
+	std::printf("Environment: KYTY_UPLOAD_ASYNC=%s staging_coherent=%d stream_coherent=%d backing_nolock=%s chunk=%u\n",
+	            UploadAsync::ModeName(UploadAsync::EnvMode()), m_staging_buffer.IsCoherent() ? 1 : 0, m_stream_buffer.IsCoherent() ? 1 : 0,
+	            std::getenv("KYTY_BACKING_READ_NOLOCK") != nullptr ? std::getenv("KYTY_BACKING_READ_NOLOCK") : "-",
+	            static_cast<unsigned>(UploadAsync::Engine::kChunk));
+	std::fflush(stdout);
+	m_scheduler.SetBeforeQueueHook([this] { UploadAsyncBeforeQueue(); });
 	std::memset(m_gds_buffer.Mapped().data(), 0, static_cast<size_t>(m_gds_buffer.Size()));
 	m_gds_buffer.Flush(0, m_gds_buffer.Size());
 	SetVulkanObjectNameF(m_graphics.device, m_bda_pagetable_buffer.Handle(),
@@ -450,6 +468,12 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 }
 
 BufferCache::~BufferCache() {
+	if (m_upload_async != nullptr) { // S605: no copy may outlive the buffers it writes
+		Libs::LibKernel::Memory::SetBackingWriteHook(nullptr);
+		UploadAsync::Global().store(nullptr, std::memory_order_release);
+		m_upload_async->Stop();
+		(void)m_upload_async.release(); // never freed: a late write fault may still hold the pointer (like the CP pipeline's worker pool)
+	}
 	if (!m_gpu_modified_ranges.Empty()) {
 		EXIT("BufferCache: destroyed with pending GPU-modified ranges\n");
 	}
@@ -466,6 +490,8 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 	if (!GuestRange {vaddr, size}.Valid()) {
 		EXIT("BufferCache: invalid memory-invalidation range\n");
 	}
+	// S605 (KYTY_UPLOAD_ASYNC): a CPU write is about to land (write fault, file read, DMA, unmap): the deferred copies of these bytes run first.
+	UploadAsync::BeforeCpuWrite(vaddr, size);
 	// With KYTY_DCC_KNOWN the fill must still be known when the readback decides, so the CPU write forgets it afterwards.
 	const bool known = DccFillPublish::EnvMode() != DccFillPublish::Mode::Off;
 	m_memory_tracker.InvalidateRegion(vaddr, size, [this, vaddr, size] {
@@ -1206,16 +1232,82 @@ vk::Buffer BufferCache::UploadCopies(Buffer& buffer, std::span<vk::BufferCopy> c
 	FrameTiming::Add(FrameTiming::Counter::UploadBytes, total_size);
 
 	const auto source = UploadMemory(m_graphics, m_scheduler, m_staging_buffer, total_size, 4,
-	    vk::BufferUsageFlagBits::eTransferSrc, [&](uint8_t* mapped, uint64_t base_offset) {
+	    vk::BufferUsageFlagBits::eTransferSrc, [&](uint8_t* mapped, uint64_t base_offset, bool coherent) {
 		for (auto& copy: copies) {
 			const auto address = buffer.CpuAddress() + copy.dstOffset;
-			if (!LibKernel::Memory::CopySparseMemory(address, mapped + copy.srcOffset, copy.size)) {
-				EXIT("BufferCache: failed to read sparse guest buffer memory\n");
-			}
+			GuestCopy(address, mapped + copy.srcOffset, copy.size, UploadAsync::Kind::Stage, coherent);
 			copy.srcOffset += base_offset;
 		}
 	});
 	return source.first->Handle();
+}
+
+void BufferCache::SyncGuestCopy(uint64_t src, uint8_t* dst, uint64_t size) {
+	++m_upas_sync_n;
+	const bool timed = (++m_upas_sample & 15u) == 0;
+	const auto t0    = timed ? FrameTiming::SteadyNowNs() : int64_t {0};
+	if (!LibKernel::Memory::CopySparseMemory(src, dst, size)) {
+		EXIT("BufferCache: failed to read sparse guest buffer memory\n");
+	}
+	if (timed) m_upas_sync_ns += 16u * static_cast<uint64_t>(FrameTiming::ElapsedNs(t0, FrameTiming::SteadyNowNs()));
+}
+
+void BufferCache::GuestCopy(uint64_t src, uint8_t* dst, uint64_t size, UploadAsync::Kind kind, bool coherent) {
+	auto* engine = m_upload_async.get();
+	// Deferred only on the recorder (the ring has one producer), into host-coherent memory (no flush after the copy), from a range the lock-free
+	// backing read serves (the upload thread never faults and never locks).
+	if (engine != nullptr && coherent && size != 0 && GuestGpu::IsGpuThread() && LibKernel::Memory::CanReadBackingNoLock(src, size)) {
+		UploadAsync::Engine::SetProducerThread();
+		if (!engine->Shadow()) {
+			engine->Copy(src, dst, size, kind);
+			return;
+		}
+		if (auto* scratch = engine->ShadowScratch(size); scratch != nullptr) {
+			SyncGuestCopy(src, scratch, size); // the copy the GPU gets, as with 0
+			std::memcpy(dst, scratch, static_cast<size_t>(size));
+			engine->Verify(src, scratch, size, kind);
+			return;
+		}
+	}
+	SyncGuestCopy(src, dst, size);
+}
+
+void BufferCache::UploadAsyncBeforeQueue() {
+	if (m_upload_async != nullptr) {
+		m_upload_async->JoinAll(UploadAsync::Reason::Submit);
+	}
+	if (!GuestGpu::IsGpuThread()) {
+		return;
+	}
+	using C = FrameTiming::Counter;
+	FrameTiming::Add(C::UpasSyncN, std::exchange(m_upas_sync_n, 0));
+	FrameTiming::Add(C::UpasSyncNs, std::exchange(m_upas_sync_ns, 0));
+	if (m_upload_async == nullptr) {
+		return;
+	}
+	auto&      s    = m_upload_async->GetStats();
+	const auto take = [](std::atomic<uint64_t>& v) { return v.exchange(0, std::memory_order_relaxed); };
+	FrameTiming::Add(C::UpasStageN, take(s.stage_n));
+	FrameTiming::Add(C::UpasStreamN, take(s.stream_n));
+	FrameTiming::Add(C::UpasBytes, take(s.bytes));
+	FrameTiming::Add(C::UpasWorkerNs, take(s.worker_ns));
+	FrameTiming::Add(C::UpasHelpN, take(s.help_n));
+	FrameTiming::Add(C::UpasJoinSubmitN, take(s.join_n[static_cast<size_t>(UploadAsync::Reason::Submit)]));
+	FrameTiming::Add(C::UpasJoinPacketN, take(s.join_n[static_cast<size_t>(UploadAsync::Reason::Packet)]));
+	FrameTiming::Add(C::UpasJoinWriteN, take(s.join_n[static_cast<size_t>(UploadAsync::Reason::Write)]));
+	FrameTiming::Add(C::UpasJoinFullN, take(s.join_n[static_cast<size_t>(UploadAsync::Reason::Full)]));
+	FrameTiming::Add(C::UpasJoinNs, take(s.join_ns));
+	FrameTiming::Add(C::UpasOtherJoinNs, take(s.other_join_ns));
+	FrameTiming::Add(C::UpasFailN, take(s.fail_n));
+	const auto ne = take(s.ne_n);
+	if (ne != 0) {
+		FrameTiming::Add(C::UpasNeN, ne);
+		static std::atomic<uint32_t> logged {0};
+		if (logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+			LOGF("[upload-async] shadow: %" PRIu64 " deferred copies would have read other bytes; first at 0x%016" PRIx64 "\n", ne,
+			     m_upload_async->m_ne_first[0].load(std::memory_order_relaxed));
+		}
+	}
 }
 
 bool BufferCache::LatestGpuWriteIsFill(uint64_t vaddr, uint64_t size, uint32_t* value) const {
@@ -1242,9 +1334,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		    m_graphics.physical_device_properties.limits.minUniformBufferOffsetAlignment, 1);
 		auto [mapped, offset] = m_stream_buffer.Map(size, alignment, false);
 		if (mapped != nullptr) {
-			if (!LibKernel::Memory::CopySparseMemory(vaddr, mapped, size)) {
-				EXIT("BufferCache: failed to read sparse guest buffer memory\n");
-			}
+			GuestCopy(vaddr, mapped, size, UploadAsync::Kind::Stream, m_stream_buffer.IsCoherent());
 			m_stream_buffer.Commit();
 			return {&m_stream_buffer, offset};
 		}
@@ -1299,7 +1389,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBufferForImage(uint64_t vaddr, u
 
 	return UploadMemory(m_graphics, m_scheduler, m_staging_buffer, size, 16,
 	    vk::BufferUsageFlagBits::eTransferSrc | vk::BufferUsageFlagBits::eStorageBuffer,
-	    [&](uint8_t* mapped, uint64_t) {
+	    [&](uint8_t* mapped, uint64_t, bool) {
 		if (!Libs::LibKernel::Memory::TryReadSparseBacking(vaddr, mapped, size)) {
 			EXIT("BufferCache: failed to read mapped guest image backing\n");
 		}

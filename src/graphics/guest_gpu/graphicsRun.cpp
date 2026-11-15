@@ -20,6 +20,7 @@
 #include "graphics/host_gpu/renderer/gpuKeepWarm.h"
 #include "graphics/host_gpu/renderer/indirectGpu.h"
 #include "graphics/host_gpu/renderer/debug.h"
+#include "graphics/host_gpu/renderer/cache/uploadAsync.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -796,6 +797,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			if (CpSampler::Active().load(std::memory_order_relaxed)) CpSampler::CpOpcode().store(opcode, std::memory_order_relaxed);
 			const bool rf_op = RfOp::Enabled(); // S412 (KYTY_DIAG_RFOP): the opcode and packet a page read fault is attributed to
 			if (rf_op) RfOp::BeginPacket(opcode, packet, remaining_dw);
+			UploadAsync::BeforeHandler(opcode, opcode == Pm4::IT_NOP ? KYTY_PM4_R(packet_header) : 0u); // S605: a handler that may write guest memory
 			packet_dw = handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
 			if (rf_op) RfOp::EndPacket();
 			if (CpSampler::Active().load(std::memory_order_relaxed)) CpSampler::CpOpcode().store(CpSampler::kNoOpcode, std::memory_order_relaxed);
