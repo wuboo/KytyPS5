@@ -70,14 +70,28 @@ std::pair<Buffer*, uint64_t> UploadMemory(GraphicContext& graphics, CommandSched
 
 // S605b (KYTY_UPLOAD_ASYNC=shadow): one line per shadow difference (the engine rate-limits: first 64, then every 256th), to the diag file (the bench's
 // printf direction is Silent, so LOGF lines never reach a file). Called on the upload thread: reads only atomics.
+std::atomic<MemoryTracker*> g_upas_tracker {nullptr}; // S605b DIAG: the tracker of the page state in the shadow line (KYTY_TRACKER_QUERY_NOLOCK=1 only)
+
 void LogUploadShadowNe(const UploadAsync::NeInfo& n) {
-	char line[384];
+	const auto page = (n.src + n.first_off) & ~uint64_t {4095};
+	// The tracker's state of the differing page at the re-read: cpu = a write went through InvalidateRegion (a fault or an explicit invalidate) and
+	// still was not held by its join; clean = the bytes changed with no fault and no invalidate at all (a writer the page protection does not see).
+	const char* state = "-";
+	static const bool nolock = [] {
+		const char* v = std::getenv("KYTY_TRACKER_QUERY_NOLOCK");
+		return v != nullptr && std::strcmp(v, "1") == 0;
+	}();
+	if (auto* tracker = g_upas_tracker.load(std::memory_order_acquire); nolock && tracker != nullptr) {
+		const bool cpu = tracker->IsRegionCpuModified(page, 4096);
+		const bool gpu = tracker->IsRegionGpuModified(page, 4096);
+		state = cpu ? (gpu ? "cpu+gpu" : "cpu") : (gpu ? "gpu" : "clean");
+	}
+	char line[416];
 	std::snprintf(line, sizeof(line),
 	              "[upload-async] shadow ne #%" PRIu64 ": flip=%" PRIu64 " path=%s src_protected=%d addr=0x%016" PRIx64 " size=%" PRIu64 " page=0x%016" PRIx64
-	              " first_off=%" PRIu64 " diff_bytes=%" PRIu64 " rec=0x%02x now=0x%02x age_us=%" PRId64 " pending=%" PRIu64 " last_join=%s\n",
-	              n.index, FrameTiming::GuestFlips(), UploadAsync::KindName(n.kind), n.kind == UploadAsync::Kind::Stage ? 1 : 0, n.src, n.size,
-	              (n.src + n.first_off) & ~uint64_t {4095}, n.first_off, n.diff_bytes, n.recorded, n.reread, n.age_ns / 1000, n.pending,
-	              UploadAsync::ReasonName(n.last_join));
+	              " first_off=%" PRIu64 " diff_bytes=%" PRIu64 " rec=0x%02x now=0x%02x age_us=%" PRId64 " pending=%" PRIu64 " last_join=%s page_now=%s\n",
+	              n.index, FrameTiming::GuestFlips(), UploadAsync::KindName(n.kind), n.kind == UploadAsync::Kind::Stage ? 1 : 0, n.src, n.size, page,
+	              n.first_off, n.diff_bytes, n.recorded, n.reread, n.age_ns / 1000, n.pending, UploadAsync::ReasonName(n.last_join), state);
 	Common::DiagOut::Write(line);
 }
 
@@ -446,6 +460,7 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 		m_upload_async = std::make_unique<UploadAsync::Engine>(&Libs::LibKernel::Memory::ReadBackingNoLock,
 		                                                       UploadAsync::EnvMode() == UploadAsync::Mode::Shadow);
 		m_upload_async->Start(&Common::CpTuning::ApplyToUploadThread);
+		g_upas_tracker.store(&m_memory_tracker, std::memory_order_release);
 		m_upload_async->SetNeObserver(&LogUploadShadowNe);
 		UploadAsync::Global().store(m_upload_async.get(), std::memory_order_release);
 		Libs::LibKernel::Memory::SetBackingWriteHook(&UploadAsync::BeforeCpuWrite);
