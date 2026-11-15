@@ -21,7 +21,10 @@
 // (not backed, non-coherent memory, a producer other than the recorder) is copied by the recorder as before.
 //
 // shadow: the recorder copies as before (through a scratch arena: the GPU sees exactly the off bytes); the helper reads the same range again at
-// its (later) time, with all join points active, and compares. S605b: the difference is classified by the protection of the source at record time:
+// its (later) time, with all join points active, and compares. S605b: the verify is handed over before the recorder's copy, at the point where mode 1
+// hands the copy over (S605 published it after the copy and a 64 KiB memcpy into staging: a guest write that faulted in that window found nothing
+// to join, landed, and the re-read reported it although the page had been re-dirtied correctly). The difference is classified by the protection of
+// the source at record time:
 //   Stage  - the consume write-protected the pages before the copy, so every later store faults into a Write join: a difference is a store that
 //            bypassed the joins (upas_ne_n, must be 0);
 //   Stream - ObtainBuffer's stream path copies CPU-dirty pages, which are writable: a guest store lands there with no fault and no join, in mode 0
@@ -35,7 +38,8 @@
 // misses a write on the last byte of a copy), KYTY_UPAS_MUTANT_SLOT_REUSE (a ring slot is refilled without checking that its copy has run), KYTY_UPAS_MUTANT_LABEL_NO_JOIN
 // (RELEASE_MEM counts as a packet that writes no guest memory), KYTY_UPAS_MUTANT_SHADOW_BLIND (the shadow compare never reports),
 // KYTY_UPAS_MUTANT_FAIL_NO_ZERO (a failed read leaves the destination as it was), KYTY_UPAS_MUTANT_GUEST_HELPS (a thread other than the producer runs copies
-// in its join), KYTY_UPAS_MUTANT_STAGE_AS_RACE (a difference on a protected source is counted as a stream race).
+// in its join), KYTY_UPAS_MUTANT_STAGE_AS_RACE (a difference on a protected source is counted as a stream race), KYTY_UPAS_MUTANT_SHADOW_LATE_PUBLISH
+// (the S605 shadow: the verify is handed over after the recorder's copy, so a write that faults in between finds nothing to join and is reported).
 
 #include "graphics/guest_gpu/pm4.h"
 
@@ -245,16 +249,47 @@ public:
 		if (m_arena_used > m_arena.size()) m_arena_used = m_arena.size();
 		return p;
 	}
-	// Producer, shadow: the helper reads `src` again and compares it with `expected` (the recorder's bytes, in ShadowScratch memory).
-	void Verify(uint64_t src, const uint8_t* expected, uint64_t size, Kind kind) {
+	// Producer, shadow (S605b): the verify of `size` bytes of `src` against `expected` (ShadowScratch memory) is handed over BEFORE the recorder copies
+	// into `expected`, i.e. at the moment mode 1 would hand the copy over: a write after this point joins it (waits until the helper has re-read), as
+	// in mode 1; a write before it is in both reads. The helper waits for VerifyReady before it compares. Returns the token for VerifyReady.
+	struct VerifyToken {
+		uint64_t first = 0, last = 0;
+	};
+	[[nodiscard]] VerifyToken VerifyBegin(uint64_t src, const uint8_t* expected, uint64_t size, Kind kind) {
 		(kind == Kind::Stage ? m_stats.stage_n : m_stats.stream_n).fetch_add(1, std::memory_order_relaxed);
 		m_stats.bytes.fetch_add(size, std::memory_order_relaxed);
+		const uint64_t pieces = (size + kChunk - 1) / kChunk;
+		// Room for every piece first: a full-ring join after the first piece would wait for a verify that is not ready yet.
+		const auto first = m_published.load(std::memory_order_relaxed);
+		if (pieces > m_mask + 1 || first + pieces > m_mask + 1 + m_watermark.load(std::memory_order_acquire)) JoinAll(Reason::Full);
+		VerifyToken token {first, first};
+#ifdef KYTY_UPAS_MUTANT_SHADOW_LATE_PUBLISH
+		m_late = {src, expected, size, kind};
+		return token;
+#endif
 		for (uint64_t done = 0; done < size;) {
 			const auto piece = size - done < kChunk ? size - done : kChunk;
-			Publish(src + done, nullptr, expected + done, piece, kind);
+			Publish(src + done, nullptr, expected + done, piece, kind, false);
 			done += piece;
 		}
+		token.last = m_published.load(std::memory_order_relaxed);
+		return token;
 	}
+	// Producer, shadow: the recorder's bytes are in `expected`; the helper may compare.
+	void VerifyReady(VerifyToken token) {
+#ifdef KYTY_UPAS_MUTANT_SHADOW_LATE_PUBLISH
+		(void)token; // S605 behaviour: the verify appears only after the recorder's copy
+		for (uint64_t done = 0; done < m_late.size;) {
+			const auto piece = m_late.size - done < kChunk ? m_late.size - done : kChunk;
+			Publish(m_late.src + done, nullptr, m_late.expected + done, piece, m_late.kind, true);
+			done += piece;
+		}
+		return;
+#endif
+		for (auto seq = token.first; seq < token.last; ++seq) m_items[seq & m_mask].ready.store(true, std::memory_order_release);
+	}
+	// Producer, shadow: VerifyBegin + VerifyReady with the bytes already in `expected` (tests).
+	void Verify(uint64_t src, const uint8_t* expected, uint64_t size, Kind kind) { VerifyReady(VerifyBegin(src, expected, size, kind)); }
 
 	// Nothing handed over is still waiting or running (two loads).
 	[[nodiscard]] bool Idle() const {
@@ -343,11 +378,20 @@ private:
 		std::atomic<uint64_t> size {0};
 		uint8_t*              dst      = nullptr; // mode 1
 		const uint8_t*        expected = nullptr; // shadow
-		int64_t               t_pub    = 0;       // shadow: when the recorder copied it
+		int64_t               t_pub    = 0;       // shadow: when the verify was handed over (before the recorder's copy)
 		Kind                  kind     = Kind::Stage;
+		std::atomic<bool>     ready {true};       // shadow: the recorder's bytes are in `expected`
 	};
+#ifdef KYTY_UPAS_MUTANT_SHADOW_LATE_PUBLISH
+	struct Late {
+		uint64_t       src      = 0;
+		const uint8_t* expected = nullptr;
+		uint64_t       size     = 0;
+		Kind           kind     = Kind::Stage;
+	} m_late;
+#endif
 
-	void Publish(uint64_t src, uint8_t* dst, const uint8_t* expected, uint64_t size, Kind kind) {
+	void Publish(uint64_t src, uint8_t* dst, const uint8_t* expected, uint64_t size, Kind kind, bool ready = true) {
 		const auto seq  = m_published.load(std::memory_order_relaxed);
 		auto&      slot = m_items[seq & m_mask];
 #ifndef KYTY_UPAS_MUTANT_SLOT_REUSE
@@ -361,6 +405,7 @@ private:
 		slot.expected = expected;
 		slot.kind     = kind;
 		slot.t_pub    = expected != nullptr ? NowNs() : 0;
+		slot.ready.store(ready, std::memory_order_relaxed); // published by the seq_cst store below
 		m_published.store(seq + 1, std::memory_order_seq_cst);
 		if (m_sleeping.load(std::memory_order_seq_cst)) {
 			std::lock_guard lock(m_sleep_mutex);
@@ -388,6 +433,14 @@ private:
 				m_stats.fail_n.fetch_add(1, std::memory_order_relaxed);
 			}
 		} else {
+			// The recorder copies right after VerifyBegin (no lock, no fault in between), so this wait is its copy time.
+			for (uint32_t spin = 0; !it.ready.load(std::memory_order_acquire); ++spin) {
+				if (spin < 4096) {
+					CpuRelax();
+				} else {
+					std::this_thread::yield();
+				}
+			}
 			uint8_t  tmp[4096];
 			uint64_t diff = 0, first = UINT64_MAX;
 			uint8_t  rec_byte = 0, new_byte = 0;

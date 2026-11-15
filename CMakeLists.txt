@@ -901,10 +901,10 @@ endforeach()
 # S605 (KYTY_UPLOAD_ASYNC): the deferred upload copies (header only); an oracle of consumes, guest writes and joins on threads. Mutants (each must be caught,
 # WILL_FAIL, exit code 1): a write does not join, a join does not wait for a running copy, the overlap misses the last byte, a ring slot is refilled unchecked,
 # RELEASE_MEM does not join, the shadow compare is blind, a failed read is not zero-filled, a guest thread runs copies in its join, a shadow difference on a
-# protected source is counted as a stream race (S605b).
+# protected source is counted as a stream race, the verify is handed over after the recorder's copy (S605b).
 add_executable(upload_async_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/UploadAsyncTests.cpp")
 target_include_directories(upload_async_tests PRIVATE ${inc_headers})
-foreach(mutant IN ITEMS NO_WRITE_JOIN JOIN_NO_WAIT OVERLAP_END SLOT_REUSE LABEL_NO_JOIN SHADOW_BLIND FAIL_NO_ZERO GUEST_HELPS STAGE_AS_RACE)
+foreach(mutant IN ITEMS NO_WRITE_JOIN JOIN_NO_WAIT OVERLAP_END SLOT_REUSE LABEL_NO_JOIN SHADOW_BLIND FAIL_NO_ZERO GUEST_HELPS STAGE_AS_RACE SHADOW_LATE_PUBLISH)
 	string(TOLOWER ${mutant} mutant_lower)
 	add_executable(upload_async_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/UploadAsyncTests.cpp")
 	target_include_directories(upload_async_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
@@ -2312,7 +2312,7 @@ if(BUILD_TESTING)
 	endforeach()
 	add_test(NAME upload_async COMMAND $<TARGET_FILE:upload_async_tests>)
 	set_tests_properties(upload_async PROPERTIES TIMEOUT 120)
-	foreach(mutant IN ITEMS no_write_join join_no_wait overlap_end slot_reuse label_no_join shadow_blind fail_no_zero guest_helps stage_as_race)
+	foreach(mutant IN ITEMS no_write_join join_no_wait overlap_end slot_reuse label_no_join shadow_blind fail_no_zero guest_helps stage_as_race shadow_late_publish)
 		add_test(NAME upload_async_mutant_${mutant} COMMAND $<TARGET_FILE:upload_async_mutant_${mutant}_tests>)
 		set_tests_properties(upload_async_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 120)
 	endforeach()

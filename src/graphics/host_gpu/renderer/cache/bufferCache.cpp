@@ -1278,9 +1278,11 @@ void BufferCache::GuestCopy(uint64_t src, uint8_t* dst, uint64_t size, UploadAsy
 			return;
 		}
 		if (auto* scratch = engine->ShadowScratch(size); scratch != nullptr) {
+			// S605b: handed over first (where mode 1 hands the copy over), so a write after this point joins the verify as it would join the copy.
+			const auto token = engine->VerifyBegin(src, scratch, size, kind);
 			SyncGuestCopy(src, scratch, size); // the copy the GPU gets, as with 0
+			engine->VerifyReady(token);
 			std::memcpy(dst, scratch, static_cast<size_t>(size));
-			engine->Verify(src, scratch, size, kind);
 			return;
 		}
 	}

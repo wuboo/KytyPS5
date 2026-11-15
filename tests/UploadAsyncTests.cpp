@@ -8,7 +8,9 @@
 //   SHADOW_BLIND   - the shadow compare never reports a difference;
 //   FAIL_NO_ZERO   - a read the backing no longer serves leaves the destination as it was;
 //   GUEST_HELPS    - a thread other than the producer runs copies in its join (a guest thread the game can suspend would then hold a copy);
-//   STAGE_AS_RACE  - a shadow difference on a protected (stage) source is counted as a stream race instead of an error.
+//   STAGE_AS_RACE  - a shadow difference on a protected (stage) source is counted as a stream race instead of an error;
+//   SHADOW_LATE_PUBLISH - the S605 shadow: the verify is handed over after the recorder's copy, so a write that faults (joins) right after the
+//                    recorder's copy finds nothing to wait for and is reported although mode 1 would have ordered it.
 
 #include "graphics/host_gpu/renderer/cache/uploadAsync.h"
 
@@ -355,6 +357,48 @@ void ShadowTests() {
 	e.Stop();
 }
 
+// S605b: shadow at the moment of mode 1. The recorder hands the verify over, copies, and only then marks it ready; a guest write that faults
+// (Write join) after the hand-over waits until the helper has re-read, exactly as it would wait for the deferred copy in mode 1: no difference.
+// Under SHADOW_LATE_PUBLISH (S605) the write lands between the recorder's copy and the hand-over and is reported.
+void ShadowMomentTests() {
+	ResetSlow();
+	Engine e(&TestRead, true, 64, 1u << 16u);
+	Engine::SetProducerThread();
+	e.Start();
+	for (int round = 0; round < 4; round++) {
+		const uint64_t at = 850000 + static_cast<uint64_t>(round) * 4096;
+		Fill(at, 4096, static_cast<uint8_t>(61 + round));
+		auto* scratch = e.ShadowScratch(4096);
+		Check(scratch != nullptr, "scratch");
+		const auto token = e.VerifyBegin(at, scratch, 4096, round % 2 == 0 ? Kind::Stage : Kind::Stream);
+		std::memcpy(scratch, g_mem.data() + at, 4096); // the recorder's copy
+		std::atomic<bool> landed {false};
+		std::thread guest([&] {
+			e.JoinOverlap(at + 100, 8); // the write fault of a page the consume protected
+			for (uint64_t i = 100; i < 108; i++) std::atomic_ref<uint8_t>(g_mem[at + i]).store(static_cast<uint8_t>(g_mem[at + i] ^ 0xffu));
+			landed = true;
+		});
+		std::this_thread::sleep_for(std::chrono::milliseconds(15)); // the guest is either blocked in its join (right) or has written (S605)
+		const bool early = landed.load();
+		e.VerifyReady(token);
+		guest.join();
+		e.JoinAll(Reason::Submit);
+		Check(!early, "a write after the hand-over waits for the verify (as for the deferred copy)");
+	}
+	Check(e.GetStats().ne_n.load() == 0 && e.GetStats().ne_race_n.load() == 0, "shadow at the moment of mode 1: no difference for an ordered write");
+	// the helper does not compare before the recorder's bytes are in (ready)
+	Fill(870000, 512, 77);
+	auto* scratch = e.ShadowScratch(512);
+	std::memset(scratch, 0, 512);
+	const auto token = e.VerifyBegin(870000, scratch, 512, Kind::Stage);
+	std::this_thread::sleep_for(std::chrono::milliseconds(5)); // the helper has claimed it and waits
+	std::memcpy(scratch, g_mem.data() + 870000, 512);
+	e.VerifyReady(token);
+	e.JoinAll(Reason::Submit);
+	Check(e.GetStats().ne_n.load() == 0, "the helper waits for the recorder's copy before it compares");
+	e.Stop();
+}
+
 // Joins from other threads (a guest's write fault, the front) while the producer keeps handing copies over.
 void CrossThreadTests() {
 	ResetSlow();
@@ -419,6 +463,7 @@ int main() {
 	ShadowTests();
 	CrossThreadTests();
 	GuestWaitsTests();
+	ShadowMomentTests();
 	OracleTests(400);
 	std::printf("UploadAsyncTests: OK\n");
 	return 0;
