@@ -135,7 +135,7 @@ inline void SortUnique(std::vector<uint64_t>& values) {
 
 // `pages`: in, the pages the worker read through the backing (TryReadBackingWorker's log, any order); out, every page the join checks as a
 // page (sorted, unique). `served`: the served dword addresses. `reads`: every read range of the walk (the snapshots' specialization_reads; the
-// served loads are among them, the function adds them anyway). `bytes`: out, the ranges the join checks byte by byte (sorted by address).
+// served loads are among them, the function adds them anyway). `bytes`: out, the ranges the join checks byte by byte (sorted by address, merged).
 // `cw_pages`: out, their pages, which the join asks for backing writes too (sorted, unique; a page may be in both lists when a plain read and a
 // read across a byte page share it: then both checks run). False: a range spans more
 // than `max_pages` pages or wraps (the job is left to the CP, as AppendPages decides).
@@ -188,8 +188,18 @@ inline bool SplitReads(std::vector<uint64_t>& pages, std::span<const uint64_t> s
 	}
 	SortUnique(pages);
 	SortUnique(cw_pages);
+	// Overlapping and touching ranges are merged (a descriptor is 4 or 8 consecutive dwords): the same bytes, fewer questions in the join.
 	std::sort(bytes.begin(), bytes.end());
-	bytes.erase(std::unique(bytes.begin(), bytes.end()), bytes.end());
+	size_t out = 0;
+	for (size_t i = 0; i < bytes.size(); i++) {
+		if (out != 0 && bytes[i].first <= bytes[out - 1].first + bytes[out - 1].second) {
+			const uint64_t end      = std::max(bytes[out - 1].first + bytes[out - 1].second, bytes[i].first + bytes[i].second);
+			bytes[out - 1].second = end - bytes[out - 1].first;
+		} else {
+			bytes[out++] = bytes[i];
+		}
+	}
+	bytes.resize(out);
 	return pages.size() + cw_pages.size() <= max_pages;
 }
 

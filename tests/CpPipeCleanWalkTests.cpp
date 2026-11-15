@@ -102,6 +102,16 @@ void SplitTests() {
 		Check(SplitReads(pages, served, reads, bytes, cw, 4096), "split ok (backing)");
 		Check(Has(pages, P + 0x1000) && bytes.empty() && cw.empty(), "a served page read through the backing stays a page check");
 	}
+	// Touching dwords (a descriptor) become one byte range.
+	{
+		std::vector<uint64_t> pages;
+		const std::vector<uint64_t> served {P + 0x1100, P + 0x1104, P + 0x1108};
+		const std::vector<Range>    reads {{P + 0x1100, 4}, {P + 0x1104, 4}, {P + 0x1108, 4}, {P + 0x110c, 4}, {P + 0x1200, 4}};
+		std::vector<Range>          bytes;
+		std::vector<uint64_t>       cw;
+		Check(SplitReads(pages, served, reads, bytes, cw, 4096), "split ok (merge)");
+		Check(bytes.size() == 2 && HasRange(bytes, P + 0x1100, 16) && HasRange(bytes, P + 0x1200, 4), "touching dwords merged into one range");
+	}
 	// A read across a served page and a plain page: checked by bytes, both pages asked for writes.
 	{
 		std::vector<uint64_t> pages;
@@ -150,7 +160,16 @@ void SplitTests() {
 		Check(SplitReads(pages, served, reads, bytes, cw, 4096), "random split ok");
 		Check(std::set<uint64_t>(pages.begin(), pages.end()) == want_pages && pages.size() == want_pages.size(), "random split: the page checks");
 		Check(std::set<uint64_t>(cw.begin(), cw.end()) == want_cw && cw.size() == want_cw.size(), "random split: the pages asked for writes");
-		Check(std::set<Range>(bytes.begin(), bytes.end()) == want_bytes && bytes.size() == want_bytes.size(), "random split: the byte checks");
+		// The byte checks cover exactly the bytes of the wanted ranges (merged: compare the covered dwords) and do not overlap.
+		std::set<uint64_t> want_cover, cover;
+		for (const auto& [a, n]: want_bytes) {
+			for (uint64_t x = a; x < a + n; x += 4) want_cover.insert(x);
+		}
+		for (size_t k = 0; k < bytes.size(); k++) {
+			for (uint64_t x = bytes[k].first; x < bytes[k].first + bytes[k].second; x += 4) cover.insert(x);
+			Check(k == 0 || bytes[k - 1].first + bytes[k - 1].second < bytes[k].first, "random split: byte ranges merged, disjoint, not touching");
+		}
+		Check(cover == want_cover, "random split: the byte checks cover exactly the reads on byte pages");
 		Check(std::is_sorted(pages.begin(), pages.end()) && std::is_sorted(cw.begin(), cw.end()), "sorted");
 	}
 }
