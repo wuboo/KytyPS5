@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/cache/bufferCache.h"
+#include "graphics/host_gpu/renderer/passSplit.h"
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -306,6 +307,7 @@ bool BufferCache::HasPendingDownload(uint64_t vaddr, uint64_t size) {
 template <bool async>
 bool BufferCache::DownloadBufferMemory(Buffer& buffer, uint64_t vaddr, uint64_t size) {
 	CpPhases::Scope phase(CpPhases::Phase::ReadbackCpu);
+	PassSplit::Note(PassSplit::Mut::Readback); // S612
 	std::vector<vk::BufferCopy> copies;
 	uint64_t                    total_size     = 0;
 	const auto                  buffer_address = buffer.CpuAddress();
@@ -1150,6 +1152,7 @@ void BufferCache::JoinOverlap(BufferId new_id, BufferId overlap_id, bool accumul
 }
 
 BufferId BufferCache::CreateBuffer(uint64_t vaddr, uint64_t size) {
+	PassSplit::Note(PassSplit::Mut::BufCreate); // S612
 	EXIT_IF(m_scheduler.Current().IsInvalid());
 	const auto end     = Common::AlignUp(vaddr + size, CACHING_PAGESIZE);
 	vaddr              = Common::AlignDown(vaddr, CACHING_PAGESIZE);
@@ -1187,6 +1190,7 @@ bool BufferCache::SynchronizeBuffer(Buffer& buffer, uint64_t vaddr, uint64_t siz
 	    },
 	    [&]() noexcept { source = UploadCopies(buffer, copies, total_size); });
 	if (source) {
+		PassSplit::Note(PassSplit::Mut::Upload); // S612
 		auto& command = m_scheduler.Current();
 		if (command.IsRendering()) {
 			FrameTiming::Add(FrameTiming::Counter::UploadPassBreakN);
@@ -1382,6 +1386,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		    m_graphics.physical_device_properties.limits.minUniformBufferOffsetAlignment, 1);
 		auto [mapped, offset] = m_stream_buffer.Map(size, alignment, false);
 		if (mapped != nullptr) {
+			PassSplit::Note(PassSplit::Mut::Upload); // S612
 			GuestCopy(vaddr, mapped, size, UploadAsync::Kind::Stream, m_stream_buffer.IsCoherent());
 			m_stream_buffer.Commit();
 			return {&m_stream_buffer, offset};
@@ -1395,6 +1400,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	TouchBuffer(buffer);
 	(void)SynchronizeBuffer(buffer, vaddr, size, is_written, is_texel_buffer);
 	if (is_written) {
+		PassSplit::Note(PassSplit::Mut::GpuWrite); // S612
 		NumInstLazy::NoteGpuWrite(vaddr, size); // S577: a GPU write over a pending NUM_INSTANCES record (one relaxed load when nothing is armed)
 		ForgetColorMetadataChecks(vaddr, size);
 		m_gpu_modified_ranges.Add(vaddr, size);

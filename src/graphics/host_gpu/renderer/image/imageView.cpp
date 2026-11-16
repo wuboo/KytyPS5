@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/image/imageView.h"
+#include "graphics/host_gpu/renderer/passSplit.h"
 
 #include "common/assert.h"
 #include "graphics/host_gpu/graphicContext.h"
@@ -296,6 +297,7 @@ vk::ImageView Image::FindView(const ImageViewInfo& view_info) {
 			return cached.view;
 		}
 	}
+	PassSplit::Note(PassSplit::Mut::View); // S612: a view is created below
 
 	const bool format_compatible = normalized.format != vk::Format::eUndefined &&
 	                               ImageViewOps::FormatsCompatible(image.format, normalized.format);

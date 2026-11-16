@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/commandScheduler.h"
+#include "graphics/host_gpu/renderer/passSplit.h"
 #include "graphics/host_gpu/renderer/syncCensus.h"
 #include "graphics/host_gpu/gpuLabels.h"
 #include "graphics/host_gpu/renderer/cpWaitDiag.h"
@@ -313,6 +314,7 @@ void CommandScheduler::Wait(uint64_t tick) {
 		BeginNext();
 		NoteDrainEnd();
 	} else {
+		PassSplit::Note(PassSplit::Mut::Wait); // S612 (the branch above submits: noted by CommandBuffer::End)
 		m_master.Wait(tick);
 	}
 }

@@ -21,6 +21,7 @@
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/pipeline/pipelineCache.h"
 #include "graphics/host_gpu/renderer/narrowBarrierVk.h"
+#include "graphics/host_gpu/renderer/passSplit.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/guest_gpu/command_processor/cpPipe.h"
 #include "graphics/guest_gpu/command_processor/cpPipeCleanWalk.h"
@@ -852,6 +853,7 @@ static void CompareWithJob(const DrawRenderState& state, const CpPipe::GfpJob& j
 
 bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCallInfo& draw,
                                             DrawRenderState& state) {
+	PassSplit::LapC(PassSplit::Sec::Job); // S612 (KYTY_PASS_SPLIT=classify): the sections of a draw's R
 	m_context.GetImageHeap().BeginDraw();
 	// S479 (KYTY_CP_PIPE): the programs of a deferred draw were computed by a worker on the registers the draw was parsed with (S490: kept only when they are all
 	// cached, the pages the worker read are not GPU-dirty and nothing was written into them since: CpPipe::JoinJob).
@@ -896,6 +898,7 @@ bool RenderExecutor::PrepareDrawRenderState(CommandBuffer& buffer, const DrawCal
 	if (state.vertex_info[0].stage.module == nullptr) {
 		return false;
 	}
+	PassSplit::LapC(PassSplit::Sec::Rt);
 	auto& targets       = m_targets;
 	targets.color_count = 0;
 	{
@@ -1556,6 +1559,399 @@ void RenderExecutor::ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallIn
 	}
 }
 
+// S612 (KYTY_PASS_SPLIT): the split path in a split mode, the original otherwise.
+void RenderExecutor::ExecuteDraw(CommandBuffer& buffer, const DrawCallInfo& draw, DrawRenderState& state, const DrawEmitInfo& emit,
+                                 const DrawIndexBufferSource& index_source, MeshIndirectRequest* mesh_gpu_request) {
+	if (PassSplit::EnvMode() == PassSplit::Mode::Off) {
+		ExecutePreparedDraw(buffer, draw, state, emit, index_source, mesh_gpu_request);
+	} else {
+		ExecutePreparedDrawSplit(buffer, draw, state, emit, index_source, mesh_gpu_request);
+	}
+}
+
+// S612 (KYTY_PASS_SPLIT, passSplit.h): ExecutePreparedDraw with its tail recorded as R then P (RunTail). Up to the tail this is a copy of
+// ExecutePreparedDraw (keep in step; the GPU mesh path is not here: such a draw is serial). A draw that takes the GPU mesh path or the image heap is
+// serial: ExecutePreparedDraw records it exactly as off does.
+void RenderExecutor::ExecutePreparedDrawSplit(CommandBuffer& buffer, const DrawCallInfo& draw, DrawRenderState& state, const DrawEmitInfo& emit,
+                                              const DrawIndexBufferSource& index_source, MeshIndirectRequest* mesh_gpu_request) {
+	const bool mesh_active = state.vertex_info[0].stage.module->info.stage == ShaderType::Mesh;
+	{
+		bool image_heap = state.ps_active && state.ps_input_info.stage.module->info.info.uses_image_heap;
+		for (const auto& stage: state.VertexStages()) {
+			image_heap = image_heap || stage.stage.module->info.info.uses_image_heap;
+		}
+		if (PassSplit::NeedsSerial(mesh_active && mesh_gpu_request != nullptr, image_heap)) {
+			PassSplit::NoteSerial();
+			ExecutePreparedDraw(buffer, draw, state, emit, index_source, mesh_gpu_request);
+			return;
+		}
+	}
+	auto&      ucfg                     = buffer.GetUserConfig();
+	const bool primitive_restart_enable = state.primitive_restart_enable;
+	if (CopyDepthToColor(buffer, draw, emit, state)) {
+		return;
+	}
+	const auto  vertex_stages = state.VertexStages();
+	const bool  mesh_task     = state.vertex_info[0].stage.module->mesh_task;
+	const auto& mesh          = state.vertex_info[0].mesh;
+	const auto& limits        = m_context.GetGraphics().mesh_shader_properties;
+	uint32_t    mesh_groups   = 0;
+	if (mesh_active) {
+		EXIT_NOT_IMPLEMENTED(mesh.fast_launch && (draw.indexed || primitive_restart_enable));
+		static std::atomic_bool restart_warned = false;
+		if (primitive_restart_enable && !restart_warned.exchange(true, std::memory_order_relaxed)) {
+			std::printf("Warning: primitive restart is not implemented for mesh shaders; "
+			            "continuing draw (primitive=%u indexed=%u)\n",
+			            static_cast<uint32_t>(ucfg.GetPrimType()), draw.indexed);
+		}
+		if (mesh.primitives_per_group == 0) {
+			EXIT("unsupported mesh draw: primitive=%u indexed=%u restart=%u\n",
+			     static_cast<uint32_t>(ucfg.GetPrimType()), draw.indexed, primitive_restart_enable);
+		}
+	}
+	if (mesh_task) {
+		EXIT_NOT_IMPLEMENTED(emit.indirect.count > std::min(limits.maxTaskWorkGroupCount[0],
+		                                                    limits.maxTaskWorkGroupTotalCount));
+	} else if (mesh_active) {
+		const auto primitives = mesh.InputPrimitiveCount(draw.index_count);
+		if (primitives == 0 || draw.instance_count == 0) {
+			return;
+		}
+		mesh_groups = (primitives - 1u) / mesh.primitives_per_group + 1u;
+		if (mesh_groups > limits.maxMeshWorkGroupCount[0] ||
+		    draw.instance_count > limits.maxMeshWorkGroupCount[1] ||
+		    static_cast<uint64_t>(mesh_groups) * draw.instance_count >
+		        limits.maxMeshWorkGroupTotalCount) {
+			EXIT("mesh draw exceeds host workgroup limits: %ux%u\n", mesh_groups,
+			     draw.instance_count);
+		}
+	}
+	if (mesh_active && draw.indexed) {
+		// Register the original guest indices for shader reads; PrepareGraphicsBindings
+		// synchronizes registered BDA ranges before any draw commands are committed.
+		(void)m_context.GetBufferCache().FindBuffer(
+		    index_source.address, static_cast<uint64_t>(draw.index_count) *
+		                              index_source.guest_element_size);
+	}
+	auto&                            bindings = m_graphics_bindings;
+	std::array<PreparedBindings*, 4> descriptor_stages {};
+	uint32_t                         stage_count = 0;
+	const auto stages = [&] {
+		PassSplit::LapC(PassSplit::Sec::Tex);
+		CpPhases::Scope bind(CpPhases::Phase::DrawBind);
+		// S558 (KYTY_CP_PREDECODE): the predecoded stages of this draw's job (the FIFO item being executed owns it until the item has run).
+		PredecodeDraw        predecode_draw;
+		const PredecodeDraw* predecode = nullptr;
+		if (Predecode::EnvMode() != Predecode::Mode::Off) {
+			const CpPipe::GfpJob* const job = CpPipe::CurrentJob();
+			predecode_draw.stages = job != nullptr ? &job->pre : nullptr;
+			predecode_draw.joined = job != nullptr && m_predecode_joined;
+			predecode             = &predecode_draw;
+		}
+		for (uint32_t i = 0; i < vertex_stages.size(); i++) {
+			PrepareBindings(state.vertex_info[i].stage, bindings.vertex[i], predecode);
+			descriptor_stages[stage_count++] = &bindings.vertex[i];
+		}
+		if (state.ps_active) {
+			PrepareBindings(state.ps_input_info.stage, bindings.pixel, predecode);
+			descriptor_stages[stage_count++] = &bindings.pixel;
+		}
+		const auto stages = std::span {descriptor_stages.data(), stage_count};
+		PrepareGraphicsBindings(stages, std::span {m_targets.colors, m_targets.color_count});
+		return stages;
+	}();
+	PassSplit::LapC(PassSplit::Sec::Vbib);
+	PreparedVertexBuffers vertex_bindings;
+	PreparedIndexBuffer   index_binding;
+	if (!mesh_active) {
+		vertex_bindings = AcquireVertexBuffers(buffer, state.vertex_info[0]);
+		index_binding   = PrepareIndexBuffer(buffer, index_source);
+	}
+	std::pair<Buffer*, uint64_t> args_buffer {};
+	if (emit.indirect.address != 0) {
+		const auto size = static_cast<uint64_t>(emit.indirect.count - 1) * emit.indirect.stride +
+		                  (draw.indexed ? sizeof(vk::DrawIndexedIndirectCommand)
+		                                : sizeof(vk::DrawIndirectCommand));
+		args_buffer = m_context.GetBufferCache().ObtainBuffer(emit.indirect.address, size, false);
+		EXIT_IF((args_buffer.second & 3u) != 0);
+	}
+
+	// The tail (passSplit.h): R = AcquireTargets, Prologue, BindingsTransit, the decisions; P = the rest.
+	static const bool skip_same_pipeline = [] {
+		const char* text = std::getenv("KYTY_SKIP_SAME_PIPELINE");
+		return text != nullptr && std::strcmp(text, "1") == 0;
+	}();
+	const bool                     shadow         = PassSplit::EnvMode() == PassSplit::Mode::Shadow;
+	PipelineCache::Pipeline*       pipeline       = nullptr;
+	const PipelineCache::Pipeline* early_pipeline = nullptr;
+	vk::ImageAspectFlags           feedback_aspects;
+	RenderState                    rendering {};
+	vk::DeviceAddress              task_params = 0;
+	std::optional<CpEmit::Cmd>     vk_buffer;
+	struct TailPlan {
+		vk::PipelineStageFlags write_stages = {};
+		bool                   address_writes = false, defer_on = false, defer_write = false, read_flush = false, write_now = false,
+		     note_failed = false;
+	};
+	TailPlan                         plan;
+	std::vector<DeferBarrier::Range> saved_pending; // shadow
+	const auto decide_before = [&](bool cb_pending, TailPlan& p) {
+		p.write_stages   = {};
+		p.address_writes = false;
+		for (const auto& stage: vertex_stages) {
+			if (HasShaderBufferWrites(stage.stage)) {
+				p.write_stages |= ShaderPipelineStages(NativeShaderStage(stage.logical_stage));
+			}
+			p.address_writes |= stage.stage.module->info.has_address_writes;
+		}
+		if (state.ps_active && HasShaderBufferWrites(state.ps_input_info.stage)) {
+			p.write_stages |= vk::PipelineStageFlagBits::eFragmentShader;
+		}
+		if (state.ps_active) {
+			p.address_writes |= state.ps_input_info.stage.module->info.has_address_writes;
+		}
+		// S511: bounded buffer writes (the garden's BUFFER_ATOMIC) leave the barrier pending.
+		// An address write has no range, so it keeps the immediate pair. Env off keeps both barriers.
+		// A draw that does not itself write still flushes when it may read a pending range.
+		p.defer_on    = DeferBarrier::Enabled();
+		p.defer_write = p.defer_on && static_cast<bool>(p.write_stages) && !p.address_writes;
+		p.read_flush  = false;
+		if (p.defer_on) {
+			if (!cb_pending) {
+				m_pending_writes.clear();
+			} else if (DrawReadsPending(stages, state.vertex_info[0], index_source, emit, 0)) {
+				p.read_flush = true;
+				m_pending_writes.clear();
+			}
+		}
+		p.write_now = static_cast<bool>(p.write_stages) && !p.defer_write;
+		if (p.write_now) {
+			m_pending_writes.clear();
+		}
+	};
+	const auto decide_after = [&](TailPlan& p) {
+		p.note_failed = false;
+		if (p.defer_write && !NotePendingBufferWrites(stages)) {
+			p.note_failed = true;
+			m_pending_writes.clear();
+		}
+	};
+	PassSplit::Overload ops {
+	    [&](PassSplit::Op::Pipeline) {
+		    CpPhases::Scope pipe(CpPhases::Phase::DrawPipeline);
+		    pipeline = &m_context.GetPipelineCache().GetGraphicsPipeline(buffer, state, m_targets);
+	    },
+	    [&](PassSplit::Op::AcquireTargets) {
+		    CpPhases::Scope targets(CpPhases::Phase::DrawTargets);
+		    rendering = AcquireRenderTargets(buffer, m_targets.colors, m_targets.color_count, m_targets.depth, feedback_aspects, stages);
+	    },
+	    [&](PassSplit::Op::Prologue) {
+		    if (mesh_task) {
+			    const MeshTaskParams params {
+			        .records        = args_buffer.first->BufferDeviceAddress() + args_buffer.second,
+			        .index_address  = index_source.address,
+			        .stride         = emit.indirect.stride,
+			        .index_size     = index_source.guest_element_size,
+			        .index_limit    = draw.index_count,
+			        .primitive_size = mesh.InputPrimitiveSize(),
+			        .group_step     = mesh.primitives_per_group * mesh.InputPrimitiveStep(),
+			        .max_groups     = limits.maxMeshWorkGroupCount[0],
+			        .max_instances  = limits.maxMeshWorkGroupCount[1],
+			        .max_total      = limits.maxMeshWorkGroupTotalCount,
+			    };
+			    auto& stream = m_context.GetBufferCache().GetUtilityBuffer(MemoryUsage::Stream);
+			    task_params  = stream.BufferDeviceAddress() + stream.Copy(&params, sizeof(params), 8);
+		    }
+		    // S327: the pass about to be needed differs from the open one: split here, before this draw records anything (KYTY_EAGER_SUBMIT).
+		    m_context.GetCommandScheduler().MaybeEagerSplitAtPass(rendering);
+		    // From here on every operation targets the current command buffer and cannot touch guest memory (as in ExecutePreparedDraw).
+		    vk_buffer.emplace(buffer.Emit());
+		    return true;
+	    },
+	    [&](PassSplit::Op::CommitVertex) {
+		    if (!mesh_active) {
+			    CommitVertexBuffers(*vk_buffer, vertex_bindings);
+		    }
+	    },
+	    [&](PassSplit::Op::BindingsWhole) {
+		    CpPhases::Scope desc(CpPhases::Phase::DrawDesc);
+		    CommitBindings(buffer, vk::PipelineBindPoint::eGraphics, *pipeline, stages);
+	    },
+	    [&](PassSplit::Op::BindingsTransit) {
+		    CpPhases::Scope desc(CpPhases::Phase::DrawDesc);
+		    CommitBindingsTransit(buffer, stages);
+	    },
+	    [&](PassSplit::Op::BindingsBuild) {
+		    CpPhases::Scope desc(CpPhases::Phase::DrawDesc);
+		    CommitBindingsBuild(buffer, vk::PipelineBindPoint::eGraphics, *pipeline, stages);
+	    },
+	    [&](PassSplit::Op::CommitIndex) {
+		    if (!mesh_active) {
+			    CommitIndexBuffer(*vk_buffer, index_binding);
+		    }
+	    },
+	    [&](PassSplit::Op::PushDraw) {
+		    CpPhases::Scope vkcmd(CpPhases::Phase::DrawVkcmd);
+		    using ShaderRecompiler::IR::PushData;
+		    const auto draw_dwords = PushData::GraphicsDrawDwords(mesh_active, state.ps_input_info.object_primitive_id);
+		    if (draw_dwords != 0) {
+			    std::array<uint32_t, PushData::MeshDrawDwordCount> draw_data {};
+			    if (mesh_task) {
+				    draw_data[0] = static_cast<uint32_t>(task_params);
+				    draw_data[1] = static_cast<uint32_t>(task_params >> 32u);
+			    } else if (mesh_active) {
+				    draw_data = {draw.index_count,
+				                 static_cast<uint32_t>(emit.vertex_offset),
+				                 emit.first_instance,
+				                 index_source.guest_element_size,
+				                 static_cast<uint32_t>(index_source.address),
+				                 static_cast<uint32_t>(index_source.address >> 32u)};
+			    } else {
+				    draw_data[0] = buffer.GetUserConfig().GetObjectId();
+			    }
+			    vk_buffer->pushConstants(pipeline->pipeline_layout, pipeline->push_stages, 0, draw_dwords * sizeof(uint32_t), draw_data.data());
+		    }
+		    if (const auto planes = vertex_stages.back().user_clip_planes; planes != 0) {
+			    vk_buffer->pushConstants(pipeline->pipeline_layout, pipeline->push_stages, PushData::UserClipPlaneDword * sizeof(uint32_t),
+			                             std::bit_width(planes) * 4u * sizeof(uint32_t), buffer.GetRegisters().GetUserClipPlanes().data());
+		    }
+	    },
+	    [&](PassSplit::Op::Dynamic) {
+		    CpPhases::Scope vkcmd(CpPhases::Phase::DrawVkcmd);
+		    auto& dynamic_state = m_context.GetCommandScheduler().GetDynamicState();
+		    UpdateGraphicsDynamicState(buffer, dynamic_state, vertex_stages.back(), m_targets.depth, rendering);
+		    dynamic_state.SetAttachmentFeedbackLoopAspects(feedback_aspects);
+		    dynamic_state.Commit(m_context.GetGraphics(), *vk_buffer);
+	    },
+	    [&](PassSplit::Op::DecideBefore) { decide_before(buffer.HasPendingShaderWrites(), plan); },
+	    [&](PassSplit::Op::EmitBefore) {
+		    CpPhases::Scope vkcmd(CpPhases::Phase::DrawVkcmd);
+		    if (plan.read_flush) {
+			    buffer.EndRendering();
+			    FrameTiming::Add(FrameTiming::Counter::DeferWriteReadN);
+		    }
+		    if (plan.write_now) {
+			    // As for dispatches, buffer writes wait for earlier accesses to the memory.
+			    buffer.EndRendering();
+			    if (NarrowBarrier::NarrowWriteHazard(NarrowBarrier::Level(), false)) {
+				    NarrowBarrier::WriteHazard(*vk_buffer, NarrowBarrier::ToStages2(plan.write_stages));
+				    FrameTiming::Add(FrameTiming::Counter::NarrowBarrierN);
+			    } else {
+				    ShaderWriteHazardBarrier(*vk_buffer, plan.write_stages);
+			    }
+			    if (plan.defer_on) {
+				    FrameTiming::Add(FrameTiming::Counter::DeferWriteNowN);
+			    }
+		    }
+	    },
+	    [&](PassSplit::Op::Draw) {
+		    CpPhases::Scope vkcmd(CpPhases::Phase::DrawVkcmd);
+		    const auto& cmd = *vk_buffer;
+		    buffer.BeginRendering(rendering);
+		    // S546 (KYTY_SKIP_SAME_PIPELINE=1): the pipeline this recording already has bound is not bound again.
+		    if (skip_same_pipeline && buffer.GraphicsPipelineBound(pipeline->pipeline)) {
+			    FrameTiming::Add(FrameTiming::Counter::PipelineSkipN);
+		    } else {
+			    cmd.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->pipeline);
+			    buffer.NoteGraphicsPipeline(pipeline->pipeline);
+		    }
+		    auto&         occlusion_queries = m_context.GetOcclusionQueries();
+		    const int32_t occlusion_query   = occlusion_queries.Begin(cmd);
+		    if (mesh_task) {
+			    cmd.drawMeshTasksEXT(emit.indirect.count, 1, 1);
+		    } else if (mesh_active) {
+			    cmd.drawMeshTasksEXT(mesh_groups, draw.instance_count, 1);
+		    } else if (args_buffer.first == nullptr) {
+			    EmitDrawPrimitives(ucfg, cmd, draw, emit);
+		    } else if (draw.indexed) {
+			    cmd.drawIndexedIndirect(args_buffer.first->Handle(), args_buffer.second, emit.indirect.count, emit.indirect.stride);
+		    } else {
+			    cmd.drawIndirect(args_buffer.first->Handle(), args_buffer.second, emit.indirect.count, emit.indirect.stride);
+		    }
+		    occlusion_queries.End(cmd, occlusion_query);
+		    if (CpPhases::Enabled()) {
+			    DrawRepeat::Finger now;
+			    now.cb         = buffer.RecordingId();
+			    now.pipeline   = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkPipeline>(pipeline->pipeline)));
+			    now.generation = m_context.GetTextureCache().RegistrationGeneration();
+			    now.color_n    = m_targets.color_count < 8 ? m_targets.color_count : 8;
+			    for (uint32_t i = 0; i < now.color_n; i++) {
+				    now.colors[i] = m_targets.colors[i].image_id.index;
+			    }
+			    now.depth = m_targets.depth.image_id.index;
+			    for (const auto* stage: stages) {
+				    for (const auto& image: stage->images) {
+					    now.images.push_back(image.image_id.index);
+				    }
+				    for (const auto sampler: stage->samplers) {
+					    now.samplers.push_back(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(static_cast<VkSampler>(sampler))));
+				    }
+				    for (const auto& source: stage->buffer_sources) {
+					    now.buffers.push_back(source.id.index);
+				    }
+				    now.shader_data.insert(now.shader_data.end(), stage->shader_data.begin(), stage->shader_data.end());
+			    }
+			    bool state_same = false;
+			    bool rt_same    = false;
+			    DrawRepeat::Observe(std::move(now), &state_same, &rt_same);
+			    if (state_same) {
+				    FrameTiming::Add(FrameTiming::Counter::DrawStateSameN);
+			    }
+			    if (rt_same) {
+				    FrameTiming::Add(FrameTiming::Counter::RtSameN);
+			    }
+		    }
+		    Common::DebugCounters::Add(Common::DebugCounters::Counter::Draws);
+		    Common::DebugCounters::Add(Common::DebugCounters::Counter::DrawInstances, draw.instance_count);
+	    },
+	    [&](PassSplit::Op::AfterBarrier) {
+		    if (plan.write_now) {
+			    buffer.EndRendering();
+			    ShaderWriteBarrier(*vk_buffer, plan.write_stages);
+		    } else if (plan.defer_write) {
+			    buffer.DeferShaderWriteBarrier(plan.write_stages);
+		    }
+	    },
+	    [&](PassSplit::Op::DecideAfter) { decide_after(plan); },
+	    [&](PassSplit::Op::AfterEnd) {
+		    if (plan.defer_write) {
+			    if (plan.note_failed) {
+				    buffer.EndRendering();
+			    }
+			    FrameTiming::Add(FrameTiming::Counter::DeferWriteDrawN);
+		    }
+	    },
+	    [&](PassSplit::Op::ShadowEarly) {
+		    early_pipeline = &m_context.GetPipelineCache().GetGraphicsPipeline(buffer, state, m_targets);
+		    saved_pending  = m_pending_writes;
+	    },
+	    [&](PassSplit::Op::ShadowCheck) {
+		    // The decisions again at their off position (after the dynamic state), on a copy of the state R decided on.
+		    TailPlan again;
+		    auto     copy = saved_pending;
+		    std::swap(m_pending_writes, copy);
+		    decide_before(buffer.HasPendingShaderWrites(), again);
+		    decide_after(again);
+		    std::swap(m_pending_writes, copy);
+		    bool same_pending = copy.size() == m_pending_writes.size();
+		    for (size_t i = 0; same_pending && i < copy.size(); i++) {
+			    same_pending = copy[i].begin == m_pending_writes[i].begin && copy[i].end == m_pending_writes[i].end &&
+			                   copy[i].atomic_only == m_pending_writes[i].atomic_only;
+		    }
+		    const bool ne = early_pipeline != pipeline || again.read_flush != plan.read_flush || again.write_now != plan.write_now ||
+		                    again.note_failed != plan.note_failed || again.write_stages != plan.write_stages || !same_pending;
+		    PassSplit::NoteShadow(ne);
+		    static std::atomic<int> logged {0};
+		    if (ne && logged.fetch_add(1, std::memory_order_relaxed) < 8) {
+			    std::fprintf(stderr, "[pass-split] shadow ne: pipeline %d read_flush %d/%d write_now %d/%d note_failed %d/%d pending %d\n",
+			                 early_pipeline != pipeline ? 1 : 0, plan.read_flush ? 1 : 0, again.read_flush ? 1 : 0, plan.write_now ? 1 : 0,
+			                 again.write_now ? 1 : 0, plan.note_failed ? 1 : 0, again.note_failed ? 1 : 0, same_pending ? 0 : 1);
+		    }
+	    },
+	};
+	(void)PassSplit::RunTail(ops, true, shadow);
+}
+
 // S479 (KYTY_CP_PIPE): the worker's GetGraphicsPrograms for a deferred draw, on the registers snapshotted with it. S490: upstream reads a draw's programs from the
 // command buffer, so the worker runs the same function on the snapshot (PipelineCache::GetGraphicsProgramsOffThread: lookup only, resources in the job's own
 // snapshot). Everything the walk read is logged as pages, which JoinJob checks against GPU-written bytes when the recorder asks for the result.
@@ -1795,6 +2191,7 @@ static bool PrimitiveRestartControlOn(const CommandBuffer& buffer) {
 }
 
 bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args) {
+	PassSplit::DrawScope pass_split_draw; // S612 (KYTY_PASS_SPLIT): the draw's sections (nothing when off)
 	KYTY_PROFILER_FUNCTION();
 	FrameTiming::Add(FrameTiming::Counter::Draws);
 	m_context.GetCommandScheduler().MaybeEagerSplit(); // KYTY_EAGER_SUBMIT
@@ -1920,7 +2317,7 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 	const auto emit = ResolveDrawEmit(ucfg, state.vertex_info[0], args.offset_source,
 	                                  args.base_vertex, args.first_instance, args.indirect);
 	if (emit) {
-		ExecutePreparedDraw(buffer, draw, state, *emit, index_source, mesh_gpu_request);
+		ExecuteDraw(buffer, draw, state, *emit, index_source, mesh_gpu_request);
 		if (mesh_gpu_request != nullptr && mesh_gpu_request->declined) {
 			// The ring was full before anything of the draw was recorded: the caller reads the args and draws the old way.
 			return decline();
@@ -1932,6 +2329,7 @@ bool RenderExecutor::DrawIndex(CommandBuffer& buffer, const DrawIndexArgs& args)
 
 // NOLINTNEXTLINE(readability-function-cognitive-complexity)
 bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
+	PassSplit::DrawScope pass_split_draw; // S612 (KYTY_PASS_SPLIT): the draw's sections (nothing when off)
 	FrameTiming::Add(FrameTiming::Counter::Draws);
 	m_context.GetCommandScheduler().MaybeEagerSplit(); // KYTY_EAGER_SUBMIT
 	KYTY_PROFILER_FUNCTION();
@@ -2013,7 +2411,7 @@ bool RenderExecutor::DrawAuto(CommandBuffer& buffer, const DrawAutoArgs& args) {
 	                                  static_cast<int32_t>(args.first_vertex), args.first_instance,
 	                                  args.indirect);
 	if (emit) {
-		ExecutePreparedDraw(buffer, draw, state, *emit, {});
+		ExecuteDraw(buffer, draw, state, *emit, {});
 	}
 	ResetBindings();
 	return emit.has_value();

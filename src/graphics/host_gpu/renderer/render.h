@@ -282,6 +282,11 @@ public:
 	void CommitBindings(CommandBuffer& buffer, vk::PipelineBindPoint pipeline_bind_point,
 	                    const PipelineCache::Pipeline&     pipeline,
 	                    std::span<PreparedBindings* const> bindings);
+	// S612 (KYTY_PASS_SPLIT, passSplit.h): CommitBindings in two halves for a split draw: the transitions / GDS barriers (R), the descriptor writes
+	// and push data (P).
+	void CommitBindingsTransit(CommandBuffer& buffer, std::span<PreparedBindings* const> bindings);
+	void CommitBindingsBuild(CommandBuffer& buffer, vk::PipelineBindPoint pipeline_bind_point, const PipelineCache::Pipeline& pipeline,
+	                         std::span<PreparedBindings* const> bindings);
 	// S558 shadow (KYTY_CP_PREDECODE=shadow): with `shadow`, the description computed before FindImage is compared with the worker's slot
 	// and *shadow_ne set when they differ; the result is the same as without.
 	[[nodiscard]] TextureBinding ResolveTexture(const ShaderRecompiler::IR::ImageResource&   resource,
@@ -330,6 +335,11 @@ private:
 	void ExecutePreparedDraw(CommandBuffer& buffer, const DrawCallInfo& draw,
 	                         DrawRenderState& state, const DrawEmitInfo& emit,
 	                         const DrawIndexBufferSource& index_source, MeshIndirectRequest* mesh_gpu = nullptr);
+	// S612 (KYTY_PASS_SPLIT): the draw recorded as R then P (passSplit.h RunTail); ExecuteDraw picks it in a split mode.
+	void ExecutePreparedDrawSplit(CommandBuffer& buffer, const DrawCallInfo& draw, DrawRenderState& state, const DrawEmitInfo& emit,
+	                              const DrawIndexBufferSource& index_source, MeshIndirectRequest* mesh_gpu = nullptr);
+	void ExecuteDraw(CommandBuffer& buffer, const DrawCallInfo& draw, DrawRenderState& state, const DrawEmitInfo& emit,
+	                 const DrawIndexBufferSource& index_source, MeshIndirectRequest* mesh_gpu = nullptr);
 	// S511: true when this draw may read bytes a deferred buffer write has not barriered yet.
 	[[nodiscard]] bool DrawReadsPending(std::span<PreparedBindings* const> stages, const ShaderVertexInputInfo& vertex_input,
 	                                    const DrawIndexBufferSource& index_source, const DrawEmitInfo& emit, uint64_t mesh_args_addr) const;

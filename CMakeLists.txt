@@ -950,6 +950,20 @@ foreach(mutant IN ITEMS SERIAL_IGNORED PASS_IGNORED NO_OVERHEAD CHUNK_PLUS_ONE W
 	target_include_directories(pass_probe_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(pass_probe_mutant_${mutant_lower}_tests PRIVATE KYTY_PASSPROBE_MUTANT_${mutant}=1)
 endforeach()
+# S612 (KYTY_PASS_SPLIT, passSplit.h): the tail of a draw split into R (reservation) and P on one thread against the original order (a fake command
+# buffer, images and the deferred-write list: the state of every draw, the final world and the command log once the vertex-buffer bind is moved back
+# must be the same; the shadow checks never differ) and the ledger of the draw sections against a replay of random scripts. Mutants (each must be
+# caught, WILL_FAIL, exit code 1): R decides before the binding transitions, P drops the pass end of a full list, descriptors built before the
+# transitions, the draw before the dynamic state, the planned pass end / barrier dropped, an image-heap draw split, soft filed as clean, P filed as R,
+# mutations outside a draw counted, a nested scope restarting the outer one.
+add_executable(pass_split_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PassSplitTests.cpp")
+target_include_directories(pass_split_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS DECIDE_EARLY NO_NOTE_END BUILD_BEFORE_TRANSIT DRAW_BEFORE_DYNAMIC NO_EMIT_BEFORE SERIAL_IGNORED SOFT_AS_CLEAN P_AS_R NOTE_OUTSIDE NESTED_SCOPE)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(pass_split_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/PassSplitTests.cpp")
+	target_include_directories(pass_split_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(pass_split_mutant_${mutant_lower}_tests PRIVATE KYTY_PASSSPLIT_MUTANT_${mutant}=1)
+endforeach()
 # S608 (KYTY_CP_WALK_QUERY, cpWalkQuery.h): the CP's clean-walk byte query from its own view (dirty without the lock, in flight with a bounded spin), the gate,
 # answers with a reader holding a lock, and an oracle over the real GpuDirtyRanges/InflightRanges with a CP, a publish thread and three readers. Mutants
 # (each must be caught, WILL_FAIL, exit code 1): the view without the switch / off the GPU thread, one try_lock on the dirty lock, no in-flight question,
@@ -2381,6 +2395,12 @@ if(BUILD_TESTING)
 	foreach(mutant IN ITEMS serial_ignored pass_ignored no_overhead chunk_plus_one wait_kept sync_parallel round_robin window_open_end)
 		add_test(NAME pass_probe_mutant_${mutant} COMMAND $<TARGET_FILE:pass_probe_mutant_${mutant}_tests>)
 		set_tests_properties(pass_probe_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 180)
+	endforeach()
+	add_test(NAME pass_split COMMAND $<TARGET_FILE:pass_split_tests>)
+	set_tests_properties(pass_split PROPERTIES TIMEOUT 180)
+	foreach(mutant IN ITEMS decide_early no_note_end build_before_transit draw_before_dynamic no_emit_before serial_ignored soft_as_clean p_as_r note_outside nested_scope)
+		add_test(NAME pass_split_mutant_${mutant} COMMAND $<TARGET_FILE:pass_split_mutant_${mutant}_tests>)
+		set_tests_properties(pass_split_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 180)
 	endforeach()
 	add_test(NAME cp_walk_query COMMAND $<TARGET_FILE:cp_walk_query_tests>)
 	set_tests_properties(cp_walk_query PROPERTIES TIMEOUT 120)

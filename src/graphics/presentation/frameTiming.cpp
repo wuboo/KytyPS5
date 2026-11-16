@@ -7,6 +7,7 @@
 #include "graphics/host_gpu/renderer/cache/imagePageSummary.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/cpWaitDiag.h"
+#include "graphics/host_gpu/renderer/passSplit.h"
 #include "graphics/shader/nullDescDiag.h"
 
 #include "common/memEvents.h"
@@ -950,6 +951,68 @@ constexpr const char* kCounterNames[] = {
     "pipe_join_cpuw_n",
     "pipe_chk_shadow_n",
     "pipe_chk_shadow_ne_n",
+    "pass_split_draw_n",
+    "pass_split_p_draw_n",
+    "pass_split_serial_n",
+    "pass_split_nop_n",
+    "pass_split_lap_n",
+    "pass_split_r_ns",
+    "pass_split_p_ns",
+    "pass_split_p_soft_n",
+    "pass_split_p_hard_n",
+    "pass_split_shadow_n",
+    "pass_split_ne_n",
+    "pass_split_head_clean_ns",
+    "pass_split_head_soft_ns",
+    "pass_split_head_hard_ns",
+    "pass_split_job_clean_ns",
+    "pass_split_job_soft_ns",
+    "pass_split_job_hard_ns",
+    "pass_split_rt_clean_ns",
+    "pass_split_rt_soft_ns",
+    "pass_split_rt_hard_ns",
+    "pass_split_tex_clean_ns",
+    "pass_split_tex_soft_ns",
+    "pass_split_tex_hard_ns",
+    "pass_split_find_clean_ns",
+    "pass_split_find_soft_ns",
+    "pass_split_find_hard_ns",
+    "pass_split_img_clean_ns",
+    "pass_split_img_soft_ns",
+    "pass_split_img_hard_ns",
+    "pass_split_buf_clean_ns",
+    "pass_split_buf_soft_ns",
+    "pass_split_buf_hard_ns",
+    "pass_split_vbib_clean_ns",
+    "pass_split_vbib_soft_ns",
+    "pass_split_vbib_hard_ns",
+    "pass_split_acq_clean_ns",
+    "pass_split_acq_soft_ns",
+    "pass_split_acq_hard_ns",
+    "pass_split_cbr_clean_ns",
+    "pass_split_cbr_soft_ns",
+    "pass_split_cbr_hard_ns",
+    "pass_split_p_clean_ns",
+    "pass_split_p_soft_ns",
+    "pass_split_p_hard_ns",
+    "pass_split_tail_clean_ns",
+    "pass_split_tail_soft_ns",
+    "pass_split_tail_hard_ns",
+    "pass_split_mut_buf_create_n",
+    "pass_split_mut_upload_n",
+    "pass_split_mut_gpu_write_n",
+    "pass_split_mut_img_create_n",
+    "pass_split_mut_img_upload_n",
+    "pass_split_mut_img_copy_n",
+    "pass_split_mut_clear_n",
+    "pass_split_mut_transit_n",
+    "pass_split_mut_submit_n",
+    "pass_split_mut_wait_n",
+    "pass_split_mut_readback_n",
+    "pass_split_mut_guest_write_n",
+    "pass_split_mut_view_n",
+    "pass_split_mut_stream_n",
+    "pass_split_mut_heap_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
@@ -974,6 +1037,34 @@ constexpr bool CpWaitColumnsMatch() {
 	return true;
 }
 static_assert(CpWaitColumnsMatch(), "frames.csv cp_wait_cause columns out of step with CpWait::Cause");
+// S612: the pass_split columns in PassSplit::Slot order (Flush adds slot i to PassSplitDrawN + i).
+constexpr bool PassSplitColumnsMatch() {
+	namespace PS        = Libs::Graphics::PassSplit;
+	constexpr auto base = static_cast<uint32_t>(Counter::PassSplitDrawN);
+	if (static_cast<uint32_t>(Counter::PassSplitMutHeapN) - base + 1 != PS::SlotCount) return false;
+	constexpr const char* buckets[] = {"_clean_ns", "_soft_ns", "_hard_ns"};
+	for (uint32_t s = 0; s < PS::kSecCount; s++) {
+		for (uint32_t b = 0; b < 3; b++) {
+			const std::string_view name = kCounterNames[base + PS::SlotSecFirst + s * 3 + b];
+			const std::string_view sec  = PS::kSecNames[s];
+			const std::string_view tail = buckets[b];
+			if (name.size() != 11 + sec.size() + tail.size() || name.substr(0, 11) != "pass_split_" || name.substr(11, sec.size()) != sec ||
+			    name.substr(11 + sec.size()) != tail) {
+				return false;
+			}
+		}
+	}
+	for (uint32_t k = 0; k < PS::kMutCount; k++) {
+		const std::string_view name = kCounterNames[base + PS::SlotMutFirst + k];
+		const std::string_view mut  = PS::kMutNames[k];
+		if (name.size() != 15 + mut.size() + 2 || name.substr(0, 15) != "pass_split_mut_" || name.substr(15, mut.size()) != mut ||
+		    name.substr(15 + mut.size()) != "_n") {
+			return false;
+		}
+	}
+	return std::string_view(kCounterNames[base + PS::SlotNeN]) == "pass_split_ne_n" && std::string_view(kCounterNames[base + PS::SlotPNs]) == "pass_split_p_ns";
+}
+static_assert(PassSplitColumnsMatch(), "frames.csv pass_split columns out of step with PassSplit::Slot");
 // S560: w2_wait_<cause>_n are in CpWait::Cause order too.
 static_assert(static_cast<uint32_t>(Counter::W2WaitOtherN) - static_cast<uint32_t>(Counter::W2WaitRfGpuN) + 1 == CpWait::kCauseCount);
 constexpr bool W2WaitColumnsMatch() {

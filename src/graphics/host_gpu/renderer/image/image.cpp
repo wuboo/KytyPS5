@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/image/image.h"
+#include "graphics/host_gpu/renderer/passSplit.h"
 
 #include "common/assert.h"
 #include "graphics/host_gpu/gpuLabelsVk.h"
@@ -309,6 +310,7 @@ void Image::TransitTo(vk::ImageLayout destination_layout, vk::AccessFlags2 desti
 	if (barriers.empty()) {
 		return;
 	}
+	PassSplit::Note(PassSplit::Mut::Transit); // S612
 	m_scheduler.EndRendering();
 	vk::DependencyInfo dependency {};
 	dependency.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());

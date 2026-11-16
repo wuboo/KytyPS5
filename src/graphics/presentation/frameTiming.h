@@ -580,6 +580,18 @@ enum class Counter : uint32_t {
 	// extent; CPU-write ranges copied into jobs; jobs the join refused because a page they read lies in one; checked_shadow: early jobs the recorder
 	// recomputed and compared, differences (must be 0).
 	PipeWaitN, PipeWaitGatedN, PipeWaitGatedNs, PipeChkEarlyN, PipeChkHeldN, PipeChkWritesN, PipeJoinCpuwN, PipeChkShadowN, PipeChkShadowNeN,
+	// S612 (KYTY_PASS_SPLIT, passSplit.h; the order of PassSplit::Slot, checked in frameTiming.cpp). Draws seen in a split mode, of them those that
+	// reached P, kept the off order (serial), ended before P (nop); laps; R and P time (ns); P sections with a soft / hard mutation (hard must be 0);
+	// shadow checks, differences (must be 0); per section (head job rt tex find img buf vbib acq cbr p tail) the time filed clean / soft / hard; the
+	// mutations noted inside draws by kind.
+	PassSplitDrawN, PassSplitPDrawN, PassSplitSerialN, PassSplitNopN, PassSplitLapN, PassSplitRNs, PassSplitPNs, PassSplitPSoftN,
+	PassSplitPHardN, PassSplitShadowN, PassSplitNeN, PassSplitHeadCleanNs, PassSplitHeadSoftNs, PassSplitHeadHardNs, PassSplitJobCleanNs, PassSplitJobSoftNs,
+	PassSplitJobHardNs, PassSplitRtCleanNs, PassSplitRtSoftNs, PassSplitRtHardNs, PassSplitTexCleanNs, PassSplitTexSoftNs, PassSplitTexHardNs, PassSplitFindCleanNs,
+	PassSplitFindSoftNs, PassSplitFindHardNs, PassSplitImgCleanNs, PassSplitImgSoftNs, PassSplitImgHardNs, PassSplitBufCleanNs, PassSplitBufSoftNs, PassSplitBufHardNs,
+	PassSplitVbibCleanNs, PassSplitVbibSoftNs, PassSplitVbibHardNs, PassSplitAcqCleanNs, PassSplitAcqSoftNs, PassSplitAcqHardNs, PassSplitCbrCleanNs, PassSplitCbrSoftNs,
+	PassSplitCbrHardNs, PassSplitPCleanNs, PassSplitPSoftNs, PassSplitPHardNs, PassSplitTailCleanNs, PassSplitTailSoftNs, PassSplitTailHardNs, PassSplitMutBufCreateN,
+	PassSplitMutUploadN, PassSplitMutGpuWriteN, PassSplitMutImgCreateN, PassSplitMutImgUploadN, PassSplitMutImgCopyN, PassSplitMutClearN, PassSplitMutTransitN, PassSplitMutSubmitN,
+	PassSplitMutWaitN, PassSplitMutReadbackN, PassSplitMutGuestWriteN, PassSplitMutViewN, PassSplitMutStreamN, PassSplitMutHeapN,
 	Count,
 };
 

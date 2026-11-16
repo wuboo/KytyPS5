@@ -9,6 +9,7 @@
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/depthRenderTarget.h"
 #include "graphics/host_gpu/renderer/image/imageView.h"
+#include "graphics/host_gpu/renderer/passSplit.h"
 #include "graphics/host_gpu/renderer/pipeline/shaderResourceBarrier.h"
 #include "graphics/host_gpu/renderer/eagerSubmit.h"
 #include "graphics/host_gpu/renderer/gpuDone.h"
@@ -135,6 +136,11 @@ void CommandBuffer::End() const {
 	EndRendering();
 	m_emit.Drain(m_buffer, CpEmit::Reason::Submit); // S561: everything the IR sites wrote, before the buffer ends
 	FlushEmitStats();
+	// S612 (KYTY_PASS_SPLIT): a submit is a hard mutation; the thread's draw ledger moves to FrameTiming here (a few times per flip, not per draw).
+	PassSplit::Note(PassSplit::Mut::Submit);
+	PassSplit::FlushOn([](uint32_t slot, uint64_t value) {
+		FrameTiming::Add(static_cast<FrameTiming::Counter>(static_cast<uint32_t>(FrameTiming::Counter::PassSplitDrawN) + slot), value);
+	});
 	auto buffer = Handle();
 	GpuTs::OnEnd(m_graphics, buffer, m_ts_slot); // S477 D3 DIAG
 

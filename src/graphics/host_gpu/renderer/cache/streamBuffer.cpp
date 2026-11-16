@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/cache/streamBuffer.h"
+#include "graphics/host_gpu/renderer/passSplit.h"
 
 #include "common/alignment.h"
 #include "common/assert.h"
@@ -227,6 +228,7 @@ bool StreamBuffer::NormalizeReservation(bool coherent, uint64_t atom, uint64_t& 
 
 std::pair<uint8_t*, uint64_t> StreamBuffer::Map(uint64_t size, uint64_t alignment,
                                                 bool allow_wait) {
+	PassSplit::Note(PassSplit::Mut::Stream); // S612
 	if (Mapped().empty()) {
 		return {nullptr, 0};
 	}

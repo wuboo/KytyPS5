@@ -1,4 +1,5 @@
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
+#include "graphics/host_gpu/renderer/passSplit.h"
 
 #include "graphics/host_gpu/renderer/cache/textureTrackRange.h"
 
@@ -245,6 +246,7 @@ TextureCache::BindingType TextureCache::UploadBinding(const Image& image) {
 }
 
 ImageId TextureCache::InsertImage(const ImageInfo& info) {
+	PassSplit::Note(PassSplit::Mut::ImgCreate); // S612
 	const auto id = m_slot_images.insert(m_graphics, m_scheduler, info);
 	if (!info.data.Empty()) {
 		RegisterImage(id);
@@ -274,6 +276,7 @@ void TextureCache::RegisterImage(ImageId id) {
 }
 
 void TextureCache::UnregisterImage(ImageId id) {
+	PassSplit::Note(PassSplit::Mut::ImgCreate); // S612
 	auto& image = m_slot_images[id];
 	image.HeapChanged();
 	UntrackImage(id);
@@ -317,6 +320,7 @@ bool TextureCache::RegistrationsSince(uint64_t address, uint64_t size, uint64_t 
 }
 
 void TextureCache::DeleteImage(ImageId id) {
+	PassSplit::Note(PassSplit::Mut::ImgCreate); // S612
 	auto& image = m_slot_images[id];
 	if (!image.registered) {
 		return;
@@ -675,6 +679,7 @@ bool TextureCache::CopyD16(Image& destination, Image& source) {
 }
 
 void TextureCache::CopyImage(ImageId destination_id, ImageId source_id) {
+	PassSplit::Note(PassSplit::Mut::ImgCopy); // S612
 	RefreshCopySource(source_id);
 	auto& destination = m_slot_images[destination_id];
 	auto& source      = m_slot_images[source_id];
@@ -713,6 +718,7 @@ void TextureCache::CopyImage(ImageId destination_id, ImageId source_id) {
 
 void TextureCache::CopyImageMip(ImageId destination_id, ImageId source_id, uint32_t mip,
                                 uint32_t layer) {
+	PassSplit::Note(PassSplit::Mut::ImgCopy); // S612
 	RefreshCopySource(source_id);
 	if (m_slot_images[destination_id].IsBufferModified()) {
 		RefreshImage(destination_id);
@@ -1114,6 +1120,7 @@ void TextureCache::InitializeImage(ImageId id) {
 	if (image.info.data.Empty()) {
 		return;
 	}
+	PassSplit::Note(PassSplit::Mut::ImgUpload); // S612
 	TrackImage(id);
 	if (image.info.metadata.compression != VideoOutCompression::Uncompressed) {
 		image.RefreshComplete();
@@ -1269,6 +1276,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 				for (uint32_t slice = 0; slice < count && expand; slice++) {
 					m_buffer_cache.MarkColorMetadataChecked(run(slice), mip.size, keys);
 				}
+				PassSplit::Note(PassSplit::Mut::Clear); // S612
 				const auto command = m_scheduler.Current().Handle();
 				const auto area    = BeginColorRendering(image, view.format, view.base_level,
 				                                         image_first, count, nullptr, command);
@@ -1340,6 +1348,7 @@ void TextureCache::MaterializeColorClear(ImageId id, const ImageDesc& desc,
 		// Publish the conversion's expanded keys without treating them as guest writes
 		// to overlapping image data. Invalidate the buffer before updating its backing.
 		if (desc.type != BindingType::VideoOut) {
+			PassSplit::Note(PassSplit::Mut::GuestWrite); // S612
 			std::fill(bytes.begin(), bytes.end(), known ? DccFillPublish::kMetadataKeyByte : uint8_t {0xff});
 			m_buffer_cache.InvalidateMemory(address, bytes.size());
 			LibKernel::Memory::WriteBacking(address, bytes.data(), bytes.size());
@@ -1813,6 +1822,7 @@ void TextureCache::MarkGpuWritten(ImageId id) {
 }
 
 void TextureCache::CommitGpuWrite(Image& image) {
+	PassSplit::Note(PassSplit::Mut::GpuWrite); // S612
 	if (!image.depth_id && image.backing.image == nullptr) {
 		EXIT("TextureCache: GPU writes require a native image or stencil association\n");
 	}
@@ -1895,6 +1905,7 @@ bool TextureCache::ClearImageFromBuffer(CommandBuffer& command, uint64_t address
 
 void TextureCache::ClearImage(CommandBuffer& command, ImageId id, vk::Format format,
                               const vk::ImageSubresourceRange& range, const vk::ClearValue& clear) {
+	PassSplit::Note(PassSplit::Mut::Clear); // S612
 	auto& image = m_slot_images[id];
 	const auto aspects = image.info.IsDepth() ? ImageViewOps::DepthAspectMask(image.backing.format)
 	                                          : vk::ImageAspectFlagBits::eColor;
@@ -2152,6 +2163,7 @@ bool BufferCache::SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uin
 }
 
 bool TextureCache::DownloadImageMemory(ImageId id) {
+	PassSplit::Note(PassSplit::Mut::Readback); // S612
 	auto& image = m_slot_images[id];
 	if (image.depth_id) {
 		return false;
