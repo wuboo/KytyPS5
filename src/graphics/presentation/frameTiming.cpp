@@ -1,4 +1,5 @@
 #include "graphics/presentation/frameTiming.h"
+#include "graphics/presentation/recCounters.h"
 #include "kernel/eventQueue.h"
 #include "graphics/presentation/cpPhases.h"
 #include "graphics/presentation/cpSampler.h"
@@ -950,6 +951,12 @@ constexpr const char* kCounterNames[] = {
     "pipe_join_cpuw_n",
     "pipe_chk_shadow_n",
     "pipe_chk_shadow_ne_n",
+    "rec_cnt_flush_n",
+    "stream_probe_n",
+    "stream_probe_rep_n",
+    "stream_probe_same_n",
+    "stream_probe_same_bytes",
+    "stream_probe_xtick_same_n",
 };
 static_assert(static_cast<uint32_t>(Counter::CpPhaseWaitNs) - static_cast<uint32_t>(Counter::CpParseNs) ==
               static_cast<uint32_t>(CpPhases::Phase::Wait));
@@ -1404,6 +1411,7 @@ void OnQueueSubmit() {
 namespace {
 thread_local bool      t_thread_mute = false;  // S479: a pipeline worker's timers would add its time to the CP's columns
 thread_local uint64_t* t_thread_buf  = nullptr; // S549: the CP front thread adds here (its counters share cache lines with the recorder's)
+thread_local bool      t_thread_rec  = false;  // S613: the recorder's table (KYTY_REC_COUNTERS=buffered): its flushes are counted
 } // namespace
 
 void SetThreadMute(bool mute) {
@@ -1422,12 +1430,15 @@ void SetThreadBuffered(bool buffered) {
 
 void FlushThreadCounters() {
 	if (t_thread_buf == nullptr) return;
-	for (size_t i = 0; i < static_cast<size_t>(Counter::Count); i++) {
-		if (t_thread_buf[i] != 0) {
-			g_counters[i].fetch_add(t_thread_buf[i], std::memory_order_relaxed);
-			t_thread_buf[i] = 0;
-		}
+	if (RecCounters::FlushInto(t_thread_buf, g_counters, static_cast<size_t>(Counter::Count)) != 0 && t_thread_rec) {
+		g_counters[static_cast<size_t>(Counter::RecCntFlushN)].fetch_add(1, std::memory_order_relaxed);
 	}
+}
+
+void RecorderCountersBegin() {
+	if (RecCounters::EnvMode() != RecCounters::Mode::Buffered) return;
+	t_thread_rec = true;
+	SetThreadBuffered(true);
 }
 
 void Add(Counter counter, uint64_t value) {
@@ -1448,7 +1459,7 @@ void Set(Counter counter, uint64_t value) {
 }
 
 uint64_t Get(Counter counter) {
-	return g_counters[static_cast<size_t>(counter)].load(std::memory_order_relaxed);
+	return RecCounters::Read(g_counters, t_thread_buf, static_cast<size_t>(counter)); // S613: a buffered thread sees its pending part too
 }
 
 void Max(Counter counter, uint64_t value) {

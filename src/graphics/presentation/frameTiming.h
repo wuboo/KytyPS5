@@ -580,6 +580,10 @@ enum class Counter : uint32_t {
 	// extent; CPU-write ranges copied into jobs; jobs the join refused because a page they read lies in one; checked_shadow: early jobs the recorder
 	// recomputed and compared, differences (must be 0).
 	PipeWaitN, PipeWaitGatedN, PipeWaitGatedNs, PipeChkEarlyN, PipeChkHeldN, PipeChkWritesN, PipeJoinCpuwN, PipeChkShadowN, PipeChkShadowNeN,
+	// S613 (KYTY_REC_COUNTERS=buffered, recCounters.h): flushes of the recorder's counter table into the global array (Thread_Gpu loop iterations
+	// with something pending). S613 (KYTY_STREAM_PROBE=1, streamProbe.h): stream copies seen; repeats of a range in the same command buffer, of
+	// them with the same bytes, their bytes; same bytes as a copy of an earlier command buffer.
+	RecCntFlushN, StreamProbeN, StreamProbeRepN, StreamProbeSameN, StreamProbeSameBytes, StreamProbeXtickSameN,
 	Count,
 };
 
@@ -589,6 +593,9 @@ void SetThreadMute(bool mute);
 // S549: Add() on this thread goes to a thread-local table until FlushThreadCounters() (the CP front thread: no cache lines shared with the recorder per item).
 void SetThreadBuffered(bool buffered);
 void FlushThreadCounters();
+// S613 (KYTY_REC_COUNTERS=buffered, recCounters.h): called once on Thread_Gpu; with the switch on, Add() there goes to the thread's table (as
+// SetThreadBuffered) and Get() there includes it. FlushThreadCounters() moves it (Thread_Gpu loop). Off: nothing happens.
+void RecorderCountersBegin();
 void AddAlways(Counter counter, uint64_t value = 1);
 
 // Stage index of the MatMemo columns: 0 = vs, 1 = ps, 2 = cs.

@@ -21,6 +21,7 @@
 #include "graphics/presentation/cpPhaseScope.h"
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/cache/bufTouchSkip.h"
+#include "graphics/host_gpu/renderer/cache/streamProbe.h"
 #include "graphics/host_gpu/renderer/cache/cpWalkQuery.h"
 #include "graphics/host_gpu/renderer/cache/uploadAsync.h"
 #include "common/cpTuning.h"
@@ -67,6 +68,30 @@ std::pair<Buffer*, uint64_t> UploadMemory(GraphicContext& graphics, CommandSched
 	auto* buffer = temporary.get();
 	scheduler.DeferOperation([owner = std::move(temporary)]() mutable { owner.reset(); });
 	return {buffer, 0};
+}
+
+// S613 (KYTY_STREAM_PROBE=1, streamProbe.h): the guest bytes of a stream copy, hashed on a private copy, looked up by (range, tick). Off: one load.
+[[gnu::noinline]] void StreamProbeSlow(uint64_t vaddr, uint64_t size, uint64_t tick) {
+	using C = FrameTiming::Counter;
+	static thread_local std::unique_ptr<StreamProbe::Table<4096>> table;
+	static thread_local std::unique_ptr<uint8_t[]>                bytes;
+	if (table == nullptr) {
+		table = std::make_unique<StreamProbe::Table<4096>>();
+		bytes = std::make_unique<uint8_t[]>(BufferCache::CACHING_PAGESIZE);
+	}
+	if (size == 0 || size > BufferCache::CACHING_PAGESIZE || !LibKernel::Memory::CopySparseMemory(vaddr, bytes.get(), size)) return;
+	StreamProbe::Stats stats;
+	(void)table->Note(vaddr, size, tick, XXH3_64bits(bytes.get(), size), stats);
+	FrameTiming::Add(C::StreamProbeN);
+	if (stats.rep != 0) FrameTiming::Add(C::StreamProbeRepN);
+	if (stats.same != 0) {
+		FrameTiming::Add(C::StreamProbeSameN);
+		FrameTiming::Add(C::StreamProbeSameBytes, stats.same_bytes);
+	}
+	if (stats.xtick_same != 0) FrameTiming::Add(C::StreamProbeXtickSameN);
+}
+inline void StreamProbeNote(uint64_t vaddr, uint64_t size, const CommandScheduler& scheduler) {
+	if (StreamProbe::EnvMode() == StreamProbe::Mode::On) StreamProbeSlow(vaddr, size, scheduler.CurrentTick());
 }
 
 // S605b (KYTY_UPLOAD_ASYNC=shadow): one line per shadow difference (the engine rate-limits: every error up to 64, the first 32 others, then every 256th), to the diag file (the bench's
@@ -1382,6 +1407,7 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 		    m_graphics.physical_device_properties.limits.minUniformBufferOffsetAlignment, 1);
 		auto [mapped, offset] = m_stream_buffer.Map(size, alignment, false);
 		if (mapped != nullptr) {
+			StreamProbeNote(vaddr, size, m_scheduler); // S613 KYTY_STREAM_PROBE (diagnostics)
 			GuestCopy(vaddr, mapped, size, UploadAsync::Kind::Stream, m_stream_buffer.IsCoherent());
 			m_stream_buffer.Commit();
 			return {&m_stream_buffer, offset};

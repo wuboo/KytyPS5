@@ -445,8 +445,10 @@ void GuestGpu::ThreadRun(void* data) {
 	CpPhases::NameCurrentThread("Thread_Gpu");
 	FrameTiming::RegisterCpThread(); // S570 T1b (KYTY_THREAD_CPU=lite)
 	Common::CpTuning::ApplyToCpThread();
+	FrameTiming::RecorderCountersBegin(); // S613 KYTY_REC_COUNTERS=buffered: this thread's counters go to its own table
 
 	for (;;) {
+		FrameTiming::FlushThreadCounters(); // S613: the table of the last stream / command / wait (nothing when not buffered)
 		Krf4PollFlips(); // S599 KYTY_KRF3=v4: the closed guest flips into the guest page guard (a relaxed load when nothing closed)
 		// Lazy flush: before the thread waits (no command, no runnable submission), submit what
 		// the batched flushes held back, so nothing the guest waits for stays unsubmitted.

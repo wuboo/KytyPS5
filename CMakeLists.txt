@@ -937,6 +937,24 @@ foreach(mutant IN ITEMS NO_CAPTURE UNKNOWN_NO_GATE JOIN_IGNORES_WRITES PRUNE_NEX
 	target_include_directories(cp_pipe_checked_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(cp_pipe_checked_mutant_${mutant_lower}_tests PRIVATE KYTY_CPCHK_MUTANT_${mutant}=1)
 endforeach()
+# S613 (KYTY_REC_COUNTERS, recCounters.h; KYTY_STREAM_PROBE, streamProbe.h): the recorder's counter table (flushes move every entry once, Get on
+# the thread includes its pending part, the seg_record computation equals the unbuffered one, threads) and the stream-copy probe against an exact
+# model. Mutants (each must be caught, WILL_FAIL, exit code 1): Get misses the pending part, a flush keeps the table, the last counter never moves,
+# an unset variable buffers; the probe ignores the tick / the size / the bytes.
+add_executable(rec_diet_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RecDietTests.cpp")
+target_include_directories(rec_diet_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS GET_IGNORES_LOCAL FLUSH_NO_ZERO FLUSH_SKIPS_LAST DEFAULT_ON)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(rec_diet_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RecDietTests.cpp")
+	target_include_directories(rec_diet_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(rec_diet_mutant_${mutant_lower}_tests PRIVATE KYTY_RECCNT_MUTANT_${mutant}=1)
+endforeach()
+foreach(mutant IN ITEMS TICK_IGNORED SIZE_IGNORED HASH_IGNORED)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(rec_diet_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/RecDietTests.cpp")
+	target_include_directories(rec_diet_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(rec_diet_mutant_${mutant_lower}_tests PRIVATE KYTY_STREAMPROBE_MUTANT_${mutant}=1)
+endforeach()
 # S608 (KYTY_CP_WALK_QUERY, cpWalkQuery.h): the CP's clean-walk byte query from its own view (dirty without the lock, in flight with a bounded spin), the gate,
 # answers with a reader holding a lock, and an oracle over the real GpuDirtyRanges/InflightRanges with a CP, a publish thread and three readers. Mutants
 # (each must be caught, WILL_FAIL, exit code 1): the view without the switch / off the GPU thread, one try_lock on the dirty lock, no in-flight question,
@@ -2362,6 +2380,12 @@ if(BUILD_TESTING)
 	foreach(mutant IN ITEMS no_capture unknown_no_gate join_ignores_writes prune_next release_none occlusion_small host_occlusion_known last_page dma_none)
 		add_test(NAME cp_pipe_checked_mutant_${mutant} COMMAND $<TARGET_FILE:cp_pipe_checked_mutant_${mutant}_tests>)
 		set_tests_properties(cp_pipe_checked_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 180)
+	endforeach()
+	add_test(NAME rec_diet COMMAND $<TARGET_FILE:rec_diet_tests>)
+	set_tests_properties(rec_diet PROPERTIES TIMEOUT 180)
+	foreach(mutant IN ITEMS get_ignores_local flush_no_zero flush_skips_last default_on tick_ignored size_ignored hash_ignored)
+		add_test(NAME rec_diet_mutant_${mutant} COMMAND $<TARGET_FILE:rec_diet_mutant_${mutant}_tests>)
+		set_tests_properties(rec_diet_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 180)
 	endforeach()
 	add_test(NAME cp_walk_query COMMAND $<TARGET_FILE:cp_walk_query_tests>)
 	set_tests_properties(cp_walk_query PROPERTIES TIMEOUT 120)
