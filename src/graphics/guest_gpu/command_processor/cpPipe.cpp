@@ -1061,6 +1061,40 @@ void CommandProcessor::PipeFrontRun(Pm4Execution& execution, GuestGpu* gpu) {
 			FrameTiming::Add(C::FrontRecWaitNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
 		}
 		const bool end = p.items[ring.Slot(seq)].sync_kind == kSyncEnd;
+		if (!end) PipeFrontExecute(seq);
+		ring.MarkDone(seq);
+		if (end) break;
+		PipeFrontRelease(seq);
+	}
+	GetScheduler().Rebind(m_ctx, m_ucfg, m_sh_ctx);
+	p.front_exec = nullptr;
+}
+
+// S611 (KYTY_PASS_PROBE set): PipeFrontRun with the probe's per-item check. S612: a copy, so PipeFrontRun keeps the body (and the PGO profile) of
+// 49d3e18e: with the check in its loop it lost its profile data (hash mismatch; S611: +0,5 ms/flip with the probe off). Keep in step with it.
+void CommandProcessor::PipeFrontRunProbe(Pm4Execution& execution, GuestGpu* gpu) {
+	using C    = FrameTiming::Counter;
+	auto& p    = *m_pipe;
+	auto& ring = *p.front;
+	p.front_exec = &execution;
+	p.front_gpu  = gpu;
+	p.front_go.fetch_add(1, std::memory_order_release);
+	p.front_go.notify_one();
+	const CpPipe::RecorderScope recorder; // the CP state is the front's from here to the End item
+	const auto idle = [&p] {
+		// A guest thread's command (a fault readback of the front thread itself, an unmap) while nothing is left to record: the FIFO is empty, so it sees every item.
+		if (p.front_gpu != nullptr && p.front_gpu->m_pending_commands.load(std::memory_order_acquire) != 0) {
+			FrameTiming::Add(C::FrontIdleCmdN);
+			p.front_gpu->ProcessCommands(); // the gate stays shut: a command that touched the front's state would stop the emulator, not race
+		}
+	};
+	for (uint64_t seq = ring.Done() + 1;; seq++) {
+		if (!ring.HasItem(seq)) { // a real wait (the cached tail was refreshed first)
+			const auto t0 = FrameTiming::SteadyNowNs();
+			ring.WaitItem(seq, idle);
+			FrameTiming::Add(C::FrontRecWaitNs, static_cast<uint64_t>(FrameTiming::SteadyNowNs() - t0));
+		}
+		const bool end = p.items[ring.Slot(seq)].sync_kind == kSyncEnd;
 		if (!end) {
 			if (auto& probe = PassProbeGet(); probe.active) [[unlikely]] {
 				const auto& it = p.items[ring.Slot(seq)];
@@ -1075,6 +1109,15 @@ void CommandProcessor::PipeFrontRun(Pm4Execution& execution, GuestGpu* gpu) {
 	}
 	GetScheduler().Rebind(m_ctx, m_ucfg, m_sh_ctx);
 	p.front_exec = nullptr;
+}
+
+// S612: the recorder's run of one stream; the probe variant only when KYTY_PASS_PROBE configured a window (decided once per stream, not per item).
+void CommandProcessor::PipeFrontRunAny(Pm4Execution& execution, GuestGpu* gpu) {
+	if (PassProbeGet().window.on) {
+		PipeFrontRunProbe(execution, gpu);
+	} else {
+		PipeFrontRun(execution, gpu);
+	}
 }
 
 // After item `done`: start the held jobs whose gate has run. The items it looks at are committed and not executed yet, so the front does not write them.

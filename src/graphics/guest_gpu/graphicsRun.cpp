@@ -633,7 +633,7 @@ Pm4ProcessResult CommandProcessor::Process(Pm4Execution&             execution,
 
 	if (m_pipe == nullptr) PipeInit(); // S479 (KYTY_CP_PIPE)
 	if (PipeFrontOn()) {
-		PipeFrontRun(execution, g_gpu_state); // S549 (KYTY_CP_FRONT_THREAD): the front thread parses, this thread records
+		PipeFrontRunAny(execution, g_gpu_state); // S612: PipeFrontRun or its KYTY_PASS_PROBE copy; S549 (KYTY_CP_FRONT_THREAD): the front thread parses, this thread records
 	} else {
 		ProcessPm4(execution);
 	}

@@ -146,6 +146,8 @@ private:
 	void FrontParse(Pm4Execution& execution); // S549: graphicsRun.cpp
 	// S549 (KYTY_CP_FRONT_THREAD, cpPipe.cpp): Thread_Gpu hands the stream to the front thread and executes the FIFO until the front's End item.
 	void     PipeFrontRun(Pm4Execution& execution, GuestGpu* gpu);
+	void     PipeFrontRunProbe(Pm4Execution& execution, GuestGpu* gpu); // S611/S612: with KYTY_PASS_PROBE
+	void     PipeFrontRunAny(Pm4Execution& execution, GuestGpu* gpu);   // S612: picks one of the two once per stream
 	void     PipeFrontThread();
 	void     PipeFrontExecute(uint64_t seq);
 	void     PipeFrontRelease(uint64_t done);
