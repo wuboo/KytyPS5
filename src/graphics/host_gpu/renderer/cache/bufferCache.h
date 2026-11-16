@@ -41,6 +41,10 @@ namespace UploadAsync {
 class Engine;
 enum class Kind : uint8_t;
 } // namespace UploadAsync
+namespace StreamDedup {
+struct State;
+enum class Mode : uint8_t;
+} // namespace StreamDedup
 
 class BufferCache {
 public:
@@ -177,6 +181,15 @@ private:
 	void SyncGuestCopy(uint64_t src, uint8_t* dst, uint64_t size);
 	[[nodiscard]] bool UploadEligible(uint64_t src, uint64_t size, bool coherent) const;
 	void UploadAsyncBeforeQueue(); // the scheduler's before-queue hook: joins the copies, moves the counters to FrameTiming
+	// S614 (KYTY_STREAM_DEDUP, streamDedup.h): the stream path's Map (a repeat that may reuse an earlier copy binds its offset) and its fill
+	// (S613 probe, S614 table, the copy and its commit; nothing after a reuse). Off: Map, probe, copy, commit as before.
+	[[nodiscard]] std::pair<uint8_t*, uint64_t> StreamMap(uint64_t vaddr, uint64_t size, uint64_t alignment);
+	[[nodiscard]] std::pair<uint8_t*, uint64_t> StreamMapDedup(uint64_t vaddr, uint64_t size, uint64_t alignment);
+	void               StreamFill(uint64_t vaddr, uint8_t* mapped, uint64_t offset, uint64_t size);
+	[[nodiscard]] bool StreamDedupBeforeCopy(uint64_t vaddr, uint64_t size, uint64_t offset);
+	void               StreamDedupFlush(); // GPU thread, at every submit: the table's and the hooks' counters into FrameTiming
+	void               StreamDedupStart(); // constructor: nothing with KYTY_STREAM_DEDUP=0
+	void               StreamDedupStop();  // destructor
 	[[nodiscard]] bool SynchronizeBufferFromImage(Buffer& buffer, uint64_t vaddr, uint64_t size);
 	// Synchronous downloads publish before returning; asynchronous callers wait before reuse.
 	template <bool async>
@@ -246,6 +259,9 @@ private:
 	uint64_t m_upas_sync_n  = 0; // S605: copies done here (every mode), GPU thread
 	uint64_t m_upas_sync_ns = 0; // S605: their time, every 16th copy timed and counted 16 times
 	uint64_t m_upas_sample  = 0; // S605: copies since start (which one is timed)
+	std::unique_ptr<StreamDedup::State> m_stream_dedup; // S614: nullptr with KYTY_STREAM_DEDUP=0
+	StreamDedup::Mode                   m_stream_dedup_mode {};
+	bool                                m_stream_dedup_hit = false; // StreamMapDedup reused an offset: StreamFill does nothing
 
 	struct EagerPage {
 		uint64_t tick = 0; // submission carrying the download; 0 when none is in flight

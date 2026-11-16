@@ -22,6 +22,7 @@
 #include "graphics/presentation/frameTiming.h"
 #include "graphics/host_gpu/renderer/cache/bufTouchSkip.h"
 #include "graphics/host_gpu/renderer/cache/streamProbe.h"
+#include "graphics/host_gpu/renderer/cache/streamDedup.h"
 #include "graphics/host_gpu/renderer/cache/cpWalkQuery.h"
 #include "graphics/host_gpu/renderer/cache/uploadAsync.h"
 #include "common/cpTuning.h"
@@ -92,6 +93,13 @@ std::pair<Buffer*, uint64_t> UploadMemory(GraphicContext& graphics, CommandSched
 }
 inline void StreamProbeNote(uint64_t vaddr, uint64_t size, const CommandScheduler& scheduler) {
 	if (StreamProbe::EnvMode() == StreamProbe::Mode::On) StreamProbeSlow(vaddr, size, scheduler.CurrentTick());
+}
+
+// S614 (KYTY_STREAM_DEDUP): the backing write hook with the switch on: the page generations first, then the S605 join (a no-op without
+// KYTY_UPLOAD_ASYNC). Both run before the write lands.
+void StreamDedupBackingWrite(uint64_t vaddr, uint64_t size) {
+	StreamDedup::NoteCpuWrite(vaddr, size);
+	UploadAsync::BeforeCpuWrite(vaddr, size);
 }
 
 // S605b (KYTY_UPLOAD_ASYNC=shadow): one line per shadow difference (the engine rate-limits: every error up to 64, the first 32 others, then every 256th), to the diag file (the bench's
@@ -492,6 +500,7 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 		UploadAsync::Global().store(m_upload_async.get(), std::memory_order_release);
 		Libs::LibKernel::Memory::SetBackingWriteHook(&UploadAsync::BeforeCpuWrite);
 	}
+	StreamDedupStart(); // S614 KYTY_STREAM_DEDUP (a call: the constructor keeps its PGO hash)
 	std::printf("Environment: KYTY_UPLOAD_ASYNC=%s staging_coherent=%d stream_coherent=%d backing_nolock=%s chunk=%u shadow_from=%llu\n",
 	            UploadAsync::ModeName(UploadAsync::EnvMode()), m_staging_buffer.IsCoherent() ? 1 : 0, m_stream_buffer.IsCoherent() ? 1 : 0,
 	            std::getenv("KYTY_BACKING_READ_NOLOCK") != nullptr ? std::getenv("KYTY_BACKING_READ_NOLOCK") : "-",
@@ -525,6 +534,7 @@ BufferCache::BufferCache(GraphicContext& graphics, CommandScheduler& scheduler,
 }
 
 BufferCache::~BufferCache() {
+	StreamDedupStop(); // S614
 	if (m_upload_async != nullptr) { // S605: no copy may outlive the buffers it writes
 		Libs::LibKernel::Memory::SetBackingWriteHook(nullptr);
 		UploadAsync::Global().store(nullptr, std::memory_order_release);
@@ -548,6 +558,7 @@ void BufferCache::InvalidateMemory(uint64_t vaddr, uint64_t size) {
 		EXIT("BufferCache: invalid memory-invalidation range\n");
 	}
 	// S605 (KYTY_UPLOAD_ASYNC): a CPU write is about to land (write fault, file read, DMA, unmap): the deferred copies of these bytes run first.
+	StreamDedup::NoteCpuWrite(vaddr, size); // S614: a repeat of a stream copy of these pages copies again
 	UploadAsync::BeforeCpuWrite(vaddr, size);
 	// With KYTY_DCC_KNOWN the fill must still be known when the readback decides, so the CPU write forgets it afterwards.
 	const bool known = DccFillPublish::EnvMode() != DccFillPublish::Mode::Off;
@@ -1357,6 +1368,7 @@ void BufferCache::UploadAsyncBeforeQueue() {
 	if (!GuestGpu::IsGpuThread()) {
 		return;
 	}
+	StreamDedupFlush(); // S614 (nothing when off)
 	using C = FrameTiming::Counter;
 	FrameTiming::Add(C::UpasSyncN, std::exchange(m_upas_sync_n, 0));
 	FrameTiming::Add(C::UpasSyncNs, std::exchange(m_upas_sync_ns, 0));
@@ -1395,6 +1407,82 @@ bool BufferCache::LatestGpuWriteIsFill(uint64_t vaddr, uint64_t size, uint32_t* 
 	return known;
 }
 
+// S614 (KYTY_STREAM_DEDUP, streamDedup.h): the table, the hooks, and the backing write hook that also tells the page generations.
+void BufferCache::StreamDedupStart() {
+	const auto dedup = StreamDedup::EnvConfig();
+	if (dedup.mode == StreamDedup::Mode::Off) return;
+	m_stream_dedup      = std::make_unique<StreamDedup::State>();
+	m_stream_dedup_mode = dedup.mode;
+	Libs::LibKernel::Memory::SetBackingWriteHook(&StreamDedupBackingWrite);
+	StreamDedup::Activate(dedup.mode, dedup.strict);
+}
+
+void BufferCache::StreamDedupStop() {
+	if (m_stream_dedup == nullptr) return;
+	StreamDedup::Activate(StreamDedup::Mode::Off);
+	Libs::LibKernel::Memory::SetBackingWriteHook(m_upload_async != nullptr ? &UploadAsync::BeforeCpuWrite : nullptr);
+}
+
+// S614. Off: m_stream_dedup is nullptr, and the stream path is Map, probe, copy, commit as before.
+inline std::pair<uint8_t*, uint64_t> BufferCache::StreamMap(uint64_t vaddr, uint64_t size, uint64_t alignment) {
+	if (m_stream_dedup == nullptr) return m_stream_buffer.Map(size, alignment, false);
+	return StreamMapDedup(vaddr, size, alignment);
+}
+
+// Only Thread_Gpu touches the table and m_stream_dedup_hit (another thread copies as before).
+[[gnu::noinline]] std::pair<uint8_t*, uint64_t> BufferCache::StreamMapDedup(uint64_t vaddr, uint64_t size, uint64_t alignment) {
+	uint64_t offset = 0;
+	if (!StreamDedup::OnRecorder()) return m_stream_buffer.Map(size, alignment, false);
+	if (m_stream_dedup->BeforeMap(vaddr, size, m_scheduler.CurrentTick(), m_stream_dedup_mode, true, &offset)) {
+		m_stream_dedup_hit = true; // the region of the earlier copy, in this tick: no Map, no copy, no commit
+		return {m_stream_buffer.Mapped().data() + offset, offset};
+	}
+	return m_stream_buffer.Map(size, alignment, false);
+}
+
+inline void BufferCache::StreamFill(uint64_t vaddr, uint8_t* mapped, uint64_t offset, uint64_t size) {
+	if (m_stream_dedup != nullptr && StreamDedupBeforeCopy(vaddr, size, offset)) return;
+	StreamProbeNote(vaddr, size, m_scheduler); // S613 KYTY_STREAM_PROBE (diagnostics)
+	GuestCopy(vaddr, mapped, size, UploadAsync::Kind::Stream, m_stream_buffer.IsCoherent());
+	m_stream_buffer.Commit();
+}
+
+// true: StreamMapDedup reused an offset. Otherwise the table remembers this copy (shadow: with the hash of the guest bytes, and the would-be
+// reuse is compared).
+[[gnu::noinline]] bool BufferCache::StreamDedupBeforeCopy(uint64_t vaddr, uint64_t size, uint64_t offset) {
+	if (!StreamDedup::OnRecorder()) return false;
+	if (std::exchange(m_stream_dedup_hit, false)) return true;
+	uint64_t hash = 0;
+	if (m_stream_dedup_mode == StreamDedup::Mode::Shadow) {
+		static thread_local std::unique_ptr<uint8_t[]> bytes;
+		if (bytes == nullptr) bytes = std::make_unique<uint8_t[]>(CACHING_PAGESIZE);
+		hash = size <= CACHING_PAGESIZE && LibKernel::Memory::CopySparseMemory(vaddr, bytes.get(), size) ? XXH3_64bits(bytes.get(), size)
+		                                                                                                  : ~uint64_t {0} - size;
+	}
+	m_stream_dedup->BeforeCopy(offset, m_stream_dedup_mode, hash);
+	return false;
+}
+
+void BufferCache::StreamDedupFlush() {
+	if (m_stream_dedup == nullptr) return;
+	using C = FrameTiming::Counter;
+	auto& s = m_stream_dedup->GetStats();
+	const std::pair<C, uint64_t*> table[] = {
+	    {C::StreamDedupLookN, &s.look_n},          {C::StreamDedupHitN, &s.hit_n},         {C::StreamDedupHitBytes, &s.hit_bytes},
+	    {C::StreamDedupNewN, &s.new_n},            {C::StreamDedupMissTickN, &s.miss_tick_n}, {C::StreamDedupMissEpochN, &s.miss_epoch_n},
+	    {C::StreamDedupMissPageN, &s.miss_page_n}, {C::StreamDedupSkipN, &s.skip_n},       {C::StreamDedupNeN, &s.ne_n},
+	    {C::StreamDedupLostN, &s.lost_n},          {C::StreamDedupCaughtN, &s.caught_n},
+	};
+	for (const auto& [counter, value]: table) {
+		if (*value != 0) FrameTiming::Add(counter, std::exchange(*value, 0));
+	}
+	const C bumps[StreamDedup::BumpKinds] = {C::StreamDedupBumpPktN, C::StreamDedupBumpWaitN, C::StreamDedupBumpSubN, C::StreamDedupBumpWriteN,
+	                                         C::StreamDedupBumpBigN, C::StreamDedupBumpCpwN, C::StreamDedupBumpNoStoreN};
+	for (size_t i = 0; i < StreamDedup::BumpKinds; i++) {
+		if (const auto n = StreamDedup::g_bump_n[i].exchange(0, std::memory_order_relaxed); n != 0) FrameTiming::Add(bumps[i], n);
+	}
+}
+
 std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t size,
                                                        bool is_written, bool is_texel_buffer,
                                                        BufferId id) {
@@ -1405,11 +1493,9 @@ std::pair<Buffer*, uint64_t> BufferCache::ObtainBuffer(uint64_t vaddr, uint64_t 
 	    m_memory_tracker.IsRegionCpuModified(vaddr, size)) {
 		const auto alignment = std::max<uint64_t>(
 		    m_graphics.physical_device_properties.limits.minUniformBufferOffsetAlignment, 1);
-		auto [mapped, offset] = m_stream_buffer.Map(size, alignment, false);
+		auto [mapped, offset] = StreamMap(vaddr, size, alignment); // S614 KYTY_STREAM_DEDUP: off = m_stream_buffer.Map(size, alignment, false)
 		if (mapped != nullptr) {
-			StreamProbeNote(vaddr, size, m_scheduler); // S613 KYTY_STREAM_PROBE (diagnostics)
-			GuestCopy(vaddr, mapped, size, UploadAsync::Kind::Stream, m_stream_buffer.IsCoherent());
-			m_stream_buffer.Commit();
+			StreamFill(vaddr, mapped, offset, size); // S613 probe, S614 table, the copy and its commit (nothing after a reuse)
 			return {&m_stream_buffer, offset};
 		}
 	}

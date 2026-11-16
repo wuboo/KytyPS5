@@ -584,6 +584,13 @@ enum class Counter : uint32_t {
 	// with something pending). S613 (KYTY_STREAM_PROBE=1, streamProbe.h): stream copies seen; repeats of a range in the same command buffer, of
 	// them with the same bytes, their bytes; same bytes as a copy of an earlier command buffer.
 	RecCntFlushN, StreamProbeN, StreamProbeRepN, StreamProbeSameN, StreamProbeSameBytes, StreamProbeXtickSameN,
+	// S614 (KYTY_STREAM_DEDUP, streamDedup.h): stream-path bindings seen; reused (shadow: would be), their bytes; first copy of a range, a repeat
+	// of an earlier tick / after an event / after a write hook on its pages, not looked up; shadow: a would-be reuse with other bytes (must be 0),
+	// refused repeats with the same / other bytes. Events: handlers that may write guest memory with no known extent, waits, submissions, write
+	// hooks, big writes, CP stores of known extent (their pages), ordered packets that store nothing.
+	StreamDedupLookN, StreamDedupHitN, StreamDedupHitBytes, StreamDedupNewN, StreamDedupMissTickN, StreamDedupMissEpochN, StreamDedupMissPageN,
+	StreamDedupSkipN, StreamDedupNeN, StreamDedupLostN, StreamDedupCaughtN, StreamDedupBumpPktN, StreamDedupBumpWaitN, StreamDedupBumpSubN,
+	StreamDedupBumpWriteN, StreamDedupBumpBigN, StreamDedupBumpCpwN, StreamDedupBumpNoStoreN,
 	Count,
 };
 

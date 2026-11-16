@@ -21,6 +21,7 @@
 #include "graphics/host_gpu/renderer/indirectGpu.h"
 #include "graphics/host_gpu/renderer/debug.h"
 #include "graphics/host_gpu/renderer/cache/uploadAsync.h"
+#include "graphics/host_gpu/renderer/cache/streamDedup.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/host_gpu/renderer/rfOpDiag.h"
 #include "graphics/host_gpu/renderer/renderContext.h"
@@ -87,6 +88,7 @@ bool GuestGpu::IsStopping() {
 
 void GuestGpu::SendCommand(Common::UniqueFunction<void>&& command) {
 	EXIT_IF(!command);
+	StreamDedup::NoteSubmit(); // S614
 	if (IsGpuThread()) {
 		command();
 		return;
@@ -284,6 +286,7 @@ void CommandProcessor::WaitRegMem(uint32_t func, const T* addr, T ref, T mask, u
 		if (PipeWaitVirtual(reinterpret_cast<uint64_t>(addr), sizeof(T), func, ref, mask, &virtual_satisfied) && virtual_satisfied) return;
 	}
 	const bool wait_satisfied = TestWaitRegMemValue(*addr, ref, mask, func);
+	StreamDedup::AfterWaitRead(); // S614: the label is read (on the front with KYTY_CP_FRONT_THREAD): a repeated stream copy copies again
 	if (Pm4Hist::Enabled()) Pm4Hist::Wait(reinterpret_cast<uintptr_t>(addr), wait_satisfied); // S477 D1 DIAG
 	if (!wait_satisfied) {
 		SuspendPm4();
@@ -419,6 +422,7 @@ void CommandProcessor::DmaData(uint8_t dst_sel, uint64_t dst_address_or_offset, 
 
 void GuestGpu::Enqueue(Submission submission) {
 	EXIT_IF(submission.queue_id >= QueueCount);
+	StreamDedup::NoteSubmit(); // S614: the guest wrote what this submission reads before it submitted
 	submission.enqueue_ns = FrameTiming::SteadyNowNs();
 	Common::LockGuard lock(m_queue_mutex);
 	EXIT_IF(!m_accepting);
@@ -446,9 +450,11 @@ void GuestGpu::ThreadRun(void* data) {
 	FrameTiming::RegisterCpThread(); // S570 T1b (KYTY_THREAD_CPU=lite)
 	Common::CpTuning::ApplyToCpThread();
 	FrameTiming::RecorderCountersBegin(); // S613 KYTY_REC_COUNTERS=buffered: this thread's counters go to its own table
+	StreamDedup::BindRecorderThread(); // S614 KYTY_STREAM_DEDUP: this thread owns the table and its epoch
 
 	for (;;) {
 		FrameTiming::FlushThreadCounters(); // S613: the table of the last stream / command / wait (nothing when not buffered)
+		StreamDedup::NoteSubmit(); // S614: a new submission / command / wait: a repeated stream copy copies again
 		Krf4PollFlips(); // S599 KYTY_KRF3=v4: the closed guest flips into the guest page guard (a relaxed load when nothing closed)
 		// Lazy flush: before the thread waits (no command, no runnable submission), submit what
 		// the batched flushes held back, so nothing the guest waits for stays unsubmitted.
@@ -799,6 +805,7 @@ void CommandProcessor::ProcessPm4(Pm4Execution& execution) {
 			if (CpSampler::Active().load(std::memory_order_relaxed)) CpSampler::CpOpcode().store(opcode, std::memory_order_relaxed);
 			const bool rf_op = RfOp::Enabled(); // S412 (KYTY_DIAG_RFOP): the opcode and packet a page read fault is attributed to
 			if (rf_op) RfOp::BeginPacket(opcode, packet, remaining_dw);
+			StreamDedup::BeforeHandler(opcode, packet_header, packet + 1, remaining_dw, IsAsyncComputeQueue()); // S614: an event for repeated stream copies
 			UploadAsync::BeforeHandler(opcode, opcode == Pm4::IT_NOP ? KYTY_PM4_R(packet_header) : 0u); // S605: a handler that may write guest memory
 			packet_dw = handler(*this, packet_header & ~1u, packet + 1, remaining_dw, total_dw) + 1;
 			if (rf_op) RfOp::EndPacket();

@@ -955,6 +955,20 @@ foreach(mutant IN ITEMS TICK_IGNORED SIZE_IGNORED HASH_IGNORED)
 	target_include_directories(rec_diet_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
 	target_compile_definitions(rec_diet_mutant_${mutant_lower}_tests PRIVATE KYTY_STREAMPROBE_MUTANT_${mutant}=1)
 endforeach()
+# S614 (KYTY_STREAM_DEDUP, streamDedup.h): a repeated stream copy reuses the earlier copy's offset. Mode and packet tables, hand cases, an oracle of
+# CP streams (every binding's bytes at the end of its tick equal a copy made at the binding; hits equal an exact model; shadow decides the same) and
+# threads (a write hook that happens-before a lookup makes it miss). Mutants (each must be caught, WILL_FAIL, exit code 1): the tick / the global
+# epoch / the recorder epoch / the last page / the size ignored, a wait / a label / a CP store of known extent / a submission / a big write that
+# bumps nothing, extents used with host occlusion queries, a blind shadow, a shadow that replaces the entry it would reuse, an unset variable that
+# turns it on.
+add_executable(stream_dedup_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/StreamDedupTests.cpp")
+target_include_directories(stream_dedup_tests PRIVATE ${inc_headers})
+foreach(mutant IN ITEMS TICK_IGNORED EPOCH_IGNORED REC_EPOCH_IGNORED LAST_PAGE_IGNORED SIZE_IGNORED WAIT_NO_BUMP LABEL_NO_BUMP KNOWN_AS_NONE PRECISE_ALWAYS SUBMIT_NO_BUMP BIG_NO_BUMP SHADOW_BLIND SHADOW_REPLACES DEFAULT_ON)
+	string(TOLOWER ${mutant} mutant_lower)
+	add_executable(stream_dedup_mutant_${mutant_lower}_tests EXCLUDE_FROM_ALL "${KYTY_TESTS_DIR}/StreamDedupTests.cpp")
+	target_include_directories(stream_dedup_mutant_${mutant_lower}_tests PRIVATE ${inc_headers})
+	target_compile_definitions(stream_dedup_mutant_${mutant_lower}_tests PRIVATE KYTY_STREAMDEDUP_MUTANT_${mutant}=1)
+endforeach()
 # S608 (KYTY_CP_WALK_QUERY, cpWalkQuery.h): the CP's clean-walk byte query from its own view (dirty without the lock, in flight with a bounded spin), the gate,
 # answers with a reader holding a lock, and an oracle over the real GpuDirtyRanges/InflightRanges with a CP, a publish thread and three readers. Mutants
 # (each must be caught, WILL_FAIL, exit code 1): the view without the switch / off the GPU thread, one try_lock on the dirty lock, no in-flight question,
@@ -2380,6 +2394,12 @@ if(BUILD_TESTING)
 	foreach(mutant IN ITEMS no_capture unknown_no_gate join_ignores_writes prune_next release_none occlusion_small host_occlusion_known last_page dma_none)
 		add_test(NAME cp_pipe_checked_mutant_${mutant} COMMAND $<TARGET_FILE:cp_pipe_checked_mutant_${mutant}_tests>)
 		set_tests_properties(cp_pipe_checked_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 180)
+	endforeach()
+	add_test(NAME stream_dedup COMMAND $<TARGET_FILE:stream_dedup_tests>)
+	set_tests_properties(stream_dedup PROPERTIES TIMEOUT 180)
+	foreach(mutant IN ITEMS tick_ignored epoch_ignored rec_epoch_ignored last_page_ignored size_ignored wait_no_bump label_no_bump known_as_none precise_always submit_no_bump big_no_bump shadow_blind shadow_replaces default_on)
+		add_test(NAME stream_dedup_mutant_${mutant} COMMAND $<TARGET_FILE:stream_dedup_mutant_${mutant}_tests>)
+		set_tests_properties(stream_dedup_mutant_${mutant} PROPERTIES WILL_FAIL TRUE TIMEOUT 180)
 	endforeach()
 	add_test(NAME rec_diet COMMAND $<TARGET_FILE:rec_diet_tests>)
 	set_tests_properties(rec_diet PROPERTIES TIMEOUT 180)

@@ -38,7 +38,8 @@ inline constexpr std::string_view kKnownKytyEnv[] = {
     "KYTY_UPLOAD_ASYNC_SHADOW_FROM", // S605d: the guest flip from which the upload shadow verifies
     "KYTY_WORKER_CLEAN_WALK", "KYTY_WORKER_CLEAN_WALK_SPIN", // S607: a pipeline worker serves a clean walker load on a hot page from the backing
     "KYTY_CP_WALK_QUERY", "KYTY_WCW_BACKING_BYTES", // S608: the CP's clean-walk byte query from its own view (never busy because a reader holds a tracker lock)
-    "KYTY_REC_COUNTERS", "KYTY_STREAM_PROBE" // S613: the recorder's counters in a table of its own (recCounters.h); a probe of repeated stream copies (streamProbe.h)
+    "KYTY_REC_COUNTERS", "KYTY_STREAM_PROBE", // S613: the recorder's counters in a table of its own (recCounters.h); a probe of repeated stream copies (streamProbe.h)
+    "KYTY_STREAM_DEDUP" // S614: a repeated stream copy reuses the earlier copy's offset (streamDedup.h)
 #ifdef KYTY_KNOWNENV_MUTANT_UNCLASSIFIED
     , "KYTY_ZZ_UNCLASSIFIED" // a new switch added to the known list and to neither classification (tests/EnvClassificationTests.cpp must fail)
 #endif
@@ -71,6 +72,8 @@ inline constexpr std::string_view kNonCodegenKytyEnv[] = {
     // S613: where the recorder adds its frames.csv counters (KYTY_REC_COUNTERS) and a probe that hashes stream copies (KYTY_STREAM_PROBE): never
     // what the recompiler emits.
     , "KYTY_REC_COUNTERS", "KYTY_STREAM_PROBE"
+    // S614: whether a repeated stream copy binds the earlier copy (KYTY_STREAM_DEDUP): the bytes the GPU reads, never what the recompiler emits.
+    , "KYTY_STREAM_DEDUP"
     // S585: KYTY_GF_EMULATE moved here from kCodegenKytyEnv: it only decides how a guest read fault is served (loader/guestReadEmulator.cpp,
     // runtimeLinker.cpp), never what the recompiler emits; in the key it only cost a cold program cache for every emulation run.
 };

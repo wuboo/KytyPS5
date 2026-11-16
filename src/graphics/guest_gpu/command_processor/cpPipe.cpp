@@ -21,6 +21,7 @@
 #include "graphics/guest_gpu/pm4.h"
 #include "graphics/host_gpu/renderer/cache/cpWalkQuery.h"
 #include "graphics/host_gpu/renderer/cache/uploadAsync.h"
+#include "graphics/host_gpu/renderer/cache/streamDedup.h"
 #include "graphics/host_gpu/renderer/cleanWalk.h"
 #include "graphics/host_gpu/renderer/render.h"
 #include "graphics/presentation/cpPhaseScope.h"
@@ -372,6 +373,7 @@ void CommandProcessor::PipeInit() {
 	{
 		const bool host_occlusion = m_renderer.GetOcclusionQueries().Enabled();
 		m_pipe->checked_on        = EnvSignals() == CpPipe::SignalPolicy::Checked && !host_occlusion;
+		StreamDedup::NoteHostOcclusion(host_occlusion); // S614: the extents of ordered stores are known only without host occlusion queries
 		m_pipe->checked_shadow    = m_pipe->checked_on && EnvCheckedShadow();
 		std::printf("Environment: KYTY_CP_PIPE_SIGNALS=%s active=%d host_occlusion=%d\n", CpPipe::SignalPolicyName(EnvSignals(), EnvCheckedShadow()),
 		            m_pipe->checked_on ? 1 : 0, host_occlusion ? 1 : 0);
@@ -558,6 +560,7 @@ void CommandProcessor::PipeExecuteFront() {
 		if (rf_op) {
 			RfOp::BeginPacket(it.opcode, it.dw.data(), packet_dw);
 		}
+		StreamDedup::BeforeHandler(it.opcode, it.dw[0], it.dw.data() + 1, packet_dw, IsAsyncComputeQueue()); // S614
 		UploadAsync::BeforeHandler(it.opcode, it.opcode == Pm4::IT_NOP ? KYTY_PM4_R(it.dw[0]) : 0u); // S605
 		const auto consumed  = handler(*this, it.dw[0] & ~1u, it.dw.data() + 1, packet_dw, packet_dw) + 1;
 		if (rf_op) {
@@ -957,6 +960,7 @@ void CommandProcessor::PipeFrontExecute(uint64_t seq) {
 			const auto handler = g_cp_op_func[it.opcode];
 			EXIT_IF(handler == nullptr || it.live_packet == nullptr);
 			CpPhases::Scope handler_phase(CpPhases::Phase::Handler);
+			StreamDedup::BeforeHandler(it.opcode, it.live_packet[0], it.live_packet + 1, it.remaining_dw, IsAsyncComputeQueue()); // S614
 			UploadAsync::BeforeHandler(it.opcode, it.opcode == Pm4::IT_NOP ? KYTY_PM4_R(it.live_packet[0]) : 0u); // S605
 			it.result_dw = handler(*this, it.live_packet[0] & ~1u, it.live_packet + 1, it.remaining_dw, it.total_dw) + 1;
 		}
@@ -996,6 +1000,7 @@ void CommandProcessor::PipeFrontExecute(uint64_t seq) {
 		if (CpSampler::Active().load(std::memory_order_relaxed)) CpSampler::CpOpcode().store(it.opcode, std::memory_order_relaxed);
 		const bool rf_op = RfOp::Enabled();
 		if (rf_op) RfOp::BeginPacket(it.opcode, it.dw.data(), packet_dw);
+		StreamDedup::BeforeHandler(it.opcode, it.dw[0], it.dw.data() + 1, packet_dw, IsAsyncComputeQueue()); // S614
 		UploadAsync::BeforeHandler(it.opcode, it.opcode == Pm4::IT_NOP ? KYTY_PM4_R(it.dw[0]) : 0u); // S605
 		const auto consumed = handler(*this, it.dw[0] & ~1u, it.dw.data() + 1, packet_dw, packet_dw) + 1;
 		if (rf_op) RfOp::EndPacket();
